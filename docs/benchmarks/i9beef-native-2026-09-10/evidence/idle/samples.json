@@ -1,0 +1,463 @@
+[
+  {
+    "label": "baseline",
+    "case": "idle",
+    "policy": "default",
+    "seconds": 10.000178228,
+    "cpu_percent": 0.09999821775176466,
+    "render_fps": 0.0,
+    "render_wall_us_per_frame": 0.0,
+    "presentation": null,
+    "frames": {
+      "dispatch_calls": 104,
+      "dispatch_us": 5368,
+      "dispatch_max_us": 120,
+      "input_us": 88,
+      "shell_us": 3042,
+      "protocol_us": 867,
+      "layout_us": 786,
+      "render_calls": 0,
+      "render_us": 0,
+      "render_max_us": 0,
+      "flush_us": 81,
+      "ipc_us": 212,
+      "render_attempts": 0,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "monotonic_ns": 227739604564234,
+      "wall_ns": 1789066842106975556,
+      "cpu_ticks": 75,
+      "rss_bytes": 346947584
+    },
+    "after": {
+      "monotonic_ns": 227749604742462,
+      "wall_ns": 1789066852107153690,
+      "cpu_ticks": 76,
+      "rss_bytes": 346947584
+    },
+    "native_delta": {},
+    "stages": {},
+    "captures": [],
+    "readback_before": {},
+    "readback_after": {},
+    "monitors": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "monitors_after": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "pixels": {
+      "size": [
+        3840,
+        2160
+      ],
+      "fullscreen_pattern_verified": false,
+      "client_pattern_verified": false,
+      "sha256": "952dfd4e89e58abcb7d26c976c2fe6885c0e33b540de70e6134471ecad93b027"
+    },
+    "load_average": [
+      3.4443359375,
+      3.5634765625,
+      3.54345703125
+    ],
+    "active_hardware_planes": [
+      {
+        "id": 54,
+        "type": 1,
+        "crtc": 200,
+        "framebuffer": 854
+      }
+    ],
+    "run": 0,
+    "directory": "000"
+  },
+  {
+    "label": "final",
+    "case": "idle",
+    "policy": "default",
+    "seconds": 10.000192401,
+    "cpu_percent": 0.0,
+    "render_fps": 0.0,
+    "render_wall_us_per_frame": 0.0,
+    "presentation": null,
+    "frames": {
+      "dispatch_calls": 102,
+      "dispatch_us": 5366,
+      "dispatch_max_us": 77,
+      "input_us": 87,
+      "shell_us": 3143,
+      "protocol_us": 843,
+      "layout_us": 711,
+      "render_calls": 0,
+      "render_us": 0,
+      "render_max_us": 0,
+      "flush_us": 82,
+      "ipc_us": 197,
+      "render_attempts": 0,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "monotonic_ns": 227757925847096,
+      "wall_ns": 1789066860428258424,
+      "cpu_ticks": 76,
+      "rss_bytes": 346886144
+    },
+    "after": {
+      "monotonic_ns": 227767926039497,
+      "wall_ns": 1789066870428451432,
+      "cpu_ticks": 76,
+      "rss_bytes": 346886144
+    },
+    "native_delta": {
+      "passes": 0,
+      "skips_off": 0,
+      "skips_flip": 0,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 0,
+      "attempts": 0,
+      "queued": 0,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 0,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 0,
+      "late_presentations": 0
+    },
+    "stages": {},
+    "captures": [],
+    "readback_before": {
+      "queued": 0,
+      "pending_polls": 0,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 0,
+      "maps": 0,
+      "map_cpu_ns": 0
+    },
+    "readback_after": {
+      "queued": 0,
+      "pending_polls": 0,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 0,
+      "maps": 0,
+      "map_cpu_ns": 0
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "monitors_after": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "pixels": {
+      "size": [
+        3840,
+        2160
+      ],
+      "fullscreen_pattern_verified": false,
+      "client_pattern_verified": false,
+      "sha256": "952dfd4e89e58abcb7d26c976c2fe6885c0e33b540de70e6134471ecad93b027"
+    },
+    "load_average": [
+      3.1875,
+      3.49365234375,
+      3.52099609375
+    ],
+    "active_hardware_planes": [
+      {
+        "id": 54,
+        "type": 1,
+        "crtc": 200,
+        "framebuffer": 853
+      }
+    ],
+    "run": 0,
+    "directory": "001"
+  }
+]

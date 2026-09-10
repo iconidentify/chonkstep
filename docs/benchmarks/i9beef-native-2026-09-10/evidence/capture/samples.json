@@ -1,0 +1,1871 @@
+[
+  {
+    "label": "baseline",
+    "case": "native",
+    "policy": "default",
+    "seconds": 22.970579509,
+    "cpu_percent": 9.664536321907734,
+    "render_fps": 138.96036008797066,
+    "render_wall_us_per_frame": 435.1356516290727,
+    "presentation": {
+      "count": 3177,
+      "fps": 138.295090633142,
+      "interval_ms_p50": 6.945,
+      "interval_ms_p95": 6.998,
+      "interval_ms_p99": 13.896,
+      "interval_ms_p99_9": 34.734,
+      "interval_ms_max": 41.742,
+      "intervals_over_1_5_refresh": 110,
+      "estimated_missed_refreshes": 131,
+      "zero_copy_count": 0,
+      "advertised_refresh_ns": [
+        6944444
+      ]
+    },
+    "frames": {
+      "dispatch_calls": 14745,
+      "dispatch_us": 1893994,
+      "dispatch_max_us": 33527,
+      "input_us": 3084,
+      "shell_us": 144369,
+      "protocol_us": 242030,
+      "layout_us": 50915,
+      "render_calls": 3192,
+      "render_us": 1388953,
+      "render_max_us": 11050,
+      "flush_us": 24103,
+      "ipc_us": 13574,
+      "render_attempts": 7219,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "monotonic_ns": 227452921386918,
+      "wall_ns": 1789066555423798130,
+      "cpu_ticks": 141,
+      "rss_bytes": 357978112
+    },
+    "after": {
+      "monotonic_ns": 227475891966427,
+      "wall_ns": 1789066578394377716,
+      "cpu_ticks": 363,
+      "rss_bytes": 391921664
+    },
+    "native_delta": {},
+    "stages": {},
+    "captures": [
+      {
+        "monotonic_ns": 227453923144207,
+        "latency_ms": 3020.934218,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227457094509627,
+        "latency_ms": 2975.560154,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227460206820947,
+        "latency_ms": 2963.854142,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227463304067431,
+        "latency_ms": 3006.385397,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227466442362566,
+        "latency_ms": 2979.540542,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227469553581837,
+        "latency_ms": 3106.88828,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227472793908283,
+        "latency_ms": 2957.511715,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      }
+    ],
+    "readback_before": {},
+    "readback_after": {},
+    "monitors": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "monitors_after": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "pixels": {
+      "size": [
+        3840,
+        2160
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+    },
+    "load_average": [
+      4.1708984375,
+      3.53955078125,
+      3.5302734375
+    ],
+    "active_hardware_planes": [
+      {
+        "id": 54,
+        "type": 1,
+        "crtc": 200,
+        "framebuffer": 858
+      }
+    ],
+    "run": 0,
+    "directory": "000"
+  },
+  {
+    "label": "final",
+    "case": "native",
+    "policy": "default",
+    "seconds": 23.108513098,
+    "cpu_percent": 6.880581166157383,
+    "render_fps": 148.8196140277688,
+    "render_wall_us_per_frame": 228.37598138993894,
+    "presentation": {
+      "count": 3299,
+      "fps": 142.786652539245,
+      "interval_ms_p50": 6.944,
+      "interval_ms_p95": 6.98,
+      "interval_ms_p99": 7.013,
+      "interval_ms_p99_9": 20.845,
+      "interval_ms_max": 27.76,
+      "intervals_over_1_5_refresh": 16,
+      "estimated_missed_refreshes": 28,
+      "zero_copy_count": 0,
+      "advertised_refresh_ns": [
+        6944444
+      ]
+    },
+    "frames": {
+      "dispatch_calls": 15744,
+      "dispatch_us": 1251159,
+      "dispatch_max_us": 21262,
+      "input_us": 3233,
+      "shell_us": 165703,
+      "protocol_us": 177136,
+      "layout_us": 56514,
+      "render_calls": 3439,
+      "render_us": 785385,
+      "render_max_us": 3712,
+      "flush_us": 19355,
+      "ipc_us": 13502,
+      "render_attempts": 8098,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "monotonic_ns": 227489206762204,
+      "wall_ns": 1789066591709173246,
+      "cpu_ticks": 128,
+      "rss_bytes": 359714816
+    },
+    "after": {
+      "monotonic_ns": 227512315275302,
+      "wall_ns": 1789066614817686393,
+      "cpu_ticks": 287,
+      "rss_bytes": 393408512
+    },
+    "native_delta": {
+      "passes": 8101,
+      "skips_off": 0,
+      "skips_flip": 303,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 4359,
+      "attempts": 3439,
+      "queued": 3439,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 3439,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 3439,
+      "late_presentations": 7
+    },
+    "stages": {
+      "scene": {
+        "count": 3439,
+        "mean_us": 18.686793835417273,
+        "histogram": [
+          0,
+          0,
+          0,
+          2,
+          2523,
+          520,
+          387,
+          6,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 17,
+        "p95_upper_us": 65,
+        "p99_upper_us": 65
+      },
+      "capture_chrome": {
+        "count": 3439,
+        "mean_us": 0.04847426577493457,
+        "histogram": [
+          3438,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 2,
+        "p95_upper_us": 2,
+        "p99_upper_us": 2
+      },
+      "prepare": {
+        "count": 3439,
+        "mean_us": 4.252940098865949,
+        "histogram": [
+          0,
+          1103,
+          1680,
+          434,
+          219,
+          3,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 5,
+        "p95_upper_us": 17,
+        "p99_upper_us": 17
+      },
+      "planes": {
+        "count": 3439,
+        "mean_us": 4.683194242512358,
+        "histogram": [
+          0,
+          0,
+          2719,
+          393,
+          319,
+          8,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 5,
+        "p95_upper_us": 17,
+        "p99_upper_us": 17
+      },
+      "composition_submit": {
+        "count": 3439,
+        "mean_us": 95.81579034603082,
+        "histogram": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1407,
+          1677,
+          312,
+          10,
+          0,
+          30,
+          3,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 129,
+        "p95_upper_us": 257,
+        "p99_upper_us": 513
+      },
+      "kms_queue": {
+        "count": 3439,
+        "mean_us": 94.43796656004652,
+        "histogram": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          3088,
+          349,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 129,
+        "p95_upper_us": 257,
+        "p99_upper_us": 257
+      },
+      "presentation_feedback": {
+        "count": 3439,
+        "mean_us": 3.149943879034603,
+        "histogram": [
+          0,
+          2451,
+          685,
+          291,
+          12,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 3,
+        "p95_upper_us": 9,
+        "p99_upper_us": 9
+      },
+      "render_attempt": {
+        "count": 3439,
+        "mean_us": 224.28180255888338,
+        "histogram": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2847,
+          537,
+          22,
+          26,
+          7,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 257,
+        "p95_upper_us": 513,
+        "p99_upper_us": 1025
+      },
+      "queue_to_vblank": {
+        "count": 3439,
+        "mean_us": 3929.9247856935153,
+        "histogram": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2,
+          0,
+          5,
+          3411,
+          14,
+          5,
+          2,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 4097,
+        "p95_upper_us": 4097,
+        "p99_upper_us": 4097
+      }
+    },
+    "captures": [
+      {
+        "monotonic_ns": 227490208455208,
+        "latency_ms": 2964.428138,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227493307663650,
+        "latency_ms": 3004.760795,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227496448202653,
+        "latency_ms": 2961.532005,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227499541675208,
+        "latency_ms": 3017.012809,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227502690752778,
+        "latency_ms": 2971.650842,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227505794068124,
+        "latency_ms": 3064.727992,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227508991259998,
+        "latency_ms": 3192.225806,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      }
+    ],
+    "readback_before": {
+      "queued": 8,
+      "pending_polls": 0,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 196608,
+      "maps": 8,
+      "map_cpu_ns": 29611
+    },
+    "readback_after": {
+      "queued": 39,
+      "pending_polls": 18,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 33325056,
+      "maps": 39,
+      "map_cpu_ns": 180354
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "monitors_after": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "pixels": {
+      "size": [
+        3840,
+        2160
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+    },
+    "load_average": [
+      4.39794921875,
+      3.64990234375,
+      3.56689453125
+    ],
+    "active_hardware_planes": [
+      {
+        "id": 54,
+        "type": 1,
+        "crtc": 200,
+        "framebuffer": 858
+      },
+      {
+        "id": 194,
+        "type": 2,
+        "crtc": 200,
+        "framebuffer": 859
+      }
+    ],
+    "run": 0,
+    "directory": "001"
+  },
+  {
+    "label": "final",
+    "case": "native",
+    "policy": "default",
+    "seconds": 23.030271045,
+    "cpu_percent": 6.686851392199931,
+    "render_fps": 143.20283046412578,
+    "render_wall_us_per_frame": 220.51273499090357,
+    "presentation": {
+      "count": 3290,
+      "fps": 142.82702405412923,
+      "interval_ms_p50": 6.944,
+      "interval_ms_p95": 6.983,
+      "interval_ms_p99": 7.009,
+      "interval_ms_p99_9": 20.85,
+      "interval_ms_max": 27.728,
+      "intervals_over_1_5_refresh": 15,
+      "estimated_missed_refreshes": 27,
+      "zero_copy_count": 0,
+      "advertised_refresh_ns": [
+        6944444
+      ]
+    },
+    "frames": {
+      "dispatch_calls": 15199,
+      "dispatch_us": 1174589,
+      "dispatch_max_us": 22091,
+      "input_us": 3280,
+      "shell_us": 156923,
+      "protocol_us": 173959,
+      "layout_us": 53728,
+      "render_calls": 3298,
+      "render_us": 727251,
+      "render_max_us": 3308,
+      "flush_us": 18460,
+      "ipc_us": 12762,
+      "render_attempts": 7855,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "monotonic_ns": 227526584316554,
+      "wall_ns": 1789066629086727634,
+      "cpu_ticks": 128,
+      "rss_bytes": 357240832
+    },
+    "after": {
+      "monotonic_ns": 227549614587599,
+      "wall_ns": 1789066652116998698,
+      "cpu_ticks": 282,
+      "rss_bytes": 391266304
+    },
+    "native_delta": {
+      "passes": 7858,
+      "skips_off": 0,
+      "skips_flip": 341,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 4219,
+      "attempts": 3298,
+      "queued": 3298,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 3299,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 3298,
+      "late_presentations": 7
+    },
+    "stages": {
+      "scene": {
+        "count": 3298,
+        "mean_us": 18.10607095209218,
+        "histogram": [
+          0,
+          0,
+          0,
+          1,
+          2476,
+          475,
+          337,
+          7,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 17,
+        "p95_upper_us": 65,
+        "p99_upper_us": 65
+      },
+      "capture_chrome": {
+        "count": 3298,
+        "mean_us": 0.03785415403274712,
+        "histogram": [
+          3298,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 2,
+        "p95_upper_us": 2,
+        "p99_upper_us": 2
+      },
+      "prepare": {
+        "count": 3298,
+        "mean_us": 4.205325651910249,
+        "histogram": [
+          0,
+          1110,
+          1567,
+          412,
+          198,
+          11,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 5,
+        "p95_upper_us": 17,
+        "p99_upper_us": 17
+      },
+      "planes": {
+        "count": 3298,
+        "mean_us": 4.504184354154033,
+        "histogram": [
+          0,
+          0,
+          2640,
+          381,
+          263,
+          14,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 5,
+        "p95_upper_us": 17,
+        "p99_upper_us": 17
+      },
+      "composition_submit": {
+        "count": 3298,
+        "mean_us": 93.22906822316556,
+        "histogram": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1770,
+          1218,
+          270,
+          9,
+          0,
+          30,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 65,
+        "p95_upper_us": 257,
+        "p99_upper_us": 513
+      },
+      "kms_queue": {
+        "count": 3298,
+        "mean_us": 90.50576834445118,
+        "histogram": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2990,
+          305,
+          3,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 129,
+        "p95_upper_us": 257,
+        "p99_upper_us": 257
+      },
+      "presentation_feedback": {
+        "count": 3298,
+        "mean_us": 2.9643168587022437,
+        "histogram": [
+          0,
+          2518,
+          571,
+          201,
+          8,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 3,
+        "p95_upper_us": 9,
+        "p99_upper_us": 9
+      },
+      "render_attempt": {
+        "count": 3298,
+        "mean_us": 216.72544966646453,
+        "histogram": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2729,
+          518,
+          20,
+          28,
+          3,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 257,
+        "p95_upper_us": 513,
+        "p99_upper_us": 1025
+      },
+      "queue_to_vblank": {
+        "count": 3299,
+        "mean_us": 3924.364591997575,
+        "histogram": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          2,
+          3277,
+          12,
+          5,
+          2,
+          0,
+          0,
+          0,
+          0
+        ],
+        "p50_upper_us": 4097,
+        "p95_upper_us": 4097,
+        "p99_upper_us": 4097
+      }
+    },
+    "captures": [
+      {
+        "monotonic_ns": 227527585664788,
+        "latency_ms": 2969.586299,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227530750276774,
+        "latency_ms": 3014.317267,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227533914852205,
+        "latency_ms": 2980.977356,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227537031071788,
+        "latency_ms": 2977.451454,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227540140823104,
+        "latency_ms": 3065.335767,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227543339794648,
+        "latency_ms": 3017.093189,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227546496553701,
+        "latency_ms": 2985.387893,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      }
+    ],
+    "readback_before": {
+      "queued": 9,
+      "pending_polls": 0,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 147456,
+      "peak_bytes": 196608,
+      "maps": 8,
+      "map_cpu_ns": 35577
+    },
+    "readback_after": {
+      "queued": 38,
+      "pending_polls": 15,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 33177600,
+      "maps": 38,
+      "map_cpu_ns": 159510
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "monitors_after": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "pixels": {
+      "size": [
+        3840,
+        2160
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+    },
+    "load_average": [
+      3.7978515625,
+      3.57763671875,
+      3.54345703125
+    ],
+    "active_hardware_planes": [
+      {
+        "id": 54,
+        "type": 1,
+        "crtc": 200,
+        "framebuffer": 858
+      },
+      {
+        "id": 194,
+        "type": 2,
+        "crtc": 200,
+        "framebuffer": 859
+      }
+    ],
+    "run": 1,
+    "directory": "002"
+  },
+  {
+    "label": "baseline",
+    "case": "native",
+    "policy": "default",
+    "seconds": 20.199154045,
+    "cpu_percent": 10.049925830940905,
+    "render_fps": 140.84748270456592,
+    "render_wall_us_per_frame": 460.0579964850615,
+    "presentation": {
+      "count": 2731,
+      "fps": 135.231534963618,
+      "interval_ms_p50": 6.945,
+      "interval_ms_p95": 13.864,
+      "interval_ms_p99": 13.912,
+      "interval_ms_p99_9": 34.775,
+      "interval_ms_max": 48.605,
+      "intervals_over_1_5_refresh": 156,
+      "estimated_missed_refreshes": 177,
+      "zero_copy_count": 0,
+      "advertised_refresh_ns": [
+        6944444
+      ]
+    },
+    "frames": {
+      "dispatch_calls": 12738,
+      "dispatch_us": 1771362,
+      "dispatch_max_us": 40907,
+      "input_us": 2802,
+      "shell_us": 128565,
+      "protocol_us": 227261,
+      "layout_us": 45929,
+      "render_calls": 2845,
+      "render_us": 1308865,
+      "render_max_us": 11446,
+      "flush_us": 22225,
+      "ipc_us": 11855,
+      "render_attempts": 6337,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "monotonic_ns": 227562976773795,
+      "wall_ns": 1789066665479184892,
+      "cpu_ticks": 150,
+      "rss_bytes": 357670912
+    },
+    "after": {
+      "monotonic_ns": 227583175927840,
+      "wall_ns": 1789066685678338900,
+      "cpu_ticks": 353,
+      "rss_bytes": 391733248
+    },
+    "native_delta": {},
+    "stages": {},
+    "captures": [
+      {
+        "monotonic_ns": 227563978356361,
+        "latency_ms": 3067.222346,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227567179431228,
+        "latency_ms": 3055.901593,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227570373467115,
+        "latency_ms": 3048.487528,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227573556119041,
+        "latency_ms": 3111.037843,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227576805005141,
+        "latency_ms": 3072.24164,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      },
+      {
+        "monotonic_ns": 227580018590937,
+        "latency_ms": 3022.664914,
+        "verification": {
+          "size": [
+            3840,
+            2160
+          ],
+          "fullscreen_pattern_verified": true,
+          "client_pattern_verified": true,
+          "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+        }
+      }
+    ],
+    "readback_before": {},
+    "readback_after": {},
+    "monitors": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "monitors_after": [
+      {
+        "id": 0,
+        "name": "DP-1",
+        "description": "Sony SDMU27M90*30 0000001",
+        "make": "Sony",
+        "model": "SDMU27M90*30",
+        "serial": "0000001",
+        "width": 3840,
+        "height": 2160,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "3840x2160@60.00Hz",
+          "3840x2160@144.00Hz",
+          "3840x2160@119.88Hz",
+          "3840x2160@120.00Hz",
+          "3840x2160@95.00Hz",
+          "3840x2160@59.94Hz",
+          "3840x2160@50.00Hz",
+          "3840x2160@29.97Hz",
+          "3840x2160@25.00Hz",
+          "3840x2160@23.98Hz",
+          "2560x1440@143.97Hz",
+          "2560x1440@120.02Hz",
+          "2560x1440@59.95Hz",
+          "1920x1080@119.88Hz",
+          "1920x1080@60.00Hz",
+          "1920x1080@59.94Hz",
+          "1920x1080@50.00Hz",
+          "1920x1080@29.97Hz",
+          "1920x1080@25.00Hz",
+          "1920x1080@23.98Hz",
+          "1280x1024@60.02Hz",
+          "1280x720@59.94Hz",
+          "1280x720@50.00Hz",
+          "1024x768@60.00Hz",
+          "800x600@60.32Hz",
+          "720x576@50.00Hz",
+          "720x480@59.94Hz",
+          "640x480@59.94Hz",
+          "640x480@59.93Hz"
+        ]
+      }
+    ],
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "pixels": {
+      "size": [
+        3840,
+        2160
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "407b8f085ac245366712d95eb5804aaf2ee1166ec830f9501a284713378fab1f"
+    },
+    "load_average": [
+      3.76904296875,
+      3.59326171875,
+      3.54931640625
+    ],
+    "active_hardware_planes": [
+      {
+        "id": 54,
+        "type": 1,
+        "crtc": 200,
+        "framebuffer": 854
+      }
+    ],
+    "run": 1,
+    "directory": "003"
+  }
+]

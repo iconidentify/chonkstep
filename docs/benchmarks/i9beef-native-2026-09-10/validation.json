@@ -1,0 +1,112 @@
+{
+  "date": "2026-09-10",
+  "checks": {
+    "wm-wayland-final-tests": {
+      "passed": true,
+      "log": "evidence/checks/wm-wayland-final-tests.log",
+      "result_lines": [
+        "test result: ok. 287 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.05s"
+      ]
+    },
+    "real-gpu-pair-test": {
+      "passed": true,
+      "log": "evidence/checks/real-gpu-pair-test.log",
+      "result_lines": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 289 filtered out; finished in 0.40s"
+      ]
+    },
+    "wm-wayland-final-clippy": {
+      "passed": true,
+      "log": "evidence/checks/wm-wayland-final-clippy.log"
+    },
+    "marker-probe-clippy": {
+      "passed": true,
+      "log": "evidence/checks/marker-probe-clippy.log"
+    },
+    "python-complete-tests": {
+      "passed": true,
+      "log": "evidence/checks/python-complete-tests.log",
+      "result_lines": [
+        "Ran 81 tests in 27.271s"
+      ]
+    },
+    "diff-check": {
+      "passed": true,
+      "log": "evidence/checks/diff-check.log"
+    }
+  },
+  "campaigns": {
+    "ab": {
+      "completed_samples": 20,
+      "summary": "evidence/ab/summary.json"
+    },
+    "qualification": {
+      "completed_samples": 15,
+      "summary": "evidence/qualification/summary.json"
+    },
+    "stress3": {
+      "completed_samples": 1,
+      "summary": "evidence/stress3/summary.json"
+    },
+    "capture": {
+      "completed_samples": 4,
+      "summary": "evidence/capture/summary.json"
+    },
+    "timers": {
+      "completed_samples": 4,
+      "summary": "evidence/timers/summary.json",
+      "note": "GPU intervals superseded by timers-fixed; query end markers were delayed until the next frame."
+    },
+    "timers-fixed": {
+      "completed_samples": 4,
+      "summary": "evidence/timers-fixed/summary.json"
+    },
+    "multigpu": {
+      "completed_samples": 1,
+      "summary": "evidence/multigpu/summary.json"
+    },
+    "vrr": {
+      "completed_samples": 1,
+      "summary": "evidence/vrr/summary.json"
+    },
+    "idle": {
+      "completed_samples": 2,
+      "summary": "evidence/idle/summary.json"
+    },
+    "freshness": {
+      "completed_samples": 1,
+      "summary": "evidence/freshness/summary.json"
+    },
+    "confirmation": {
+      "completed_samples": 4,
+      "summary": "evidence/confirmation/summary.json"
+    },
+    "multigpu-verified": {
+      "completed_samples": 1,
+      "summary": "evidence/multigpu-verified/summary.json"
+    }
+  },
+  "total_completed_native_samples": 58,
+  "qualified_binary": {
+    "sha256": "2727bc755de151d0285d2cfff24d59f1b186e1ae40fb71db8ea14ec75b926da2",
+    "build_id": "ab789770f61f743a4f7d5b0d8c3ed11f91460b08",
+    "source": "preview-v0.4.4-11-ga416af5-native-qualified"
+  },
+  "freshness": {
+    "passed": true,
+    "phases": 24,
+    "strictly_advancing_pixel_markers": 21,
+    "asynchronous_readbacks": 123,
+    "synchronous_fallbacks": 0,
+    "render_failures": 0,
+    "queue_failures": 0
+  },
+  "hardware_limits": [
+    "one physical 4K monitor",
+    "no physical 5K or Apple GPU qualification",
+    "no GPU-clock-controlled resampler-cost isolation",
+    "cross-GPU DMA interoperability rejected; CPU fallback observed"
+  ],
+  "desktop_restored": "desktop-restored.json",
+  "source_commit": "52c680d02750ad18918539bb3a0fb4b95b9c0c04"
+}

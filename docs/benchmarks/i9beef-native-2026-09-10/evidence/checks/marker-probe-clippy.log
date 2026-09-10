@@ -1,0 +1,35 @@
+    Checking rustix v1.1.4
+    Checking wayland-sys v0.31.11
+    Checking slotmap v1.1.1
+    Checking winnow v1.0.4
+    Checking bytemuck v1.25.2
+    Checking serde v1.0.229
+    Checking tracing v0.1.44
+    Checking x11rb-protocol v0.13.2
+    Checking font-types v0.11.3
+    Checking font-types v0.12.4
+    Checking tiny-skia-path v0.11.4
+    Checking toml_parser v1.1.3+spec-1.1.0
+    Checking fontdb v0.23.0
+    Checking wm-theme-api v0.4.4 (/home/chrisk/src/chonkstep/crates/wm-theme-api)
+    Checking read-fonts v0.37.0
+    Checking read-fonts v0.41.0
+    Checking tiny-skia v0.11.4
+    Checking toml v0.9.12+spec-1.1.0
+    Checking wayland-backend v0.3.17
+    Checking gethostname v1.1.0
+    Checking tempfile v3.27.0
+    Checking x11rb v0.13.2
+    Checking wayland-client v0.31.15
+    Checking wayland-egl v0.32.11
+    Checking wayland-protocols v0.32.13
+    Checking harfrust v0.5.2
+    Checking skrifa v0.40.0
+    Checking skrifa v0.44.0
+    Checking swash v0.2.10
+    Checking wayland-protocols-wlr v0.3.12
+    Checking wayland-protocols-misc v0.3.12
+    Checking cosmic-text v0.19.0
+    Checking wm-theme v0.4.4 (/home/chrisk/src/chonkstep/crates/wm-theme)
+    Checking chonk-testkit v0.4.4 (/home/chrisk/src/chonkstep/crates/chonk-testkit)
+    Finished `release` profile [optimized + debuginfo] target(s) in 8.50s

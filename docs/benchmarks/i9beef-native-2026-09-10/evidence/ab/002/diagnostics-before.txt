@@ -1,0 +1,13 @@
+workspace=1 focused_window=Some(4294967297) clients=1
+state locked=false damage=true last_damage=crates/wm-wayland/src/xdg.rs:881 monitors=1 windows=1 frames=1 layers=0 shells=2 ime_popups=0
+graphics backend=drm-session kms_device=/dev/dri/card1 drm_driver=nvidia-drm render_node=renderD128
+output index=0 name="DP-1" x=0 y=0 w=3840 h=2160 scale=1.5 refresh_millihertz=144000 transform=0
+focus pending=None pointer=None keyboard_grab=false pointer_grab=false pending_pointer_grab=false
+diagnostics damage-log=false idle-log=false full-damage=false no-direct-scanout=false no-cursor-plane=false no-vrr=true
+scene bottom-to-top
+ frame id=4 window=3 x=0 y=0 w=3840 h=2160 mapped=true app="native-gpu-probe" title="NativeGpuProbe"
+ shell id=1 x=3756 y=0 w=84 h=672 mapped=false above=true buffer_bytes=0
+ shell id=2 x=3756 y=2076 w=84 h=84 mapped=false above=true buffer_bytes=0
+clients
+ client id=InnerClientId { id: 0, serial: 1 } pid=962850 uid=1000 executable="chonkstep-wayland" surfaces=1 buffer_bytes_estimate=0
+ client id=InnerClientId { id: 1, serial: 3 } pid=962882 uid=1000 executable="final-probe" surfaces=1 buffer_bytes_estimate=58982400
