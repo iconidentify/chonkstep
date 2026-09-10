@@ -28,6 +28,7 @@ use super::InputMethodManagerState;
 pub(crate) struct InputMethodKeyboard {
     pub grab: Option<ZwpInputMethodKeyboardGrabV2>,
     pub text_input_handle: TextInputHandle,
+    projected_modifiers: bool,
 }
 
 /// Handle to an input method instance
@@ -43,19 +44,29 @@ where
     fn input(
         &mut self,
         _data: &mut D,
-        _handle: &mut KeyboardInnerHandle<'_, D>,
+        handle: &mut KeyboardInnerHandle<'_, D>,
         keycode: Keycode,
         key_state: KeyState,
         modifiers: Option<ModifiersState>,
         serial: Serial,
         time: u32,
     ) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        // A projected shortcut changes its modifiers without a physical
+        // modifier-key event. The IME must see that mask before the letter it
+        // interprets or reinjects. Preserve normal physical-event ordering.
+        let projected = modifiers.is_some_and(|m| m != handle.modifier_state());
+        // Restore the physical mask before the first untranslated key too;
+        // otherwise it is interpreted with the previous chord's Control mask.
+        let modifiers_first = projected || inner.projected_modifiers;
+        inner.projected_modifiers = projected;
         let keyboard = inner.grab.as_ref().unwrap();
         inner
             .text_input_handle
             .active_text_input_serial_or_default(serial.0, |serial| {
-                keyboard.key(serial, time, keycode.raw() - 8, key_state.into());
+                if !modifiers_first {
+                    keyboard.key(serial, time, keycode.raw() - 8, key_state.into());
+                }
                 if let Some(serialized) = modifiers.map(|m| m.serialized) {
                     keyboard.modifiers(
                         serial,
@@ -64,6 +75,9 @@ where
                         serialized.locked,
                         serialized.layout_effective,
                     )
+                }
+                if modifiers_first {
+                    keyboard.key(serial, time, keycode.raw() - 8, key_state.into());
                 }
             });
     }

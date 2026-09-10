@@ -3443,6 +3443,88 @@ mod tests {
         });
     }
 
+    /// Like an IME, this grab consumes events before KeyboardFocus can project
+    /// their modifiers. Assert the values delivered to the grab itself.
+    struct RecordingKeyboardGrab {
+        start: smithay::input::keyboard::GrabStartData<TestSeatState>,
+    }
+
+    impl smithay::input::keyboard::KeyboardGrab<TestSeatState> for RecordingKeyboardGrab {
+        fn input(
+            &mut self,
+            data: &mut TestSeatState,
+            _handle: &mut smithay::input::keyboard::KeyboardInnerHandle<'_, TestSeatState>,
+            keycode: Keycode,
+            state: KeyState,
+            modifiers: Option<ModifiersState>,
+            _serial: Serial,
+            _time: u32,
+        ) {
+            data.keys.push((keycode, state));
+            if let Some(modifiers) = modifiers {
+                data.modifiers.push(modifiers);
+            }
+        }
+
+        fn set_focus(
+            &mut self,
+            data: &mut TestSeatState,
+            handle: &mut smithay::input::keyboard::KeyboardInnerHandle<'_, TestSeatState>,
+            focus: Option<TestInputTarget>,
+            serial: Serial,
+        ) {
+            handle.set_focus(data, focus, serial);
+        }
+
+        fn start_data(&self) -> &smithay::input::keyboard::GrabStartData<TestSeatState> {
+            &self.start
+        }
+
+        fn unset(&mut self, _data: &mut TestSeatState) {}
+    }
+
+    #[test]
+    fn translated_modifiers_reach_keyboard_grabs_without_changing_physical_state() {
+        const COMMAND: Keycode = Keycode::new(125 + 8);
+        const A: Keycode = Keycode::new(30 + 8);
+        let mut state = TestSeatState::default();
+        let mut seat = state.seat_state.new_seat("projected-grab-test");
+        let keyboard = seat.add_keyboard(XkbConfig::default(), 200, 25).unwrap();
+        keyboard.set_focus(&mut state, Some(TestInputTarget), SERIAL_COUNTER.next_serial());
+        send_test_key(&mut state, &keyboard, COMMAND, KeyState::Pressed, true);
+        let physical = keyboard.modifier_state();
+        assert!(physical.logo && !physical.ctrl);
+        keyboard.set_grab(&mut state, RecordingKeyboardGrab {
+            start: smithay::input::keyboard::GrabStartData { focus: Some(TestInputTarget) },
+        }, SERIAL_COUNTER.next_serial());
+        state.keys.clear();
+        state.modifiers.clear();
+
+        let mut projected = physical;
+        projected.logo = false;
+        projected.ctrl = true;
+        keyboard.with_xkb_state(&mut state, |context| {
+            let xkb = context.xkb().lock().unwrap();
+            // SAFETY: the keymap is only borrowed while its mutex is held.
+            let keymap = unsafe { xkb.keymap() };
+            projected.serialized.depressed &= !(1 << keymap.mod_get_index("Mod4"));
+            projected.serialized.depressed |= 1 << keymap.mod_get_index("Control");
+        });
+        for key_state in [KeyState::Pressed, KeyState::Released] {
+            let (route, _) = keyboard.input_intercept(&mut state, A, key_state, |_, _, _| FilterResult::<()>::Forward);
+            assert!(matches!(route, FilterResult::Forward));
+            keyboard.input_forward_with_modifiers(&mut state, A, key_state, SERIAL_COUNTER.next_serial(), 1, projected);
+            assert_eq!(state.modifiers.last(), Some(&projected));
+            assert_eq!(keyboard.modifier_state(), physical, "projection must not rewrite physical XKB state");
+            assert_eq!(keyboard.forwarded_key_is_pressed(A), key_state == KeyState::Pressed);
+        }
+        send_test_key(&mut state, &keyboard, COMMAND, KeyState::Released, true);
+        let released = keyboard.modifier_state();
+        assert!(!released.logo && !released.ctrl);
+        assert_eq!(state.modifiers.last(), Some(&released));
+        assert_eq!(state.keys, [(A, KeyState::Pressed), (A, KeyState::Released), (COMMAND, KeyState::Released)]);
+    }
+
     #[test]
     fn removing_keyboard_focus_notifies_dependent_focus_owners_once() {
         let mut state = TestSeatState::default();

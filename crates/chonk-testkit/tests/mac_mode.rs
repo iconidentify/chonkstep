@@ -121,6 +121,96 @@ fn boot(name: &str) -> Session {
     )
     .unwrap()
 }
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_mode; requires fcitx5 and Python GTK4"]
+fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
+    if !chonk_testkit::require_client("fcitx5") || !chonk_testkit::require_client("python") {
+        return;
+    }
+    fn ime_chord(s: &mut Session, modifiers: &[u32], code: u32) {
+        // The seat barrier cannot acknowledge an asynchronous client changing
+        // its text-input focus and replacing the IME grab. Let that round trip
+        // settle before the next user chord.
+        std::thread::sleep(Duration::from_millis(250));
+        chord(s, modifiers, code);
+    }
+    let mut s = boot("mac-ime-clipboard");
+    s.launch_isolated("env", &["WAYLAND_DEBUG=1", "fcitx5", "--disable", "notificationitem"])
+        .unwrap();
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/mac-ime-editor.py");
+    let dir = s.dir.to_string_lossy().into_owned();
+    let fixture = fixture.to_string_lossy().into_owned();
+    for (role, text) in [("source", CONTENT), ("destination", "")] {
+        s.launch_isolated("env", &["GTK_IM_MODULE=wayland", "python", &fixture, role, &dir, text])
+            .unwrap();
+        s.wait_for_window(&format!("IME Probe {role}")).unwrap();
+    }
+    let source = s.world().unwrap().window_matching("IME Probe source").unwrap().clone();
+    s.door().click(source.x as f64 + 60.0, source.y as f64 + 100.0).unwrap();
+    let read = |role: &str| -> Option<Value> {
+        serde_json::from_str(&std::fs::read_to_string(PathBuf::from(&dir).join(format!("{role}.json"))).ok()?).ok()
+    };
+    // A passing direct-keyboard path would miss the bug: require the real
+    // input method to acquire its Wayland keyboard grab before sending keys.
+    poll_until(WAIT, "Fcitx input-method keyboard grab", || {
+        std::fs::read_dir(&dir).ok()?.filter_map(Result::ok).any(|entry| {
+            entry.file_name().to_string_lossy().starts_with("client-")
+                && std::fs::read_to_string(entry.path()).unwrap_or_default().contains(".grab_keyboard(")
+        }).then_some(())
+    }).unwrap();
+    ime_chord(&mut s, &[CMD], 30);
+    poll_until(WAIT, "Command-A selection through Fcitx", || {
+        (read("source")?["selected"] == true).then_some(())
+    }).unwrap();
+    let observed = read("source").unwrap();
+    let a = observed["events"].as_array().unwrap().iter().rev().find(|e| e["key"] == "a").unwrap();
+    assert_eq!(a["modifiers"].as_u64().unwrap() & ((1 << 26) | 4), 4,
+        "GTK must see Control-A, without Super, through the IME");
+    ime_chord(&mut s, &[CMD], 46);
+    ime_chord(&mut s, &[CMD], 15);
+    ime_chord(&mut s, &[CMD], 47);
+    poll_until(WAIT, "cross-app paste through Fcitx", || {
+        (read("destination")?["text"] == CONTENT).then_some(())
+    }).unwrap();
+    ime_chord(&mut s, &[CMD], 15);
+    ime_chord(&mut s, &[CMD], 16);
+    poll_until(WAIT, "source closed gracefully", || {
+        s.world().ok()?.window_matching("IME Probe source").is_none().then_some(())
+    }).unwrap();
+    ime_chord(&mut s, &[CTRL], 30); // Physical Control remains ordinary client input.
+    ime_chord(&mut s, &[], 14);
+    poll_until(WAIT, "destination cleared", || (read("destination")?["text"] == "").then_some(())).unwrap();
+    ime_chord(&mut s, &[CMD], 47);
+    poll_until(WAIT, "clipboard survives source quit with IME active", || {
+        (read("destination")?["text"] == CONTENT).then_some(())
+    }).unwrap();
+    // A translated chord followed by an untranslated one while Command is
+    // still held must restore Super before the second key reaches the IME.
+    s.door().key(CMD, true).unwrap();
+    s.door().tap_key(30).unwrap();
+    s.door().tap_key(53).unwrap(); // Command-/ has no GUI translation.
+    s.door().key(CMD, false).unwrap();
+    s.door().barrier().unwrap();
+    poll_until(WAIT, "untranslated chord restores physical modifiers", || {
+        let observed = read("destination")?;
+        let event = observed["events"].as_array()?.iter().rev().find(|e| e["key"] == "slash")?;
+        (event["modifiers"].as_u64()? & ((1 << 26) | 4) == 1 << 26).then_some(())
+    }).unwrap();
+    // Release Command before A, then type normally: no synthetic Control or
+    // Super may stick, and physical Shift must retain its ordinary behavior.
+    ime_chord(&mut s, &[CMD], 30);
+    s.door().key(CMD, true).unwrap();
+    s.door().key(30, true).unwrap();
+    s.door().key(CMD, false).unwrap();
+    s.door().key(30, false).unwrap();
+    ime_chord(&mut s, &[], 48);
+    ime_chord(&mut s, &[SHIFT], 48);
+    poll_until(WAIT, "normal typing after translated releases", || {
+        (read("destination")?["text"] == "bB").then_some(())
+    }).unwrap();
+}
+
 #[test]
 #[ignore = "scripts/e2e.sh --headless --test mac_mode"]
 fn native_and_xwayland_copy_cut_paste_undo_and_releases() {

@@ -185,3 +185,26 @@ and exited owners. Preserve campaign before/after logs when replacing these
 patches. Remove them only when an adopted upstream release passes the same
 payload and lifetime matrix; clipboard support alone does not prove XDND or
 clipboard-history/persistence support.
+
+## Local patch: translated modifiers reach input-method keyboard grabs
+
+`src/input/keyboard/mod.rs` and
+`src/wayland/input_method/input_method_keyboard_grab.rs`:
+
+- Add `input_forward_with_modifiers` to forward a translated shortcut through
+  the existing grab and pressed-key bookkeeping with an explicit modifier mask,
+  while preserving the physical XKB state. The original forwarding API retains
+  its behavior. Projecting only at the final keyboard focus misses IME grabs.
+- Deliver projected modifiers before the associated key to the input method,
+  and restore the physical mask before the first untranslated key. Ordinary
+  physical input keeps its existing key/modifier ordering. Fcitx reinjects keys
+  asynchronously, so a temporary compositor focus override cannot fix them.
+
+Evidence: the unit regression in `wm-wayland/src/input.rs` checks grab-visible
+modifiers, balanced key bookkeeping and unchanged physical state. The real
+Fcitx/GTK test in `chonk-testkit/tests/mac_mode.rs` requires an actual Wayland
+input-method grab and checks Command copy/paste between applications, clipboard
+retention after the owner quits, untranslated chords and release ordering.
+The previously installed i9beef binary fails at Command-A; the patched binary
+selects and transfers the text. Remove this patch when an adopted upstream
+version provides equivalent projection through grabs and passes these tests.

@@ -81,6 +81,11 @@ find, tabs, and zoom. This preserves the application's clipboard formats, editin
 context, save dialogs, and tab behavior. Command-W goes to the app, rather than
 closing its whole window through the compositor.
 
+Translated chords also pass through Wayland input-method keyboard grabs, including
+Fcitx. The input method receives the projected modifiers before the key it
+interprets or forwards. Physical Control, Shift, and Command state is preserved;
+turning off the input method is not required for Mac shortcuts.
+
 Command-Left/Right become Home/End; Command-Up/Down become Control-Home/End.
 Shift preserves selection. Option-arrow and Option-Backspace/Delete use the
 corresponding Control editing operations in GUI applications. Command-period

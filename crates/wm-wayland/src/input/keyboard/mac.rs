@@ -242,7 +242,7 @@ pub(crate) fn forward(comp: &mut Compositor, keyboard: &KeyboardHandle<Composito
     comp.mac_keyboard.suppress_key = suppress;
     // Always announce the current projection. This restores modifiers even if
     // physical XKB reports no change after a translated press or keymap handoff.
-    keyboard.input_forward(comp, out_code, state, serial, time, true);
+    keyboard.input_forward_with_modifiers(comp, out_code, state, serial, time, modifiers);
     comp.mac_keyboard.modifiers = None;
     comp.mac_keyboard.suppress_key = false;
     if state == KeyState::Pressed && !suppress && eligible && comp.wm.mac_mode()

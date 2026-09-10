@@ -1019,6 +1019,35 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         time: u32,
         mods_changed: bool,
     ) {
+        self.input_forward_inner(data, keycode, state, serial, time, |physical| {
+            mods_changed.then_some(physical)
+        });
+    }
+
+    /// Forward a translated chord through the active grab with its projected
+    /// modifiers, without changing physical XKB state. Input-method grabs need
+    /// the same projection as the eventual keyboard focus target.
+    pub fn input_forward_with_modifiers(
+        &self,
+        data: &mut D,
+        keycode: Keycode,
+        state: KeyState,
+        serial: Serial,
+        time: u32,
+        modifiers: ModifiersState,
+    ) {
+        self.input_forward_inner(data, keycode, state, serial, time, |_| Some(modifiers));
+    }
+
+    fn input_forward_inner(
+        &self,
+        data: &mut D,
+        keycode: Keycode,
+        state: KeyState,
+        serial: Serial,
+        time: u32,
+        project: impl FnOnce(ModifiersState) -> Option<ModifiersState>,
+    ) {
         let mut guard = self.arc.internal.lock().unwrap();
         match state {
             KeyState::Pressed => {
@@ -1031,7 +1060,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
 
         // forward to client if no keybinding is triggered
         let seat = self.get_seat(data);
-        let modifiers = mods_changed.then_some(guard.mods_state);
+        let modifiers = project(guard.mods_state);
         guard.with_grab(data, &seat, |data, handle, grab| {
             grab.input(data, handle, keycode, state, modifiers, serial, time);
         });
