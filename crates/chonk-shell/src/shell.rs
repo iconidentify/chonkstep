@@ -3319,12 +3319,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             self.desktop.close_menu(wm.backend_mut());
             self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
         }
-        // The Overview's one-shot preview catch-up: the panel opened
-        // against whatever captures the backend had (icon-sized, on
-        // the compositor), the entry hinted the card size, and this
-        // fires exactly once when the backend reports card-sized
-        // captures exist — see `OverviewPanel`'s preview-resolution
-        // doc. Almost every call is one integer comparison.
+        // Catch up once per completed preview batch. The backend may finish
+        // bounded asynchronous downloads over several dispatch turns; unchanged
+        // generations cost only the integer comparison and never repaint.
         let generation = wm.backend().preview_generation();
         if self.desktop.overview_wants_fresh_previews(generation) {
             let previews: Vec<Option<DecorationBuffer>> =

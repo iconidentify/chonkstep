@@ -75,13 +75,6 @@ impl RgbaDownload {
         if self.ready() { self.scene.clear(); }
     }
 
-    pub fn wait(&mut self) -> Result<(), String> {
-        self.completion.wait().map_err(|error| format!("readback fence: {error}"))?;
-        self.ready.set(true);
-        self.scene.clear();
-        Ok(())
-    }
-
     pub fn expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.started) >= DOWNLOAD_TIMEOUT
     }

@@ -101,10 +101,9 @@ const MAX_SNAPSHOT_EDGE: u32 = 256;
 /// readback cost.
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How many windows may be captured in one frame. Reading pixels back
-/// out of the GPU is a synchronous stall, so a desktop with a dozen
-/// windows must not pay a dozen of them in the frame where their
-/// snapshots all come due at once. Capping the batch also staggers the
+/// How many window downloads may be in flight at once. Even with asynchronous
+/// completion, a desktop with a dozen windows should not submit a dozen
+/// offscreen passes in the frame where all snapshots come due. Capping the batch also staggers the
 /// fleet permanently: each window is stamped when it is actually
 /// captured, so windows that started in lockstep drift into separate
 /// frames and stay there.
@@ -122,6 +121,15 @@ pub(crate) struct ScreenshotRequestPoller {
     marker: Option<PathBuf>,
     home: Option<PathBuf>,
     next_poll: Instant,
+    download: Option<MarkerDownload>,
+    writer: Option<std::sync::mpsc::Receiver<()>>,
+    service_after: Instant,
+}
+
+struct MarkerDownload {
+    image: PendingImage,
+    target: Option<PathBuf>,
+    locked: bool,
 }
 
 impl ScreenshotRequestPoller {
@@ -134,12 +142,12 @@ impl ScreenshotRequestPoller {
         let state_dir = state_dir(xdg_state_home, home.clone());
         let marker = state_dir.as_ref().map(|dir| dir.join("screenshot"));
         let home = home.filter(|value| !value.is_empty()).map(PathBuf::from);
-        Self { state_dir, marker, home, next_poll: now }
+        Self { state_dir, marker, home, next_poll: now, download: None, writer: None, service_after: now }
     }
 
     /// Exact next point at which [`Self::poll`] can touch the marker.
     pub(crate) fn next_deadline(&self) -> Instant {
-        self.next_poll
+        if self.download.is_some() || self.writer.is_some() { self.service_after } else { self.next_poll }
     }
 
     /// Consumes a screenshot request when the polling deadline is due.
@@ -264,7 +272,7 @@ pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
 /// output covers; it comes out as the desktop's own background (the
 /// clear color) rather than as a hole, which is the least surprising
 /// thing a viewer can be handed.
-pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(), String> {
+fn capture_output(comp: &mut Compositor) -> Result<PendingImage, String> {
     let Compositor {
         wm,
         graphics,
@@ -294,9 +302,8 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
     // Diagnostic marker captures what the user sees, including capture chrome.
     // User exports and protocol screencopy deliberately do not add this layer.
     crate::capture_tool::render(&mut elements, renderer, wm.backend(), Rect::new(Point::new(0, 0), size));
-    let buffer = render_offscreen(renderer, &mut elements, size, 1.0, clear_color)
-        .ok_or_else(|| "offscreen render of the desktop failed".to_string())?;
-    write_png(buffer, path)
+    render_offscreen_pending(renderer, &mut elements, size, 1.0, clear_color)
+        .ok_or_else(|| "offscreen render of the desktop failed".to_string())
 }
 
 /// The GLES renderer behind whichever graphics stack is running —
@@ -569,18 +576,6 @@ impl PendingImage {
     }
 }
 
-fn render_offscreen(
-    renderer: &mut GlesRenderer,
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
-    size: Size,
-    scale: f64,
-    clear_color: Color32F,
-) -> Option<DecorationBuffer> {
-    let mut pending = render_offscreen_pending(renderer, elements, size, scale, clear_color)?;
-    pending.pixels.wait().ok()?;
-    pending.copy_pixels(renderer).ok()
-}
-
 fn render_offscreen_pending(
     renderer: &mut GlesRenderer,
     elements: &mut Vec<SceneElement<GlesRenderer>>,
@@ -663,16 +658,64 @@ fn write_png(buffer: DecorationBuffer, path: &Path) -> Result<(), String> {
 /// `state.rs`'s restart marker is: a capture that fails (an
 /// unwritable path, a renderer hiccup) must not re-fire forever.
 pub(crate) fn poll_screenshot_marker(comp: &mut Compositor) {
-    let Some(request) = comp.screenshot_poller.poll(Instant::now()) else { return };
-    let target = match request {
-        Ok(target) => target,
-        Err(error) => {
-            tracing::warn!(%error, "screenshot request failed");
+    let now = Instant::now();
+    if now < comp.screenshot_poller.next_deadline() { return; }
+    if let Some(writer) = &comp.screenshot_poller.writer {
+        match writer.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                comp.screenshot_poller.service_after = now + Duration::from_millis(20);
+                return;
+            }
+            _ => comp.screenshot_poller.writer = None,
+        }
+    }
+    if let Some(mut pending) = comp.screenshot_poller.download.take() {
+        if pending.image.pixels.expired(now) || pending.locked != comp.wm.backend().locked {
+            if let Some(path) = pending.target.take() {
+                tracing::warn!(path = %path.display(), "diagnostic screenshot canceled before GPU completion");
+            }
+        }
+        if !pending.image.pixels.ready() {
+            comp.screenshot_poller.service_after = now + if pending.target.is_some() { Duration::from_millis(4) } else { Duration::from_millis(100) };
+            comp.screenshot_poller.download = Some(pending);
             return;
         }
+        pending.image.pixels.release_scene();
+        if let Some(target) = pending.target {
+            match pending.image.copy_pixels(graphics_renderer(&mut comp.graphics)) {
+                Ok(buffer) => {
+                    let (done, receiver) = std::sync::mpsc::sync_channel(1);
+                    // One diagnostic image total, including its writer. PNG
+                    // compression and filesystem latency never block dispatch.
+                    match std::thread::Builder::new().name("chonk-diagnostic-png".into()).spawn(move || {
+                        match write_png(buffer, &target) {
+                            Ok(()) => tracing::info!(path = %target.display(), "screenshot written"),
+                            Err(error) => tracing::warn!(%error, path = %target.display(), "screenshot failed"),
+                        }
+                        let _ = done.send(());
+                    }) {
+                        Ok(_) => {
+                            comp.screenshot_poller.writer = Some(receiver);
+                            comp.screenshot_poller.service_after = now + Duration::from_millis(20);
+                            return;
+                        }
+                        Err(error) => tracing::warn!(%error, "could not start diagnostic PNG writer"),
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "diagnostic screenshot mapping failed"),
+            }
+        }
+    }
+    let Some(request) = comp.screenshot_poller.poll(now) else { return; };
+    let target = match request {
+        Ok(target) => target,
+        Err(error) => { tracing::warn!(%error, "screenshot request failed"); return; }
     };
-    match capture_output_png(comp, &target) {
-        Ok(()) => tracing::info!(path = %target.display(), "screenshot written"),
+    match capture_output(comp) {
+        Ok(image) => {
+            comp.screenshot_poller.download = Some(MarkerDownload { image, target: Some(target), locked: comp.wm.backend().locked });
+            comp.screenshot_poller.service_after = now + Duration::from_millis(4);
+        }
         Err(error) => tracing::warn!(%error, path = %target.display(), "screenshot failed"),
     }
 }
