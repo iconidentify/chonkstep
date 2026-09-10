@@ -1,0 +1,535 @@
+[
+  {
+    "phase": "before",
+    "monotonic": 234521.239855555,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": true,
+      "hidden": false,
+      "at": [
+        0,
+        0
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 1,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1064016
+  },
+  {
+    "phase": "focus-away-0",
+    "monotonic": 234522.253062685,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": false,
+      "hidden": true,
+      "at": [
+        2619,
+        76
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 1,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1018448
+  },
+  {
+    "phase": "focus-return-0",
+    "monotonic": 234523.267731555,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": true,
+      "hidden": false,
+      "at": [
+        0,
+        0
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 1,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1064016
+  },
+  {
+    "phase": "focus-away-1",
+    "monotonic": 234524.281990027,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": false,
+      "hidden": true,
+      "at": [
+        2619,
+        76
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 1,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1018448
+  },
+  {
+    "phase": "focus-return-1",
+    "monotonic": 234525.297994738,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": true,
+      "hidden": false,
+      "at": [
+        0,
+        0
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 1,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1064016
+  },
+  {
+    "phase": "focus-away-2",
+    "monotonic": 234526.310628455,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": false,
+      "hidden": true,
+      "at": [
+        2619,
+        76
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 1,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1018448
+  },
+  {
+    "phase": "focus-return-2",
+    "monotonic": 234527.332043163,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": true,
+      "hidden": false,
+      "at": [
+        0,
+        0
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 1,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1064016
+  },
+  {
+    "phase": "steam-overlay-open-0",
+    "monotonic": 234529.368376597,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": true,
+      "hidden": false,
+      "at": [
+        0,
+        0
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 1,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1064016
+  },
+  {
+    "phase": "steam-overlay-close-0",
+    "monotonic": 234531.403228913,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": true,
+      "hidden": false,
+      "at": [
+        0,
+        0
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 1,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1064016
+  },
+  {
+    "phase": "steam-overlay-open-1",
+    "monotonic": 234533.438513022,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": true,
+      "hidden": false,
+      "at": [
+        0,
+        0
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 1,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1064016
+  },
+  {
+    "phase": "steam-overlay-close-1",
+    "monotonic": 234535.473082763,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": true,
+      "hidden": false,
+      "at": [
+        0,
+        0
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 1,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1064016
+  },
+  {
+    "phase": "space-parked",
+    "monotonic": 234537.487866156,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": false,
+      "hidden": true,
+      "at": [
+        2619,
+        76
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 2,
+        "name": "2"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 1,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1018448
+  },
+  {
+    "phase": "space-returned",
+    "monotonic": 234539.510607092,
+    "game": {
+      "address": "0x1100000004",
+      "mapped": true,
+      "hidden": false,
+      "at": [
+        0,
+        0
+      ],
+      "size": [
+        3840,
+        2160
+      ],
+      "workspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "floating": true,
+      "pseudo": false,
+      "monitor": 0,
+      "class": "hl2_linux",
+      "title": "HALF-LIFE 2 - Vulkan",
+      "initialClass": "hl2_linux",
+      "initialTitle": "HALF-LIFE 2 - Vulkan",
+      "pid": 1064016,
+      "xwayland": true,
+      "pinned": false,
+      "fullscreen": 1,
+      "fullscreenClient": 0,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": ""
+    },
+    "focused": 1064016
+  }
+]

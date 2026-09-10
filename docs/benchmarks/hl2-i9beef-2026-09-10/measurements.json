@@ -1,0 +1,626 @@
+{
+  "initial-live": {
+    "elapsed": 20.000095428986242,
+    "game_pid": 1053010,
+    "cpu_percent": {
+      "137376": 4.049980675722491,
+      "1053010": 3.049985447149036
+    },
+    "native_delta": {
+      "passes": 340,
+      "skips_off": 0,
+      "skips_flip": 257,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 0,
+      "attempts": 83,
+      "queued": 83,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 83,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 83,
+      "late_presentations": 1
+    },
+    "compositor_flips_per_second": 4.149980198579836,
+    "stage_mean_us": {
+      "scene": 51.496674698795175,
+      "capture_chrome": 0.04718072289156626,
+      "prepare": 10.705084337349398,
+      "planes": 10.132469879518071,
+      "composition_submit": 8298.150554216867,
+      "cpu_fence_wait": null,
+      "kms_queue": 132.18192771084335,
+      "presentation_feedback": 10.609469879518072,
+      "render_attempt": 8521.524638554218,
+      "queue_to_vblank": 44871.319626506025
+    }
+  },
+  "no-vllm-live": {
+    "elapsed": 20.000063567014877,
+    "game_pid": 1053010,
+    "cpu_percent": {
+      "137376": 4.199986650969303,
+      "1053010": 3.399989193641818
+    },
+    "native_delta": {
+      "passes": 380,
+      "skips_off": 0,
+      "skips_flip": 321,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 0,
+      "attempts": 59,
+      "queued": 59,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 59,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 59,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 2.9499906238951064,
+    "stage_mean_us": {
+      "scene": 53.73342372881356,
+      "capture_chrome": 0.0489322033898305,
+      "prepare": 10.923576271186441,
+      "planes": 10.208949152542372,
+      "composition_submit": 12797.07274576271,
+      "cpu_fence_wait": null,
+      "kms_queue": 135.31945762711865,
+      "presentation_feedback": 13.609440677966102,
+      "render_attempt": 13029.927627118643,
+      "queue_to_vblank": 52259.12786440678
+    }
+  },
+  "opengl-fresh-vsync": {
+    "elapsed": 20.00008153601084,
+    "game_pid": 1060823,
+    "cpu_percent": {
+      "137376": 8.04996718188943,
+      "1060823": 98.2995992521405
+    },
+    "native_delta": {
+      "passes": 6948,
+      "skips_off": 0,
+      "skips_flip": 363,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 3705,
+      "attempts": 2880,
+      "queued": 2880,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 2880,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 2880,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 143.99941294311526,
+    "stage_mean_us": {
+      "scene": 33.93819270833333,
+      "capture_chrome": 0.08180972222222221,
+      "prepare": 7.4166211805555555,
+      "planes": 6.397172222222222,
+      "composition_submit": 120.52612152777778,
+      "cpu_fence_wait": null,
+      "kms_queue": 109.92967083333333,
+      "presentation_feedback": 7.202259027777778,
+      "render_attempt": 291.2131142361111,
+      "queue_to_vblank": 3770.8426961805553
+    }
+  },
+  "opengl-no-vsync": {
+    "elapsed": 20.000099156983197,
+    "game_pid": 1057225,
+    "cpu_percent": {
+      "137376": 11.099944968147167,
+      "1057225": 106.79947050433489
+    },
+    "native_delta": {
+      "passes": 22956,
+      "skips_off": 0,
+      "skips_flip": 8818,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 11258,
+      "attempts": 2880,
+      "queued": 2880,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 2880,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 2880,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 143.99928607326052,
+    "stage_mean_us": {
+      "scene": 35.150353125,
+      "capture_chrome": 0.06693958333333333,
+      "prepare": 7.9973246527777775,
+      "planes": 7.108188194444445,
+      "composition_submit": 126.89733125000001,
+      "cpu_fence_wait": null,
+      "kms_queue": 113.95311805555556,
+      "presentation_feedback": 7.026110416666667,
+      "render_attempt": 304.31525937500004,
+      "queue_to_vblank": 3216.310812847222
+    }
+  },
+  "opengl-original-map-vsync": {
+    "elapsed": 20.00009710001177,
+    "game_pid": 1057225,
+    "cpu_percent": {
+      "137376": 8.099960674686157,
+      "1057225": 37.39981842385954
+    },
+    "native_delta": {
+      "passes": 7042,
+      "skips_off": 0,
+      "skips_flip": 432,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 3730,
+      "attempts": 2880,
+      "queued": 2880,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 2880,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 2880,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 143.99930088330944,
+    "stage_mean_us": {
+      "scene": 33.90232569444444,
+      "capture_chrome": 0.053001041666666665,
+      "prepare": 7.5022569444444445,
+      "planes": 6.522299652777778,
+      "composition_submit": 119.74420972222222,
+      "cpu_fence_wait": null,
+      "kms_queue": 109.19543958333334,
+      "presentation_feedback": 6.8937913194444445,
+      "render_attempt": 289.7227451388889,
+      "queue_to_vblank": 4319.1091878472225
+    }
+  },
+  "opengl-vsync-reenabled": {
+    "elapsed": 20.000069906993303,
+    "game_pid": 1057225,
+    "cpu_percent": {
+      "137376": 7.7999727363679074,
+      "1057225": 29.599896538011546
+    },
+    "native_delta": {
+      "passes": 7081,
+      "skips_off": 0,
+      "skips_flip": 408,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 3793,
+      "attempts": 2880,
+      "queued": 2880,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 2879,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 2880,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 143.94949684617438,
+    "stage_mean_us": {
+      "scene": 31.883070833333335,
+      "capture_chrome": 0.062047222222222226,
+      "prepare": 7.10100625,
+      "planes": 6.2589725694444445,
+      "composition_submit": 115.26641909722223,
+      "cpu_fence_wait": null,
+      "kms_queue": 105.09317083333333,
+      "presentation_feedback": 6.573614930555555,
+      "render_attempt": 277.82152291666665,
+      "queue_to_vblank": 4182.276668982286
+    }
+  },
+  "opengl-with-model-restored": {
+    "elapsed": 20.000111793982796,
+    "game_pid": 1062780,
+    "cpu_percent": {
+      "137376": 4.549974567011077,
+      "1062780": 171.6990402540224
+    },
+    "native_delta": {
+      "passes": 179,
+      "skips_off": 0,
+      "skips_flip": 95,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 0,
+      "attempts": 84,
+      "queued": 84,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 84,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 84,
+      "late_presentations": 1
+    },
+    "compositor_flips_per_second": 4.19997652339484,
+    "stage_mean_us": {
+      "scene": 51.69014285714285,
+      "capture_chrome": 0.04841666666666666,
+      "prepare": 10.684476190476191,
+      "planes": 10.22972619047619,
+      "composition_submit": 19298.775452380953,
+      "cpu_fence_wait": null,
+      "kms_queue": 136.86707142857142,
+      "presentation_feedback": 11.170321428571429,
+      "render_attempt": 19528.110904761903,
+      "queue_to_vblank": 43584.07745238095
+    }
+  },
+  "primary-any-live": {
+    "elapsed": 20.000099564000266,
+    "game_pid": 1053010,
+    "cpu_percent": {
+      "137376": 0.6499967641860999,
+      "1053010": 6.6999666462259535
+    },
+    "native_delta": {
+      "passes": 101,
+      "skips_off": 0,
+      "skips_flip": 19,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 0,
+      "attempts": 82,
+      "queued": 82,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 83,
+      "primary": 82,
+      "overlay": 0,
+      "composited": 0,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 4.149979340572791,
+    "stage_mean_us": {
+      "scene": 50.75878048780488,
+      "capture_chrome": 0.047609756097560976,
+      "prepare": 10.598182926829267,
+      "planes": 27.21198780487805,
+      "composition_submit": 246.20424390243903,
+      "cpu_fence_wait": null,
+      "kms_queue": 138.31871951219512,
+      "presentation_feedback": 9.353158536585367,
+      "render_attempt": 490.20424390243903,
+      "queue_to_vblank": 4422.85965060241
+    }
+  },
+  "vulkan-after-recovery": {
+    "elapsed": 20.000115931004984,
+    "game_pid": 1064016,
+    "cpu_percent": {
+      "137376": 10.849937107794354,
+      "1064016": 133.7992244260723
+    },
+    "native_delta": {
+      "passes": 17927,
+      "skips_off": 0,
+      "skips_flip": 15235,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 233,
+      "attempts": 2459,
+      "queued": 2459,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 2459,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 2459,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 122.94928731827795,
+    "stage_mean_us": {
+      "scene": 37.40423342822285,
+      "capture_chrome": 0.06335908906059375,
+      "prepare": 8.234696217974786,
+      "planes": 7.057603090687271,
+      "composition_submit": 179.07416998779993,
+      "cpu_fence_wait": null,
+      "kms_queue": 127.37806100040667,
+      "presentation_feedback": 7.84415494103294,
+      "render_attempt": 374.27369133794224,
+      "queue_to_vblank": 7633.586749898333
+    }
+  },
+  "vulkan-gameplay": {
+    "elapsed": 60.00007026499952,
+    "game_pid": 1064016,
+    "cpu_percent": {
+      "137376": 11.933319358422017,
+      "1064016": 143.86649818700954
+    },
+    "native_delta": {
+      "passes": 69720,
+      "skips_off": 0,
+      "skips_flip": 38050,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 23031,
+      "attempts": 8639,
+      "queued": 8639,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 8639,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 8639,
+      "late_presentations": 1
+    },
+    "compositor_flips_per_second": 143.98316471705,
+    "stage_mean_us": {
+      "scene": 37.37381849751129,
+      "capture_chrome": 0.04946533163560597,
+      "prepare": 7.82992429679361,
+      "planes": 6.375329783539762,
+      "composition_submit": 148.69731890265075,
+      "cpu_fence_wait": null,
+      "kms_queue": 114.72867843500406,
+      "presentation_feedback": 7.8460098391017485,
+      "render_attempt": 329.82732457460355,
+      "queue_to_vblank": 4642.664778678088
+    }
+  },
+  "vulkan-original-save": {
+    "elapsed": 30.000070601003245,
+    "game_pid": 1064016,
+    "cpu_percent": {
+      "137376": 12.133304779216997,
+      "1064016": 135.96634668798387
+    },
+    "native_delta": {
+      "passes": 34350,
+      "skips_off": 0,
+      "skips_flip": 12942,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 17091,
+      "attempts": 4317,
+      "queued": 4317,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 4317,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 4317,
+      "late_presentations": 1
+    },
+    "compositor_flips_per_second": 143.89966135131806,
+    "stage_mean_us": {
+      "scene": 39.819830669446375,
+      "capture_chrome": 0.04334700023164235,
+      "prepare": 8.659047949965254,
+      "planes": 7.338238591614547,
+      "composition_submit": 151.4983808200139,
+      "cpu_fence_wait": null,
+      "kms_queue": 122.9179115126245,
+      "presentation_feedback": 8.0859298123697,
+      "render_attempt": 345.5253574241371,
+      "queue_to_vblank": 4290.287925179522
+    }
+  },
+  "vulkan-recovery-primary-any": {
+    "elapsed": 20.000070873007644,
+    "game_pid": 1064016,
+    "cpu_percent": {
+      "137376": 8.749968993169032,
+      "1064016": 110.49960842802038
+    },
+    "native_delta": {
+      "passes": 17609,
+      "skips_off": 0,
+      "skips_flip": 5766,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 8972,
+      "attempts": 2871,
+      "queued": 2868,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 3,
+      "flips": 2867,
+      "primary": 2868,
+      "overlay": 0,
+      "composited": 0,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 143.3494920195178,
+    "stage_mean_us": {
+      "scene": 36.9332943225357,
+      "capture_chrome": 0.04845628700801115,
+      "prepare": 7.875494601184257,
+      "planes": 13.066731104144898,
+      "composition_submit": 4.123588645071403,
+      "cpu_fence_wait": null,
+      "kms_queue": 117.67609892023685,
+      "presentation_feedback": 7.6385435843793585,
+      "render_attempt": 193.75295855102752,
+      "queue_to_vblank": 3636.1181594000695
+    }
+  },
+  "vulkan-unprofiled-after-recovery": {
+    "elapsed": 30.000071746995673,
+    "game_pid": 1072684,
+    "cpu_percent": {
+      "137376": 8.199980389201416,
+      "1072684": 38.499907924909095
+    },
+    "native_delta": {
+      "passes": 10252,
+      "skips_off": 0,
+      "skips_flip": 759,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 5174,
+      "attempts": 4319,
+      "queued": 4319,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 4319,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 4319,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 143.96632236162975,
+    "stage_mean_us": {
+      "scene": 31.709551053484603,
+      "capture_chrome": 0.04081291965732809,
+      "prepare": 6.665298911785135,
+      "planes": 5.533829358647835,
+      "composition_submit": 128.6096017596666,
+      "cpu_fence_wait": null,
+      "kms_queue": 107.54293378096781,
+      "presentation_feedback": 7.210746932160222,
+      "render_attempt": 293.2122449641121,
+      "queue_to_vblank": 5025.486952998379
+    }
+  },
+  "vulkan-unprofiled-original-settings": {
+    "elapsed": 30.000094105984317,
+    "game_pid": 1072684,
+    "cpu_percent": {
+      "137376": 8.266640735321221,
+      "1072684": 39.166543806461426
+    },
+    "native_delta": {
+      "passes": 10272,
+      "skips_off": 0,
+      "skips_flip": 578,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 5374,
+      "attempts": 4320,
+      "queued": 4320,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 4320,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 4320,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 143.99954829269223,
+    "stage_mean_us": {
+      "scene": 33.064045370370366,
+      "capture_chrome": 0.03859328703703704,
+      "prepare": 7.0065532407407405,
+      "planes": 5.914386805555556,
+      "composition_submit": 128.74258935185185,
+      "cpu_fence_wait": null,
+      "kms_queue": 108.33777037037038,
+      "presentation_feedback": 7.438371296296296,
+      "render_attempt": 296.5981650462963,
+      "queue_to_vblank": 4029.1571951388887
+    }
+  },
+  "vulkan-with-model": {
+    "elapsed": 30.000069094996434,
+    "game_pid": 1064016,
+    "cpu_percent": {
+      "137376": 11.333307230839242,
+      "1064016": 139.56634522212914
+    },
+    "native_delta": {
+      "passes": 24246,
+      "skips_off": 0,
+      "skips_flip": 7129,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 12797,
+      "attempts": 4320,
+      "queued": 4320,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 4320,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 4320,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 143.99966834478099,
+    "stage_mean_us": {
+      "scene": 46.27848935185185,
+      "capture_chrome": 0.04572037037037037,
+      "prepare": 10.444168287037037,
+      "planes": 9.402430324074073,
+      "composition_submit": 168.85233680555555,
+      "cpu_fence_wait": null,
+      "kms_queue": 147.61253333333332,
+      "presentation_feedback": 9.028572222222223,
+      "render_attempt": 399.52567407407406,
+      "queue_to_vblank": 4994.009755092593
+    }
+  },
+  "vulkan-normal-steam-gameplay": {
+    "elapsed": 30.00009336898802,
+    "game_pid": 1076166,
+    "cpu_percent": {
+      "137376": 8.733306152668083,
+      "1076166": 49.26651333451689
+    },
+    "native_delta": {
+      "passes": 10327,
+      "skips_off": 0,
+      "skips_flip": 630,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 5391,
+      "attempts": 4306,
+      "queued": 4306,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 4306,
+      "primary": 0,
+      "overlay": 0,
+      "composited": 4306,
+      "late_presentations": 0
+    },
+    "compositor_flips_per_second": 143.53288661598765,
+    "stage_mean_us": {
+      "scene": 35.808258708778446,
+      "capture_chrome": 0.04045680445889457,
+      "prepare": 7.330312354853692,
+      "planes": 6.245367858801672,
+      "composition_submit": 140.10721713887597,
+      "cpu_fence_wait": null,
+      "kms_queue": 115.67492127264282,
+      "presentation_feedback": 7.761738968880632,
+      "render_attempt": 319.53238132837896,
+      "queue_to_vblank": 4387.920631444496
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "since": "2026-09-10 12:40:00 PDT",
+  "until": "2026-09-10T14:12:39-07:00",
+  "patterns": "NVRM: Xid|oom-kill|Out of memory|GPU.*reset",
+  "matches": [],
+  "journalctl_exit_code": 0
+}

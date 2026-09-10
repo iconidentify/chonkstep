@@ -1,0 +1,63 @@
+[2026-09-10 14:00:10] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:00:10] info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
+[2026-09-10 14:00:10] info:    Present mode: VK_PRESENT_MODE_IMMEDIATE_KHR
+[2026-09-10 14:00:10] info:    Buffer size:  3840x2160
+[2026-09-10 14:00:10] info:    Image count:  3
+[2026-09-10 14:00:10] info:    Exclusive FS: 0
+[2026-09-10 14:00:10] Host_WriteConfiguration: Wrote //ROOT_MOD/cfg/config.cfg
+[2026-09-10 14:01:12] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:01:12] info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
+[2026-09-10 14:01:12] info:    Present mode: VK_PRESENT_MODE_IMMEDIATE_KHR
+[2026-09-10 14:01:12] info:    Buffer size:  3840x2160
+[2026-09-10 14:01:12] info:    Image count:  3
+[2026-09-10 14:01:12] info:    Exclusive FS: 0
+[2026-09-10 14:01:12] warn:  D3D9Cursor::ShowCursor: Not supported on current platform.
+[2026-09-10 14:01:13] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:01:13] info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
+[2026-09-10 14:01:13] info:    Present mode: VK_PRESENT_MODE_FIFO_KHR
+[2026-09-10 14:01:13] info:    Buffer size:  3840x2160
+[2026-09-10 14:01:13] info:    Image count:  4
+[2026-09-10 14:01:13] info:    Exclusive FS: 0
+[2026-09-10 14:01:13] Fossilize WARN: Graphics pipeline handle 0xffffffffd398df08 is not registered.
+[2026-09-10 14:01:16] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:01:16] info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
+[2026-09-10 14:01:16] info:    Present mode: VK_PRESENT_MODE_FIFO_KHR
+[2026-09-10 14:01:16] info:    Buffer size:  3840x2160
+[2026-09-10 14:01:16] info:    Image count:  4
+[2026-09-10 14:01:16] info:    Exclusive FS: 0
+[2026-09-10 14:02:35] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:02:35] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:02:35] info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
+[2026-09-10 14:02:35] info:    Present mode: VK_PRESENT_MODE_FIFO_KHR
+[2026-09-10 14:02:35] info:    Buffer size:  3840x2160
+[2026-09-10 14:02:35] info:    Image count:  4
+[2026-09-10 14:02:35] info:    Exclusive FS: 0
+[2026-09-10 14:02:38] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:02:38] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:02:38] info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
+[2026-09-10 14:02:38] info:    Present mode: VK_PRESENT_MODE_FIFO_KHR
+[2026-09-10 14:02:38] info:    Buffer size:  3840x2160
+[2026-09-10 14:02:38] info:    Image count:  4
+[2026-09-10 14:02:38] info:    Exclusive FS: 0
+[2026-09-10 14:02:48] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:02:48] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:02:48] info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
+[2026-09-10 14:02:48] info:    Present mode: VK_PRESENT_MODE_FIFO_KHR
+[2026-09-10 14:02:48] info:    Buffer size:  3840x2160
+[2026-09-10 14:02:48] info:    Image count:  4
+[2026-09-10 14:02:48] info:    Exclusive FS: 0
+[2026-09-10 14:03:48] Host_WriteConfiguration: Wrote //ROOT_MOD/cfg/config.cfg
+[2026-09-10 14:06:37] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:06:37] info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
+[2026-09-10 14:06:37] info:    Present mode: VK_PRESENT_MODE_IMMEDIATE_KHR
+[2026-09-10 14:06:37] info:    Buffer size:  3840x2160
+[2026-09-10 14:06:37] info:    Image count:  3
+[2026-09-10 14:06:37] info:    Exclusive FS: 0
+[2026-09-10 14:06:37] warn:  D3D9Cursor::ShowCursor: Not supported on current platform.
+[2026-09-10 14:06:38] info:  Presenter: Actual swap chain properties:
+[2026-09-10 14:06:38] info:    Format:       VK_FORMAT_B8G8R8A8_UNORM
+[2026-09-10 14:06:38] info:    Present mode: VK_PRESENT_MODE_FIFO_KHR
+[2026-09-10 14:06:38] info:    Buffer size:  3840x2160
+[2026-09-10 14:06:38] info:    Image count:  4
+[2026-09-10 14:06:38] info:    Exclusive FS: 0
+[2026-09-10 14:06:38] Fossilize WARN: Graphics pipeline handle 0xffffffffd3997d38 is not registered.

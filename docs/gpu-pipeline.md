@@ -123,8 +123,20 @@ Apple hardware qualification. Both RTX 3090 devices were accessible during that
 experiment, but every physical connector was disconnected. Subsequent
 [i9beef native testing](benchmarks/i9beef-native-2026-09-10/README.md) uses the
 attached 4K/144 Hz panel to verify actual plane assignments, hardware presentation
-cadence and display-state recovery. Physical multi-monitor and Apple GPU
-qualification still require those devices.
+cadence and display-state recovery. The
+[cross-GPU campaign](benchmarks/cross-gpu-2026-09-10/README.md) adds AMD and Apple
+hardware results and an M1 regression with both scanout experiments enabled.
+Physical multi-monitor qualification remains separate.
+
+[Half-Life 2 testing](benchmarks/hl2-i9beef-2026-09-10/README.md) subsequently
+reproduced approximately 4 game FPS in native OpenGL when a model server occupied
+most of the RTX 3090's memory. Using the game's built-in Vulkan renderer restored
+approximately 144 Hz output cadence with the original graphics settings and
+VSync. Direct scanout did not cure the OpenGL slowdown, and a Vulkan primary-any
+transition produced KMS queue errors. The final game configuration uses shipping
+scanout policy. Synthetic throughput and pixel tests do not qualify real games
+under competing GPU resource use; the report retains the unsuccessful cases and
+the limits of the crash diagnosis.
 
 References: [Khronos timer-query specification](https://registry.khronos.org/OpenGL/extensions/EXT/EXT_disjoint_timer_query.txt),
 [Smithay DRM compositor](https://smithay.github.io/smithay/smithay/backend/drm/compositor/index.html).

@@ -1,0 +1,7 @@
+{
+  "pid": 1072684,
+  "cmdline": "/home/chrisk/.local/share/Steam/steamapps/common/Half-Life 2/hl2_linux -steam -game hl2_complete -novid -console -condebug +con_enable 1 +cl_showfps 1 +load chonk_gaming_test -vulkan ",
+  "mangohud_loaded": false,
+  "vulkan_loaded": true,
+  "dxvk_loaded": true
+}

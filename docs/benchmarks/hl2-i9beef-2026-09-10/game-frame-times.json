@@ -1,0 +1,20 @@
+{
+  "hl2_linux_2026-09-10_13-44-55.csv": {
+    "frames": 232,
+    "warmup_excluded_seconds": 20,
+    "fps_from_sum_frame_times": 3.9699758189628462,
+    "median_ms": 249.55149999999998,
+    "p99_ms": 371.769,
+    "summed_frame_seconds": 58.4386431,
+    "last_elapsed_seconds": 78.318360379
+  },
+  "hl2_linux_2026-09-10_13-46-31.csv": {
+    "frames": 15245,
+    "warmup_excluded_seconds": 20,
+    "fps_from_sum_frame_times": 217.80922327841557,
+    "median_ms": 4.51048,
+    "p99_ms": 7.05625,
+    "summed_frame_seconds": 69.992444629,
+    "last_elapsed_seconds": 90.002616043
+  }
+}

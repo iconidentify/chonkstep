@@ -1,0 +1,42 @@
+{
+  "pid": 1076166,
+  "cmdline": "/home/chrisk/.local/share/Steam/steamapps/common/Half-Life 2/hl2_linux -steam -game hl2_complete -vulkan ",
+  "mangohud_loaded": false,
+  "dxvk_loaded": true,
+  "window": {
+    "address": "0x1900000004",
+    "at": [
+      0,
+      0
+    ],
+    "class": "hl2_linux",
+    "floating": true,
+    "focusHistoryID": 0,
+    "fullscreen": 1,
+    "fullscreenClient": 0,
+    "grouped": [],
+    "hidden": false,
+    "inhibitingIdle": false,
+    "initialClass": "hl2_linux",
+    "initialTitle": "HALF-LIFE 2 - Vulkan",
+    "mapped": true,
+    "monitor": 0,
+    "pid": 1076166,
+    "pinned": false,
+    "pseudo": false,
+    "size": [
+      3840,
+      2160
+    ],
+    "swallowing": "0x0",
+    "tags": [],
+    "title": "HALF-LIFE 2 - Vulkan",
+    "workspace": {
+      "id": 1,
+      "name": "1"
+    },
+    "xdgDescription": "",
+    "xdgTag": "",
+    "xwayland": true
+  }
+}
