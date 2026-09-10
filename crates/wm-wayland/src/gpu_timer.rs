@@ -201,6 +201,12 @@ impl GpuTimer {
             // renderer's context; no timer queries are nested in our pipeline.
             unsafe {
                 gl.EndQueryEXT(ffi::TIME_ELAPSED_EXT);
+                // DrmCompositor has already flushed its rendered frame. An
+                // end marker queued afterward can otherwise remain in the
+                // driver until the next frame, making a short GPU interval
+                // appear to consume an entire refresh. Submit the marker now;
+                // Flush does not wait for GPU completion or query results.
+                gl.Flush();
             }
         });
         // SAFETY: these are the same live EGL handles saved above, on the

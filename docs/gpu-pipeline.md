@@ -11,14 +11,19 @@ reason. The last 32 attempts are retained; cumulative counters cover the session
 Request `{"request":"debug","topic":"scene"}` on
 `$CHONKSTEP_CONTROL_SOCKET` to read the snapshot. It includes:
 
-- `native_pipeline`: per-output totals and skip reasons.
+- `native_pipeline`: per-output totals, skip reasons and `late_presentations`
+  (queued frames whose hardware timestamp missed their intended refresh).
 - `native_stage`: CPU durations for scene assembly, capture chrome, preparation,
   plane assignment/validation, composition submission, CPU fence waiting, KMS
   queueing and presentation feedback. `queue_to_vblank` is wall-clock latency.
 - `native_frame`: the bounded recent history, including reason counters.
 - `native_reason_order` / `native_reason_totals`: the reason names and totals.
-- `surface_buffer`: each window's actual SHM/DMA-BUF/EGL buffer type, scale and
-  pixel dimensions, queried only when requesting diagnostics.
+- `surface_buffer`: each window's actual SHM/DMA-BUF/EGL buffer type, scale,
+  pixel dimensions, import-node hint and format/modifier, queried only when
+  requesting diagnostics.
+- `multi_gpu_copies`: live cumulative DMA/CPU transfer counts and CPU-copied
+  pixels. Device identity is cached at startup; these counters are read when
+  diagnostics are requested, so the initial zero does not become permanent.
 
 CPU intervals are not GPU execution measurements. To request asynchronous GPU
 queries, start the session with `CHONKSTEP_GPU_TIMINGS=1`. Supported contexts
@@ -26,9 +31,33 @@ report `gpu_timer status=EXT_disjoint_timer_query` and `gpu_stage` with
 `stage=composition_gpu`, sample counts and nanoseconds. This brackets rendering
 after scene imports. Results are read only when available, from a 16-query ring;
 a full ring drops a measurement, and GPU clock-disjoint events discard affected
-samples. Profiling adds no compositor `glFinish` or result waits. Queries can
+samples. The end marker is flushed immediately so it cannot sit in the driver
+until the next refresh after the rendered frame has already been submitted.
+Profiling adds no compositor `glFinish` or result waits. Queries can
 perturb a workload, so compare equally instrumented sessions and record that
 fact. An unsupported context reports `unavailable`, never a fabricated zero.
+On the native backend the GPU timestamp span surrounds `DrmCompositor` and can
+include CPU submission gaps during plane preparation. It is elapsed GPU-clock
+time across that span, not a hardware busy-time or shader-only measurement.
+
+Successful DMA-BUF imports record the renderer's node when the buffer has no
+node hint. Without this, Smithay rejects client buffers before attempting plane
+export, even when scanout is enabled. This records a demonstrated import path;
+it does not assert allocation origin or bypass GBM export and atomic validation.
+
+The compositor's cached cursor sprites use `Argb8888`, matching Smithay's cursor
+plane buffers. Their rasterizer produces RGBA bytes, so the import converts them
+to BGRA once, preserving colors and premultiplied alpha. The previous `Abgr8888`
+sprites rendered correctly through GLES but could not use the cursor copy path.
+
+Native pacing learns from both CPU submission and actual KMS completion. A
+queued frame retains its intended refresh until its page flip arrives. When
+the hardware timestamp misses that target by more than half a refresh, the
+scheduler adds 250 microseconds of headroom, bounded to half a refresh and
+the existing maximum margin. It retains the GPU-derived margin for 30 seconds
+before gradual decay. GPU timer queries are not required. This covers GPU work
+that continues after an on-time CPU submission; idle frames and failed queue
+attempts cannot create fictitious misses.
 
 The scanout experiments remain opt-in until physical outputs have been qualified:
 
@@ -90,10 +119,12 @@ pixel checks and a non-flat-content check. The default solid workload remains
 available for reproducing the first checkpoint.
 
 This is a rendering experiment, not a physical KMS scanout, panel latency, or
-Apple hardware qualification. On the development machine both RTX 3090 devices
-are accessible but every physical connector is disconnected. An attached output
-is required to measure real overlay/primary scanout acceptance, page-flip
-latency, hotplug and multi-monitor cadence end to end.
+Apple hardware qualification. Both RTX 3090 devices were accessible during that
+experiment, but every physical connector was disconnected. Subsequent
+[i9beef native testing](benchmarks/i9beef-native-2026-09-10/README.md) uses the
+attached 4K/144 Hz panel to verify actual plane assignments, hardware presentation
+cadence and display-state recovery. Physical multi-monitor and Apple GPU
+qualification still require those devices.
 
 References: [Khronos timer-query specification](https://registry.khronos.org/OpenGL/extensions/EXT/EXT_disjoint_timer_query.txt),
 [Smithay DRM compositor](https://smithay.github.io/smithay/smithay/backend/drm/compositor/index.html).

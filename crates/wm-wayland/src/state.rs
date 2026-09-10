@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+use smithay::backend::renderer::element::memory::{MemoryBuffer, MemoryRenderBuffer};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
 use smithay::desktop::{PopupKind, PopupManager};
@@ -4492,19 +4492,28 @@ impl CursorSet {
     }
 }
 
-/// Imports one cursor's pixels. RGBA byte order is the little-endian
-/// DRM fourcc Abgr8888, NOT Argb8888 — mixing those up swaps red and
-/// blue. Fully opaque or fully transparent pixels only, so these bytes
-/// are also already valid premultiplied alpha, which is what the GLES
-/// renderer's blending expects (and what tiny-skia's `data()` provides
-/// for the decoration buffers `backend_impl` imports the same way).
+/// Converts the rasterizer's premultiplied RGBA bytes to the BGRA byte order
+/// of little-endian Argb8888. Smithay's hardware cursor copy path requires
+/// this format. Keeping Abgr8888 forced the compositor's own pointer through
+/// GLES and retried an unusable cursor-plane copy on every animated frame.
+/// Convert once when building the cached sprite, preserving alpha and colors
+/// for both hardware scanout and the ordinary composition fallback.
+fn cursor_memory(pixels: &[u8], width: i32, height: i32) -> MemoryBuffer {
+    let mut memory = MemoryBuffer::from_slice(pixels, Fourcc::Argb8888, (width, height));
+    for pixel in memory.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    memory
+}
+
+/// Imports one cursor's converted pixels.
 ///
 /// Buffer scale 1 for the reason `backend_impl::import_buffer`
 /// documents for decoration buffers: this session's ledger is in
 /// physical pixels, so a buffer already rasterized at the UI scale is
 /// 1 buffer pixel per unit of that space.
 fn import_cursor(pixels: &[u8], width: i32, height: i32) -> MemoryRenderBuffer {
-    MemoryRenderBuffer::from_slice(pixels, Fourcc::Abgr8888, (width, height), 1, Transform::Normal, None)
+    MemoryRenderBuffer::from_memory(cursor_memory(pixels, width, height), 1, Transform::Normal, None)
 }
 
 fn build_default_cursor(scale: f32) -> CursorSprite {
@@ -4786,6 +4795,15 @@ mod tests {
     /// Alpha of the pixel at (x, y) in a `default_cursor_pixels` buffer.
     fn alpha_at(pixels: &[u8], width: i32, x: i32, y: i32) -> u8 {
         pixels[((y * width + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn cursor_storage_matches_the_hardware_format_without_swapping_visible_colors() {
+        let rgba = [0x20, 0x40, 0x60, 0x80, 0x90, 0x30, 0x10, 0xff];
+        let memory = cursor_memory(&rgba, 2, 1);
+        assert_eq!(memory.format(), Fourcc::Argb8888);
+        assert_eq!(&*memory, &[0x60, 0x40, 0x20, 0x80, 0x10, 0x30, 0x90, 0xff]);
+        assert_eq!(memory.stride(), 8);
     }
 
     #[test]

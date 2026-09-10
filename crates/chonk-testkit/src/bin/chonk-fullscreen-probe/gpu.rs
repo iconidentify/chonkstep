@@ -4,7 +4,7 @@
 
 #[cfg(feature = "gpu-probe")]
 mod egl {
-    use std::{ffi::{c_char, c_int, c_void, CStr}, ptr};
+    use std::{cell::Cell, ffi::{c_char, c_int, c_void, CStr}, ptr};
     use wayland_client::{protocol::wl_surface::WlSurface, Connection, Proxy};
     use wayland_egl::WlEglSurface;
 
@@ -29,6 +29,9 @@ mod egl {
         fn glViewport(x: c_int, y: c_int, width: c_int, height: c_int);
         fn glClearColor(red: f32, green: f32, blue: f32, alpha: f32);
         fn glClear(mask: u32);
+        fn glEnable(capability: u32);
+        fn glDisable(capability: u32);
+        fn glScissor(x: c_int, y: c_int, width: c_int, height: c_int);
         fn glFinish();
         fn glGetString(name: u32) -> *const u8;
         fn glCreateShader(kind: u32) -> u32;
@@ -62,6 +65,7 @@ mod egl {
         target: Handle,
         window: WlEglSurface,
         pattern: Option<Pattern>,
+        frame_marker: Option<Cell<u32>>,
         // Keep the native objects alive until after Drop destroys EGL.
         _surface: WlSurface,
         _connection: Connection,
@@ -100,7 +104,9 @@ mod egl {
                     Ok(other) => panic!("unknown GPU fixture pattern {other}"),
                 };
                 super::super::say(&format!("GPU client pattern={}", if pattern.is_some() { "texture" } else { "solid" }));
-                Self { display, context, target, window, pattern, _surface: surface.clone(), _connection: connection.clone() }
+                let frame_marker = (std::env::var("CHONKSTEP_PROBE_GPU_FRAME_MARKER").as_deref() == Ok("1"))
+                    .then(|| Cell::new(0));
+                Self { display, context, target, window, pattern, frame_marker, _surface: surface.clone(), _connection: connection.clone() }
             }
         }
 
@@ -118,6 +124,21 @@ mod egl {
                 } else {
                     glClearColor(32.0 / 255.0, 64.0 / 255.0, 128.0 / 255.0, 1.0);
                     glClear(0x4000);
+                }
+                if let Some(marker) = &self.frame_marker {
+                    // Opt-in correctness witness: constant textures alone
+                    // cannot reveal stale buffers after a display transition.
+                    // Encode a 24-bit frame number in a uniform interior patch,
+                    // away from the benchmark's calibration/texture samples.
+                    let number = (marker.get() + 1) & 0x00ff_ffff;
+                    marker.set(number);
+                    glEnable(0x0C11); // GL_SCISSOR_TEST
+                    glScissor(width / 5, height * 2 / 5, width / 10, height / 5);
+                    glClearColor(((number >> 16) & 255) as f32 / 255.0,
+                        ((number >> 8) & 255) as f32 / 255.0, (number & 255) as f32 / 255.0, 1.0);
+                    glClear(0x4000);
+                    glDisable(0x0C11);
+                    super::super::say(&format!("GPU frame_marker={number}"));
                 }
                 glFinish();
                 assert_eq!(eglSwapBuffers(self.display, self.target), 1, "EGL buffer submission");

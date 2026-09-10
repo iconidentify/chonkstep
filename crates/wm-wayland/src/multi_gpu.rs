@@ -150,10 +150,9 @@ impl Stack {
         match self {
             Self::Single(_) => "multi_gpu=disabled".into(),
             Self::Multi(multi) => {
-                let copies = smithay::backend::renderer::multigpu::copy_stats();
                 format!(
-                    "multi_gpu=experimental render={} target={} dma_copies={} cpu_copies={} cpu_pixels={} verified_scanout_formats={}",
-                    multi.render, multi.target, copies.dma_frames, copies.cpu_frames, copies.cpu_pixels, multi.scanout_imports.indexset().len()
+                    "multi_gpu=experimental render={} target={} verified_scanout_formats={}",
+                    multi.render, multi.target, multi.scanout_imports.indexset().len()
                 )
             }
         }

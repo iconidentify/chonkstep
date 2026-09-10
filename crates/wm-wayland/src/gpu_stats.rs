@@ -115,6 +115,7 @@ pub(crate) struct Stats {
     pub render_failed: u64,
     pub queue_failed: u64,
     pub flips: u64,
+    pub late_presentations: u64,
     pub primary: u64,
     pub overlay: u64,
     pub composited: u64,
@@ -190,10 +191,10 @@ impl OutputStats {
 
     pub fn describe(&self, report: &mut String) {
         let stats = self.stats.borrow();
-        let _ = writeln!(report, "native_pipeline output={:?} passes={} skips_off={} skips_flip={} skips_clean={} skips_inactive={} skips_deadline={} attempts={} queued={} empty={} render_failed={} queue_failed={} flips={} primary={} overlay={} composited={}",
+        let _ = writeln!(report, "native_pipeline output={:?} passes={} skips_off={} skips_flip={} skips_clean={} skips_inactive={} skips_deadline={} attempts={} queued={} empty={} render_failed={} queue_failed={} flips={} primary={} overlay={} composited={} late_presentations={}",
             self.name, stats.passes, stats.skips[0], stats.skips[1], stats.skips[2], stats.skips[3], stats.skips[4],
             stats.attempts, stats.queued, stats.empty, stats.render_failed, stats.queue_failed, stats.flips,
-            stats.primary, stats.overlay, stats.composited);
+            stats.primary, stats.overlay, stats.composited, stats.late_presentations);
         for (name, timing) in STAGES.iter().zip(&stats.stages) {
             let _ = writeln!(
                 report,

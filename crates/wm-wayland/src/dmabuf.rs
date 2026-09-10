@@ -367,6 +367,16 @@ impl DmabufHandler for Compositor {
 
         match graphics_renderer(&mut self.graphics).import_dmabuf(&dmabuf, None) {
             Ok(_texture) => {
+                // linux-dmabuf carries no allocation-device identity. Smithay
+                // leaves these buffers untagged, and the GBM framebuffer
+                // exporter rejects every untagged client before trying KMS.
+                // Record the renderer which just proved it can import this
+                // buffer, matching MultiRenderer's successful-import policy.
+                // This is an import hint, not proof of allocation origin or
+                // scanout support: GBM export and the atomic test still decide.
+                if dmabuf.node().is_none() {
+                    dmabuf.set_node(self.dmabuf.render_node);
+                }
                 let _ = notifier.successful::<Compositor>();
             }
             Err(error) => {

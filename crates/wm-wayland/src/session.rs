@@ -782,6 +782,7 @@ struct FrameClock {
     last_sample: Option<Instant>,
     deadline: Option<Instant>,
     target_vblank: Option<Instant>,
+    last_late_presentation: Option<Instant>,
 }
 
 impl FrameClock {
@@ -796,6 +797,7 @@ impl FrameClock {
             last_sample: None,
             deadline: None,
             target_vblank: None,
+            last_late_presentation: None,
         }
     }
 
@@ -811,6 +813,7 @@ impl FrameClock {
             last_sample: None,
             deadline: None,
             target_vblank: None,
+            last_late_presentation: None,
         }
     }
 
@@ -820,6 +823,7 @@ impl FrameClock {
         self.last_vblank = None;
         self.deadline = None;
         self.target_vblank = None;
+        self.last_late_presentation = None;
     }
 
     fn note_vblank(&mut self, at: Instant) {
@@ -832,6 +836,25 @@ impl FrameClock {
         self.last_vblank = None;
         self.deadline = None;
         self.target_vblank = None;
+        self.last_late_presentation = None;
+    }
+
+    /// CPU submission can finish on time while an asynchronous GPU fence
+    /// misses the intended refresh. Learn from the completed KMS flip too.
+    /// Only a queued frame carries a target; idle/unsubmitted frames cannot
+    /// manufacture misses. Half a refresh tolerates timestamp jitter, and
+    /// small bounded steps avoid turning one stall into a full-frame delay.
+    fn observe_presentation(&mut self, target: Option<Instant>, presented: Instant) -> bool {
+        let (Some(target), Some(period)) = (target, self.period) else { return false; };
+        if period.is_zero() || presented.saturating_duration_since(target) <= period / 2 {
+            return false;
+        }
+        let ceiling = MAX_RENDER_MARGIN.min(period / 2);
+        if self.margin < ceiling {
+            self.margin = self.margin.saturating_add(Duration::from_micros(250)).min(ceiling);
+        }
+        self.last_late_presentation = Some(presented);
+        true
     }
 
     fn pessimistic_budget(&self) -> Duration {
@@ -909,7 +932,7 @@ impl FrameClock {
         if self.target_vblank.is_some_and(|target| finished > target) {
             let overrun = self.target_vblank.map(|target| finished.duration_since(target)).unwrap_or_default();
             self.margin = self.margin.saturating_add(overrun.max(Duration::from_micros(250))).min(MAX_RENDER_MARGIN);
-        } else {
+        } else if self.last_late_presentation.is_none_or(|late| finished.saturating_duration_since(late) >= Duration::from_secs(30)) {
             let margin = self.margin.as_secs_f64();
             let base = BASE_RENDER_MARGIN.as_secs_f64();
             self.margin = Duration::from_secs_f64((margin + (base - margin) * decay_alpha).max(base));
@@ -948,6 +971,7 @@ fn drm_monotonic_instant(timestamp: Duration) -> Instant {
 
 /// A page flip the kernel has accepted and not yet reported back.
 struct PendingFlip {
+    target_vblank: Option<Instant>,
     queued_at: Instant,
     /// Any client plane needs its buffers held until replacement, including a
     /// composited primary with an overlay. Primary-only tracking is unsafe.
@@ -1309,9 +1333,14 @@ pub(crate) fn init(
                         // buffers now. A direct-scanout frame cannot:
                         // this vblank made its client buffer current.
                         if let Some(pending) = pending {
+                            // Use the kernel clock, not delayed event-loop
+                            // receipt, to distinguish a missed GPU deadline.
+                            let late = monotonic_metadata.is_some()
+                                && output.frame_clock.observe_presentation(pending.target_vblank, vblank_at);
                             {
                                 let mut stats = output.telemetry.stats.borrow_mut();
                                 stats.flips = stats.flips.saturating_add(1);
+                                stats.late_presentations = stats.late_presentations.saturating_add(u64::from(late));
                                 stats.stage(9, vblank_at.saturating_duration_since(pending.queued_at));
                             }
                             let changed = complete_scene_flip(
@@ -2805,6 +2834,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             match queue {
                 Ok(()) => {
                     output.frame_pending = Some(PendingFlip {
+                        target_vblank: output.frame_clock.target_vblank,
                         queued_at: Instant::now(),
                         client_scanout,
                         stall_reported: false,
@@ -3445,5 +3475,41 @@ mod tests {
         clock.observe_render(Duration::from_millis(1), start + Duration::from_millis(16));
         assert!(clock.pessimistic_budget() > Duration::from_millis(5));
         assert!(clock.pessimistic_budget() <= raised);
+    }
+
+    #[test]
+    fn on_time_cpu_submission_still_learns_a_late_gpu_presentation() {
+        let period = Duration::from_nanos(6_944_444);
+        let start = Instant::now();
+        let mut clock = FrameClock::for_period(period);
+        clock.note_vblank(start);
+        let deadline = clock.arm(start + Duration::from_micros(100));
+        let queued_target = clock.target_vblank;
+        clock.observe_render(Duration::from_micros(100), deadline + Duration::from_micros(100));
+        let old_margin = clock.margin;
+        let completed = queued_target.unwrap() + period;
+        assert!(clock.observe_presentation(queued_target, completed));
+        assert!(clock.margin > old_margin);
+        let learned = clock.margin;
+        clock.observe_render(Duration::from_micros(100), completed + period);
+        assert_eq!(clock.margin, learned, "CPU-only samples must not immediately erase GPU feedback");
+    }
+
+    #[test]
+    fn presentation_jitter_and_unsubmitted_frames_do_not_raise_the_margin() {
+        let period = Duration::from_nanos(6_944_444);
+        let at = Instant::now();
+        let mut clock = FrameClock::for_period(period);
+        let original = clock.margin;
+        assert!(!clock.observe_presentation(None, at + Duration::from_secs(10)));
+        assert!(!clock.observe_presentation(Some(at), at + Duration::from_micros(100)));
+        assert!(!clock.observe_presentation(Some(at), at - Duration::from_micros(100)));
+        assert_eq!(clock.margin, original);
+        for _ in 0..100 {
+            assert!(clock.observe_presentation(Some(at), at + period));
+        }
+        assert_eq!(clock.margin, period / 2, "GPU correction cannot consume a whole refresh");
+        clock.disarm();
+        assert!(clock.last_late_presentation.is_none());
     }
 }

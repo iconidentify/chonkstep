@@ -83,10 +83,12 @@ mod popup;
 mod dialog;
 #[path = "chonk-fullscreen-probe/gpu.rs"]
 mod gpu;
+#[path = "chonk-fullscreen-probe/presentation.rs"]
+mod presentation;
 
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback, wl_compositor::WlCompositor, wl_keyboard, wl_registry,
-    wl_seat, wl_shm, wl_shm_pool, wl_surface::{self, WlSurface}, wl_output,
+    wl_seat, wl_shm, wl_shm_pool, wl_surface::{self, WlSurface}, wl_output, wl_pointer,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, Proxy};
 use wayland_protocols::xdg::shell::client::{
@@ -157,6 +159,7 @@ impl Want {
 
 #[derive(Default)]
 struct Probe {
+    presentation: Option<wayland_protocols::wp::presentation_time::client::wp_presentation::WpPresentation>,
     compositor: Option<WlCompositor>,
     outputs: Vec<wl_output::WlOutput>,
     shm: Option<wl_shm::WlShm>,
@@ -281,6 +284,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                 "wl_compositor" => probe.compositor = Some(registry.bind(name, version.min(4), qh, ())),
                 "wl_output" => probe.outputs.push(registry.bind(name, version.min(4), qh, ())),
                 "wl_shm" => probe.shm = Some(registry.bind(name, 1, qh, ())),
+                "wp_presentation" if std::env::var("CHONKSTEP_PROBE_PRESENTATION").as_deref() == Ok("1") => {
+                    probe.presentation = Some(registry.bind(name, 1, qh, ()));
+                }
                 "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, version.min(3), qh, ())),
                 "wl_seat" => probe.seat = Some(registry.bind(name, version.min(7), qh, ())),
                 "ext_idle_notifier_v1" => {
@@ -409,6 +415,20 @@ impl Dispatch<wl_seat::WlSeat, ()> for Probe {
             if capabilities.contains(wl_seat::Capability::Keyboard) {
                 seat.get_keyboard(qh, ());
             }
+            if capabilities.contains(wl_seat::Capability::Pointer)
+                && std::env::var("CHONKSTEP_PROBE_HIDE_CURSOR").as_deref() == Ok("1") {
+                seat.get_pointer(qh, ());
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
+    fn event(_: &mut Self, pointer: &wl_pointer::WlPointer, event: wl_pointer::Event,
+             _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wl_pointer::Event::Enter { serial, .. } = event {
+            pointer.set_cursor(serial, None, 0, 0);
+            say("cursor hidden");
         }
     }
 }
@@ -541,6 +561,7 @@ macro_rules! ignore_events {
 }
 ignore_events!(
     WlCompositor,
+    wayland_client::protocol::wl_region::WlRegion,
     wl_shm::WlShm,
     wl_shm_pool::WlShmPool,
     WlBuffer,
@@ -646,6 +667,9 @@ fn main() {
     queue
         .roundtrip(&mut probe)
         .unwrap_or_else(|error| fatal(&format!("seat roundtrip: {error}")));
+    if std::env::var("CHONKSTEP_PROBE_PRESENTATION").as_deref() == Ok("1") && probe.presentation.is_none() {
+        fatal("presentation measurement requested but wp_presentation is unavailable");
+    }
 
     let surface = compositor.create_surface(&qh, ());
     surface.set_buffer_scale(buffer_scale);
@@ -683,10 +707,21 @@ fn main() {
             let (logical_width, logical_height) = probe.size;
             let (width, height) = (logical_width * buffer_scale, logical_height * buffer_scale);
             say(&format!("buffer scale={buffer_scale} size={width}x{height}"));
+            if std::env::var("CHONKSTEP_PROBE_OPAQUE").as_deref() == Ok("1") {
+                // Both fixtures draw alpha=1 everywhere. Advertise that fact
+                // explicitly: EGL's minimum alpha-size=0 can still choose an
+                // alpha-bearing DMA-BUF, whose pixels alone are not an opaque
+                // region declaration for the compositor's plane allocator.
+                let region = compositor.create_region(&qh, ());
+                region.add(0, 0, logical_width, logical_height);
+                surface.set_opaque_region(Some(&region));
+                region.destroy();
+            }
             if frame_driven && !probe.frame_pending {
                 surface.frame(&qh, ());
                 probe.frame_pending = true;
             }
+            presentation::request(&probe, &surface, &qh);
             if let Some(gpu) = &gpu {
                 gpu.draw(width, height);
             } else {
@@ -768,6 +803,7 @@ fn main() {
             // the next one, while the sleep is the producer's cadence
             // (not a test wait).
             let (width, height) = probe.size;
+            presentation::request(&probe, &surface, &qh);
             if let Some(gpu) = &gpu {
                 gpu.draw(width * buffer_scale, height * buffer_scale);
             } else {
@@ -792,6 +828,7 @@ fn main() {
             let (width, height) = probe.size;
             surface.frame(&qh, ());
             probe.frame_pending = true;
+            presentation::request(&probe, &surface, &qh);
             if let Some(gpu) = &gpu {
                 gpu.draw(width * buffer_scale, height * buffer_scale);
             } else {

@@ -198,6 +198,12 @@ impl WaylandBackend {
         use std::fmt::Write as _;
 
         let mut report = format!("graphics {}\n", self.graphics_diagnostics);
+        // Graphics identity is cached at startup; transfer counters are live.
+        // Including them in that cached string made native sessions report
+        // zero copies forever, even while using the CPU fallback every frame.
+        let copies = smithay::backend::renderer::multigpu::copy_stats();
+        let _ = writeln!(report, "multi_gpu_copies dma_frames={} cpu_frames={} cpu_pixels={}",
+            copies.dma_frames, copies.cpu_frames, copies.cpu_pixels);
         for (index, monitor) in self.monitors.iter().enumerate() {
             let scale = self.monitor_scales.get(index).copied().unwrap_or(1.0);
             let hardware = self.monitor_outputs.get(index);
@@ -366,8 +372,10 @@ impl Backend for WaylandBackend {
                 smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |state| {
                     let kind = state.buffer().and_then(|buffer| smithay::backend::renderer::buffer_type(buffer));
                     let size = state.buffer().and_then(|buffer| smithay::backend::renderer::buffer_dimensions(buffer));
-                    let _ = writeln!(report, "surface_buffer window={} kind={:?} scale={} pixels={:?}",
-                        id.0, kind, state.buffer_scale(), size);
+                    let dma = state.buffer().and_then(|buffer| smithay::wayland::dmabuf::get_dmabuf(buffer).ok());
+                    let _ = writeln!(report, "surface_buffer window={} kind={:?} scale={} pixels={:?} import_node={:?} format={:?}",
+                        id.0, kind, state.buffer_scale(), size, dma.and_then(|dma| dma.node()),
+                        dma.map(smithay::backend::allocator::Buffer::format));
                 });
             }
         }
