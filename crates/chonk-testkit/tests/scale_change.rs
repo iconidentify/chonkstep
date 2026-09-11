@@ -3,7 +3,7 @@ use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions};
 use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -34,6 +34,22 @@ fn resize(s: &mut Session, w: u32, h: u32) {
     .unwrap();
 }
 
+fn change_density(marker: &Path, stage: &str) {
+    std::fs::write(marker, stage).unwrap();
+    poll_until(
+        Duration::from_secs(10),
+        "client committed the requested density transition",
+        || {
+            (std::fs::read_to_string(marker.with_extension("done"))
+                .ok()?
+                .as_str()
+                == stage)
+                .then_some(())
+        },
+    )
+    .unwrap();
+}
+
 #[test]
 #[ignore = "requires nested Wayland"]
 fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
@@ -58,7 +74,7 @@ fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
             resize(&mut s, 300, 160);
             resize(&mut s, 400, 200);
             resize(&mut s, 200, 100);
-            std::fs::write(&act, "2").unwrap();
+            change_density(&act, "2");
             // The fractional integer-buffer fallback is intentionally 1.5x;
             // both declarations still use the same effective output factor.
             let (w, h) = match (mode, scale == 1.5) {
@@ -79,14 +95,14 @@ fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
             .unwrap_or_else(|e| panic!("{e}: {scale}/{mode}\n{}", s.log()));
             assert_pixels(&mut s, w, h);
             // Changing back also must not be suppressed by prior physical asks.
-            std::fs::write(&act, "1").unwrap();
+            change_density(&act, "1");
             poll_until(Duration::from_secs(10), "density restored", || {
                 let world = s.world().ok()?;
                 let c = world.window_matching("scale-change-probe")?;
                 (c.w == 200 && c.h == 100 && c.presented_w == 200).then_some(())
             })
             .unwrap();
-            std::fs::write(&act, "2").unwrap();
+            change_density(&act, "2");
             poll_until(Duration::from_secs(10), "second density increase", || {
                 let world = s.world().ok()?;
                 let c = world.window_matching("scale-change-probe")?;
@@ -106,7 +122,7 @@ fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
                     .map(|status| assert!(status.success()))
             })
             .unwrap();
-            std::fs::write(&act, "2 ").unwrap();
+            change_density(&act, "2 ");
             let changed = poll_until(
                 Duration::from_secs(10),
                 "density settles after output scale change",

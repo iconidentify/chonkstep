@@ -27,7 +27,8 @@ The demo capture policy is immutable per connection and present in request
 grouping/cache keys for both output-capture protocols. Normal concurrent exports
 remain clean. Confined clients do not inherit capture privileges. A lock
 transition invalidates pending desktop readback and prevents overlay rendering.
-No blanket clipping of client surface trees was introduced: legitimate CSD
+Density tests fence an actual client commit, including destination edits whose
+physical bounds stay unchanged. No blanket clipping of client surface trees was introduced: legitimate CSD
 shadows, subsurfaces and popups retain their existing behavior.
 
 ## Real editor and native measurement

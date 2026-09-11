@@ -199,6 +199,9 @@ fn main() {
                 "committed {} {} density={density}",
                 logical.0, logical.1
             ));
+            // A density-only viewport edit can preserve all physical bounds.
+            // Let the harness fence the actual wire commit, not just geometry.
+            std::fs::write(act.with_extension("done"), stage.as_bytes()).unwrap();
             dirty = false;
         }
         std::thread::sleep(Duration::from_millis(2));
