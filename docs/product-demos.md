@@ -38,7 +38,8 @@ python3 -B scripts/product-demo.py \
 ```
 
 The output directory must be new. Dependencies: Weston with its GL headless
-backend and kiosk shell, Foot, grim, wf-recorder, FFmpeg/ffprobe, dbus-run-session,
+backend and kiosk shell, Foot, grim, wf-recorder, wlr-randr, wayland-info,
+FFmpeg/ffprobe, dbus-run-session,
 Python 3, Pillow, PyGObject, GTK 4 and the Python Cairo/GI bridge. On Debian/Ubuntu the
 Python packages are `python3-pil python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-4.0`.
 The capture scenario also requires imv and Omacut with their Wayland support.

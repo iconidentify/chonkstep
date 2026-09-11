@@ -48,6 +48,8 @@ license=('GPL-3.0-only')
 depends=(
   'wl-clipboard'     # lossless PNG clipboard ownership
   'wf-recorder'      # native Wayland recording (software H.264 works on Asahi)
+  'wlr-randr'        # chonkrec output selection and rotation across recorder versions
+  'wayland-utils'    # query the actual wl_output orientation used by capture clients
   'ffmpeg'           # finalize recoverable MKV recordings as fast-start MP4
   'libnotify'        # capture completion / failure notifications
   'xdg-user-dirs'    # localized Pictures / Videos destinations

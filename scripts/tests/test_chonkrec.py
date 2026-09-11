@@ -27,6 +27,8 @@ class RecorderCommands(unittest.TestCase):
                         CHONKREC_DIR=str(self.root/'videos'))
         for name in ('wf-recorder', 'ffmpeg', 'ffprobe'):
             self.program(name, 'raise SystemExit(97)\n')
+        self.program('wlr-randr', 'print(\'HEADLESS-1 "fixture"\\n  Enabled: yes\\n  Transform: normal\')\n')
+        self.program('wayland-info', 'print("interface: \'wl_output\', version: 4, name: 1\\n\\tname: HEADLESS-1\\n\\tsubpixel_orientation: unknown, output_transform: normal,")\n')
 
     def program(self, name, body):
         path = self.bin/name
@@ -72,6 +74,24 @@ class RecorderCommands(unittest.TestCase):
         result = self.run_command('start')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('unambiguous Wayland desktop', result.stderr)
+
+    def test_multiple_monitors_require_an_explicit_selection(self):
+        self.socket('wayland-1')
+        self.env['WAYLAND_DISPLAY'] = 'wayland-1'
+        self.program('wlr-randr', 'print(\'DP-1 "left"\\n  Enabled: yes\\n  Transform: normal\\nDP-2 "right"\\n  Enabled: yes\\n  Transform: 90\')\n')
+        result = self.run_command('start')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('use -O NAME', result.stderr)
+        self.assertFalse((self.root/'chonkrec.pid').exists())
+
+    def test_a_disabled_selected_monitor_does_not_record_another(self):
+        self.socket('wayland-1')
+        self.env['WAYLAND_DISPLAY'] = 'wayland-1'
+        self.program('wlr-randr', 'print(\'DP-1 "left"\\n  Enabled: yes\\n  Transform: normal\\nDP-2 "right"\\n  Enabled: no\\n  Transform: 90\')\n')
+        result = self.run_command('start', '-O', 'DP-2')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('use -O NAME', result.stderr)
+        self.assertFalse((self.root/'chonkrec.pid').exists())
 
     def test_stale_pid_file_cannot_identify_an_unrelated_process_as_the_recorder(self):
         (self.root/'chonkrec.pid').write_text(str(os.getpid()))

@@ -49,6 +49,7 @@ if [[ "$base_name" = chonkstep-capture-* ]]; then
   fi
 fi
 RECORD_DISPLAY=""
+OUTPUT_FILTER=""
 AUDIO=""
 DELAY=0
 OUTFILE=""
@@ -129,6 +130,55 @@ wayland_socket_ready() {
   fi
 }
 
+# Normalize the selected output ourselves: wf-recorder 0.4 handles SHM's
+# Y-invert flag but ignores wl_output transforms. Newer versions recognize
+# these explicit filters and avoid applying their own transform twice.
+select_output() {
+  local listing line name transform selected=""
+  listing=$(timeout 4s env -u WAYLAND_SOCKET WAYLAND_DISPLAY="$RECORD_DISPLAY" wlr-randr) || return 1
+  local -a outputs=()
+  mapfile -t outputs < <(printf '%s\n' "$listing" | awk '
+    /^[^ \t]/ { name=$1; enabled=0 }
+    /^  Enabled: / { enabled=($2 == "yes") }
+    /^  Transform: / { if (enabled) print name "\t" $2 }
+  ')
+  if [ -z "$OUTPUT" ]; then
+    [ "${#outputs[@]}" -eq 1 ] || return 1
+    selected=${outputs[0]}
+  else
+    for line in "${outputs[@]}"; do
+      IFS=$'\t' read -r name transform <<< "$line"
+      [ "$name" != "$OUTPUT" ] || selected=$line
+    done
+  fi
+  [ -n "$selected" ] || return 1
+  IFS=$'\t' read -r name transform <<< "$selected"
+  # Output management describes the configured monitor orientation. The
+  # actual wl_output can additionally reflect the renderer's framebuffer
+  # orientation (notably nested outputs); that is what the recorder receives.
+  listing=$(timeout 4s env -u WAYLAND_SOCKET WAYLAND_DISPLAY="$RECORD_DISPLAY" wayland-info --interface wl_output) || return 1
+  transform=$(printf '%s\n' "$listing" | awk -v selected="$name" '
+    /^interface:/ { current="" }
+    $1 == "name:" { current=$2 }
+    current == selected && /output_transform:/ {
+      sub(/.*output_transform: /, ""); sub(/,.*/, ""); print; exit
+    }
+  ')
+  transform=${transform%°}
+  case "$transform" in
+    normal) OUTPUT_FILTER="" ;;
+    90) OUTPUT_FILTER="transpose=1," ;;
+    180) OUTPUT_FILTER="hflip,vflip," ;;
+    270) OUTPUT_FILTER="transpose=2," ;;
+    flipped) OUTPUT_FILTER="hflip," ;;
+    'flipped 90') OUTPUT_FILTER="transpose=1,hflip," ;;
+    'flipped 180') OUTPUT_FILTER="vflip," ;;
+    'flipped 270') OUTPUT_FILTER="transpose=2,hflip," ;;
+    *) return 1 ;;
+  esac
+  OUTPUT=$name
+}
+
 # Both encoder tools normally flush on INT. Some wf-recorder versions leave
 # a thread alive after a Wayland disconnect even after closing the stream.
 # Bound shutdown, then reap our child so a failed segment cannot stall a take.
@@ -158,7 +208,7 @@ do_supervise() {
   local n=0 consecutive_failures=0
 
   while [ ! -e "$work/stop" ]; do
-    if ! wayland_socket_ready; then
+    if ! wayland_socket_ready || ! select_output; then
       sleep 0.3; continue
     fi
     local seg; seg=$(printf '%s/seg-%03d.mp4' "$work" "$n")
@@ -180,7 +230,7 @@ do_supervise() {
 
     local -a args=(-y --no-dmabuf --no-damage -r "$FPS" -m matroska -c libx264
       -p "preset=$PRESET" -p "crf=$CRF" -p tune=zerolatency -p color_range=tv
-      -x yuv420p -F 'pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=in_range=pc:out_range=tv,format=yuv420p')
+      -x yuv420p -F "${OUTPUT_FILTER}pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=in_range=pc:out_range=tv,format=yuv420p")
     [ -n "$GEOMETRY" ] && args+=(-g "$GEOMETRY")
     [ -n "$OUTPUT" ] && args+=(-o "$OUTPUT")
     args+=(-f "$fifo")
@@ -233,13 +283,14 @@ do_start() {
     die "already recording (pid $pid) -> $(cat "$PATHFILE" 2>/dev/null)"
   fi
   local program
-  for program in wf-recorder ffmpeg ffprobe; do
+  for program in wf-recorder ffmpeg ffprobe wlr-randr wayland-info; do
     command -v "$program" >/dev/null || die "$program is not installed"
   done
   if ! wayland_socket_ready; then
     [ "$INCLUDE_OVERLAYS" -eq 0 ] || die "demo capture is unavailable on this desktop; run a ChonkStep build with demo capture support"
     die "no unambiguous Wayland desktop; set WAYLAND_DISPLAY to the ChonkStep session"
   fi
+  select_output || die "cannot select an enabled monitor; use -O NAME (wlr-randr lists monitors)"
 
   if [ -n "$GEOMETRY" ] && ! [[ "$GEOMETRY" =~ ^-?[0-9]+,-?[0-9]+\ +[0-9]+x[0-9]+$ ]]; then
     # wf-recorder only *warns* on a malformed -g and records the whole

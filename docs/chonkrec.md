@@ -27,10 +27,10 @@ chonkrec status
 chonkrec stop
 ```
 
-- `-O NAME` selects a monitor; specify it when multiple monitors are available.
+- `-O NAME` selects a monitor; it is required when multiple monitors are enabled.
   `wf-recorder --list-output` lists the names.
-- `-g "x,y WxH"` limits recording to a numeric region in logical
-  coordinates. Odd-sized regions are padded for H.264 without dropping an edge.
+- `-g "x,y WxH"` limits recording to a numeric region in logical coordinates.
+  Use even-sized regions: wf-recorder can trim an odd pixel edge before encoding.
 - `-r FPS` selects constant frame rate, from 1 to 240; the default is 30.
 - `-d SECONDS` delays startup.
 - `-a [DEVICE]` records audio separately; `chonkrec list-audio` lists sources.
@@ -55,10 +55,13 @@ new session environment. Time while the compositor is absent is missing from the
 video. Separately recorded audio continues during that gap, so a multi-restart
 take may need an audio offset or an edit in Omacut.
 
-The Wayland compositor, wf-recorder, FFmpeg, Bash, coreutils and util-linux are
+The Wayland compositor, wf-recorder, wlr-randr, wayland-info (wayland-utils),
+FFmpeg, Bash, coreutils and util-linux are
 required. Omacut is optional for automatic review. Demo capture needs a ChonkStep
 build with this feature; the original 0.5.0 release does not expose it. An unsupported
 desktop fails with an explicit error instead of producing an overlay-free demo.
+Monitor rotation is normalized explicitly, including with older wf-recorder
+versions that otherwise record rotated or nested outputs upside down.
 
 For isolated, repeatable 1080p footage with fixture windows, captions and pixel
 verification, use the [product-demo runner](product-demos.md).

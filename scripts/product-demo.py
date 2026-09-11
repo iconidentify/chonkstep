@@ -390,7 +390,7 @@ def png_ready(path):
 
 def run(args):
     binary = args.binary.resolve(strict=True)
-    commands = ('weston', 'foot', 'wf-recorder', 'grim', 'ffmpeg', 'ffprobe')
+    commands = ('weston', 'foot', 'wf-recorder', 'wlr-randr', 'wayland-info', 'grim', 'ffmpeg', 'ffprobe')
     if args.scenario == 'capture':
         commands += ('imv', 'omacut')
     for command in commands:
