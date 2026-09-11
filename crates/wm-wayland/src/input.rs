@@ -359,14 +359,22 @@ pub(crate) fn capture_pointer_busy(seat: &Seat<Compositor>) -> bool {
 /// not turn into a client-visible release merely because a VT switch
 /// interrupted it.
 pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
+    state.mac_copy_order.reset();
     crate::capture_tool::reset_input(state);
     gestures::cancel(state);
     let seat = state.seat.clone();
     cancel_active_touches(state);
-    let suppressed_keys = with_input(&seat, reset_resume_bookkeeping);
+    let mut suppressed_keys = with_input(&seat, reset_resume_bookkeeping);
 
     if let Some(keyboard) = seat.get_keyboard() {
         let time = state.start_time.elapsed().as_millis() as u32;
+        for (physical, output, focus) in state.mac_keyboard.drain() {
+            suppressed_keys.push(physical);
+            let Some(output) = output else { continue; };
+            state.mac_keyboard.suppress_key = focus.is_none() || focus != keyboard.current_focus();
+            keyboard.input_forward(state, output, KeyState::Released, SERIAL_COUNTER.next_serial(), time, true);
+        }
+        state.mac_keyboard.suppress_key = false;
         release_stale_pressed_keys(state, &keyboard, &suppressed_keys, time);
     }
 
@@ -376,6 +384,7 @@ pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
     // panel remains open. Drop exclusivity immediately, then give
     // wm-core the same release its ordinary input path would have queued
     // so it can commit and retire the cycle session on this dispatch.
+    state.wm.cancel_keyboard_cycle();
     reset_modal_keyboard_grab(state.wm.backend_mut());
 }
 
@@ -1262,8 +1271,13 @@ fn on_tablet_button<I: InputBackend>(state: &mut Compositor, event: I::TabletToo
 fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKeyEvent) {
     let keycode = event.key_code();
     let key_state = event.state();
-    let serial = SERIAL_COUNTER.next_serial();
     let time = event.time_msec();
+    if keyboard::copy_order::defer(state, keyboard::copy_order::Key { code: keycode, state: key_state, time }) { return; }
+    deliver_keyboard_key(state, keycode, key_state, time);
+}
+
+pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key_state: KeyState, time: u32) {
+    let serial = SERIAL_COUNTER.next_serial();
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };
@@ -1271,8 +1285,19 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
     let seat = state.seat.clone();
     let shortcuts_inhibited = seat.keyboard_shortcuts_inhibited();
     let modal_owns_keyboard = keyboard::modal_owns_keyboard(state);
+    let app_target = if state.wm.mac_mode() {
+        keyboard.current_focus().and_then(|focus| state.wm.backend().window_for_surface(focus.surface()))
+            .and_then(|id| state.wm.backend().windows.get(&id).and_then(|record| record.app_id.as_deref())
+                .map(|identity| (id, state.wm.interaction_config().profile(identity))))
+    } else { None };
+    let passthrough = app_target.is_some_and(|(_, profile)| profile == wm_core::AppProfile::Passthrough);
     let dragging = state.wm.interactive_drag_active();
-    keyboard.input::<(), _>(state, keycode, key_state, serial, time, |data, mods, handle| {
+    let mut physical_modifiers = ModifiersState::default();
+    let mut physical_combo = KeyCombo { keysym: 0, modifiers: Modifiers::empty() };
+    let eligible = !state.wm.backend().locked && !shortcuts_inhibited
+        && state.wm.backend().xwayland_keyboard_grab.as_ref()
+            .is_none_or(|grab| !smithay::reexports::wayland_server::Resource::is_alive(grab));
+    let (route, mods_changed) = keyboard.input_intercept(state, keycode, key_state, |data, mods, handle| {
         // Level-0 (unshifted) keysym, exactly like `wm-x11`'s
         // `keysym_for_keycode` taking the keycode's first sym: a combo
         // bound as Alt+Shift+T must match the T key with SHIFT in the
@@ -1281,8 +1306,17 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
         // ISO_Left_Tab — `wm-core`'s cycle-backwards match depends on
         // it). The latin fallback keeps bindings working on non-latin
         // layouts.
-        let keysym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or_else(|| handle.modified_sym());
+        let mut keysym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or_else(|| handle.modified_sym());
+        // AZERTY puts digits on the Shift level. Mac screenshot chords name
+        // that digit, while Latin letters and punctuation retain the existing
+        // unshifted matching rule (including Command-Shift-grave).
+        if data.wm.mac_mode() && mods.shift && !(0x30..=0x39).contains(&keysym.raw()) {
+            let shifted = handle.modified_sym();
+            if (0x30..=0x39).contains(&shifted.raw()) { keysym = shifted; }
+        }
         let combo = KeyCombo { keysym: keysym.raw(), modifiers: combo_modifiers(mods) };
+        physical_modifiers = *mods;
+        physical_combo = combo;
         // A repeat belongs to the complete chord, not just its final key.
         // In particular, releasing Super while R remains held must not keep
         // running a Super+R action behind subsequent ordinary typing.
@@ -1331,7 +1365,7 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                 if backend.locked && !works_locked {
                     return FilterResult::Forward;
                 }
-                if shortcuts_inhibited {
+                if shortcuts_inhibited || (passthrough && !modal_owns_keyboard && !works_locked) {
                     return FilterResult::Forward;
                 }
                 // An XWayland client holding the keyboard through
@@ -1380,6 +1414,11 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                         });
                     });
                     FilterResult::Intercept(())
+                } else if combo.keysym == 0x77 && combo.modifiers == Modifiers::SUPER
+                    && app_target.is_some_and(|(_, profile)| profile == wm_core::AppProfile::TerminalWindow) {
+                    backend.queue(WmEvent::CloseRequested(app_target.unwrap().0));
+                    with_input(&seat, |input| input.suppressed_keys.push(keycode));
+                    FilterResult::Intercept(())
                 } else {
                     FilterResult::Forward
                 }
@@ -1418,6 +1457,16 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
             }
         }
     });
+    if matches!(route, FilterResult::Forward) {
+        if state.wm.mac_mode() || state.mac_keyboard.has_held(keycode) {
+            keyboard::mac::forward(state, &keyboard, keyboard::mac::Delivery {
+                code: keycode, state: key_state, serial, time,
+                combo: physical_combo, physical: physical_modifiers, eligible,
+            });
+        } else {
+            keyboard.input_forward(state, keycode, key_state, serial, time, mods_changed);
+        }
+    }
     // XKB options such as `grp:alt_shift_toggle` change the active group
     // inside `KeyboardHandle::input`, without going through the IPC action.
     // Mirror that state after every physical key transition so the next
@@ -1754,6 +1803,13 @@ fn pointer_moved(
     // answer without reaching the `Compositor` — see that verb for the
     // stale-anchor bug the mirror exists to prevent.
     state.wm.backend_mut().pointer = Some(at);
+    // Idle client-content motion deliberately bypasses wm-core's hover queue.
+    // Display selection still observes the physical seat, without taking focus.
+    if !state.wm.backend().locked && state.wm.backend().gesture_scene.is_none()
+        && state.wm.backend().overview.is_none() {
+        let output = state.wm.monitor_index_at(at);
+        state.wm.select_output(output);
+    }
     if !state.wm.backend().locked && crate::capture_tool::motion(state, at) {
         pointer.motion(state, None, &MotionEvent { location: position, serial, time });
         pointer.frame(state);
@@ -2824,7 +2880,9 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
     // `renderer.rs`'s override-redirect pass reads this same field.
     for window in backend.scene_index.unmanaged() {
         let Some(record) = backend.windows.get(&window) else { continue };
-        if !record.mapped || !record.content.contains(at) {
+        if !record.mapped || !record.content.contains(at)
+            || backend.space_output_for(record).is_some_and(|name|
+                !backend.monitors.iter().any(|m| m.name == name && m.geometry.contains(at))) {
             continue;
         }
         if let Some(hit) = content_hit(backend, None, window, position) {
@@ -2838,7 +2896,9 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
             StackEntry::Window(id) => Some(*id),
             StackEntry::Frame(id) => backend.frames.get(id).map(|f| f.window),
         };
-        if window.is_some_and(|id| !backend.layout_scene.allows_pointer(id, at)) {
+        if window.is_some_and(|id| !backend.layout_scene.allows_pointer(id, at)
+            || backend.windows.get(&id).is_some_and(|record| backend.space_output_for(record).is_some_and(|name|
+                !backend.monitors.iter().any(|m| m.name == name && m.geometry.contains(at))))) {
             continue;
         }
 
@@ -3266,7 +3326,7 @@ fn popup_hit(
             .into();
         let anchor: LogicalPoint<f64, Logical> = (popup_origin.x as f64, popup_origin.y as f64).into();
         let scale = crate::xdg::effective_surface_scale(
-            crate::xdg::committed_surface_scale(popup_surface), backend.scale_at(record.content),
+            crate::xdg::committed_surface_scale(popup_surface), backend.window_output_scale(record),
         );
         let probe = surface_probe(anchor, position, scale);
         if let Some((surface, found)) =
@@ -3381,6 +3441,88 @@ mod tests {
                 FilterResult::Intercept(())
             }
         });
+    }
+
+    /// Like an IME, this grab consumes events before KeyboardFocus can project
+    /// their modifiers. Assert the values delivered to the grab itself.
+    struct RecordingKeyboardGrab {
+        start: smithay::input::keyboard::GrabStartData<TestSeatState>,
+    }
+
+    impl smithay::input::keyboard::KeyboardGrab<TestSeatState> for RecordingKeyboardGrab {
+        fn input(
+            &mut self,
+            data: &mut TestSeatState,
+            _handle: &mut smithay::input::keyboard::KeyboardInnerHandle<'_, TestSeatState>,
+            keycode: Keycode,
+            state: KeyState,
+            modifiers: Option<ModifiersState>,
+            _serial: Serial,
+            _time: u32,
+        ) {
+            data.keys.push((keycode, state));
+            if let Some(modifiers) = modifiers {
+                data.modifiers.push(modifiers);
+            }
+        }
+
+        fn set_focus(
+            &mut self,
+            data: &mut TestSeatState,
+            handle: &mut smithay::input::keyboard::KeyboardInnerHandle<'_, TestSeatState>,
+            focus: Option<TestInputTarget>,
+            serial: Serial,
+        ) {
+            handle.set_focus(data, focus, serial);
+        }
+
+        fn start_data(&self) -> &smithay::input::keyboard::GrabStartData<TestSeatState> {
+            &self.start
+        }
+
+        fn unset(&mut self, _data: &mut TestSeatState) {}
+    }
+
+    #[test]
+    fn translated_modifiers_reach_keyboard_grabs_without_changing_physical_state() {
+        const COMMAND: Keycode = Keycode::new(125 + 8);
+        const A: Keycode = Keycode::new(30 + 8);
+        let mut state = TestSeatState::default();
+        let mut seat = state.seat_state.new_seat("projected-grab-test");
+        let keyboard = seat.add_keyboard(XkbConfig::default(), 200, 25).unwrap();
+        keyboard.set_focus(&mut state, Some(TestInputTarget), SERIAL_COUNTER.next_serial());
+        send_test_key(&mut state, &keyboard, COMMAND, KeyState::Pressed, true);
+        let physical = keyboard.modifier_state();
+        assert!(physical.logo && !physical.ctrl);
+        keyboard.set_grab(&mut state, RecordingKeyboardGrab {
+            start: smithay::input::keyboard::GrabStartData { focus: Some(TestInputTarget) },
+        }, SERIAL_COUNTER.next_serial());
+        state.keys.clear();
+        state.modifiers.clear();
+
+        let mut projected = physical;
+        projected.logo = false;
+        projected.ctrl = true;
+        keyboard.with_xkb_state(&mut state, |context| {
+            let xkb = context.xkb().lock().unwrap();
+            // SAFETY: the keymap is only borrowed while its mutex is held.
+            let keymap = unsafe { xkb.keymap() };
+            projected.serialized.depressed &= !(1 << keymap.mod_get_index("Mod4"));
+            projected.serialized.depressed |= 1 << keymap.mod_get_index("Control");
+        });
+        for key_state in [KeyState::Pressed, KeyState::Released] {
+            let (route, _) = keyboard.input_intercept(&mut state, A, key_state, |_, _, _| FilterResult::<()>::Forward);
+            assert!(matches!(route, FilterResult::Forward));
+            keyboard.input_forward_with_modifiers(&mut state, A, key_state, SERIAL_COUNTER.next_serial(), 1, projected);
+            assert_eq!(state.modifiers.last(), Some(&projected));
+            assert_eq!(keyboard.modifier_state(), physical, "projection must not rewrite physical XKB state");
+            assert_eq!(keyboard.forwarded_key_is_pressed(A), key_state == KeyState::Pressed);
+        }
+        send_test_key(&mut state, &keyboard, COMMAND, KeyState::Released, true);
+        let released = keyboard.modifier_state();
+        assert!(!released.logo && !released.ctrl);
+        assert_eq!(state.modifiers.last(), Some(&released));
+        assert_eq!(state.keys, [(A, KeyState::Pressed), (A, KeyState::Released), (COMMAND, KeyState::Released)]);
     }
 
     #[test]

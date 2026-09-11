@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "/tmp/cm1/scripts/bench-native-gpu.py", line 665, in <module>
+    main()
+    ~~~~^^
+  File "/tmp/cm1/scripts/bench-native-gpu.py", line 647, in main
+    result = measure(args, label, binary, case, policy, root)
+  File "/tmp/cm1/scripts/bench-native-gpu.py", line 535, in measure
+    pixels = verify_pixels(root / "pixels.png", [args.width, args.height], case not in ("idle", "windowed"), rect)
+  File "/tmp/cm1/scripts/bench-native-gpu.py", line 181, in verify_pixels
+    from PIL import Image, ImageStat
+ModuleNotFoundError: No module named 'PIL'

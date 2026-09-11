@@ -83,6 +83,49 @@ fn open_overview(session: &mut Session) {
 }
 
 #[test]
+#[ignore = "needs a nested session; scripts/e2e.sh --headless"]
+fn retiring_an_old_input_method_grab_preserves_its_replacement() {
+    let mut session = boot_with("keyboard-ime-replacement", "", &["ime-replace-grab"]);
+    wait_events(&session, "ime replacement ready", 1);
+    session.door().tap_key(KEY_A).unwrap();
+    session.door().barrier().unwrap();
+    poll_until(EVENT, "replacement IME receives both key edges", || {
+        let log = session.client_log(PROBE);
+        (log.contains("ime grab 1 key 30 Value(Pressed)")
+            && log.contains("ime grab 1 key 30 Value(Released)"))
+            .then_some(())
+    }).unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(PROBE)));
+    assert_eq!(event_count(&session, "keyboard key 30 down"), 0,
+        "retiring an old grab must not route new keys directly to a client");
+}
+
+#[test]
+#[ignore = "needs a nested session; scripts/e2e.sh --headless --test keyboard_focus"]
+fn a_translated_release_cannot_cross_focus_through_an_input_method() {
+    let mut session = boot_with("keyboard-ime-release-focus", "", &["ime-replace-grab"]);
+    wait_events(&session, "ime replacement ready", 1);
+    let reloads = session.log().matches("reload requested").count();
+    session.rewrite_config("interaction_mode='mac'\nhyprland_config=false\nshow_dock=false\nomarchy_shell=false\n").unwrap();
+    session.request_reload().unwrap();
+    poll_until(EVENT, "Mac mode applied", || {
+        (session.log().matches("reload requested").count() > reloads).then_some(())
+    }).unwrap();
+    session.door().key(keys::LEFTMETA, true).unwrap();
+    session.door().key(105, true).unwrap();
+    wait_events(&session, "ime grab 1 key 102 Value(Pressed)", 1);
+    session.launch_isolated("foot", &["--title=IME Other Focus", "sleep", "120"]).unwrap();
+    let other = session.wait_for_window("IME Other Focus").unwrap();
+    session.door().click(f64::from(other.x + 30), f64::from(other.y + 50)).unwrap();
+    wait_events(&session, "keyboard leave", 1);
+    session.door().key(105, false).unwrap();
+    session.door().key(keys::LEFTMETA, false).unwrap();
+    session.door().tap_key(KEY_A).unwrap();
+    wait_events(&session, "ime grab 1 key 30 Value(Released)", 1);
+    assert_eq!(event_count(&session, "ime grab 1 key 102 Value(Released)"), 0,
+        "an IME must not reinject the previous focus's translated release into the new client");
+}
+
+#[test]
 #[ignore = "needs a nested session; scripts/e2e.sh --headless --release"]
 fn overview_withdraws_a_held_keys_client_focus_and_restores_it_on_cancel() {
     let mut session = boot("keyboard-focus-overview");

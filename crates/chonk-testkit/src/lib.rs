@@ -1108,6 +1108,8 @@ pub struct World {
     pub shells: Vec<ShellInfo>,
     pub overview: Option<OverviewInfo>,
     pub overview_windows: Vec<OverviewWindowInfo>,
+    pub overview_spaces: Vec<OverviewSpaceInfo>,
+    pub overview_space_windows: Vec<(usize, u64)>,
     pub overview_drag: Option<OverviewDragInfo>,
     pub gesture: Option<GestureInfo>,
     pub logical_focus: Option<u64>,
@@ -1150,6 +1152,13 @@ pub struct OverviewInfo {
     pub selected: usize,
     pub label_bytes: usize,
     pub preview_edge: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct OverviewSpaceInfo {
+    pub index: usize,
+    pub rect: wm_theme_api::Rect,
+    pub windows: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -1502,8 +1511,20 @@ impl Door {
         self.send(&format!("key {code} {}", if pressed { "press" } else { "release" }))
     }
 
-    /// Change the live primary-output scale through the same compositor
-    /// method Hyprland IPC and output-management clients use.
+    /// Change the nested fixture's live output topology through native hotplug policy.
+    pub fn virtual_outputs(&mut self, split: bool) -> Result<(), String> {
+        self.set_virtual_outputs(if split { "split" } else { "single" })
+    }
+
+    pub fn set_virtual_outputs(&mut self, topology: &str) -> Result<(), String> {
+        if !matches!(topology, "split" | "single" | "compact" | "none") {
+            return Err("unknown virtual topology".into());
+        }
+        self.send(&format!("virtual-outputs {topology}"))?;
+        self.barrier()
+    }
+
+    /// Change the live primary-output scale through normal output management.
     pub fn set_primary_scale(&mut self, scale: f64) -> Result<(), String> {
         self.send(&format!("primary-scale {scale}"))
     }
@@ -1859,6 +1880,16 @@ impl Door {
                         wm_theme_api::Size::new(field(&line, "w=").unwrap_or_default(), field(&line, "h=").unwrap_or_default())),
                     target: field::<i64>(&line, "target=").and_then(|i| usize::try_from(i).ok()),
                 });
+            } else if line.starts_with("overview-space ") {
+                world.overview_spaces.push(OverviewSpaceInfo {
+                    index: field(&line, "index=").unwrap_or_default(),
+                    rect: wm_theme_api::Rect::new(
+                        wm_theme_api::Point::new(field(&line, "x=").unwrap_or_default(), field(&line, "y=").unwrap_or_default()),
+                        wm_theme_api::Size::new(field(&line, "w=").unwrap_or_default(), field(&line, "h=").unwrap_or_default())),
+                    windows: field(&line, "windows=").unwrap_or_default(),
+                });
+            } else if line.starts_with("overview-space-window ") {
+                world.overview_space_windows.push((field(&line, "index=").unwrap_or_default(), field(&line, "id=").unwrap_or_default()));
             } else if line.starts_with("overview-window ") {
                 world.overview_windows.push(OverviewWindowInfo {
                     id: field(&line, "id=").unwrap_or_default(),

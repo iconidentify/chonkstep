@@ -455,6 +455,7 @@ mod tests {
     fn overlay() -> Overlay {
         Overlay {
             mode: Mode::Area,
+            destination: super::super::worker::Destination::Legacy,
             quick: false,
             badge: false,
             monitor: Rect::new(Point::new(0, 0), Size::new(1280, 800)),

@@ -1,0 +1,28 @@
+workspace=0 focused_window=None clients=0
+state locked=false damage=false last_damage=crates/wm-wayland/src/backend_impl.rs:267 monitors=1 windows=0 frames=0 layers=0 shells=2 ime_popups=0
+graphics backend=drm-session kms_device=/dev/dri/card2 drm_driver=apple render_node=renderD128 multi_gpu=disabled
+multi_gpu_copies dma_frames=0 cpu_frames=0 cpu_pixels=0
+output index=0 name="eDP-1" x=0 y=0 w=2560 h=1600 scale=2 refresh_millihertz=60000 transform=0
+focus pending=None pointer=None keyboard_grab=false pointer_grab=false pending_pointer_grab=false
+diagnostics damage-log=false idle-log=false full-damage=false no-direct-scanout=false no-cursor-plane=false no-vrr=true overlay-scanout=false primary-scanout-any=false
+gpu_timer status=disabled pending_capacity=16 dropped=0 disjoint=0
+readback queued=0 pending_polls=0 synchronous_fallbacks=0 active_bytes=0 peak_bytes=0 maps=0 map_cpu_ns=0
+native_pipeline output="eDP-1" passes=19 skips_off=0 skips_flip=18 skips_clean=0 skips_inactive=0 skips_deadline=0 attempts=1 queued=1 empty=0 render_failed=0 queue_failed=0 flips=1 primary=0 overlay=0 composited=1 late_presentations=0
+native_stage output="eDP-1" stage=scene calls=1 total_ns=4302639 max_ns=4302639 histogram_us_pow2=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+native_stage output="eDP-1" stage=capture_chrome calls=1 total_ns=417 max_ns=417 histogram_us_pow2=[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+native_stage output="eDP-1" stage=prepare calls=1 total_ns=9625 max_ns=9625 histogram_us_pow2=[0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+native_stage output="eDP-1" stage=planes calls=1 total_ns=41958 max_ns=41958 histogram_us_pow2=[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+native_stage output="eDP-1" stage=composition_submit calls=1 total_ns=931878 max_ns=931878 histogram_us_pow2=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+native_stage output="eDP-1" stage=cpu_fence_wait calls=0 total_ns=0 max_ns=0 histogram_us_pow2=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+native_stage output="eDP-1" stage=kms_queue calls=1 total_ns=4694598 max_ns=4694598 histogram_us_pow2=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+native_stage output="eDP-1" stage=presentation_feedback calls=1 total_ns=1333 max_ns=1333 histogram_us_pow2=[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+native_stage output="eDP-1" stage=render_attempt calls=1 total_ns=9991574 max_ns=9991574 histogram_us_pow2=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]
+native_stage output="eDP-1" stage=queue_to_vblank calls=1 total_ns=253533439 max_ns=253533439 histogram_us_pow2=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+native_frame output="eDP-1" sequence=1 policy_flags=9 Frame { sequence: 1, outcome: "queued", flags: 9, elements: 2, primary: false, overlays: 0, cursor: false, composited: 2, zero_copy: 0, skipped: 0, unsupported_format: 0, scanout_failed: 0, unclassified: 0, reasons: [0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], full_damage: false, cpu_ns: [4302639, 417, 9625, 41958, 931878, 0, 4694598, 1333, 9991574] }
+native_reason_order ["format_unsupported", "scanout_failed", "policy_disabled", "no_free_plane", "primary_format_mismatch", "no_underlying_storage", "unsupported_buffer", "underlay_conflict", "underlay_alpha", "primary_overlap", "lower_plane_overlap", "plane_claim_failed", "scene_requires_composition", "clear_color"]
+native_reason_totals output="eDP-1" [0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+scene bottom-to-top
+ shell id=1 x=2448 y=0 w=112 h=896 mapped=false above=true buffer_bytes=0
+ shell id=2 x=2448 y=1488 w=112 h=112 mapped=false above=true buffer_bytes=0
+clients
+ client id=InnerClientId { id: 0, serial: 1 } pid=156106 uid=1001 executable="final" surfaces=1 buffer_bytes_estimate=0

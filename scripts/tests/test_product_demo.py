@@ -1,0 +1,40 @@
+"""A later clean PNG must not hide a damaged frame in the share video."""
+import importlib.util
+from pathlib import Path
+import subprocess
+import unittest
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('product_demo', Path(__file__).parents[1] / 'product-demo.py')
+demo = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(demo)
+
+
+class RecordedPixels(unittest.TestCase):
+    timeline = [{'seconds': 6, 'action': 'Select a region'}]
+    clean = bytes([207, 203, 201])*680*2
+
+    def verify(self, frames):
+        with patch.object(demo.subprocess, 'check_output', return_value=frames):
+            return demo.verify_capture_video(Path('sample.mp4'), self.timeline)
+
+    def test_clean_decoded_frames_are_counted(self):
+        result = self.verify(self.clean*45)
+        self.assertEqual(result['frames'], 45)
+        self.assertEqual(result['max_header_spread'], 0)
+
+    def test_one_stale_strip_between_clean_frames_rejects_the_video(self):
+        bad = bytearray(self.clean)
+        bad[300:600] = bytes([126,124,123])*100
+        with self.assertRaisesRegex(RuntimeError, 'recorded frame 15'):
+            self.verify(self.clean*15 + bad + self.clean*29)
+
+    def test_blank_short_and_truncated_videos_cannot_pass(self):
+        for pixels in (b'', self.clean*2, self.clean*45+b'x', bytes(len(self.clean)*45)):
+            with self.subTest(length=len(pixels)), self.assertRaises(RuntimeError):
+                self.verify(pixels)
+
+    def test_decoder_failures_are_not_treated_as_empty_success(self):
+        with patch.object(demo.subprocess, 'check_output', side_effect=subprocess.CalledProcessError(1, 'ffmpeg')):
+            with self.assertRaises(subprocess.CalledProcessError):
+                demo.verify_capture_video(Path('sample.mp4'), self.timeline)

@@ -1,0 +1,64 @@
+{
+  "date_utc": "2026-09-10T19:30:53Z",
+  "backend": "native DRM/KMS",
+  "arguments": {
+    "binary": [
+      "final=/tmp/cim/bin/final"
+    ],
+    "probe": "/tmp/cim/bin/probe",
+    "drm_info": "/tmp/cim/bin/drm-info",
+    "device": "/dev/dri/card1",
+    "render_device": null,
+    "connector": "eDP-1",
+    "test_vt": 3,
+    "return_vt": 1,
+    "width": 3840,
+    "height": 2160,
+    "hz": 59.997,
+    "cases": [
+      "native"
+    ],
+    "policies": [
+      "default"
+    ],
+    "seconds": 8.0,
+    "settle_seconds": 3.0,
+    "runs": 1,
+    "gpu_timings": false,
+    "vrr": "off",
+    "log_filter": "info",
+    "require_scanout": null,
+    "stress": false,
+    "frame_marker": false,
+    "capture_every": 0,
+    "output": "/tmp/cim/smoke"
+  },
+  "binaries": {
+    "final": {
+      "path": "/tmp/cim/bin/final",
+      "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-11-ga416af5-native-qualified\nbuild id: ab789770f61f743a4f7d5b0d8c3ed11f91460b08",
+      "sha256": "2727bc755de151d0285d2cfff24d59f1b186e1ae40fb71db8ea14ec75b926da2"
+    }
+  },
+  "probe_sha256": "b3cff7d4b921f04cd22ed731e6281aaf327dd79aac9bc5390a6eb3bb00f3ffba",
+  "harness_sha256": "0174f109fc9eb40c145f87b2c2f2f6606dc145922674abc94eaa63e6e67a55e3",
+  "kernel": "Linux imac 7.1.9-arch1-2 #1 SMP PREEMPT_DYNAMIC Fri, 21 Aug 2026 22:18:59 +0000 x86_64 GNU/Linux",
+  "load_average": [
+    0.748046875,
+    0.63134765625,
+    0.560546875
+  ],
+  "driver": [
+    {
+      "pci": "0000:01:00.0",
+      "vendor": "0x1002",
+      "device": "0x67df",
+      "subsystem_vendor": "0x106b",
+      "subsystem_device": "0x0195",
+      "driver": "amdgpu",
+      "power_policy": "auto",
+      "power_scope": "amdgpu hwmon PPT sensor; not system or wall power"
+    }
+  ],
+  "limitations": "Synthetic frame-paced opaque EGL producer uses glFinish before handoff. Single physical output. Presentation is hardware completion, not photon/input latency. GPU board telemetry includes other processes. Histogram percentiles are upper bounds."
+}

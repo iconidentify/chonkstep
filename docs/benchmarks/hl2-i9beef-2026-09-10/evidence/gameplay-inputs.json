@@ -1,0 +1,122 @@
+[
+  {
+    "at_monotonic": 234359.210144812,
+    "key": "a",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234361.347021462,
+    "key": "d",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  },
+  {
+    "at_monotonic": 234363.483381806,
+    "key": "w",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234365.619733296,
+    "key": "s",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  },
+  {
+    "at_monotonic": 234367.756636517,
+    "key": "a",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234369.895145602,
+    "key": "d",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  },
+  {
+    "at_monotonic": 234372.031405818,
+    "key": "w",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234374.166981973,
+    "key": "s",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  },
+  {
+    "at_monotonic": 234376.302904483,
+    "key": "a",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234378.437725825,
+    "key": "d",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  },
+  {
+    "at_monotonic": 234380.572425221,
+    "key": "w",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234382.707402128,
+    "key": "s",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  },
+  {
+    "at_monotonic": 234384.842277527,
+    "key": "a",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234386.977499499,
+    "key": "d",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  },
+  {
+    "at_monotonic": 234389.112649982,
+    "key": "w",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234391.247739533,
+    "key": "s",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  },
+  {
+    "at_monotonic": 234393.382653544,
+    "key": "a",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234395.51745655,
+    "key": "d",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  },
+  {
+    "at_monotonic": 234397.652576351,
+    "key": "w",
+    "hold_seconds": 1,
+    "mouse_dx": 80
+  },
+  {
+    "at_monotonic": 234399.787498327,
+    "key": "s",
+    "hold_seconds": 1,
+    "mouse_dx": -80
+  }
+]

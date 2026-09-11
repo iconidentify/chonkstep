@@ -1,0 +1,888 @@
+{
+  "metadata": {
+    "date_utc": "2026-09-10T19:54:09Z",
+    "backend": "native DRM/KMS",
+    "arguments": {
+      "binary": [
+        "baseline=/tmp/cim/bin/baseline",
+        "final=/tmp/cim/bin/final"
+      ],
+      "probe": "/tmp/cim/bin/probe",
+      "drm_info": "/tmp/cim/bin/drm-info",
+      "device": "/dev/dri/card1",
+      "render_device": null,
+      "connector": "eDP-1",
+      "test_vt": 3,
+      "return_vt": 1,
+      "width": 3840,
+      "height": 2160,
+      "hz": 59.997,
+      "cases": [
+        "idle"
+      ],
+      "policies": [
+        "default"
+      ],
+      "seconds": 12.0,
+      "settle_seconds": 6.0,
+      "runs": 1,
+      "gpu_timings": false,
+      "vrr": "off",
+      "log_filter": "info",
+      "require_scanout": null,
+      "stress": false,
+      "skip_modesets": null,
+      "frame_marker": false,
+      "capture_every": 0,
+      "output": "/tmp/cim/idle"
+    },
+    "binaries": {
+      "baseline": {
+        "path": "/tmp/cim/bin/baseline",
+        "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-1-gda52c0d\nbuild id: 74f7d20488b6a604efa2ef2f90dc71ebac6a19c4",
+        "sha256": "a59b0b54995e47f9d8924f7723f5355e85a573869fdfcaa11d94fc793b4b751b"
+      },
+      "final": {
+        "path": "/tmp/cim/bin/final",
+        "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-11-ga416af5-native-qualified\nbuild id: ab789770f61f743a4f7d5b0d8c3ed11f91460b08",
+        "sha256": "2727bc755de151d0285d2cfff24d59f1b186e1ae40fb71db8ea14ec75b926da2"
+      }
+    },
+    "probe_sha256": "b3cff7d4b921f04cd22ed731e6281aaf327dd79aac9bc5390a6eb3bb00f3ffba",
+    "harness_sha256": "011e8a0f37e1fac9b5afdf615b92f9633ab5a7fdba083a8f839413ec8c24a8d4",
+    "kernel": "Linux imac 7.1.9-arch1-2 #1 SMP PREEMPT_DYNAMIC Fri, 21 Aug 2026 22:18:59 +0000 x86_64 GNU/Linux",
+    "load_average": [
+      0.89501953125,
+      0.99560546875,
+      0.78076171875
+    ],
+    "driver": [
+      {
+        "pci": "0000:01:00.0",
+        "vendor": "0x1002",
+        "device": "0x67df",
+        "subsystem_vendor": "0x106b",
+        "subsystem_device": "0x0195",
+        "driver": "amdgpu",
+        "power_policy": "auto",
+        "power_scope": "amdgpu hwmon PPT sensor; not system or wall power"
+      }
+    ],
+    "limitations": "Synthetic frame-paced opaque EGL producer uses glFinish before handoff. Single physical output. Presentation is hardware completion, not photon/input latency. GPU board telemetry includes other processes. Histogram percentiles are upper bounds."
+  },
+  "summary": {
+    "baseline/idle/default": {
+      "cpu_percent": {
+        "n": 1,
+        "median": 0.1666644866951807,
+        "mean": 0.1666644866951807,
+        "min": 0.1666644866951807,
+        "max": 0.1666644866951807,
+        "values": [
+          0.1666644866951807
+        ]
+      },
+      "presentation_fps": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      },
+      "cpu_us_per_presented_frame": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      },
+      "render_wall_us_per_frame": {
+        "n": 1,
+        "median": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0
+        ]
+      },
+      "missed_refreshes": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      }
+    },
+    "final/idle/default": {
+      "cpu_percent": {
+        "n": 1,
+        "median": 0.08332993133333336,
+        "mean": 0.08332993133333336,
+        "min": 0.08332993133333336,
+        "max": 0.08332993133333336,
+        "values": [
+          0.08332993133333336
+        ]
+      },
+      "presentation_fps": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      },
+      "cpu_us_per_presented_frame": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      },
+      "render_wall_us_per_frame": {
+        "n": 1,
+        "median": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0
+        ]
+      },
+      "missed_refreshes": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      }
+    }
+  },
+  "samples": [
+    {
+      "label": "baseline",
+      "case": "idle",
+      "policy": "default",
+      "seconds": 12.00015696,
+      "cpu_percent": 0.1666644866951807,
+      "render_fps": 0.0,
+      "render_wall_us_per_frame": 0.0,
+      "presentation": null,
+      "frames": {
+        "dispatch_calls": 121,
+        "dispatch_us": 7341,
+        "dispatch_max_us": 110,
+        "input_us": 137,
+        "shell_us": 4427,
+        "protocol_us": 1150,
+        "layout_us": 968,
+        "render_calls": 0,
+        "render_us": 0,
+        "render_max_us": 0,
+        "flush_us": 92,
+        "ipc_us": 225,
+        "render_attempts": 0,
+        "gesture_build_calls": 0,
+        "gesture_build_us": 0,
+        "gesture_build_max_us": 0
+      },
+      "before": {
+        "monotonic_ns": 167743976080551,
+        "wall_ns": 1789070057360083053,
+        "cpu_ticks": 51,
+        "rss_bytes": 320712704
+      },
+      "after": {
+        "monotonic_ns": 167755976237511,
+        "wall_ns": 1789070069360239845,
+        "cpu_ticks": 53,
+        "rss_bytes": 320712704
+      },
+      "native_delta": {},
+      "stages": {},
+      "captures": [],
+      "readback_before": {},
+      "readback_after": {},
+      "multi_gpu_delta": {},
+      "monitors": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "monitors_after": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "renderers": [
+        "AMD Radeon Pro 580X (radeonsi, polaris10, ACO, DRM 3.64, 7.1.9-arch1-2)"
+      ],
+      "pixels": {
+        "size": [
+          3840,
+          2160
+        ],
+        "fullscreen_pattern_verified": false,
+        "client_pattern_verified": false,
+        "sha256": "952dfd4e89e58abcb7d26c976c2fe6885c0e33b540de70e6134471ecad93b027"
+      },
+      "load_average": [
+        0.6689453125,
+        0.931640625,
+        0.7646484375
+      ],
+      "active_hardware_planes": [
+        {
+          "id": 59,
+          "type": 1,
+          "crtc": 64,
+          "framebuffer": 123
+        }
+      ],
+      "run": 0,
+      "directory": "000",
+      "presentation_fps": 0,
+      "missed_refreshes": 0,
+      "cpu_us_per_presented_frame": 0,
+      "boards": {
+        "0000:01:00.0": {
+          "utilization_percent": {
+            "n": 10,
+            "median": 0.0,
+            "mean": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "memory_utilization_percent": {
+            "n": 10,
+            "median": 6.0,
+            "mean": 6.0,
+            "min": 6.0,
+            "max": 6.0,
+            "values": [
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0
+            ]
+          },
+          "memory_mib": {
+            "n": 10,
+            "median": 381.703125,
+            "mean": 381.703125,
+            "min": 381.703125,
+            "max": 381.703125,
+            "values": [
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125
+            ]
+          },
+          "graphics_mhz": {
+            "n": 10,
+            "median": 1168.0,
+            "mean": 1168.0,
+            "min": 1168.0,
+            "max": 1168.0,
+            "values": [
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0
+            ]
+          },
+          "memory_mhz": {
+            "n": 10,
+            "median": 300.0,
+            "mean": 300.0,
+            "min": 300.0,
+            "max": 300.0,
+            "values": [
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0
+            ]
+          },
+          "power_w": {
+            "n": 10,
+            "median": 14.391,
+            "mean": 14.489700000000001,
+            "min": 14.391,
+            "max": 15.297,
+            "values": [
+              15.297,
+              14.441,
+              14.391,
+              14.422,
+              14.391,
+              14.391,
+              14.391,
+              14.391,
+              14.391,
+              14.391
+            ]
+          },
+          "temperature_c": {
+            "n": 10,
+            "median": 60.0,
+            "mean": 60.0,
+            "min": 60.0,
+            "max": 60.0,
+            "values": [
+              60.0,
+              60.0,
+              60.0,
+              60.0,
+              60.0,
+              60.0,
+              60.0,
+              60.0,
+              60.0,
+              60.0
+            ]
+          }
+        }
+      }
+    },
+    {
+      "label": "final",
+      "case": "idle",
+      "policy": "default",
+      "seconds": 12.000489908,
+      "cpu_percent": 0.08332993133333336,
+      "render_fps": 0.0,
+      "render_wall_us_per_frame": 0.0,
+      "presentation": null,
+      "frames": {
+        "dispatch_calls": 121,
+        "dispatch_us": 7561,
+        "dispatch_max_us": 110,
+        "input_us": 111,
+        "shell_us": 4698,
+        "protocol_us": 1139,
+        "layout_us": 903,
+        "render_calls": 0,
+        "render_us": 0,
+        "render_max_us": 0,
+        "flush_us": 97,
+        "ipc_us": 269,
+        "render_attempts": 0,
+        "gesture_build_calls": 0,
+        "gesture_build_us": 0,
+        "gesture_build_max_us": 0
+      },
+      "before": {
+        "monotonic_ns": 167767035694579,
+        "wall_ns": 1789070080419696726,
+        "cpu_ticks": 52,
+        "rss_bytes": 321048576
+      },
+      "after": {
+        "monotonic_ns": 167779036184487,
+        "wall_ns": 1789070092420186718,
+        "cpu_ticks": 53,
+        "rss_bytes": 321048576
+      },
+      "native_delta": {
+        "passes": 0,
+        "skips_off": 0,
+        "skips_flip": 0,
+        "skips_clean": 0,
+        "skips_inactive": 0,
+        "skips_deadline": 0,
+        "attempts": 0,
+        "queued": 0,
+        "empty": 0,
+        "render_failed": 0,
+        "queue_failed": 0,
+        "flips": 0,
+        "primary": 0,
+        "overlay": 0,
+        "composited": 0,
+        "late_presentations": 0
+      },
+      "stages": {},
+      "captures": [],
+      "readback_before": {
+        "queued": 0,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 0,
+        "maps": 0,
+        "map_cpu_ns": 0
+      },
+      "readback_after": {
+        "queued": 0,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 0,
+        "maps": 0,
+        "map_cpu_ns": 0
+      },
+      "multi_gpu_delta": {
+        "dma_frames": 0,
+        "cpu_frames": 0,
+        "cpu_pixels": 0
+      },
+      "monitors": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "monitors_after": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "renderers": [
+        "AMD Radeon Pro 580X (radeonsi, polaris10, ACO, DRM 3.64, 7.1.9-arch1-2)"
+      ],
+      "pixels": {
+        "size": [
+          3840,
+          2160
+        ],
+        "fullscreen_pattern_verified": false,
+        "client_pattern_verified": false,
+        "sha256": "952dfd4e89e58abcb7d26c976c2fe6885c0e33b540de70e6134471ecad93b027"
+      },
+      "load_average": [
+        0.478515625,
+        0.8701171875,
+        0.7470703125
+      ],
+      "active_hardware_planes": [
+        {
+          "id": 59,
+          "type": 1,
+          "crtc": 64,
+          "framebuffer": 122
+        }
+      ],
+      "run": 0,
+      "directory": "001",
+      "presentation_fps": 0,
+      "missed_refreshes": 0,
+      "cpu_us_per_presented_frame": 0,
+      "boards": {
+        "0000:01:00.0": {
+          "utilization_percent": {
+            "n": 10,
+            "median": 0.0,
+            "mean": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "memory_utilization_percent": {
+            "n": 10,
+            "median": 6.0,
+            "mean": 6.0,
+            "min": 6.0,
+            "max": 6.0,
+            "values": [
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0,
+              6.0
+            ]
+          },
+          "memory_mib": {
+            "n": 10,
+            "median": 381.703125,
+            "mean": 381.703125,
+            "min": 381.703125,
+            "max": 381.703125,
+            "values": [
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125,
+              381.703125
+            ]
+          },
+          "graphics_mhz": {
+            "n": 10,
+            "median": 1168.0,
+            "mean": 1168.0,
+            "min": 1168.0,
+            "max": 1168.0,
+            "values": [
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0,
+              1168.0
+            ]
+          },
+          "memory_mhz": {
+            "n": 10,
+            "median": 300.0,
+            "mean": 300.0,
+            "min": 300.0,
+            "max": 300.0,
+            "values": [
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0,
+              300.0
+            ]
+          },
+          "power_w": {
+            "n": 10,
+            "median": 14.550999999999998,
+            "mean": 14.5948,
+            "min": 14.391,
+            "max": 14.875,
+            "values": [
+              14.418,
+              14.391,
+              14.77,
+              14.844,
+              14.391,
+              14.793,
+              14.875,
+              14.684,
+              14.391,
+              14.391
+            ]
+          },
+          "temperature_c": {
+            "n": 10,
+            "median": 59.0,
+            "mean": 59.0,
+            "min": 59.0,
+            "max": 59.0,
+            "values": [
+              59.0,
+              59.0,
+              59.0,
+              59.0,
+              59.0,
+              59.0,
+              59.0,
+              59.0,
+              59.0,
+              59.0
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "cpu_comparison": {
+    "idle/default": {
+      "relative_change_percent": {
+        "n": 1,
+        "median": -50.00138722669888,
+        "mean": -50.00138722669888,
+        "min": -50.00138722669888,
+        "max": -50.00138722669888,
+        "values": [
+          -50.00138722669888
+        ]
+      },
+      "paired_mean_bootstrap_95_percent": [
+        -50.00138722669888,
+        -50.00138722669888
+      ],
+      "method": "10000 paired bootstrap resamples, seed 1729; small-sample uncertainty remains"
+    }
+  },
+  "cpu_per_frame_comparison": {}
+}

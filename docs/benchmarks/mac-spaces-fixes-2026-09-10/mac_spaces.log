@@ -1,0 +1,47 @@
+Building the compositor and the harness (release)...
+Using preserved compositor: /tmp/chonkstep-a416af5/chonkstep-wayland
+Running the end-to-end suite (one nested compositor at a time)...
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running tests/mac_spaces.rs (target/release/deps/mac_spaces-6e4451a1e56c2685)
+
+running 16 tests
+test a_crossing_window_is_clipped_until_its_center_moves_to_the_other_display ... ok
+test a_live_swipe_moves_only_its_display_and_stops_at_that_rows_boundary ... ok
+test clicking_a_pinned_window_keeps_the_current_space ... ok
+test control_arrows_switch_only_the_pointed_display_and_keep_other_pixels ... ok
+test dragging_a_fullscreen_dialog_moves_a_consistent_family ... ok
+test enabling_separate_spaces_preserves_the_live_linked_desktop ... ok
+test fullscreen_furniture_follows_visible_spaces_instead_of_global_keyboard_focus ... ok
+test fullscreen_is_independent_and_restores_both_display_geometries ... ok
+test headless_swipes_are_ignored_and_reconnect_recovers_input_and_pixels ... ok
+test linking_displays_repairs_focus_before_more_keys_reach_clients ... ok
+test native_workspace_clients_receive_two_independent_active_groups ... ok
+test overview_uses_the_selected_display_and_hotplug_releases_its_keyboard_grab ... ok
+test saved_fullscreen_over_maximize_unwinds_to_the_original_window ... ok
+test session_restore_keeps_empty_spaces_and_fullscreen_return_on_a_reconnected_display ... ok
+test smaller_survivor_keeps_home_position_and_restore_geometry ... ok
+test unplug_reconnect_preserves_membership_and_rehomes_client_pixels ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.31s
+
+Running the unit tests that read the installed Omarchy...
+  chonk-shell menu fixture: reading /usr/share/omarchy/default/omarchy/omarchy-menu.jsonc
+  wm-theme theme fixture: reading /usr/share/omarchy/themes
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/release/deps/chonk_shell-e4e8fd54f8b30528)
+
+running 2 tests
+test omarchy_menu::tests::the_installed_omarchy_menu_parses_into_a_full_tree ... ok
+test omarchy_menu::tests::the_installed_menus_conditions_evaluate_within_the_timeout ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 432 filtered out; finished in 0.45s
+
+     Running unittests src/lib.rs (target/release/deps/wm_theme-f7da910a2e1bb871)
+
+running 1 test
+test omarchy::tests::every_installed_omarchy_theme_parses_and_dresses ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 214 filtered out; finished in 0.00s
+
+
+e2e suite passed. Artifacts (logs + screenshots) are under /tmp/chonk-testkit/

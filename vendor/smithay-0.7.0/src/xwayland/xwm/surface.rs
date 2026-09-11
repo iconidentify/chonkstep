@@ -911,9 +911,21 @@ impl X11Surface {
         &self.user_data
     }
 
-    /// Send a close request to this window.
-    ///
-    /// Will outright destroy windows that don't support the `NET_DELETE_WINDOW` protocol.
+    /// Whether a polite close can be requested without destroying the client.
+    pub fn supports_delete_window(&self) -> bool {
+        self.state.lock().unwrap().protocols.contains(&WMProtocol::DeleteWindow)
+    }
+
+    /// Disconnect the X11 client owning this window, even if it ignores close.
+    /// Intended for an explicit user-requested force quit, never normal closing.
+    pub fn kill_client(&self) -> Result<(), ConnectionError> {
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        if !self.state.lock().unwrap().alive { return Ok(()); }
+        conn.kill_client(self.window)?;
+        conn.flush()
+    }
+
+    /// Send a close request, destroying clients that do not support WM_DELETE_WINDOW.
     pub fn close(&self) -> Result<(), ConnectionError> {
         let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
         let state = self.state.lock().unwrap();

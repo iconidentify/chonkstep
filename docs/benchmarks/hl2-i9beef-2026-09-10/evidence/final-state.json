@@ -1,0 +1,21 @@
+{
+  "checked_at": "2026-09-10T14:13:40-07:00",
+  "compositor_pid": 137376,
+  "compositor_sha256": "2727bc755de151d0285d2cfff24d59f1b186e1ae40fb71db8ea14ec75b926da2",
+  "diagnostics": "diagnostics damage-log=false idle-log=false full-damage=false no-direct-scanout=false no-cursor-plane=false no-vrr=false overlay-scanout=false primary-scanout-any=false",
+  "output": "output index=0 name=\"DP-1\" x=0 y=0 w=3840 h=2160 scale=1.5 refresh_millihertz=144000 transform=0",
+  "vllm_service": "active",
+  "vllm_http_health": 200,
+  "original_save_files_verified": 21,
+  "all_original_save_bytes_match": true,
+  "private_test_save_removed": true,
+  "game_processes_remaining": "",
+  "persistent_steam_launch_options": "-vulkan",
+  "steam_cloud": "AutoCloud complete and Upload complete, result OK at 14:12:20; private test save Forget OK at 14:06:25",
+  "normal_engine_config_changes": [
+    "detected vendor/device IDs",
+    "r_lightmap_bicubic=1",
+    "main-menu sky name",
+    "mat_disable_d3d9ex=0"
+  ]
+}

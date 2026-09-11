@@ -4,6 +4,9 @@
 //! enter here. Clipboard, primary selection and drag-and-drop are distinct
 //! protocols, even when they share the seat's data-device machinery.
 
+pub(crate) mod persistence;
+use persistence::SelectionData;
+
 use std::os::fd::OwnedFd;
 
 use smithay::input::Seat;
@@ -28,10 +31,14 @@ pub(crate) fn xwayland_ready(compositor: &mut Compositor) {
         return;
     };
     for target in [SelectionTarget::Clipboard, SelectionTarget::Primary] {
-        let Some(source) = current_client_selection(&compositor.seat, target) else {
-            continue;
-        };
-        if let Err(error) = xwm.new_selection(target, Some(source.mime_types())) {
+        let mimes = current_client_selection(&compositor.seat, target).map(|source| source.mime_types())
+            .or_else(|| {
+                if target != SelectionTarget::Clipboard { return None; }
+                let data = smithay::wayland::selection::data_device::current_data_device_selection_userdata(&compositor.seat)?;
+                match &*data { SelectionData::Memory(data) => data.upgrade().map(|data| data.keys().cloned().collect()), _ => None }
+            });
+        let Some(mimes) = mimes else { continue; };
+        if let Err(error) = xwm.new_selection(target, Some(mimes)) {
             tracing::warn!(
                 ?error,
                 ?target,
@@ -43,7 +50,8 @@ pub(crate) fn xwayland_ready(compositor: &mut Compositor) {
 
 /// Withdraw only bridge-owned offers when their X11 server disappears.
 /// A native owner's clipboard/primary selection survives an XWayland restart.
-pub(crate) fn xwayland_lost(compositor: &Compositor) {
+pub(crate) fn xwayland_lost(compositor: &mut Compositor) {
+    compositor.clipboard_persistence.x11_lost();
     use smithay::wayland::selection::data_device::{
         clear_data_device_selection, current_data_device_selection_userdata,
     };
@@ -51,7 +59,7 @@ pub(crate) fn xwayland_lost(compositor: &Compositor) {
         clear_primary_selection, current_primary_selection_userdata,
     };
 
-    if current_data_device_selection_userdata(&compositor.seat).is_some() {
+    if current_data_device_selection_userdata(&compositor.seat).is_some_and(|data| matches!(*data, SelectionData::Bridge)) {
         clear_data_device_selection(&compositor.display_handle, &compositor.seat);
     }
     if current_primary_selection_userdata(&compositor.seat).is_some() {
@@ -69,7 +77,7 @@ pub(crate) fn xwayland_lost(compositor: &Compositor) {
 /// property of smithay's dispatch rather than of a guard here, so it is
 /// worth knowing before adding one.
 impl SelectionHandler for Compositor {
-    type SelectionUserData = ();
+    type SelectionUserData = SelectionData;
 
     fn new_selection(
         &mut self,
@@ -77,6 +85,17 @@ impl SelectionHandler for Compositor {
         source: Option<SelectionSource>,
         _seat: Seat<Self>,
     ) {
+        tracing::debug!(?ty, clear = source.is_none(), "client selection changed");
+        if ty == SelectionTarget::Clipboard {
+            if source.is_some() { self.mac_copy_order.offered(); }
+            self.clipboard_persistence.clear();
+            if self.wm.mac_mode() && self.wm.interaction_config().clipboard_persistence {
+                if let Some(source) = source.as_ref() {
+                    let requests = self.clipboard_persistence.begin(Some(source.clone()), source.mime_types());
+                    for (mime, fd) in requests { source.send(mime, fd); }
+                }
+            }
+        }
         // A Wayland client copied something. Xwayland owns the X-side
         // selection window, so it has to be told to claim CLIPBOARD (or
         // PRIMARY) on the X server and advertise these mime types;
@@ -102,8 +121,12 @@ impl SelectionHandler for Compositor {
         mime_type: String,
         fd: OwnedFd,
         _seat: Seat<Self>,
-        _user_data: &(),
+        user_data: &SelectionData,
     ) {
+        if matches!(user_data, SelectionData::Memory(_)) {
+            self.clipboard_persistence.send(user_data, &mime_type, fd);
+            return;
+        }
         // A Wayland client is pasting a selection this compositor owns
         // on behalf of an X client (the one `xwayland.rs`'s
         // `new_selection` installed). Fetching the bytes is an X

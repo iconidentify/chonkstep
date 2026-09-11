@@ -79,12 +79,18 @@ use std::time::Duration;
 
 #[path = "chonk-fullscreen-probe/popup.rs"]
 mod popup;
+#[path = "chonk-fullscreen-probe/dialog.rs"]
+mod dialog;
+#[path = "chonk-fullscreen-probe/gpu.rs"]
+mod gpu;
+#[path = "chonk-fullscreen-probe/presentation.rs"]
+mod presentation;
 
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback, wl_compositor::WlCompositor, wl_keyboard, wl_registry,
-    wl_seat, wl_shm, wl_shm_pool, wl_surface::WlSurface,
+    wl_seat, wl_shm, wl_shm_pool, wl_surface::{self, WlSurface}, wl_output, wl_pointer,
 };
-use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, Proxy};
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::{self, XdgSurface},
     xdg_toplevel::{self, XdgToplevel},
@@ -153,7 +159,9 @@ impl Want {
 
 #[derive(Default)]
 struct Probe {
+    presentation: Option<wayland_protocols::wp::presentation_time::client::wp_presentation::WpPresentation>,
     compositor: Option<WlCompositor>,
+    outputs: Vec<wl_output::WlOutput>,
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<XdgWmBase>,
     seat: Option<wl_seat::WlSeat>,
@@ -164,6 +172,7 @@ struct Probe {
     surface: Option<WlSurface>,
     xdg_surface: Option<XdgSurface>,
     popup: Option<popup::Popup>,
+    dialog: Option<dialog::Dialog>,
     large_minimum: bool,
     toplevel: Option<XdgToplevel>,
     /// The size the compositor's latest configure asked for, or
@@ -273,7 +282,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
         if let wl_registry::Event::Global { name, interface, version } = event {
             match interface.as_str() {
                 "wl_compositor" => probe.compositor = Some(registry.bind(name, version.min(4), qh, ())),
+                "wl_output" => probe.outputs.push(registry.bind(name, version.min(4), qh, ())),
                 "wl_shm" => probe.shm = Some(registry.bind(name, 1, qh, ())),
+                "wp_presentation" if std::env::var("CHONKSTEP_PROBE_PRESENTATION").as_deref() == Ok("1") => {
+                    probe.presentation = Some(registry.bind(name, 1, qh, ()));
+                }
                 "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, version.min(3), qh, ())),
                 "wl_seat" => probe.seat = Some(registry.bind(name, version.min(7), qh, ())),
                 "ext_idle_notifier_v1" => {
@@ -402,6 +415,20 @@ impl Dispatch<wl_seat::WlSeat, ()> for Probe {
             if capabilities.contains(wl_seat::Capability::Keyboard) {
                 seat.get_keyboard(qh, ());
             }
+            if capabilities.contains(wl_seat::Capability::Pointer)
+                && std::env::var("CHONKSTEP_PROBE_HIDE_CURSOR").as_deref() == Ok("1") {
+                seat.get_pointer(qh, ());
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
+    fn event(_: &mut Self, pointer: &wl_pointer::WlPointer, event: wl_pointer::Event,
+             _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wl_pointer::Event::Enter { serial, .. } = event {
+            pointer.set_cursor(serial, None, 0, 0);
+            say("cursor hidden");
         }
     }
 }
@@ -423,6 +450,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Probe {
             match key {
                 KEY_F => probe.control(Want::Fullscreen, qh),
                 KEY_M => probe.control(Want::Maximized, qh),
+                32 => dialog::toggle(probe, qh), // D: a native transient toplevel.
                 25 => popup::toggle(probe, qh), // P: a native application menu.
                 49 => {
                     probe.large_minimum = !probe.large_minimum;
@@ -505,6 +533,24 @@ impl Dispatch<ZwpInputMethodV2, ()> for Probe {
     }
 }
 
+impl Dispatch<WlSurface, ()> for Probe {
+    fn event(probe: &mut Self, surface: &WlSurface, event: wl_surface::Event, _: &(),
+             _: &Connection, _: &QueueHandle<Self>) {
+        if probe.surface.as_ref() != Some(surface) { return; }
+        match event {
+            wl_surface::Event::Enter { output } => say(&format!("surface output enter id={}", output.id().protocol_id())),
+            wl_surface::Event::Leave { output } => say(&format!("surface output leave id={}", output.id().protocol_id())),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for Probe {
+    fn event(_: &mut Self, output: &wl_output::WlOutput, event: wl_output::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wl_output::Event::Name { name } = event { say(&format!("output id={} name={name}", output.id().protocol_id())); }
+    }
+}
+
 macro_rules! ignore_events {
     ($($t:ty),*) => {$(
         impl Dispatch<$t, ()> for Probe {
@@ -515,10 +561,10 @@ macro_rules! ignore_events {
 }
 ignore_events!(
     WlCompositor,
+    wayland_client::protocol::wl_region::WlRegion,
     wl_shm::WlShm,
     wl_shm_pool::WlShmPool,
     WlBuffer,
-    WlSurface,
     ExtIdleNotifierV1,
     ZwpIdleInhibitManagerV1,
     ZwpIdleInhibitorV1,
@@ -546,8 +592,16 @@ fn frame_file(width: i32, height: i32) -> std::fs::File {
     let pixels = (width.max(1) as usize) * (height.max(1) as usize);
     // Premultiplied opaque ARGB little-endian: B, G, R, A.
     let mut bytes = Vec::with_capacity(pixels * 4);
+    // Optional test-owned RGB file changes the next real committed buffer.
+    // Reads are bounded even if a malformed fixture points at a large file.
+    let rgb = std::env::var_os("CHONKSTEP_PROBE_COLOR_FILE")
+        .and_then(|path| std::fs::File::open(path).ok())
+        .and_then(|mut file| {
+            let mut rgb = [0; 3];
+            std::io::Read::read_exact(&mut file, &mut rgb).ok().map(|_| rgb)
+        }).unwrap_or([0x20, 0x40, 0x80]);
     for _ in 0..pixels {
-        bytes.extend_from_slice(&[0x80, 0x40, 0x20, 0xFF]);
+        bytes.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 0xFF]);
     }
     let mut writer = &file;
     writer.write_all(&bytes).unwrap_or_else(|error| fatal(&format!("filling the frame: {error}")));
@@ -560,6 +614,11 @@ fn main() {
     let title = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
     let app_id = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
     let animation = args.next();
+    let buffer_scale = match std::env::var("CHONKSTEP_PROBE_BUFFER_SCALE") {
+        Ok(value) => value.parse::<i32>().ok().filter(|scale| (1..=3).contains(scale))
+            .unwrap_or_else(|| fatal("CHONKSTEP_PROBE_BUFFER_SCALE must be 1, 2 or 3")),
+        Err(_) => 1,
+    };
     let duplicate_inhibit = animation.as_deref() == Some("animate-duplicate-inhibit-idle");
     let ime_popup_flood = animation.as_deref() == Some("ime-popup-flood");
     let self_timed = matches!(
@@ -616,8 +675,12 @@ fn main() {
     queue
         .roundtrip(&mut probe)
         .unwrap_or_else(|error| fatal(&format!("seat roundtrip: {error}")));
+    if std::env::var("CHONKSTEP_PROBE_PRESENTATION").as_deref() == Ok("1") && probe.presentation.is_none() {
+        fatal("presentation measurement requested but wp_presentation is unavailable");
+    }
 
     let surface = compositor.create_surface(&qh, ());
+    surface.set_buffer_scale(buffer_scale);
     let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
     probe.xdg_surface = Some(xdg_surface.clone());
     let toplevel = xdg_surface.get_toplevel(&qh, ());
@@ -641,13 +704,35 @@ fn main() {
         .roundtrip(&mut probe)
         .unwrap_or_else(|error| fatal(&format!("initial configure: {error}")));
 
+    let gpu = (std::env::var("CHONKSTEP_PROBE_RENDERER").as_deref() == Ok("egl"))
+        .then(|| gpu::Gpu::new(&connection, &surface));
     let mut attached = (0, 0);
     let mut attached_buffer = None;
     let mut animation_frame = 0_u64;
     say(&format!("mapped title={title:?}"));
     while !probe.closed {
         if probe.dirty || attached != probe.size {
-            let (width, height) = probe.size;
+            let (logical_width, logical_height) = probe.size;
+            let (width, height) = (logical_width * buffer_scale, logical_height * buffer_scale);
+            say(&format!("buffer scale={buffer_scale} size={width}x{height}"));
+            if std::env::var("CHONKSTEP_PROBE_OPAQUE").as_deref() == Ok("1") {
+                // Both fixtures draw alpha=1 everywhere. Advertise that fact
+                // explicitly: EGL's minimum alpha-size=0 can still choose an
+                // alpha-bearing DMA-BUF, whose pixels alone are not an opaque
+                // region declaration for the compositor's plane allocator.
+                let region = compositor.create_region(&qh, ());
+                region.add(0, 0, logical_width, logical_height);
+                surface.set_opaque_region(Some(&region));
+                region.destroy();
+            }
+            if frame_driven && !probe.frame_pending {
+                surface.frame(&qh, ());
+                probe.frame_pending = true;
+            }
+            presentation::request(&probe, &surface, &qh);
+            if let Some(gpu) = &gpu {
+                gpu.draw(width, height);
+            } else {
             let file = frame_file(width, height);
             let stride = width.max(1) * 4;
             let pool = shm.create_pool(file.as_fd(), stride * height.max(1), &qh, ());
@@ -665,14 +750,11 @@ fn main() {
             // repeated layout/focus operations.
             pool.destroy();
             surface.attach(Some(&buffer), 0, 0);
-            surface.damage(0, 0, width.max(1), height.max(1));
-            if frame_driven && !probe.frame_pending {
-                surface.frame(&qh, ());
-                probe.frame_pending = true;
-            }
+            surface.damage(0, 0, logical_width.max(1), logical_height.max(1));
             surface.commit();
             if let Some(previous) = attached_buffer.replace(buffer) {
                 previous.destroy();
+            }
             }
             if inhibit_idle && probe.idle_inhibitor.is_none() {
                 let manager = probe
@@ -729,9 +811,14 @@ fn main() {
             // the next one, while the sleep is the producer's cadence
             // (not a test wait).
             let (width, height) = probe.size;
-            surface.attach(attached_buffer.as_ref(), 0, 0);
-            surface.damage(0, 0, width.max(1), height.max(1));
-            surface.commit();
+            presentation::request(&probe, &surface, &qh);
+            if let Some(gpu) = &gpu {
+                gpu.draw(width * buffer_scale, height * buffer_scale);
+            } else {
+                surface.attach(attached_buffer.as_ref(), 0, 0);
+                surface.damage(0, 0, width.max(1), height.max(1));
+                surface.commit();
+            }
             animation_frame += 1;
             if animation_frame.is_multiple_of(30) {
                 say(&format!("animation frame={animation_frame}"));
@@ -747,11 +834,16 @@ fn main() {
             // commit.
             probe.frame_ready = false;
             let (width, height) = probe.size;
-            surface.attach(attached_buffer.as_ref(), 0, 0);
-            surface.damage(0, 0, width.max(1), height.max(1));
             surface.frame(&qh, ());
             probe.frame_pending = true;
-            surface.commit();
+            presentation::request(&probe, &surface, &qh);
+            if let Some(gpu) = &gpu {
+                gpu.draw(width * buffer_scale, height * buffer_scale);
+            } else {
+                surface.attach(attached_buffer.as_ref(), 0, 0);
+                surface.damage(0, 0, width.max(1), height.max(1));
+                surface.commit();
+            }
             animation_frame += 1;
             if animation_frame.is_multiple_of(30) {
                 say(&format!("animation frame={animation_frame}"));

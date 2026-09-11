@@ -18,7 +18,16 @@ pub struct OverviewWindow<W, F> {
 }
 
 /// One desktop thumbnail and its optional close control, in panel pixels.
-pub struct OverviewWorkspace {
+pub struct OverviewThumbnail<W, F> {
+    pub window: W,
+    pub frame: Option<F>,
+    pub source: Rect,
+    pub draw_content: bool,
+}
+
+/// A desktop thumbnail contains its actual windows in desktop coordinates.
+pub struct OverviewWorkspace<W, F> {
+    pub windows: Vec<OverviewThumbnail<W, F>>,
     pub rect: Rect,
     pub label: DecorationBuffer,
     pub drop_label: DecorationBuffer,
@@ -30,7 +39,7 @@ pub struct OverviewWorkspace {
 pub struct OverviewScene<W, F> {
     pub geometry: Rect,
     pub windows: Vec<OverviewWindow<W, F>>,
-    pub spaces: Vec<OverviewWorkspace>,
+    pub spaces: Vec<OverviewWorkspace<W, F>>,
     pub workspace: usize,
     pub selected: usize,
     pub gap: u32,
@@ -69,6 +78,9 @@ pub struct LayoutDrag<Window, Frame> {
 pub trait Backend {
     type WindowId: Copy + Eq + std::hash::Hash + std::fmt::Debug;
     type FrameId: Copy + Eq + std::hash::Hash + std::fmt::Debug;
+
+    /// Whether this backend supplies app-aware Mac keyboard delivery.
+    fn supports_mac_interaction(&self) -> bool { false }
 
     /// Establish output clipping before staging final geometry, then animate
     /// live surfaces from the old frame without intermediate configures.
@@ -454,6 +466,8 @@ pub trait Backend {
     fn set_input_focus(&mut self, window: Self::WindowId);
     /// `WM_DELETE_WINDOW` if the client supports it, force-kill otherwise.
     fn send_close(&mut self, window: Self::WindowId);
+    /// Polite application quit; a compositor may finish clipboard handoff first.
+    fn send_quit(&mut self, window: Self::WindowId) { self.send_close(window); }
 
     /// Force-kills the client owning `window` (X11: `XKillClient`) —
     /// the escalation for an application that no longer answers
@@ -604,6 +618,10 @@ pub trait Backend {
     fn publish_active_window(&mut self, _window: Option<Self::WindowId>) {}
     /// Publishes `_NET_NUMBER_OF_DESKTOPS` and `_NET_CURRENT_DESKTOP`.
     fn publish_workspaces(&mut self, _count: usize, _current: usize) {}
+
+    /// Restrict a managed window and its popups to this display in separate
+    /// Spaces mode. None restores the ordinary spanning-window policy.
+    fn set_window_space_output(&mut self, _window: Self::WindowId, _output: Option<&str>) {}
     /// Publishes `_NET_WORKAREA` — the same rectangle for every
     /// desktop, since the dock reserves the same strip on all of them.
     /// `area` is the *union* of the per-monitor workareas, not any one

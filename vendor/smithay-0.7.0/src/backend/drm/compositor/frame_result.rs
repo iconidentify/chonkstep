@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use crate::{
     backend::{
@@ -38,6 +38,9 @@ use super::{DrmScanoutBuffer, ScanoutBuffer};
 ///   swapchain is an implementation detail, but should generally be expect to be
 ///   large enough to hold onto at least one `RenderFrameResult`.
 pub struct RenderFrameResult<'a, B: Buffer, F: Framebuffer, E> {
+    /// CPU intervals for preparation, plane assignment and composition command
+    /// submission. These are not GPU completion durations or page-flip latency.
+    pub cpu_timings: RenderFrameTimings,
     /// If this frame contains any changes and should be submitted
     pub is_empty: bool,
     /// The render element states of this frame
@@ -53,6 +56,17 @@ pub struct RenderFrameResult<'a, B: Buffer, F: Framebuffer, E> {
 
     pub(super) primary_plane_element_id: Id,
     pub(super) supports_fencing: bool,
+}
+
+/// CPU-side intervals inside the DRM compositor's render preparation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderFrameTimings {
+    /// Buffer acquisition, viewport/occlusion analysis and element preparation.
+    pub preparation: Duration,
+    /// Plane assignment and atomic tests, including fallback preparation.
+    pub planes: Duration,
+    /// Renderer binding, damage tracking and command submission/texture cleanup.
+    pub composition: Duration,
 }
 
 impl<B: Buffer, F: Framebuffer, E> RenderFrameResult<'_, B, F, E> {

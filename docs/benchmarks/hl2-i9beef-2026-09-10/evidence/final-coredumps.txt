@@ -1,0 +1,2 @@
+Journal file /var/log/journal/41cb32e8f11e43f48324a55942549689/system@00065a8528179fbc-d10e8dfea3b07339.journal~ is truncated, ignoring file.
+No coredumps found.

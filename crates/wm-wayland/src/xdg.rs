@@ -593,20 +593,10 @@ impl CompositorHandler for Compositor {
 
     fn new_surface(&mut self, surface: &WlSurface) {
         self.pacing_surfaces.insert(surface.id(), surface.clone());
-        // This compositor deliberately advertises every surface on
-        // every output: all outputs share the session scale, and true
-        // overlap tracking would add complexity without changing what
-        // a client renders (see the commit handler's scale doctrine).
-        // Membership is a surface-lifecycle fact, so establish it
-        // here exactly once. `Output::enter` takes a mutex and probes
-        // a weak-surface HashSet; doing that for every output on every
-        // buffer commit used to put pure deduplication in the hottest
-        // protocol path. A wl_output bound later is still correct:
-        // Smithay replays `enter` to that client's already-known
-        // surfaces when the output resource is created.
-        for entry in &self.outputs {
-            entry.output.enter(surface);
-        }
+        // Membership is established by the actual output scene, including
+        // independently clipped subsurfaces and popups. Unmapped surfaces do
+        // not belong to every monitor merely because they were created.
+        self.surface_outputs.register(surface);
         // Every surface gets the buffer-readiness pre-commit hook: a
         // commit whose dmabuf the client's GPU is still drawing into
         // must not land until it is finished (explicit syncobj acquire
@@ -707,6 +697,7 @@ impl CompositorHandler for Compositor {
 
     fn destroyed(&mut self, surface: &WlSurface) {
         self.pacing_surfaces.remove(&surface.id());
+        self.surface_outputs.destroy(surface);
         self.pacing_fifo_deadlines.remove(&surface.id());
         // `Output` retains weak surface handles so it can replay
         // `enter` to wl_output objects a client binds later. The
@@ -1151,8 +1142,7 @@ impl Compositor {
         let backend = self.wm.backend();
         if let Some(id) = owner {
             if let Some(record) = backend.windows.get(&id) {
-                return backend
-                    .scale_at(backend.layout_scene.workarea(id).unwrap_or(record.content));
+                return backend.window_output_scale(record);
             }
         }
         if let Some(record) = backend
@@ -1228,7 +1218,15 @@ impl Compositor {
             .get(&id)
             .map(|record| backend.window_surface_scale(record))
             .unwrap_or(1.0);
-        let screen = backend.output_size;
+        // A late buffer commit after the last output disconnects still has
+        // valid geometry. Bound it by the already accepted window size while
+        // headless, rather than turning the empty desktop into a 1x1 resize.
+        // New/unmapped surfaces keep the ordinary conservative fallback.
+        let screen = if backend.monitors.is_empty() && was_mapped {
+            backend.windows.get(&id).map_or(backend.output_size, |record| record.content.size)
+        } else {
+            backend.output_size
+        };
         let committed = committed_content_size(&root, surface_scale, screen);
         if has_buffer && !was_mapped {
             set_mapped_marker(&root, true);
@@ -1390,9 +1388,14 @@ pub(crate) fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -
     let Some(record) = backend.windows.get(&window) else {
         return false;
     };
-    if !record.mapped || !record.surface.alive() {
+    if !record.surface.alive() {
         return false;
     }
+    if backend.overview.as_ref().is_some_and(|o| o.includes_window(window)
+        && backend.shells.get(&o.surface).is_some_and(|s| s.mapped)) {
+        return true;
+    }
+    if !record.mapped { return false; }
     record.window_type == wm_core::WindowType::Unmanaged || backend.scene_index.is_presented(window)
 }
 
@@ -1612,7 +1615,7 @@ impl ShmHandler for Compositor {
 // -- wl_output -----------------------------------------------------------
 
 impl OutputHandler for Compositor {
-    fn output_bound(&mut self, _output: Output, _wl_output: wl_output::WlOutput) {}
+    fn output_bound(&mut self, _output: Output, _wl_output: wl_output::WlOutput) { self.workspaces.mark_dirty(); }
 }
 
 // XWayland uses xdg-output's *logical* size as its X root size whenever

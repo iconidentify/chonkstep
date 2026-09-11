@@ -1,0 +1,13 @@
+{"label": "final", "case": "native", "policy": "default", "cpu_percent": 6.199630316664181, "render_fps": 59.89642838196523, "presentation": {"count": 599, "fps": 59.89866508112162, "interval_ms_p50": 16.667, "interval_ms_p95": 16.688, "interval_ms_p99": 16.75, "interval_ms_p99_9": 33.322, "interval_ms_max": 33.322, "intervals_over_1_5_refresh": 1, "estimated_missed_refreshes": 1, "zero_copy_count": 0, "advertised_refresh_ns": [16666666]}, "native_delta": {"passes": 1497, "skips_off": 0, "skips_flip": 143, "skips_clean": 0, "skips_inactive": 0, "skips_deadline": 752, "attempts": 602, "queued": 602, "empty": 0, "render_failed": 0, "queue_failed": 0, "flips": 601, "primary": 0, "overlay": 0, "composited": 602, "late_presentations": 1}}
+Traceback (most recent call last):
+  File "/tmp/cm1/scripts/bench-native-gpu.py", line 669, in <module>
+    main()
+    ~~~~^^
+  File "/tmp/cm1/scripts/bench-native-gpu.py", line 651, in main
+    result = measure(args, label, binary, case, policy, root)
+  File "/tmp/cm1/scripts/bench-native-gpu.py", line 481, in measure
+    gpu.wait_for("client fullscreen confirmation", lambda: "answer granted: asked fullscreen=true, told fullscreen=true" in (root / "client.log").read_text())
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/cm1/scripts/bench-gpu-scaling.py", line 83, in wait_for
+    raise TimeoutError(what)
+TimeoutError: client fullscreen confirmation

@@ -1,0 +1,27 @@
+{
+  "elapsed": 30.000069094996434,
+  "game_pid": 1064016,
+  "cpu_percent": {
+    "137376": 11.333307230839242,
+    "1064016": 139.56634522212914
+  },
+  "native_delta": {
+    "passes": 24246,
+    "skips_off": 0,
+    "skips_flip": 7129,
+    "skips_clean": 0,
+    "skips_inactive": 0,
+    "skips_deadline": 12797,
+    "attempts": 4320,
+    "queued": 4320,
+    "empty": 0,
+    "render_failed": 0,
+    "queue_failed": 0,
+    "flips": 4320,
+    "primary": 0,
+    "overlay": 0,
+    "composited": 4320,
+    "late_presentations": 0
+  },
+  "compositor_flips_per_second": 143.99966834478099
+}

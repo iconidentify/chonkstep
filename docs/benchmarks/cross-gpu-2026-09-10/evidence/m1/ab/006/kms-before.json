@@ -1,0 +1,62 @@
+{
+  "crtcs": [
+    {
+      "id": 45,
+      "active": true,
+      "width": 2560,
+      "height": 1600,
+      "hz": 59.999856,
+      "sequence_available": false,
+      "sequence": 0,
+      "sequence_ns": 0
+    }
+  ],
+  "connectors": [
+    {
+      "id": 47,
+      "type": 14,
+      "type_id": 1,
+      "connected": true,
+      "modes": 1
+    }
+  ],
+  "planes": [
+    {
+      "id": 35,
+      "type": 1,
+      "crtc": 45,
+      "framebuffer": 53,
+      "possible_crtcs": 1,
+      "formats": [
+        808669784,
+        808669761,
+        875713112,
+        875713089,
+        875709016,
+        875708993,
+        842094158,
+        909203022,
+        875714126,
+        808530000,
+        808530512
+      ]
+    },
+    {
+      "id": 40,
+      "type": 0,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 1,
+      "formats": [
+        808669761,
+        875713089,
+        875708993,
+        842094158,
+        909203022,
+        875714126,
+        808530000,
+        808530512
+      ]
+    }
+  ]
+}

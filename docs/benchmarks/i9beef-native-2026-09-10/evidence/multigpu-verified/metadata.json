@@ -1,0 +1,56 @@
+{
+  "date_utc": "2026-09-10T19:11:30Z",
+  "backend": "native DRM/KMS",
+  "arguments": {
+    "binary": [
+      "verified=/tmp/cni9/verified/chonkstep-wayland"
+    ],
+    "probe": "/tmp/cni9/final-probe",
+    "drm_info": "/tmp/cni9/drm-info",
+    "device": "/dev/dri/card1",
+    "render_device": "/dev/dri/renderD129",
+    "connector": "DP-1",
+    "test_vt": 3,
+    "return_vt": 2,
+    "width": 3840,
+    "height": 2160,
+    "hz": 144,
+    "cases": [
+      "native"
+    ],
+    "policies": [
+      "composite"
+    ],
+    "seconds": 15.0,
+    "settle_seconds": 8.0,
+    "runs": 1,
+    "gpu_timings": true,
+    "vrr": "off",
+    "log_filter": "info",
+    "require_scanout": null,
+    "stress": false,
+    "frame_marker": false,
+    "capture_every": 0,
+    "output": "/tmp/cni9/multigpu-verified"
+  },
+  "binaries": {
+    "verified": {
+      "path": "/tmp/cni9/verified/chonkstep-wayland",
+      "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-11-ga416af5-native-qualified\nbuild id: ab789770f61f743a4f7d5b0d8c3ed11f91460b08",
+      "sha256": "2727bc755de151d0285d2cfff24d59f1b186e1ae40fb71db8ea14ec75b926da2"
+    }
+  },
+  "probe_sha256": "b3cff7d4b921f04cd22ed731e6281aaf327dd79aac9bc5390a6eb3bb00f3ffba",
+  "harness_sha256": "af42b319792d3f6d45a85e3e220c52ae9c0ef3c1921b69947900ccf3f5d89983",
+  "kernel": "Linux i9beef 7.1.9-arch1-2 #1 SMP PREEMPT_DYNAMIC Fri, 21 Aug 2026 22:18:59 +0000 x86_64 GNU/Linux",
+  "gpus": {
+    "load_average": [
+      4.51025390625,
+      4.85107421875,
+      4.3779296875
+    ],
+    "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 2, 22089, 50, 76.92\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 30, 32.39"
+  },
+  "driver": "0, 00000000:01:00.0, NVIDIA GeForce RTX 3090, 610.57.04\n1, 00000000:02:00.0, NVIDIA GeForce RTX 3090, 610.57.04",
+  "limitations": "Synthetic frame-paced opaque EGL producer uses glFinish before handoff. Single physical output. Presentation is hardware completion, not photon/input latency. GPU board telemetry includes other processes. Histogram percentiles are upper bounds."
+}

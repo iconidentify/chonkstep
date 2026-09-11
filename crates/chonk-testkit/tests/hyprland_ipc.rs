@@ -62,6 +62,53 @@ fn control_socket(session: &Session) -> PathBuf {
     PathBuf::from(runtime).join("chonkstep").join(format!("control-{}.sock", session.wayland_display))
 }
 
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn experimental_scanout_controls_reach_the_live_renderer_policy() {
+    let mut session = Session::boot("gpu-policy-controls", SessionOptions {
+        env: vec![("CHONKSTEP_GPU_TIMINGS".into(), "1".into())],
+        ..Default::default()
+    }).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+    session.launch(&probe.display().to_string(), &["GPU timing", "gpu-timing", "animate-frame"]).unwrap();
+    session.wait_for_window("GPU timing").unwrap();
+    let dir = socket_dir(&session);
+    let snapshot = || {
+        let stream = UnixStream::connect(control_socket(&session)).unwrap();
+        stream.set_read_timeout(Some(EVENT)).unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        writer.write_all(b"{\"request\":\"debug\",\"topic\":\"scene\"}\n").unwrap();
+        let mut reader = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if event["event"] == "debug" { break event.to_string(); }
+        }
+    };
+    let initial = snapshot();
+    assert!(initial.contains("overlay-scanout=false"), "{initial}");
+    assert!(initial.contains("primary-scanout-any=false"), "{initial}");
+    if !initial.contains("gpu_timer status=unavailable") {
+        let measured = poll_until(EVENT, "asynchronous GPU query results", || {
+            let report = snapshot();
+            let samples = report.split("stage=composition_gpu samples=").nth(1)?
+                .split_whitespace().next()?.parse::<u64>().ok()?;
+            (samples >= 3).then_some(report)
+        }).unwrap();
+        eprintln!("GPU timing observed: {measured}");
+    }
+    for name in ["overlay-scanout", "primary-scanout-any", "no-direct-scanout", "no-cursor-plane"] {
+        for enabled in [true, false] {
+            assert_eq!(request(&dir, &format!("debug-set {name} {enabled}")), "ok");
+            poll_until(EVENT, "the diagnostic to change in the running compositor", || {
+                snapshot().contains(&format!("{name}={enabled}")).then_some(())
+            }).unwrap();
+        }
+    }
+    assert!(session.compositor_alive());
+}
+
 /// One request: connect, write, read to EOF. Exactly `hyprctl`'s shape.
 fn request(dir: &Path, payload: &str) -> String {
     let mut stream = UnixStream::connect(dir.join(".socket.sock"))

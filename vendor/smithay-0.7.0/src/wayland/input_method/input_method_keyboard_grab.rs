@@ -28,6 +28,7 @@ use super::InputMethodManagerState;
 pub(crate) struct InputMethodKeyboard {
     pub grab: Option<ZwpInputMethodKeyboardGrabV2>,
     pub text_input_handle: TextInputHandle,
+    pub(super) projected_modifiers: bool,
 }
 
 /// Handle to an input method instance
@@ -43,19 +44,30 @@ where
     fn input(
         &mut self,
         _data: &mut D,
-        _handle: &mut KeyboardInnerHandle<'_, D>,
+        handle: &mut KeyboardInnerHandle<'_, D>,
         keycode: Keycode,
         key_state: KeyState,
         modifiers: Option<ModifiersState>,
         serial: Serial,
         time: u32,
     ) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        let modifiers = modifiers.or_else(|| inner.projected_modifiers.then(|| handle.modifier_state()));
+        // A projected shortcut changes its modifiers without a physical
+        // modifier-key event. The IME must see that mask before the letter it
+        // interprets or reinjects. Preserve normal physical-event ordering.
+        let projected = modifiers.is_some_and(|m| m != handle.modifier_state());
+        // Restore the physical mask before the first untranslated key too;
+        // otherwise it is interpreted with the previous chord's Control mask.
+        let modifiers_first = projected || inner.projected_modifiers;
+        inner.projected_modifiers = projected;
         let keyboard = inner.grab.as_ref().unwrap();
         inner
             .text_input_handle
             .active_text_input_serial_or_default(serial.0, |serial| {
-                keyboard.key(serial, time, keycode.raw() - 8, key_state.into());
+                if !modifiers_first {
+                    keyboard.key(serial, time, keycode.raw() - 8, key_state.into());
+                }
                 if let Some(serialized) = modifiers.map(|m| m.serialized) {
                     keyboard.modifiers(
                         serial,
@@ -64,6 +76,9 @@ where
                         serialized.locked,
                         serialized.layout_effective,
                     )
+                }
+                if modifiers_first {
+                    keyboard.key(serial, time, keycode.raw() - 8, key_state.into());
                 }
             });
     }
@@ -89,6 +104,7 @@ where
 pub struct InputMethodKeyboardUserData<D: SeatHandler> {
     pub(super) handle: InputMethodKeyboardGrab,
     pub(crate) keyboard_handle: KeyboardHandle<D>,
+    pub(super) serial: Serial,
 }
 
 impl<D: SeatHandler> fmt::Debug for InputMethodKeyboardUserData<D> {
@@ -106,11 +122,21 @@ impl<D: SeatHandler + 'static> Dispatch<ZwpInputMethodKeyboardGrabV2, InputMetho
     fn destroyed(
         state: &mut D,
         _client: ClientId,
-        _object: &ZwpInputMethodKeyboardGrabV2,
+        object: &ZwpInputMethodKeyboardGrabV2,
         data: &InputMethodKeyboardUserData<D>,
     ) {
-        data.handle.inner.lock().unwrap().grab = None;
-        data.keyboard_handle.unset_grab(state);
+        let mut inner = data.handle.inner.lock().unwrap();
+        if inner.grab.as_ref() != Some(object) {
+            return;
+        }
+        inner.grab = None;
+        inner.projected_modifiers = false;
+        drop(inner);
+        // A newer IME or another keyboard grab may have replaced this one.
+        // Retiring a resource must only release the grab it installed.
+        if data.keyboard_handle.has_grab(data.serial) {
+            data.keyboard_handle.unset_grab(state);
+        }
     }
 
     fn request(

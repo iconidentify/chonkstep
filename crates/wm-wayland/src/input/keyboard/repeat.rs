@@ -58,6 +58,7 @@ impl RepeatingKey {
 /// Repeat navigation, never commit/cancel or the Super+Up opener itself.
 /// Tab may carry Alt/Shift for the switcher; neither flag is a new action.
 fn modal_navigation(combo: KeyCombo) -> bool {
+    if combo.keysym == keysyms::KEY_Tab && (combo.modifiers & !Modifiers::SHIFT) == Modifiers::SUPER { return true; }
     let allowed = Modifiers::ALT | Modifiers::SHIFT;
     if !(combo.modifiers & !allowed).is_empty() {
         return false;

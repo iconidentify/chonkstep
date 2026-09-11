@@ -1,0 +1,1608 @@
+[
+  {
+    "phase": "initial",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "b228ef51ea7bb07c0a489684556d28bb69ecc04b4699c2b78a8a2cbc756bb5cf",
+      "frame_marker": 1009
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 2469,
+      "skips_off": 0,
+      "skips_flip": 114,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 1349,
+      "attempts": 1006,
+      "queued": 1006,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1006,
+      "primary": 1001,
+      "overlay": 0,
+      "composited": 5,
+      "late_presentations": 3
+    },
+    "readback": {
+      "queued": 18,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 18,
+      "map_cpu_ns": 344292
+    }
+  },
+  {
+    "phase": "windowed-0",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": false,
+      "client_pattern_verified": true,
+      "sha256": "680b9d81b4c6b67a3f4b8b7dcfc534a711aeb91f7a9e3f6e7826673f6b82561f",
+      "frame_marker": 1047
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          2,
+          48
+        ],
+        "size": [
+          800,
+          600
+        ],
+        "workspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 0,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 2570,
+      "skips_off": 0,
+      "skips_flip": 126,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 1400,
+      "attempts": 1044,
+      "queued": 1044,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1043,
+      "primary": 1018,
+      "overlay": 0,
+      "composited": 26,
+      "late_presentations": 5
+    },
+    "readback": {
+      "queued": 20,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 20,
+      "map_cpu_ns": 380084
+    }
+  },
+  {
+    "phase": "fullscreen-0",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "ee6a23d609c64a32e09fe706ed38dd39d3651abe9d9463acf86ec1d3241ea295",
+      "frame_marker": 1169
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 2875,
+      "skips_off": 0,
+      "skips_flip": 182,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 1528,
+      "attempts": 1165,
+      "queued": 1165,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1164,
+      "primary": 1039,
+      "overlay": 0,
+      "composited": 126,
+      "late_presentations": 5
+    },
+    "readback": {
+      "queued": 23,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 23,
+      "map_cpu_ns": 425459
+    }
+  },
+  {
+    "phase": "windowed-1",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": false,
+      "client_pattern_verified": true,
+      "sha256": "60423768cde8d467eb5c0e64421bd93a03ecfdfe60cb0c14c203a9b5d116e47f",
+      "frame_marker": 1208
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          2,
+          48
+        ],
+        "size": [
+          800,
+          600
+        ],
+        "workspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 0,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 2984,
+      "skips_off": 0,
+      "skips_flip": 210,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 1571,
+      "attempts": 1203,
+      "queued": 1203,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1202,
+      "primary": 1056,
+      "overlay": 0,
+      "composited": 147,
+      "late_presentations": 6
+    },
+    "readback": {
+      "queued": 25,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 25,
+      "map_cpu_ns": 462668
+    }
+  },
+  {
+    "phase": "fullscreen-1",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "47541c4924e9b56a926e4a79a48476cc77e62b1b52894906e0fb45e5e5ccbb45",
+      "frame_marker": 1330
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 3300,
+      "skips_off": 0,
+      "skips_flip": 282,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 1695,
+      "attempts": 1323,
+      "queued": 1323,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1322,
+      "primary": 1076,
+      "overlay": 0,
+      "composited": 247,
+      "late_presentations": 6
+    },
+    "readback": {
+      "queued": 28,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 28,
+      "map_cpu_ns": 514127
+    }
+  },
+  {
+    "phase": "windowed-2",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": false,
+      "client_pattern_verified": true,
+      "sha256": "11558e1eecd708dc3ca79cdcdf4f3756fe4f970cf9ce38542755e789703317e6",
+      "frame_marker": 1370
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          2,
+          48
+        ],
+        "size": [
+          800,
+          600
+        ],
+        "workspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 0,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 3406,
+      "skips_off": 0,
+      "skips_flip": 307,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 1737,
+      "attempts": 1362,
+      "queued": 1362,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1361,
+      "primary": 1094,
+      "overlay": 0,
+      "composited": 268,
+      "late_presentations": 6
+    },
+    "readback": {
+      "queued": 29,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 29,
+      "map_cpu_ns": 531669
+    }
+  },
+  {
+    "phase": "fullscreen-2",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "87f62ff33025afae5f485a9ef67de906412a5cba3a010e5c2e3c4dd844518ebf",
+      "frame_marker": 1492
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 3728,
+      "skips_off": 0,
+      "skips_flip": 364,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 1880,
+      "attempts": 1484,
+      "queued": 1484,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1483,
+      "primary": 1115,
+      "overlay": 0,
+      "composited": 369,
+      "late_presentations": 6
+    },
+    "readback": {
+      "queued": 32,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 32,
+      "map_cpu_ns": 580710
+    }
+  },
+  {
+    "phase": "windowed-3",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": false,
+      "client_pattern_verified": true,
+      "sha256": "8314a0535126e50b460737a577cb1c26ba543fec7cd37807e5bd8d8f1deec38f",
+      "frame_marker": 1532
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          2,
+          48
+        ],
+        "size": [
+          800,
+          600
+        ],
+        "workspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 0,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 3835,
+      "skips_off": 0,
+      "skips_flip": 389,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 1924,
+      "attempts": 1522,
+      "queued": 1522,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1522,
+      "primary": 1132,
+      "overlay": 0,
+      "composited": 390,
+      "late_presentations": 6
+    },
+    "readback": {
+      "queued": 34,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 34,
+      "map_cpu_ns": 613502
+    }
+  },
+  {
+    "phase": "fullscreen-3",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "08dfd8504e21f5742bf60d6d8ab5743c6f1fe18228812c2b9398bccb69235722",
+      "frame_marker": 1654
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 4160,
+      "skips_off": 0,
+      "skips_flip": 445,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 2071,
+      "attempts": 1644,
+      "queued": 1644,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1643,
+      "primary": 1152,
+      "overlay": 0,
+      "composited": 492,
+      "late_presentations": 6
+    },
+    "readback": {
+      "queued": 37,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 37,
+      "map_cpu_ns": 637128
+    }
+  },
+  {
+    "phase": "windowed-4",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": false,
+      "client_pattern_verified": true,
+      "sha256": "990214ded50a13e7985bedd4c70751851632dac9fc82ea70a43a26ea95ef95c4",
+      "frame_marker": 1693
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          2,
+          48
+        ],
+        "size": [
+          800,
+          600
+        ],
+        "workspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 0,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 4263,
+      "skips_off": 0,
+      "skips_flip": 473,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 2109,
+      "attempts": 1681,
+      "queued": 1681,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1680,
+      "primary": 1169,
+      "overlay": 0,
+      "composited": 512,
+      "late_presentations": 7
+    },
+    "readback": {
+      "queued": 39,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 39,
+      "map_cpu_ns": 671045
+    }
+  },
+  {
+    "phase": "fullscreen-4",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "ed4f84016664e1108627bdca4a1abd41d3c7931739621d38f68c6c94b44f45d9",
+      "frame_marker": 1815
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 4570,
+      "skips_off": 0,
+      "skips_flip": 518,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 2250,
+      "attempts": 1802,
+      "queued": 1802,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1801,
+      "primary": 1189,
+      "overlay": 0,
+      "composited": 613,
+      "late_presentations": 7
+    },
+    "readback": {
+      "queued": 42,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 42,
+      "map_cpu_ns": 706379
+    }
+  },
+  {
+    "phase": "popup",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": false,
+      "client_pattern_verified": false,
+      "sha256": "1704d321d1754022604f9ac8e35e9a766b695f726f1c7edd78477130932f5156",
+      "popup_pixels": 9600
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 4679,
+      "skips_off": 0,
+      "skips_flip": 541,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 2297,
+      "attempts": 1841,
+      "queued": 1841,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1840,
+      "primary": 1207,
+      "overlay": 0,
+      "composited": 634,
+      "late_presentations": 7
+    },
+    "readback": {
+      "queued": 43,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 43,
+      "map_cpu_ns": 724295
+    }
+  },
+  {
+    "phase": "popup-closed",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "ff85e66f7e2a952f7fcab715e579e98ff9a333b714b2218b52c1a03bd675c69b",
+      "frame_marker": 1890
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 4781,
+      "skips_off": 0,
+      "skips_flip": 560,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 2343,
+      "attempts": 1878,
+      "queued": 1878,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1877,
+      "primary": 1229,
+      "overlay": 0,
+      "composited": 649,
+      "late_presentations": 7
+    },
+    "readback": {
+      "queued": 45,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 45,
+      "map_cpu_ns": 757420
+    }
+  },
+  {
+    "phase": "parked-space",
+    "callbacks_stopped": true
+  },
+  {
+    "phase": "space-return",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "65e17082b29682296783ba181742f856d2886e31d34f9499fe9e90746f95f2ea",
+      "frame_marker": 1931
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 4899,
+      "skips_off": 0,
+      "skips_flip": 579,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 2402,
+      "attempts": 1918,
+      "queued": 1918,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1918,
+      "primary": 1268,
+      "overlay": 0,
+      "composited": 650,
+      "late_presentations": 8
+    },
+    "readback": {
+      "queued": 47,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 47,
+      "map_cpu_ns": 781586
+    }
+  },
+  {
+    "phase": "dpms-return-0",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "da2856cf1473ef643cedbd73b65c4ac5624f35299320e4d58d05c15db97b546f",
+      "frame_marker": 1969
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 5012,
+      "skips_off": 1,
+      "skips_flip": 600,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 2454,
+      "attempts": 1957,
+      "queued": 1957,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1956,
+      "primary": 1285,
+      "overlay": 0,
+      "composited": 672,
+      "late_presentations": 8
+    },
+    "readback": {
+      "queued": 49,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 49,
+      "map_cpu_ns": 814252
+    }
+  },
+  {
+    "phase": "dpms-return-1",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "a9913b4449f50c8b7c9d18dd3a18f1451a6956bce8bf2f467612db40ce7167ea",
+      "frame_marker": 2007
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 5122,
+      "skips_off": 2,
+      "skips_flip": 632,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 2493,
+      "attempts": 1995,
+      "queued": 1995,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 1993,
+      "primary": 1285,
+      "overlay": 0,
+      "composited": 710,
+      "late_presentations": 9
+    },
+    "readback": {
+      "queued": 51,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 51,
+      "map_cpu_ns": 848294
+    }
+  },
+  {
+    "phase": "dpms-return-2",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "71b9ae018104838771df7161061f8a027edc77af7c238ba01d15fdd6542f87e1",
+      "frame_marker": 2045
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 5229,
+      "skips_off": 3,
+      "skips_flip": 654,
+      "skips_clean": 0,
+      "skips_inactive": 0,
+      "skips_deadline": 2538,
+      "attempts": 2034,
+      "queued": 2034,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 2032,
+      "primary": 1285,
+      "overlay": 0,
+      "composited": 749,
+      "late_presentations": 10
+    },
+    "readback": {
+      "queued": 53,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 53,
+      "map_cpu_ns": 874044
+    }
+  },
+  {
+    "phase": "vt-return-0",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "8c68b6d1da33f7c568e34ee25fcfb71da6fc33559cb4e6f921c5e05fe8a6e0a2",
+      "frame_marker": 2085
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 5352,
+      "skips_off": 3,
+      "skips_flip": 679,
+      "skips_clean": 0,
+      "skips_inactive": 29,
+      "skips_deadline": 2566,
+      "attempts": 2075,
+      "queued": 2075,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 0,
+      "flips": 2072,
+      "primary": 1285,
+      "overlay": 0,
+      "composited": 790,
+      "late_presentations": 10
+    },
+    "readback": {
+      "queued": 55,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 55,
+      "map_cpu_ns": 907878
+    }
+  },
+  {
+    "phase": "vt-return-1",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "d73f39ab049a101c8b7e974e39ede13a7cde1bfb88f0bfa548adcac953084792",
+      "frame_marker": 2126
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 5477,
+      "skips_off": 3,
+      "skips_flip": 711,
+      "skips_clean": 0,
+      "skips_inactive": 55,
+      "skips_deadline": 2590,
+      "attempts": 2118,
+      "queued": 2116,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 2,
+      "flips": 2113,
+      "primary": 1285,
+      "overlay": 0,
+      "composited": 831,
+      "late_presentations": 10
+    },
+    "readback": {
+      "queued": 57,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 57,
+      "map_cpu_ns": 933544
+    }
+  },
+  {
+    "phase": "vt-return-2",
+    "pixels": {
+      "size": [
+        2560,
+        1600
+      ],
+      "fullscreen_pattern_verified": true,
+      "client_pattern_verified": true,
+      "sha256": "3d4667688c2172bd584f539acc3db833902ad5abc9d050bfaaaedb66199d66f4",
+      "frame_marker": 2165
+    },
+    "clients": [
+      {
+        "address": "0x100000001",
+        "mapped": true,
+        "hidden": false,
+        "at": [
+          0,
+          0
+        ],
+        "size": [
+          2560,
+          1600
+        ],
+        "workspace": {
+          "id": 2,
+          "name": "2"
+        },
+        "floating": true,
+        "pseudo": false,
+        "monitor": 0,
+        "class": "native-gpu-probe",
+        "title": "NativeGpuProbe",
+        "initialClass": "native-gpu-probe",
+        "initialTitle": "NativeGpuProbe",
+        "pid": 152234,
+        "xwayland": false,
+        "pinned": false,
+        "fullscreen": 1,
+        "fullscreenClient": 0,
+        "grouped": [],
+        "tags": [],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": ""
+      }
+    ],
+    "native": {
+      "passes": 5605,
+      "skips_off": 3,
+      "skips_flip": 740,
+      "skips_clean": 0,
+      "skips_inactive": 90,
+      "skips_deadline": 2615,
+      "attempts": 2157,
+      "queued": 2155,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 2,
+      "flips": 2152,
+      "primary": 1285,
+      "overlay": 0,
+      "composited": 870,
+      "late_presentations": 10
+    },
+    "readback": {
+      "queued": 60,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 60,
+      "map_cpu_ns": 1003628
+    }
+  },
+  {
+    "phase": "modesets-skipped",
+    "reason": "The internal M1 panel advertises only 2560x1600 at 60 Hz"
+  },
+  {
+    "phase": "complete",
+    "passed": true,
+    "native": {
+      "passes": 5649,
+      "skips_off": 3,
+      "skips_flip": 751,
+      "skips_clean": 0,
+      "skips_inactive": 90,
+      "skips_deadline": 2631,
+      "attempts": 2174,
+      "queued": 2172,
+      "empty": 0,
+      "render_failed": 0,
+      "queue_failed": 2,
+      "flips": 2169,
+      "primary": 1285,
+      "overlay": 0,
+      "composited": 887,
+      "late_presentations": 10
+    },
+    "readback": {
+      "queued": 61,
+      "pending_polls": 3,
+      "synchronous_fallbacks": 0,
+      "active_bytes": 0,
+      "peak_bytes": 16384000,
+      "maps": 61,
+      "map_cpu_ns": 1039837
+    },
+    "expected_vt_permission_retries": 2,
+    "skipped_phases": [
+      {
+        "phase": "modesets-skipped",
+        "reason": "The internal M1 panel advertises only 2560x1600 at 60 Hz"
+      }
+    ]
+  }
+]

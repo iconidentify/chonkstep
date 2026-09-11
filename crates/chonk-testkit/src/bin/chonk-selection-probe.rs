@@ -65,6 +65,7 @@ fn say(message: impl std::fmt::Display) {
 
 #[derive(Default)]
 struct Probe {
+    closed: bool,
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     shell: Option<xdg_wm_base::XdgWmBase>,
@@ -398,6 +399,13 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for Probe {
     }
 }
 
+impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Probe {
+    fn event(state: &mut Self, _: &xdg_toplevel::XdgToplevel, event: xdg_toplevel::Event,
+        _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if matches!(event, xdg_toplevel::Event::Close) { state.closed = true; }
+    }
+}
+
 macro_rules! ignore_events {
     ($($proxy:ty),* $(,)?) => {$(
         wayland_client::delegate_noop!(Probe: ignore $proxy);
@@ -410,7 +418,6 @@ ignore_events!(
     wl_shm_pool::WlShmPool,
     wl_buffer::WlBuffer,
     wl_surface::WlSurface,
-    xdg_toplevel::XdgToplevel,
     wl_data_device_manager::WlDataDeviceManager,
     wl_data_offer::WlDataOffer,
     primary_manager::ZwpPrimarySelectionDeviceManagerV1,
@@ -487,7 +494,7 @@ fn main() {
     surface.attach(Some(&buffer), 0, 0);
     surface.damage_buffer(0, 0, 320, 200);
     surface.commit();
-    loop {
+    while !probe.closed {
         queue
             .blocking_dispatch(&mut probe)
             .expect("selection dispatch");

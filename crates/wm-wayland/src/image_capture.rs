@@ -138,15 +138,24 @@ struct CursorSessionData {
     capture_session_created: AtomicBool,
 }
 
+struct Download {
+    consumer: Option<PendingCapture>,
+    image: crate::capture::PendingImage,
+    constraints: Constraints,
+    locked: bool,
+    stamp: Duration,
+}
+
 pub(crate) struct ImageCapture {
     sessions: Vec<SessionInstance>,
     captures: VecDeque<PendingCapture>,
+    download: Option<Download>,
     service_after: Instant,
 }
 
 impl ImageCapture {
     fn deadline(&self) -> Option<Instant> {
-        (!self.captures.is_empty()).then_some(self.service_after)
+        (!self.captures.is_empty() || self.download.is_some()).then_some(self.service_after)
     }
 }
 
@@ -170,6 +179,7 @@ pub(crate) fn init(display: &DisplayHandle) -> ImageCapture {
     ImageCapture {
         sessions: Vec::new(),
         captures: VecDeque::new(),
+        download: None,
         service_after: Instant::now(),
     }
 }
@@ -185,106 +195,106 @@ pub(crate) fn refresh(comp: &mut Compositor) {
     }
 
     let started = Instant::now();
-    if comp.image_capture.captures.is_empty() || started < comp.image_capture.service_after {
-        return;
+    if comp.image_capture.deadline().is_none() || started < comp.image_capture.service_after { return; }
+    if let Some(mut download) = comp.image_capture.download.take() {
+        let failure = download.consumer.as_ref().and_then(|capture| {
+            validate_capture(comp, capture).err().or_else(|| {
+                if download.image.pixels.expired(started) || download.locked != comp.wm.backend().locked {
+                    Some(FailureReason::Unknown)
+                } else if target_constraints(comp, capture.shared.target.as_ref()) != Some(download.constraints) {
+                    Some(FailureReason::BufferConstraints)
+                } else { None }
+            })
+        });
+        if let Some(reason) = failure {
+            if let Some(capture) = download.consumer.take().filter(|capture| capture.frame.is_alive()) {
+                capture.frame.failed(reason);
+            }
+        }
+        if !download.image.pixels.ready() {
+            // A timed-out or destroyed consumer frees no GPU staging slot until
+            // its fence retires. This bounds memory even if the device hangs.
+            if download.image.pixels.expired(started) {
+                for capture in comp.image_capture.captures.drain(..) {
+                    if capture.frame.is_alive() { capture.frame.failed(FailureReason::Unknown); }
+                }
+            }
+            comp.image_capture.service_after = started + if download.consumer.is_some() { SERVICE_PAUSE } else { Duration::from_millis(100) };
+            comp.image_capture.download = Some(download);
+            return;
+        }
+        download.image.pixels.release_scene();
+        if let Some(capture) = download.consumer {
+            let renderer = crate::capture::graphics_renderer(&mut comp.graphics);
+            let size = download.image.size;
+            let result = download.image.pixels.with_pixels(renderer, |pixels| {
+                crate::protocols::write_capture_bytes(&capture.buffer, size, pixels)
+            }).and_then(|result| result);
+            match result {
+                Ok(()) => {
+                    capture.frame.transform(wl_output::Transform::Normal);
+                    capture.frame.damage(0, 0, size.w as i32, size.h as i32);
+                    let stamp = download.stamp;
+                    capture.frame.presentation_time((stamp.as_secs() >> 32) as u32, stamp.as_secs() as u32, stamp.subsec_nanos());
+                    capture.frame.ready();
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "ext image-copy-capture could not write the client buffer");
+                    capture.frame.failed(FailureReason::Unknown);
+                }
+            }
+        }
     }
     let mut budget = ServiceBudget::new(started);
     while budget.examine(Instant::now()) {
-        let Some(capture) = comp.image_capture.captures.pop_front() else {
-            break;
+        let Some(capture) = comp.image_capture.captures.pop_front() else { break; };
+        let constraints = match validate_capture(comp, &capture) {
+            Ok(constraints) => constraints,
+            Err(reason) => {
+                if capture.frame.is_alive() { capture.frame.failed(reason); }
+                continue;
+            }
         };
-        if !capture.frame.is_alive() {
-            continue;
-        }
-        if !capture.buffer.is_alive() {
-            capture.frame.failed(FailureReason::Unknown);
-            continue;
-        }
-        if capture.shared.stopped.load(Ordering::Relaxed) {
-            capture.frame.failed(FailureReason::Stopped);
-            continue;
-        }
-        let Some(constraints) = target_constraints(comp, capture.shared.target.as_ref()) else {
-            stop_session(&capture.shared, None);
-            capture.frame.failed(FailureReason::Stopped);
-            continue;
-        };
-        if capture.shared.latest_constraints.lock().unwrap().as_ref() != Some(&constraints) {
-            capture.frame.failed(FailureReason::BufferConstraints);
-            continue;
-        }
-
-        // Never bypass the lock screen to read a toplevel's private surface
-        // tree. Output capture remains allowed and sees the ordinary locked
-        // scene through build_scene.
-        if matches!(capture.shared.target, Some(CaptureTarget::Toplevel(_)))
-            && comp.wm.backend().locked
-        {
-            capture.frame.failed(FailureReason::Unknown);
-            continue;
-        }
         if !budget.reserve_frame(constraints.size.w as u64 * constraints.size.h as u64) {
-            // Keep arrival order when the current batch has insufficient
-            // room. The first frame in the next batch is always admitted.
             comp.image_capture.captures.push_front(capture);
             break;
         }
-        let size = match capture.shared.target.as_ref() {
+        let image = match capture.shared.target.as_ref() {
             Some(CaptureTarget::Output(name)) => {
-                let region = comp
-                    .outputs
-                    .iter()
-                    .find(|entry| entry.output.name() == *name)
+                let region = comp.outputs.iter().find(|entry| entry.output.name() == *name)
                     .map(|entry| Rect::new(entry.position, entry.size));
-                region.and_then(|region| {
-                    match crate::protocols::capture_region_into(
-                        comp,
-                        region,
-                        Transform::Normal,
-                        capture.shared.paint_cursors,
-                        &capture.buffer,
-                    ) {
-                        Ok(size) => Some(size),
-                        Err(error) => {
-                            tracing::warn!(%error, "ext image-copy-capture could not capture the output");
-                            None
-                        }
-                    }
-                })
+                region.and_then(|region| crate::protocols::capture_region(
+                    comp, region, Transform::Normal, capture.shared.paint_cursors,
+                ).map_err(|error| tracing::warn!(%error, "ext image-copy-capture could not capture the output")).ok())
             }
-            Some(CaptureTarget::Toplevel(window)) => crate::capture::capture_window_full(
-                    comp,
-                    *window,
-                    capture.shared.paint_cursors,
-                )
-                .and_then(|pixels| match crate::protocols::write_capture(&capture.buffer, &pixels) {
-                    Ok(()) => Some(Size::new(pixels.width, pixels.height)),
-                    Err(error) => {
-                        tracing::warn!(%error, "ext image-copy-capture could not write the client buffer");
-                        None
-                    }
-                }),
+            Some(CaptureTarget::Toplevel(window)) => crate::capture::capture_window_full(comp, *window, capture.shared.paint_cursors),
             None => None,
         };
-        let Some(size) = size else {
-            capture.frame.failed(FailureReason::Unknown);
-            continue;
-        };
-
-        capture.frame.transform(wl_output::Transform::Normal);
-        capture.frame.damage(0, 0, size.w as i32, size.h as i32);
-        let stamp = Duration::from(Clock::<Monotonic>::new().now());
-        capture.frame.presentation_time(
-            (stamp.as_secs() >> 32) as u32,
-            stamp.as_secs() as u32,
-            stamp.subsec_nanos(),
-        );
-        capture.frame.ready();
+        let Some(image) = image else { capture.frame.failed(FailureReason::Unknown); continue; };
+        comp.image_capture.download = Some(Download {
+            consumer: Some(capture), image, constraints, locked: comp.wm.backend().locked,
+            stamp: Duration::from(Clock::<Monotonic>::new().now()),
+        });
+        break;
     }
-    // Keep the cooldown when the queue drains, preventing a client from
-    // bypassing the budget with one new request per dispatch. An empty queue
-    // contributes no event-loop deadline and causes no periodic wakeups.
     comp.image_capture.service_after = Instant::now() + SERVICE_PAUSE;
+}
+
+fn validate_capture(comp: &Compositor, capture: &PendingCapture) -> Result<Constraints, FailureReason> {
+    if !capture.frame.is_alive() || !capture.buffer.is_alive() { return Err(FailureReason::Unknown); }
+    if capture.shared.stopped.load(Ordering::Relaxed) { return Err(FailureReason::Stopped); }
+    let Some(constraints) = target_constraints(comp, capture.shared.target.as_ref()) else {
+        stop_session(&capture.shared, None);
+        return Err(FailureReason::Stopped);
+    };
+    if capture.shared.latest_constraints.lock().unwrap().as_ref() != Some(&constraints) {
+        return Err(FailureReason::BufferConstraints);
+    }
+    // Output capture sees the lock scene. Toplevel capture must never bypass it.
+    if matches!(capture.shared.target, Some(CaptureTarget::Toplevel(_))) && comp.wm.backend().locked {
+        return Err(FailureReason::Unknown);
+    }
+    Ok(constraints)
 }
 
 fn target_constraints(comp: &Compositor, target: Option<&CaptureTarget>) -> Option<Constraints> {
@@ -759,6 +769,7 @@ mod tests {
         let capture = ImageCapture {
             sessions: Vec::new(),
             captures: VecDeque::new(),
+            download: None,
             service_after: now + SERVICE_PAUSE,
         };
         assert_eq!(capture.deadline(), None);

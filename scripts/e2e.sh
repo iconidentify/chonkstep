@@ -44,17 +44,26 @@
 # barrier the harness intentionally waits on and produces misleading
 # client-map timeouts.
 #
-# Usage: scripts/e2e.sh [--headless] [--release] [--test TARGET] [extra test args]
+# Usage: scripts/e2e.sh [--headless] [--host-renderer gl|pixman] [--release] [--test TARGET] [extra test args]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 headless=false
+host_renderer=()
 cargo_profile=()
 cargo_tests=(--tests)
 profile_name=debug
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --headless) headless=true; shift ;;
+        --host-renderer)
+            if [ "$#" -lt 2 ] || [[ "$2" != gl && "$2" != pixman ]]; then
+                echo "e2e.sh: --host-renderer needs gl or pixman" >&2
+                exit 2
+            fi
+            host_renderer=("--renderer=$2")
+            shift 2
+            ;;
         --release) cargo_profile=(--release); profile_name=release; shift ;;
         --test)
             if [ "$#" -lt 2 ]; then
@@ -67,6 +76,11 @@ while [ "$#" -gt 0 ]; do
         *) break ;;
     esac
 done
+
+if [ "${#host_renderer[@]}" -gt 0 ] && ! "$headless"; then
+    echo "e2e.sh: --host-renderer requires --headless" >&2
+    exit 2
+fi
 
 if "$headless"; then
     if ! command -v weston >/dev/null 2>&1; then
@@ -88,6 +102,7 @@ if "$headless"; then
     host_socket=wayland-chonkstep-e2e
     XDG_RUNTIME_DIR="$host_runtime" weston \
         --backend=headless-backend.so \
+        "${host_renderer[@]}" \
         --no-config \
         --socket="$host_socket" \
         --idle-time=0 \

@@ -49,6 +49,9 @@ jobs:
       - name: Run the Python SDK tests
         run: python3 -m unittest discover bindings/python/tests
 
+      - name: Install image verification dependency
+        run: python3 -m pip install Pillow==12.3.0
+
       - name: Run benchmark and preflight harness regression tests
         run: scripts/check.sh harness
 
@@ -414,7 +417,9 @@ jobs:
             libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev \
             weston xwayland foot alacritty zenity grim wayland-utils wlr-randr wtype \
-            wl-clipboard wf-recorder ffmpeg libnotify-bin xdg-user-dirs xdg-utils
+            wl-clipboard wf-recorder ffmpeg libnotify-bin xdg-user-dirs xdg-utils \
+            nautilus libreoffice-writer libreoffice-gtk3 \
+            fcitx5 python3-gi gir1.2-gtk-4.0
 
       # --locked: the compositor pins Smithay 0.7.0, and a silent
       # re-resolution here would test a different dependency tree than

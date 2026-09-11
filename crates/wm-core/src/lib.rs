@@ -11,6 +11,7 @@ mod client;
 mod focus;
 mod gestures;
 mod hittest;
+pub mod interaction;
 mod manager;
 mod motif;
 mod placement;
@@ -30,14 +31,15 @@ mod types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake_backend;
 
-pub use backend::{Backend, LayoutDrag, OverviewDrag, OverviewScene, OverviewWindow, OverviewWorkspace};
+pub use backend::{Backend, LayoutDrag, OverviewDrag, OverviewScene, OverviewWindow, OverviewWorkspace, OverviewThumbnail};
 pub use client::{
     Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo,
 };
 pub use focus::{FocusDirection, FocusPolicy};
 pub use gestures::{physics as gesture_physics, DesktopGesture, GestureConfig, SwipeAxis, SwipeMotion, SwipeTracker};
 pub use hittest::{hit_test, HitTarget};
-pub use manager::{Notification, WindowManager, DEFAULT_DRAG_MODIFIER, MAX_WORKSPACES};
+pub use interaction::{AppProfile, InteractionConfig, InteractionMode};
+pub use manager::{DisplaySpace, DisplaySpacesSnapshot, Space, SpaceHomeGeometry, Notification, WindowManager, DEFAULT_DRAG_MODIFIER, MAX_WORKSPACES};
 pub use motif::{hints_say_client_decorates, MIN_HINT_WORDS};
 pub use placement::{place_frame, FloatDecision, FloatPolicy, PlacementPolicy, WindowRuleDecision};
 // `FloatDecision` carries a `Size`, so a crate that implements

@@ -130,6 +130,7 @@ use std::{
     os::unix::io::{AsFd, OwnedFd},
     str::FromStr,
     sync::Arc,
+    time::Instant,
 };
 
 use drm::{
@@ -873,11 +874,21 @@ impl From<ExportBufferError> for Option<RenderingReason> {
             // by announcing a scan-out tranche
             Some(RenderingReason::ScanoutFailed)
         } else {
-            // We provide no reason for rendering here as there
-            // is no action that can be taken to make it work
-            None
+            Some(match err {
+                ExportBufferError::NoUnderlyingStorage => RenderingReason::NoUnderlyingStorage,
+                _ => RenderingReason::UnsupportedBuffer,
+            })
         }
     }
+}
+
+// Preserve the pre-existing feedback policy: an actionable scanout failure on
+// a later plane outranks an earlier diagnostic-only policy/geometry rejection.
+fn merge_rendering_reason(current: Option<RenderingReason>, next: Option<RenderingReason>) -> Option<RenderingReason> {
+    let actionable = |reason| matches!(reason, Some(RenderingReason::FormatUnsupported | RenderingReason::ScanoutFailed | RenderingReason::PrimaryFormatMismatch));
+    if actionable(current) { current }
+    else if actionable(next) { next }
+    else { current.or(next) }
 }
 
 #[derive(Debug)]
@@ -1694,6 +1705,7 @@ where
         R::TextureId: Texture + 'static,
     {
         let mut clear_color = clear_color.into();
+        let preparation_started = Instant::now();
 
         if !self.surface.is_active() {
             return Err(RenderFrameErrorType::<A, F, R>::PrepareFrame(
@@ -1936,6 +1948,11 @@ where
                             }
                         })
                         .or_insert_with(|| RenderElementState::rendered(element_visible_area));
+                    if let Some(state) = render_element_states.states.get_mut(element_id) {
+                        state.presentation_state = RenderElementPresentationState::Rendering {
+                            reason: Some(RenderingReason::ClearColor),
+                        };
+                    }
                 } else {
                     output_elements.push((
                         element,
@@ -1975,6 +1992,8 @@ where
         // This will hold the element assigned on the cursor plane if any
         let mut cursor_plane_element: Option<&'a E> = None;
 
+        let preparation_elapsed = preparation_started.elapsed();
+        let planes_started = Instant::now();
         let output_elements_len = output_elements.len();
         for (index, (element, element_geometry, element_visible_area, element_is_opaque)) in
             output_elements.iter().enumerate()
@@ -2045,7 +2064,8 @@ where
                     }
                 }
                 Err(reason) => {
-                    if let Some(reason) = reason {
+                    let reason = reason.unwrap_or(RenderingReason::SceneRequiresComposition);
+                    {
                         if !render_element_states.states.contains_key(element_id) {
                             render_element_states.states.insert(
                                 element_id.clone(),
@@ -2128,7 +2148,8 @@ where
                 // multiple times and only gets removed once. But this is pretty unlikely to
                 // happen and will only result in reporting wrong visible area size and scan-out state
                 // for a single frame.
-                render_element_states.states.remove(element.id());
+                render_element_states.states.insert(element.id().clone(),
+                    RenderElementState::rendering_with_reason(RenderingReason::ScanoutFailed));
             }
 
             // If we removed any element from some plane we have
@@ -2160,6 +2181,8 @@ where
             }
         }
 
+        let planes_elapsed = planes_started.elapsed();
+        let composition_started = Instant::now();
         let render = next_frame_state
             .plane_buffer(self.surface.plane())
             .map(|config| matches!(config.buffer, ScanoutBuffer::Swapchain(_)))
@@ -2343,6 +2366,7 @@ where
             let _ = renderer.cleanup_texture_cache();
         }
 
+        let composition_elapsed = composition_started.elapsed();
         let primary_plane_element = if render {
             let (slot, sync) = {
                 let primary_plane_state = next_frame_state.plane_state(self.surface.plane()).unwrap();
@@ -2394,6 +2418,11 @@ where
             frame: next_frame_state,
         };
         let frame_reference: RenderFrameResult<'a, A::Buffer, F::Framebuffer, E> = RenderFrameResult {
+            cpu_timings: RenderFrameTimings {
+                preparation: preparation_elapsed,
+                planes: planes_elapsed,
+                composition: composition_elapsed,
+            },
             is_empty: next_frame.is_empty(),
             primary_element: primary_plane_element,
             overlay_elements: overlay_plane_elements.into_values().collect(),
@@ -2826,7 +2855,7 @@ where
                 "skipping direct scan-out for element {:?}, no free planes",
                 element.id()
             );
-            return Err(None);
+            return Err(Some(RenderingReason::PolicyDisabled));
         };
 
         let mut rendering_reason: Option<RenderingReason> = None;
@@ -2852,7 +2881,7 @@ where
                     );
                     return Ok(plane);
                 }
-                Err(err) => rendering_reason = rendering_reason.or(err),
+                Err(err) => rendering_reason = merge_rendering_reason(rendering_reason, err),
             };
         }
 
@@ -2893,7 +2922,7 @@ where
                 );
                 return Ok(plane);
             }
-            Err(err) => rendering_reason = rendering_reason.or(err),
+            Err(err) => rendering_reason = merge_rendering_reason(rendering_reason, err),
         }
 
         Err(rendering_reason)
@@ -2922,7 +2951,7 @@ where
         if !frame_flags
             .intersects(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT | FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY)
         {
-            return Err(None);
+            return Err(Some(RenderingReason::PolicyDisabled));
         }
 
         if frame_state
@@ -2930,7 +2959,7 @@ where
             .map(|state| state.element_state.is_some())
             .unwrap_or(true)
         {
-            return Err(None);
+            return Err(Some(RenderingReason::NoFreePlane));
         }
 
         let element_config = self.element_config(
@@ -2958,7 +2987,7 @@ where
                     element.id(),
                     self.surface.plane()
                 );
-                return Err(None);
+                return Err(Some(RenderingReason::PrimaryFormatMismatch));
             }
         }
 
@@ -2977,7 +3006,7 @@ where
                 element.id(),
                 self.surface.plane()
             );
-            return Err(None);
+            return Err(Some(RenderingReason::UnderlayConflict));
         }
 
         if element_config.failed_planes.primary {
@@ -3712,7 +3741,7 @@ where
         E: RenderElement<R>,
     {
         if !frame_flags.contains(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT) {
-            return Err(None);
+            return Err(Some(RenderingReason::PolicyDisabled));
         }
 
         let element_id = element.id();
@@ -3728,7 +3757,7 @@ where
                 "skipping overlay planes for element {:?}, no free planes",
                 element_id
             );
-            return Err(None);
+            return Err(Some(RenderingReason::NoFreePlane));
         }
 
         let element_config = self.element_config(
@@ -3797,7 +3826,7 @@ where
                     plane.zpos,
                     element_id,
                 );
-                return Err(None);
+                return Err(Some(RenderingReason::NoFreePlane));
             }
 
             // test if the plane represents an underlay
@@ -3811,7 +3840,7 @@ where
                     plane.zpos,
                     element_id
                 );
-                return Err(None);
+                return Err(Some(RenderingReason::UnderlayAlpha));
             }
 
             // if the element overlaps with an element on
@@ -3821,7 +3850,7 @@ where
                 trace!(
                     "skipping direct scan-out on {:?} with zpos {:?}, element {:?} overlaps with element on primary plane", plane.handle, plane.zpos, element_id,
                 );
-                return Err(None);
+                return Err(Some(RenderingReason::PrimaryOverlap));
             }
 
             let overlaps_with_plane_underneath = self
@@ -3843,7 +3872,7 @@ where
                 trace!(
                     "skipping direct scan-out on {:?} with zpos {:?}, element {:?} geometry {:?} overlaps with plane underneath", plane.handle, plane.zpos, element_id, element_config.geometry,
                 );
-                return Err(None);
+                return Err(Some(RenderingReason::LowerPlaneOverlap));
             }
 
             self.try_assign_plane(element, element_config, plane, scale, frame_state)
@@ -3872,7 +3901,7 @@ where
                 trace!(
                     "skipping direct scan-out on {:?} with zpos {:?}, element {:?} geometry {:?}, test already known to fail", plane.handle, plane.zpos, element_id, element_config.geometry,
                 );
-                rendering_reason = rendering_reason.or(Some(RenderingReason::ScanoutFailed));
+                rendering_reason = merge_rendering_reason(rendering_reason, Some(RenderingReason::ScanoutFailed));
                 continue;
             }
 
@@ -3884,7 +3913,7 @@ where
                         element_config.failed_planes.overlay_bitmask |= 1 << index;
                     }
 
-                    rendering_reason = rendering_reason.or(err)
+                    rendering_reason = merge_rendering_reason(rendering_reason, err)
                 }
             }
         }
@@ -3917,7 +3946,7 @@ where
             Some(claim) => claim,
             None => {
                 trace!("failed to claim {:?} for element {:?}", plane.handle, element_id);
-                return Err(None);
+                return Err(Some(RenderingReason::PlaneClaimFailed));
             }
         };
 

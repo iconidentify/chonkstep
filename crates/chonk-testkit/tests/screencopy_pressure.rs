@@ -484,3 +484,73 @@ fn one_damage_fanout_yields_without_creating_a_self_sustaining_capture_loop() {
     client.sync();
     assert!(session.compositor_alive());
 }
+
+#[path = "support/readback.rs"]
+mod readback;
+
+#[test]
+#[ignore = "needs nested Wayland; scripts/e2e.sh --headless --host-renderer gl --test screencopy_pressure"]
+fn pending_gpu_download_yields_input_and_cancellation_retains_only_one_staging_slot() {
+    let mut session = Session::boot("readback-pending-cancel", SessionOptions {
+        config_extra: "show_dock = false\n".into(),
+        env: vec![("CHONKSTEP_TEST_READBACK_DELAY_MS".into(), "800".into())],
+        ..Default::default()
+    }).unwrap();
+    let mut client = screencopy::Client::connect(&session);
+    let first = client.region(20, 30, 32, 32);
+    let second = client.region(70, 30, 32, 32);
+    let storage = client.storage(&first);
+    let a = client.buffer(&storage, &first);
+    let b = client.buffer(&storage, &second);
+    let before = readback::counter(&session, "queued");
+    first.resource.copy(&a);
+    client.sync();
+    poll_until(Duration::from_secs(2), "readback submitted", || {
+        (readback::counter(&session, "queued") > before).then_some(())
+    }).unwrap();
+    assert!(!client.probe.ready.contains(&first.id));
+    let started = Instant::now();
+    session.door().motion(55.0, 65.0).unwrap();
+    session.door().barrier().unwrap();
+    client.sync();
+    assert!(started.elapsed() < Duration::from_millis(500), "input blocked on a pending GPU download");
+    a.destroy();
+    second.resource.copy(&b);
+    client.sync();
+    assert_eq!(readback::counter(&session, "queued"), before + 1, "cancellation must not allocate a second staging slot");
+    client.until("canceled consumer fails", |p| p.failed.contains(&first.id));
+    client.until("later consumer completes after retirement", |p| p.ready.contains(&second.id));
+    assert!(second.pixels(&storage).iter().all(|pixel| pixel[3] == 255));
+    assert!(readback::counter(&session, "pending_polls") > 0);
+    poll_until(Duration::from_secs(2), "all GPU staging retired", || {
+        (readback::counter(&session, "active_bytes") == 0).then_some(())
+    }).unwrap();
+    first.resource.destroy(); second.resource.destroy(); b.destroy(); storage.pool.destroy(); client.sync();
+    assert!(session.compositor_alive());
+}
+
+#[test]
+#[ignore = "needs nested Wayland; scripts/e2e.sh --headless --host-renderer gl --test screencopy_pressure"]
+fn stalled_gpu_download_fails_its_consumer_without_blocking_or_freeing_in_flight_storage() {
+    let mut session = Session::boot("readback-timeout", SessionOptions {
+        config_extra: "show_dock = false\n".into(),
+        env: vec![("CHONKSTEP_TEST_READBACK_DELAY_MS".into(), "6000".into())],
+        ..Default::default()
+    }).unwrap();
+    let mut client = screencopy::Client::connect(&session);
+    let frame = client.region(20, 30, 16, 16);
+    let storage = client.storage(&frame);
+    let buffer = client.buffer(&storage, &frame);
+    frame.resource.copy(&buffer);
+    client.until_for(Duration::from_secs(7), "bounded readback timeout", |p| p.failed.contains(&frame.id));
+    assert!(!client.probe.ready.contains(&frame.id));
+    assert_eq!(readback::counter(&session, "active_bytes"), 16 * 16 * 4);
+    let started = Instant::now();
+    session.door().barrier().unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500));
+    poll_until(Duration::from_secs(3), "timed-out storage retires after GPU completion", || {
+        (readback::counter(&session, "active_bytes") == 0).then_some(())
+    }).unwrap();
+    frame.resource.destroy(); buffer.destroy(); storage.pool.destroy(); client.sync();
+    assert!(session.compositor_alive());
+}

@@ -1,0 +1,9 @@
+{
+  "wall_ns": 1789065544650457955,
+  "monotonic_ns": 226442148048062,
+  "local_timezone": [
+    "PST",
+    "PDT"
+  ],
+  "purpose": "Filter NVIDIA CSV samples to the measurement interval; A/B harness did not yet record wall time per sample."
+}

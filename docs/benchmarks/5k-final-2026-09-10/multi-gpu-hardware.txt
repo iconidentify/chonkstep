@@ -1,0 +1,16 @@
+   Compiling chonk-shell v0.4.4 (/home/chrisk/src/chonkstep/crates/chonk-shell)
+   Compiling wm-wayland v0.4.4 (/home/chrisk/src/chonkstep/crates/wm-wayland)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.54s
+     Running unittests src/lib.rs (target/debug/deps/wm_wayland-c2fa44a21ca581e2)
+
+running 1 test
+verified target-to-render import formats: 0
+target /dev/dri/renderD129 renderable modifiers: [Unrecognized(216172782120099856), Unrecognized(216172782120099857), Unrecognized(216172782120099858), Unrecognized(216172782120099859), Unrecognized(216172782120099860), Unrecognized(216172782120099861), Unrecognized(216172782128496656), Unrecognized(216172782128496657), Unrecognized(216172782128496658), Unrecognized(216172782128496659), Unrecognized(216172782128496660), Unrecognized(216172782128496661), Invalid]
+verified /dev/dri/renderD128 -> /dev/dri/renderD129: dma_copies=0, cpu_copies=4, cpu_pixels=14753170
+verified target-to-render import formats: 0
+target /dev/dri/renderD128 renderable modifiers: [Unrecognized(216172782120099856), Unrecognized(216172782120099857), Unrecognized(216172782120099858), Unrecognized(216172782120099859), Unrecognized(216172782120099860), Unrecognized(216172782120099861), Unrecognized(216172782128496656), Unrecognized(216172782128496657), Unrecognized(216172782128496658), Unrecognized(216172782128496659), Unrecognized(216172782128496660), Unrecognized(216172782128496661), Invalid]
+verified /dev/dri/renderD129 -> /dev/dri/renderD128: dma_copies=0, cpu_copies=4, cpu_pixels=14753170
+test multi_gpu::tests::two_real_gpus_preserve_full_and_partial_opaque_pixels_in_both_directions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 286 filtered out; finished in 0.37s
+

@@ -482,6 +482,57 @@ fn on_readable(connection: &mut Connection, comp: &mut Compositor) -> PostAction
 /// Parses and executes one command line. Injection goes through
 /// [`crate::input::process_input_event`] — the seam; see the module
 /// docs for why nowhere shallower would do.
+/// Only the explicitly enabled test socket can create nested heads. The output
+/// lifecycle below is the same connector reconciliation native hardware uses.
+fn virtual_outputs(comp: &mut Compositor, topology: &str) -> Result<(), &'static str> {
+    use crate::state::{Graphics, OutputSetup};
+    use smithay::output::{Output, PhysicalProperties, Mode, Subpixel};
+    use smithay::utils::Transform;
+    use wm_theme_api::{Point, Size};
+    let Graphics::Winit(host) = &comp.graphics else { return Err("virtual outputs require a nested host"); };
+    let host_size = host.window_size();
+    if host_size.w < 400 || host_size.h < 300 { return Err("host is too small for virtual displays"); }
+    let sizes: Vec<Size> = match topology {
+        "none" => Vec::new(),
+        "compact" => vec![Size::new(400, 300)],
+        "single" => vec![Size::new(host_size.w as u32, host_size.h as u32)],
+        "split" => vec![Size::new((host_size.w / 2) as u32, host_size.h as u32),
+            Size::new((host_size.w - host_size.w / 2) as u32, host_size.h as u32)],
+        _ => return Err("virtual-outputs wants split, single, compact or none"),
+    };
+    let mut added = Vec::new();
+    let mut x = 0;
+    for (index, &size) in sizes.iter().enumerate() {
+        let mode = Mode { size: (size.w as i32, size.h as i32).into(), refresh: 60_000 };
+        if let Some(entry) = comp.outputs.get_mut(index) {
+            entry.size = size;
+            entry.position = Point::new(x, 0);
+            entry.output.change_current_state(Some(mode), None, None, Some((x, 0).into()));
+            entry.output.set_preferred(mode);
+            entry.modes = vec![mode];
+        } else {
+            let name = if index == 0 { "chonkstep" } else { "chonkstep-right" };
+            let output = Output::new(name.into(), PhysicalProperties { size: (0, 0).into(),
+                subpixel: Subpixel::Unknown, make: "chonkstep".into(), model: "nested test display".into() });
+            output.change_current_state(Some(mode), Some(Transform::Flipped180), None, Some((x, 0).into()));
+            output.set_preferred(mode);
+            added.push(OutputSetup { output, identity: None, serial: String::new(), position: Point::new(x, 0),
+                size, transform: Transform::Normal, requested_mode: None, modes: vec![mode],
+                powered: true, vrr_supported: false, vrr_requested: false, vrr_enabled: false });
+        }
+        x += size.w as i32;
+    }
+    let removed: Vec<_> = (sizes.len()..comp.outputs.len()).rev().collect();
+    crate::state::apply_connector_hotplug(comp, &removed, added);
+    // A host swap covers the framebuffer; wl_output retains each head's viewport.
+    let total = Size::new(host_size.w as u32, host_size.h as u32);
+    if let Some(first) = comp.outputs.first_mut() {
+        first.damage_tracker = crate::state::physical_damage_tracker(&first.output, total);
+    }
+    comp.wm.backend_mut().mark_damaged();
+    Ok(())
+}
+
 fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
     let mut words = line.split_whitespace();
     let time = comp.start_time.elapsed().as_micros() as u64;
@@ -489,6 +540,14 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
         let _ = stream.write_all(format!("err {reason}\n").as_bytes());
     };
     match words.next() {
+        Some("virtual-outputs") => {
+            match (words.next(), words.next()) {
+                (Some(mode @ ("split" | "single" | "compact" | "none")), None) => {
+                    if let Err(error) = virtual_outputs(comp, mode) { reply_err(stream, error); }
+                }
+                _ => reply_err(stream, "virtual-outputs wants split, single, compact or none"),
+            }
+        }
         Some("primary-scale") => {
             let Some(Ok(scale)) = words.next().map(str::parse::<f64>) else {
                 reply_err(stream, "primary-scale wants a numeric FACTOR");
@@ -928,6 +987,14 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                         window.source.size.h
                     ));
                 }
+                for (index, space) in overview.spaces.iter().enumerate() {
+                    let r = space.rect;
+                    reply.push_str(&format!("overview-space index={index} x={} y={} w={} h={} windows={}\n",
+                        r.pos.x, r.pos.y, r.size.w, r.size.h, space.windows.len()));
+                    for window in &space.windows {
+                        reply.push_str(&format!("overview-space-window index={index} id={}\n", window.window.0));
+                    }
+                }
                 if let Some(drag) = overview.drag {
                     if let Some(window) = overview.windows.get(drag.index) {
                         let r = drag.destination;
@@ -973,7 +1040,8 @@ pub(crate) fn after_frame(comp: &mut Compositor) {
             return;
         }
         let backend = comp.wm.backend();
-        if backend.damage || !backend.pending.is_empty() {
+        // With no outputs there can be no completed frame; fence dispatch only.
+        if (backend.damage && !comp.outputs.is_empty()) || !backend.pending.is_empty() || comp.mac_copy_order.queued() {
             return;
         }
         for mut stream in pending.drain(..) {

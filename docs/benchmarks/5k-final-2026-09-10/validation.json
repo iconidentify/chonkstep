@@ -1,0 +1,202 @@
+{
+  "e2e_command": "scripts/e2e.sh --headless --host-renderer gl --release --test TARGET",
+  "e2e_total": 144,
+  "missing_client_skips": 0,
+  "e2e": [
+    {
+      "target": "mac_mode",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-mac_mode.log",
+      "log_sha256": "bc2e4fa7220b17bd691b0b92be3bd83c0cb11fbe70b82ea050144222f28a7eee"
+    },
+    {
+      "target": "selection_transfer",
+      "passed": 20,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-selection_transfer.log",
+      "log_sha256": "8f817efec95346030b02e1593f12527ae5a4238b73504a733d1e72c3f14fdeb1"
+    },
+    {
+      "target": "capture_tool",
+      "passed": 17,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-capture_tool.log",
+      "log_sha256": "4f0af1b9dc31c48a1a0b8325028b39438b690d6c9756aa119691f5b5d4478db3"
+    },
+    {
+      "target": "keyboard_focus",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-keyboard_focus.log",
+      "log_sha256": "0fd169dcfacb7c199894556c436d22b6bdc06bd94997391ae96dc128421b9a57"
+    },
+    {
+      "target": "selection_lifecycle",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-selection_lifecycle.log",
+      "log_sha256": "14e0ce21f9f13e8f1b1fad70ff351422d334a00a6fd813fff30b15b2ae42c185"
+    },
+    {
+      "target": "keyboard_repeat",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-keyboard_repeat.log",
+      "log_sha256": "8199dea836360efb91878d4d9c775f835c27a0e6f2930602e14fdfa5304f6a23"
+    },
+    {
+      "target": "xwayland_input",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-xwayland_input.log",
+      "log_sha256": "6b41380b60b891b0a96ce050eeff208ecde9ff17436deaf194b3fc2a049b5cce"
+    },
+    {
+      "target": "session_lock",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-session_lock.log",
+      "log_sha256": "6fba3c74c8da7a57b24c88d83d18d5dc603b57c1550043fcc8525cbaf890b558"
+    },
+    {
+      "target": "browser_selection",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-browser_selection.log",
+      "log_sha256": "a4cad6f0b78891738aae16dcb0184c0c2a7449ea441362233ee7ed7af011be72"
+    },
+    {
+      "target": "omarchy_terminal",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-omarchy_terminal.log",
+      "log_sha256": "ad78d89b0201cdb6783274c67c843a321f126494fa222fcb146688206189cf0b"
+    },
+    {
+      "target": "screencopy_pressure",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-screencopy_pressure.log",
+      "log_sha256": "76dee150de47db3a6541c1ff9dafab1caaf9f7fe1d7857d5f3db4e4644900940"
+    },
+    {
+      "target": "image_capture",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-image_capture.log",
+      "log_sha256": "b5f7ad5a6e36fc3dc2a2422be333c9db6ab73c8f49beb18a73c498f02d5b9306"
+    },
+    {
+      "target": "capture_cache",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-capture_cache.log",
+      "log_sha256": "4ce48cfbb0fb74b938944e65a6939a011634dde0273bb363020882a3270b93ca"
+    },
+    {
+      "target": "hidden_surface_damage",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-hidden_surface_damage.log",
+      "log_sha256": "fb7d96bbbcafed4ad9f84bae00de2e4a06cbf55fb72337e705a19fa058525840"
+    },
+    {
+      "target": "hyprland_ipc",
+      "passed": 19,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-hyprland_ipc.log",
+      "log_sha256": "b7ce1b60037dc3190b420442979a17ee5f037172be593c5121193624438647bd"
+    },
+    {
+      "target": "fullscreen",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-fullscreen.log",
+      "log_sha256": "61fd2f16fc7d0a23a0646bd4b65e5a99835463458d7817fb247133250643a794"
+    },
+    {
+      "target": "overview",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-overview.log",
+      "log_sha256": "d20ccff6982f47bcaa04cff515bcbf0bd2feddb7cf281812b6c568266eec1824"
+    },
+    {
+      "target": "idle",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/chonk-final-idle-retry.log",
+      "log_sha256": "677baf1d6ca2ae423a19b6867abcbfc1b02abf1b82eb6f8ed8606b7ee5d0e88a"
+    }
+  ],
+  "workspace_library_tests": {
+    "passed": 1917,
+    "failed": 0,
+    "ignored": 12,
+    "targets": 18,
+    "log": "/tmp/chonk-gpu-final-unit2.log"
+  },
+  "harness": {
+    "passed": 68,
+    "log": "/tmp/chonk-final-harness.log"
+  },
+  "hardware": {
+    "test": "multi_gpu::tests::two_real_gpus_preserve_full_and_partial_opaque_pixels_in_both_directions",
+    "passed": 1,
+    "dma_copies": 0,
+    "cpu_copies": 8,
+    "verified_target_import_formats": [
+      0,
+      0
+    ],
+    "physical_connectors": "all eight disconnected",
+    "log": "/tmp/chonk-multigpu-hardware-final.log"
+  },
+  "note": "Non-idle nested tests precede the native-only cross-GPU import preflight. Idle retry, strict Clippy and the hardware test include it. Initial idle attempt was interrupted by a concurrent source edit during compilation, not an idle runtime failure.",
+  "strict_checks": {
+    "workspace_clippy": "/tmp/chonk-interop-lint.log",
+    "private_rustdoc": "/tmp/chonk-final-rustdoc.log",
+    "gpu_fixture_clippy": "/tmp/chonk-texture-fixture-lint.log"
+  },
+  "committed_release_recheck": {
+    "source_commit": "795206b",
+    "binary": "/tmp/chonkstep-795206b/chonkstep-wayland",
+    "sha256": "041ff5be3d8e558a1d9c65e52d26fdcfa6b80168c9c2e565d11b43f07e23c5b0",
+    "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-7-g795206b\nbuild id: df08f762133fa79dc2245d02f24bf0e8d5e6794a",
+    "mac_check_config": "resolved 41 bindings; 0 diagnostics",
+    "tests": [
+      {
+        "target": "mac_mode",
+        "passed": 11,
+        "log": "/tmp/chonk-final-shipping-mac.log",
+        "log_sha256": "a6645af166b7d6957c2f7357b19c9474a32b1d57b913149ca9e4e9a63b2f1f49"
+      },
+      {
+        "target": "screencopy_pressure",
+        "passed": 8,
+        "log": "/tmp/chonk-final-shipping-e2e.log",
+        "log_sha256": "08bd352db41d0364abea23d89b7229eff75bc42ac3bb974475d87fcd9d0e0d1f"
+      }
+    ],
+    "note": "These repeat existing cases against the standalone release build; they do not increase the 144 distinct E2E total."
+  }
+}

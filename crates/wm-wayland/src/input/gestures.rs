@@ -20,7 +20,8 @@ pub(crate) fn inspect(
 }
 
 pub(crate) fn available(state: &Compositor) -> bool {
-    !state.wm.backend().locked
+    !state.wm.monitors_ref().is_empty()
+        && !state.wm.backend().locked
         && crate::session::input_active(&state.graphics)
         && !crate::capture_tool::modal(state.wm.backend())
         && state.layer_shell.exclusive_focus.is_none()

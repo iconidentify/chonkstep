@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/release/deps/wm_wayland-ca01cb7e706506e3)
+
+running 1 test
+verified target-to-render import formats: 0
+target /dev/dri/renderD129 renderable modifiers: [Unrecognized(216172782120099856), Unrecognized(216172782120099857), Unrecognized(216172782120099858), Unrecognized(216172782120099859), Unrecognized(216172782120099860), Unrecognized(216172782120099861), Unrecognized(216172782128496656), Unrecognized(216172782128496657), Unrecognized(216172782128496658), Unrecognized(216172782128496659), Unrecognized(216172782128496660), Unrecognized(216172782128496661), Invalid]
+verified /dev/dri/renderD128 -> /dev/dri/renderD129: dma_copies=0, cpu_copies=4, cpu_pixels=14753170
+verified target-to-render import formats: 0
+target /dev/dri/renderD128 renderable modifiers: [Unrecognized(216172782120099856), Unrecognized(216172782120099857), Unrecognized(216172782120099858), Unrecognized(216172782120099859), Unrecognized(216172782120099860), Unrecognized(216172782120099861), Unrecognized(216172782128496656), Unrecognized(216172782128496657), Unrecognized(216172782128496658), Unrecognized(216172782128496659), Unrecognized(216172782128496660), Unrecognized(216172782128496661), Invalid]
+verified /dev/dri/renderD129 -> /dev/dri/renderD128: dma_copies=0, cpu_copies=4, cpu_pixels=14753170
+test multi_gpu::tests::two_real_gpus_preserve_full_and_partial_opaque_pixels_in_both_directions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 289 filtered out; finished in 0.40s

@@ -1,0 +1,1604 @@
+[
+  {
+    "label": "final",
+    "case": "native",
+    "buffer_scale": 2,
+    "output_scale": 2.0,
+    "client_renderer": "egl",
+    "pattern": "texture",
+    "framebuffer": [
+      5120,
+      2880
+    ],
+    "source_buffer": [
+      5120,
+      2880
+    ],
+    "seconds": 10.014806634,
+    "cpu_percent": 13.579892749829403,
+    "render_frames_per_second": 60.11099584850957,
+    "render_wall_us_per_frame": 15186.548172757475,
+    "composition_gpu_us_per_sample": 1678.188747107438,
+    "gpu_samples": 605,
+    "gpu_before": {
+      "samples": 127,
+      "total_ns": 30256128,
+      "max_ns": 1549312
+    },
+    "gpu_after": {
+      "samples": 732,
+      "total_ns": 1045560320,
+      "max_ns": 4751360
+    },
+    "frames": {
+      "dispatch_calls": 1129,
+      "dispatch_us": 9171098,
+      "dispatch_max_us": 16524,
+      "input_us": 360,
+      "shell_us": 14436,
+      "protocol_us": 3946,
+      "layout_us": 4591,
+      "render_calls": 602,
+      "render_us": 9142302,
+      "render_max_us": 16500,
+      "flush_us": 1505,
+      "ipc_us": 1216,
+      "render_attempts": 602,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "rss_kib": 335464,
+      "pss_kib": 195770,
+      "private_kib": 168364,
+      "swap_kib": 0,
+      "peak_rss_kib": 371576,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 85,
+      "context_switches": 1298,
+      "sample_monotonic_ns": 192007944887896,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456139,
+          "rss_kib": 244888,
+          "pss_kib": 105627,
+          "private_kib": 78036,
+          "swap_kib": 0,
+          "peak_rss_kib": 244888,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 182,
+          "sample_monotonic_ns": 192007952930175,
+          "reaped_child_cpu_ticks": 1,
+          "children": [],
+          "tree_pss_kib": 105627
+        }
+      ],
+      "tree_pss_kib": 301397
+    },
+    "after": {
+      "rss_kib": 338056,
+      "pss_kib": 198362,
+      "private_kib": 170956,
+      "swap_kib": 0,
+      "peak_rss_kib": 371576,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 221,
+      "context_switches": 6334,
+      "sample_monotonic_ns": 192017959694530,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456139,
+          "rss_kib": 244888,
+          "pss_kib": 105627,
+          "private_kib": 78036,
+          "swap_kib": 0,
+          "peak_rss_kib": 244888,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 182,
+          "sample_monotonic_ns": 192017964266172,
+          "reaped_child_cpu_ticks": 1,
+          "children": [],
+          "tree_pss_kib": 105627
+        }
+      ],
+      "tree_pss_kib": 303989
+    },
+    "competing_load_before": {
+      "load_average": [
+        3.4521484375,
+        3.64111328125,
+        4.265625
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 5, 22565, 49, 115.36\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.46"
+    },
+    "competing_load_after": {
+      "load_average": [
+        3.3017578125,
+        3.60302734375,
+        4.24658203125
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 35, 22565, 43, 36.70\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 31.59"
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "chonkstep",
+        "description": "chonkstep",
+        "make": "chonkstep",
+        "model": "winit",
+        "serial": "",
+        "width": 5120,
+        "height": 2880,
+        "refreshRate": 60.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "5120x2880@60.00Hz"
+        ]
+      }
+    ],
+    "pixels_verified": true,
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "artifact_directory": "/tmp/cg5-final-gpu/00-final-c0"
+  },
+  {
+    "label": "final",
+    "case": "fractional",
+    "buffer_scale": 2,
+    "output_scale": 1.5,
+    "client_renderer": "egl",
+    "pattern": "texture",
+    "framebuffer": [
+      5120,
+      2880
+    ],
+    "source_buffer": [
+      6826,
+      3840
+    ],
+    "seconds": 10.013537045,
+    "cpu_percent": 13.781344132431878,
+    "render_frames_per_second": 60.118617157420225,
+    "render_wall_us_per_frame": 14830.586378737542,
+    "composition_gpu_us_per_sample": 1739.635517355372,
+    "gpu_samples": 605,
+    "gpu_before": {
+      "samples": 127,
+      "total_ns": 35752960,
+      "max_ns": 1515520
+    },
+    "gpu_after": {
+      "samples": 732,
+      "total_ns": 1088232448,
+      "max_ns": 2835456
+    },
+    "frames": {
+      "dispatch_calls": 980,
+      "dispatch_us": 8954559,
+      "dispatch_max_us": 16760,
+      "input_us": 336,
+      "shell_us": 13520,
+      "protocol_us": 3637,
+      "layout_us": 3796,
+      "render_calls": 602,
+      "render_us": 8928013,
+      "render_max_us": 16722,
+      "flush_us": 1457,
+      "ipc_us": 1174,
+      "render_attempts": 602,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "rss_kib": 334872,
+      "pss_kib": 195018,
+      "private_kib": 167616,
+      "swap_kib": 0,
+      "peak_rss_kib": 371200,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 85,
+      "context_switches": 1302,
+      "sample_monotonic_ns": 192026591792839,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456334,
+          "rss_kib": 243620,
+          "pss_kib": 104401,
+          "private_kib": 76844,
+          "swap_kib": 0,
+          "peak_rss_kib": 243620,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 192,
+          "sample_monotonic_ns": 192026598645251,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 104401
+        }
+      ],
+      "tree_pss_kib": 299419
+    },
+    "after": {
+      "rss_kib": 337456,
+      "pss_kib": 197602,
+      "private_kib": 170200,
+      "swap_kib": 0,
+      "peak_rss_kib": 371200,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 223,
+      "context_switches": 6379,
+      "sample_monotonic_ns": 192036605329884,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456334,
+          "rss_kib": 243620,
+          "pss_kib": 104401,
+          "private_kib": 76844,
+          "swap_kib": 0,
+          "peak_rss_kib": 243620,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 192,
+          "sample_monotonic_ns": 192036610078881,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 104401
+        }
+      ],
+      "tree_pss_kib": 302003
+    },
+    "competing_load_before": {
+      "load_average": [
+        3.2548828125,
+        3.58251953125,
+        4.23291015625
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 5, 22699, 49, 117.03\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 25.40"
+    },
+    "competing_load_after": {
+      "load_average": [
+        3.0615234375,
+        3.5302734375,
+        4.20849609375
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 14, 22699, 46, 54.04\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.48"
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "chonkstep",
+        "description": "chonkstep",
+        "make": "chonkstep",
+        "model": "winit",
+        "serial": "",
+        "width": 5120,
+        "height": 2880,
+        "refreshRate": 60.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 1.5,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "5120x2880@60.00Hz"
+        ]
+      }
+    ],
+    "pixels_verified": true,
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "artifact_directory": "/tmp/cg5-final-gpu/00-final-c1"
+  },
+  {
+    "label": "final",
+    "case": "legacy",
+    "buffer_scale": 1,
+    "output_scale": 2.0,
+    "client_renderer": "egl",
+    "pattern": "texture",
+    "framebuffer": [
+      5120,
+      2880
+    ],
+    "source_buffer": [
+      5120,
+      2880
+    ],
+    "seconds": 10.013657092,
+    "cpu_percent": 12.98226999443172,
+    "render_frames_per_second": 60.11789643575304,
+    "render_wall_us_per_frame": 15210.04485049834,
+    "composition_gpu_us_per_sample": 1591.5008,
+    "gpu_samples": 605,
+    "gpu_before": {
+      "samples": 127,
+      "total_ns": 29205504,
+      "max_ns": 1547264
+    },
+    "gpu_after": {
+      "samples": 732,
+      "total_ns": 992063488,
+      "max_ns": 4738048
+    },
+    "frames": {
+      "dispatch_calls": 1014,
+      "dispatch_us": 9183400,
+      "dispatch_max_us": 16683,
+      "input_us": 305,
+      "shell_us": 13605,
+      "protocol_us": 3725,
+      "layout_us": 3886,
+      "render_calls": 602,
+      "render_us": 9156447,
+      "render_max_us": 16644,
+      "flush_us": 1524,
+      "ipc_us": 1211,
+      "render_attempts": 602,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "rss_kib": 335976,
+      "pss_kib": 196154,
+      "private_kib": 168724,
+      "swap_kib": 0,
+      "peak_rss_kib": 372700,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 84,
+      "context_switches": 1326,
+      "sample_monotonic_ns": 192041620833226,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456513,
+          "rss_kib": 244052,
+          "pss_kib": 104778,
+          "private_kib": 77204,
+          "swap_kib": 0,
+          "peak_rss_kib": 244052,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 189,
+          "sample_monotonic_ns": 192041627896712,
+          "reaped_child_cpu_ticks": 1,
+          "children": [],
+          "tree_pss_kib": 104778
+        }
+      ],
+      "tree_pss_kib": 300932
+    },
+    "after": {
+      "rss_kib": 338560,
+      "pss_kib": 198738,
+      "private_kib": 171308,
+      "swap_kib": 0,
+      "peak_rss_kib": 372700,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 214,
+      "context_switches": 6359,
+      "sample_monotonic_ns": 192051634490318,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456513,
+          "rss_kib": 244052,
+          "pss_kib": 104778,
+          "private_kib": 77204,
+          "swap_kib": 0,
+          "peak_rss_kib": 244052,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 189,
+          "sample_monotonic_ns": 192051639234162,
+          "reaped_child_cpu_ticks": 1,
+          "children": [],
+          "tree_pss_kib": 104778
+        }
+      ],
+      "tree_pss_kib": 303516
+    },
+    "competing_load_before": {
+      "load_average": [
+        3.45703125,
+        3.6044921875,
+        4.22900390625
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 5, 22565, 50, 115.43\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.56"
+    },
+    "competing_load_after": {
+      "load_average": [
+        3.46728515625,
+        3.60107421875,
+        4.220703125
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 35, 22565, 44, 37.25\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.65"
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "chonkstep",
+        "description": "chonkstep",
+        "make": "chonkstep",
+        "model": "winit",
+        "serial": "",
+        "width": 5120,
+        "height": 2880,
+        "refreshRate": 60.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "5120x2880@60.00Hz"
+        ]
+      }
+    ],
+    "pixels_verified": true,
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "artifact_directory": "/tmp/cg5-final-gpu/00-final-c2"
+  },
+  {
+    "label": "final",
+    "case": "native",
+    "buffer_scale": 2,
+    "output_scale": 2.0,
+    "client_renderer": "egl",
+    "pattern": "texture",
+    "framebuffer": [
+      5120,
+      2880
+    ],
+    "source_buffer": [
+      5120,
+      2880
+    ],
+    "seconds": 10.014375627,
+    "cpu_percent": 13.38076431232711,
+    "render_frames_per_second": 60.11358295537999,
+    "render_wall_us_per_frame": 15126.083056478405,
+    "composition_gpu_us_per_sample": 1639.5153983471075,
+    "gpu_samples": 605,
+    "gpu_before": {
+      "samples": 127,
+      "total_ns": 29316096,
+      "max_ns": 1478656
+    },
+    "gpu_after": {
+      "samples": 732,
+      "total_ns": 1021222912,
+      "max_ns": 4764672
+    },
+    "frames": {
+      "dispatch_calls": 1157,
+      "dispatch_us": 9135941,
+      "dispatch_max_us": 16430,
+      "input_us": 345,
+      "shell_us": 15266,
+      "protocol_us": 4096,
+      "layout_us": 4564,
+      "render_calls": 602,
+      "render_us": 9105902,
+      "render_max_us": 16408,
+      "flush_us": 1586,
+      "ipc_us": 1299,
+      "render_attempts": 602,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "rss_kib": 335860,
+      "pss_kib": 196075,
+      "private_kib": 168672,
+      "swap_kib": 0,
+      "peak_rss_kib": 372268,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 84,
+      "context_switches": 1289,
+      "sample_monotonic_ns": 192094013348631,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 457204,
+          "rss_kib": 243588,
+          "pss_kib": 104324,
+          "private_kib": 76736,
+          "swap_kib": 0,
+          "peak_rss_kib": 243588,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 180,
+          "sample_monotonic_ns": 192094018348782,
+          "reaped_child_cpu_ticks": 1,
+          "children": [],
+          "tree_pss_kib": 104324
+        }
+      ],
+      "tree_pss_kib": 300399
+    },
+    "after": {
+      "rss_kib": 338448,
+      "pss_kib": 198663,
+      "private_kib": 171260,
+      "swap_kib": 0,
+      "peak_rss_kib": 372268,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 218,
+      "context_switches": 6504,
+      "sample_monotonic_ns": 192104027724258,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 457204,
+          "rss_kib": 243588,
+          "pss_kib": 104324,
+          "private_kib": 76736,
+          "swap_kib": 0,
+          "peak_rss_kib": 243588,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 180,
+          "sample_monotonic_ns": 192104036314311,
+          "reaped_child_cpu_ticks": 1,
+          "children": [],
+          "tree_pss_kib": 104324
+        }
+      ],
+      "tree_pss_kib": 302987
+    },
+    "competing_load_before": {
+      "load_average": [
+        2.97607421875,
+        3.46533203125,
+        4.14501953125
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 5, 22565, 51, 114.69\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.81"
+    },
+    "competing_load_after": {
+      "load_average": [
+        2.98583984375,
+        3.45068359375,
+        4.13232421875
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 35, 22565, 45, 37.28\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 31.81"
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "chonkstep",
+        "description": "chonkstep",
+        "make": "chonkstep",
+        "model": "winit",
+        "serial": "",
+        "width": 5120,
+        "height": 2880,
+        "refreshRate": 60.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "5120x2880@60.00Hz"
+        ]
+      }
+    ],
+    "pixels_verified": true,
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "artifact_directory": "/tmp/cg5-final-gpu/01-final-c0"
+  },
+  {
+    "label": "final",
+    "case": "fractional",
+    "buffer_scale": 2,
+    "output_scale": 1.5,
+    "client_renderer": "egl",
+    "pattern": "texture",
+    "framebuffer": [
+      5120,
+      2880
+    ],
+    "source_buffer": [
+      6826,
+      3840
+    ],
+    "seconds": 10.022197955,
+    "cpu_percent": 13.270542110340907,
+    "render_frames_per_second": 60.16644280101929,
+    "render_wall_us_per_frame": 14888.462686567163,
+    "composition_gpu_us_per_sample": 1673.018297029703,
+    "gpu_samples": 606,
+    "gpu_before": {
+      "samples": 127,
+      "total_ns": 35492864,
+      "max_ns": 720896
+    },
+    "gpu_after": {
+      "samples": 733,
+      "total_ns": 1049341952,
+      "max_ns": 2801664
+    },
+    "frames": {
+      "dispatch_calls": 1074,
+      "dispatch_us": 9006663,
+      "dispatch_max_us": 16552,
+      "input_us": 322,
+      "shell_us": 14748,
+      "protocol_us": 3971,
+      "layout_us": 4216,
+      "render_calls": 603,
+      "render_us": 8977743,
+      "render_max_us": 16509,
+      "flush_us": 1540,
+      "ipc_us": 1245,
+      "render_attempts": 603,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "rss_kib": 336220,
+      "pss_kib": 196399,
+      "private_kib": 168988,
+      "swap_kib": 0,
+      "peak_rss_kib": 372156,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 86,
+      "context_switches": 1295,
+      "sample_monotonic_ns": 192078956961827,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456996,
+          "rss_kib": 244324,
+          "pss_kib": 104987,
+          "private_kib": 77400,
+          "swap_kib": 0,
+          "peak_rss_kib": 244324,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 213,
+          "sample_monotonic_ns": 192078967347627,
+          "reaped_child_cpu_ticks": 1,
+          "children": [],
+          "tree_pss_kib": 104987
+        }
+      ],
+      "tree_pss_kib": 301386
+    },
+    "after": {
+      "rss_kib": 338812,
+      "pss_kib": 198991,
+      "private_kib": 171580,
+      "swap_kib": 0,
+      "peak_rss_kib": 372156,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 219,
+      "context_switches": 6347,
+      "sample_monotonic_ns": 192088979159782,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456996,
+          "rss_kib": 244324,
+          "pss_kib": 104987,
+          "private_kib": 77400,
+          "swap_kib": 0,
+          "peak_rss_kib": 244324,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 213,
+          "sample_monotonic_ns": 192088987167323,
+          "reaped_child_cpu_ticks": 1,
+          "children": [],
+          "tree_pss_kib": 104987
+        }
+      ],
+      "tree_pss_kib": 303978
+    },
+    "competing_load_before": {
+      "load_average": [
+        3.2548828125,
+        3.54150390625,
+        4.18017578125
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 5, 22699, 50, 116.21\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.43"
+    },
+    "competing_load_after": {
+      "load_average": [
+        3.0615234375,
+        3.490234375,
+        4.15673828125
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 11, 22699, 47, 47.61\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 27.48"
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "chonkstep",
+        "description": "chonkstep",
+        "make": "chonkstep",
+        "model": "winit",
+        "serial": "",
+        "width": 5120,
+        "height": 2880,
+        "refreshRate": 60.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 1.5,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "5120x2880@60.00Hz"
+        ]
+      }
+    ],
+    "pixels_verified": true,
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "artifact_directory": "/tmp/cg5-final-gpu/01-final-c1"
+  },
+  {
+    "label": "final",
+    "case": "legacy",
+    "buffer_scale": 1,
+    "output_scale": 2.0,
+    "client_renderer": "egl",
+    "pattern": "texture",
+    "framebuffer": [
+      5120,
+      2880
+    ],
+    "source_buffer": [
+      5120,
+      2880
+    ],
+    "seconds": 10.012027863,
+    "cpu_percent": 13.983181221196725,
+    "render_frames_per_second": 60.12767925114593,
+    "render_wall_us_per_frame": 15153.31561461794,
+    "composition_gpu_us_per_sample": 1732.7857190082643,
+    "gpu_samples": 605,
+    "gpu_before": {
+      "samples": 127,
+      "total_ns": 28107776,
+      "max_ns": 747520
+    },
+    "gpu_after": {
+      "samples": 732,
+      "total_ns": 1076443136,
+      "max_ns": 10075136
+    },
+    "frames": {
+      "dispatch_calls": 1117,
+      "dispatch_us": 9150990,
+      "dispatch_max_us": 16588,
+      "input_us": 304,
+      "shell_us": 14431,
+      "protocol_us": 3885,
+      "layout_us": 4493,
+      "render_calls": 602,
+      "render_us": 9122296,
+      "render_max_us": 16556,
+      "flush_us": 1500,
+      "ipc_us": 1213,
+      "render_attempts": 602,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "rss_kib": 336192,
+      "pss_kib": 196298,
+      "private_kib": 168864,
+      "swap_kib": 0,
+      "peak_rss_kib": 372604,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 88,
+      "context_switches": 1249,
+      "sample_monotonic_ns": 192060356091607,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456773,
+          "rss_kib": 244060,
+          "pss_kib": 104751,
+          "private_kib": 77176,
+          "swap_kib": 0,
+          "peak_rss_kib": 244060,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 17,
+          "context_switches": 199,
+          "sample_monotonic_ns": 192060361033508,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 104751
+        }
+      ],
+      "tree_pss_kib": 301049
+    },
+    "after": {
+      "rss_kib": 338776,
+      "pss_kib": 198882,
+      "private_kib": 171448,
+      "swap_kib": 0,
+      "peak_rss_kib": 372604,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 228,
+      "context_switches": 6305,
+      "sample_monotonic_ns": 192070368119470,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 456773,
+          "rss_kib": 244060,
+          "pss_kib": 104751,
+          "private_kib": 77176,
+          "swap_kib": 0,
+          "peak_rss_kib": 244060,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 17,
+          "context_switches": 199,
+          "sample_monotonic_ns": 192070373413245,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 104751
+        }
+      ],
+      "tree_pss_kib": 303633
+    },
+    "competing_load_before": {
+      "load_average": [
+        3.5556640625,
+        3.6142578125,
+        4.21826171875
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 5, 22566, 50, 115.62\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 27.26"
+    },
+    "competing_load_after": {
+      "load_average": [
+        3.39599609375,
+        3.57763671875,
+        4.19921875
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 34, 22566, 44, 36.62\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.79"
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "chonkstep",
+        "description": "chonkstep",
+        "make": "chonkstep",
+        "model": "winit",
+        "serial": "",
+        "width": 5120,
+        "height": 2880,
+        "refreshRate": 60.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "5120x2880@60.00Hz"
+        ]
+      }
+    ],
+    "pixels_verified": true,
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "artifact_directory": "/tmp/cg5-final-gpu/01-final-c2"
+  },
+  {
+    "label": "final",
+    "case": "native",
+    "buffer_scale": 2,
+    "output_scale": 2.0,
+    "client_renderer": "egl",
+    "pattern": "texture",
+    "framebuffer": [
+      5120,
+      2880
+    ],
+    "source_buffer": [
+      5120,
+      2880
+    ],
+    "seconds": 10.010904566,
+    "cpu_percent": 13.585185944324785,
+    "render_frames_per_second": 60.13442601826117,
+    "render_wall_us_per_frame": 15169.20099667774,
+    "composition_gpu_us_per_sample": 1683.9299173553718,
+    "gpu_samples": 605,
+    "gpu_before": {
+      "samples": 127,
+      "total_ns": 28730368,
+      "max_ns": 1568768
+    },
+    "gpu_after": {
+      "samples": 732,
+      "total_ns": 1047507968,
+      "max_ns": 4752384
+    },
+    "frames": {
+      "dispatch_calls": 1035,
+      "dispatch_us": 9159952,
+      "dispatch_max_us": 16435,
+      "input_us": 364,
+      "shell_us": 14380,
+      "protocol_us": 3837,
+      "layout_us": 3982,
+      "render_calls": 602,
+      "render_us": 9131859,
+      "render_max_us": 16409,
+      "flush_us": 1521,
+      "ipc_us": 1173,
+      "render_attempts": 602,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "rss_kib": 336472,
+      "pss_kib": 196741,
+      "private_kib": 169324,
+      "swap_kib": 0,
+      "peak_rss_kib": 372648,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 85,
+      "context_switches": 1301,
+      "sample_monotonic_ns": 192112970910161,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 457339,
+          "rss_kib": 244832,
+          "pss_kib": 105553,
+          "private_kib": 77972,
+          "swap_kib": 0,
+          "peak_rss_kib": 244832,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 189,
+          "sample_monotonic_ns": 192112975373571,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 105553
+        }
+      ],
+      "tree_pss_kib": 302294
+    },
+    "after": {
+      "rss_kib": 339060,
+      "pss_kib": 199329,
+      "private_kib": 171912,
+      "swap_kib": 0,
+      "peak_rss_kib": 372648,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 221,
+      "context_switches": 6255,
+      "sample_monotonic_ns": 192122981814727,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 457339,
+          "rss_kib": 244832,
+          "pss_kib": 105553,
+          "private_kib": 77972,
+          "swap_kib": 0,
+          "peak_rss_kib": 244832,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 189,
+          "sample_monotonic_ns": 192122986383272,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 105553
+        }
+      ],
+      "tree_pss_kib": 304882
+    },
+    "competing_load_before": {
+      "load_average": [
+        3.1474609375,
+        3.4765625,
+        4.13720703125
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 5, 22565, 51, 114.44\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.52"
+    },
+    "competing_load_after": {
+      "load_average": [
+        3.05029296875,
+        3.44384765625,
+        4.119140625
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 35, 22565, 45, 37.17\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.37"
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "chonkstep",
+        "description": "chonkstep",
+        "make": "chonkstep",
+        "model": "winit",
+        "serial": "",
+        "width": 5120,
+        "height": 2880,
+        "refreshRate": 60.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "5120x2880@60.00Hz"
+        ]
+      }
+    ],
+    "pixels_verified": true,
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "artifact_directory": "/tmp/cg5-final-gpu/02-final-c0"
+  },
+  {
+    "label": "final",
+    "case": "fractional",
+    "buffer_scale": 2,
+    "output_scale": 1.5,
+    "client_renderer": "egl",
+    "pattern": "texture",
+    "framebuffer": [
+      5120,
+      2880
+    ],
+    "source_buffer": [
+      6826,
+      3840
+    ],
+    "seconds": 10.013372946,
+    "cpu_percent": 13.082504836927104,
+    "render_frames_per_second": 60.11960238038257,
+    "render_wall_us_per_frame": 14955.56146179402,
+    "composition_gpu_us_per_sample": 1665.0510809917355,
+    "gpu_samples": 605,
+    "gpu_before": {
+      "samples": 126,
+      "total_ns": 35976192,
+      "max_ns": 1695744
+    },
+    "gpu_after": {
+      "samples": 731,
+      "total_ns": 1043332096,
+      "max_ns": 2797568
+    },
+    "frames": {
+      "dispatch_calls": 1039,
+      "dispatch_us": 9030886,
+      "dispatch_max_us": 16514,
+      "input_us": 273,
+      "shell_us": 13879,
+      "protocol_us": 3603,
+      "layout_us": 4074,
+      "render_calls": 602,
+      "render_us": 9003248,
+      "render_max_us": 16469,
+      "flush_us": 2030,
+      "ipc_us": 1138,
+      "render_attempts": 602,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "rss_kib": 335512,
+      "pss_kib": 195970,
+      "private_kib": 168624,
+      "swap_kib": 0,
+      "peak_rss_kib": 371968,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 85,
+      "context_switches": 1262,
+      "sample_monotonic_ns": 192131611551400,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 457582,
+          "rss_kib": 243060,
+          "pss_kib": 103795,
+          "private_kib": 76208,
+          "swap_kib": 0,
+          "peak_rss_kib": 243060,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 194,
+          "sample_monotonic_ns": 192131618055300,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 103795
+        }
+      ],
+      "tree_pss_kib": 299765
+    },
+    "after": {
+      "rss_kib": 338100,
+      "pss_kib": 198558,
+      "private_kib": 171212,
+      "swap_kib": 0,
+      "peak_rss_kib": 371968,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 216,
+      "context_switches": 6280,
+      "sample_monotonic_ns": 192141624924346,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 457582,
+          "rss_kib": 243060,
+          "pss_kib": 103795,
+          "private_kib": 76208,
+          "swap_kib": 0,
+          "peak_rss_kib": 243060,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 194,
+          "sample_monotonic_ns": 192141629694612,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 103795
+        }
+      ],
+      "tree_pss_kib": 302353
+    },
+    "competing_load_before": {
+      "load_average": [
+        3.19677734375,
+        3.46240234375,
+        4.1171875
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 5, 22699, 51, 116.15\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 25.37"
+    },
+    "competing_load_after": {
+      "load_average": [
+        3.01220703125,
+        3.4140625,
+        4.09375
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 42, 22699, 46, 41.53\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.68"
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "chonkstep",
+        "description": "chonkstep",
+        "make": "chonkstep",
+        "model": "winit",
+        "serial": "",
+        "width": 5120,
+        "height": 2880,
+        "refreshRate": 60.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 1.5,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "5120x2880@60.00Hz"
+        ]
+      }
+    ],
+    "pixels_verified": true,
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "artifact_directory": "/tmp/cg5-final-gpu/02-final-c1"
+  },
+  {
+    "label": "final",
+    "case": "legacy",
+    "buffer_scale": 1,
+    "output_scale": 2.0,
+    "client_renderer": "egl",
+    "pattern": "texture",
+    "framebuffer": [
+      5120,
+      2880
+    ],
+    "source_buffer": [
+      5120,
+      2880
+    ],
+    "seconds": 10.013799204,
+    "cpu_percent": 14.480018726766552,
+    "render_frames_per_second": 60.11704326561011,
+    "render_wall_us_per_frame": 15053.343853820597,
+    "composition_gpu_us_per_sample": 1808.473705785124,
+    "gpu_samples": 605,
+    "gpu_before": {
+      "samples": 127,
+      "total_ns": 27780096,
+      "max_ns": 704512
+    },
+    "gpu_after": {
+      "samples": 732,
+      "total_ns": 1121906688,
+      "max_ns": 4746240
+    },
+    "frames": {
+      "dispatch_calls": 1106,
+      "dispatch_us": 9090806,
+      "dispatch_max_us": 16422,
+      "input_us": 318,
+      "shell_us": 14686,
+      "protocol_us": 3902,
+      "layout_us": 4246,
+      "render_calls": 602,
+      "render_us": 9062113,
+      "render_max_us": 16400,
+      "flush_us": 1522,
+      "ipc_us": 1259,
+      "render_attempts": 602,
+      "gesture_build_calls": 0,
+      "gesture_build_us": 0,
+      "gesture_build_max_us": 0
+    },
+    "before": {
+      "rss_kib": 334988,
+      "pss_kib": 195271,
+      "private_kib": 167856,
+      "swap_kib": 0,
+      "peak_rss_kib": 371516,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 83,
+      "context_switches": 1277,
+      "sample_monotonic_ns": 192146612918973,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 457729,
+          "rss_kib": 243660,
+          "pss_kib": 104389,
+          "private_kib": 76832,
+          "swap_kib": 0,
+          "peak_rss_kib": 243660,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 226,
+          "sample_monotonic_ns": 192146620011350,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 104389
+        }
+      ],
+      "tree_pss_kib": 299660
+    },
+    "after": {
+      "rss_kib": 337568,
+      "pss_kib": 197851,
+      "private_kib": 170436,
+      "swap_kib": 0,
+      "peak_rss_kib": 371516,
+      "threads": 7,
+      "fds": 78,
+      "cpu_ticks": 228,
+      "context_switches": 6422,
+      "sample_monotonic_ns": 192156626718177,
+      "reaped_child_cpu_ticks": 0,
+      "children": [
+        {
+          "pid": 457729,
+          "rss_kib": 243660,
+          "pss_kib": 104389,
+          "private_kib": 76832,
+          "swap_kib": 0,
+          "peak_rss_kib": 243660,
+          "threads": 1,
+          "fds": 41,
+          "cpu_ticks": 18,
+          "context_switches": 226,
+          "sample_monotonic_ns": 192156631420627,
+          "reaped_child_cpu_ticks": 0,
+          "children": [],
+          "tree_pss_kib": 104389
+        }
+      ],
+      "tree_pss_kib": 302240
+    },
+    "competing_load_before": {
+      "load_average": [
+        3.09130859375,
+        3.423828125,
+        4.0927734375
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 5, 22566, 51, 115.08\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 28.31"
+    },
+    "competing_load_after": {
+      "load_average": [
+        2.92333984375,
+        3.37646484375,
+        4.06982421875
+      ],
+      "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 35, 22566, 46, 37.13\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 29, 24.65"
+    },
+    "monitors": [
+      {
+        "id": 0,
+        "name": "chonkstep",
+        "description": "chonkstep",
+        "make": "chonkstep",
+        "model": "winit",
+        "serial": "",
+        "width": 5120,
+        "height": 2880,
+        "refreshRate": 60.0,
+        "x": 0,
+        "y": 0,
+        "activeWorkspace": {
+          "id": 1,
+          "name": "1"
+        },
+        "specialWorkspace": {
+          "id": 0,
+          "name": ""
+        },
+        "reserved": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "scale": 2.0,
+        "transform": 0,
+        "focused": true,
+        "dpmsStatus": true,
+        "vrr": false,
+        "solitaryBlockedBy": [],
+        "activelyTearing": false,
+        "directScanoutTo": null,
+        "disabled": false,
+        "currentFormat": "XRGB8888",
+        "mirrorOf": "none",
+        "availableModes": [
+          "5120x2880@60.00Hz"
+        ]
+      }
+    ],
+    "pixels_verified": true,
+    "renderers": [
+      "NVIDIA GeForce RTX 3090/PCIe/SSE2"
+    ],
+    "artifact_directory": "/tmp/cg5-final-gpu/02-final-c2"
+  }
+]

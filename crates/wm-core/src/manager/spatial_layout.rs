@@ -47,6 +47,7 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         self.end_active_drag();
+        if !self.ensure_display_space_slots(workspace + 1) { return; }
         self.workspace_count = self.workspace_count.max(workspace + 1);
         self.layouts
             .resize_with(self.workspace_count, WorkspaceLayout::default);
@@ -214,6 +215,7 @@ impl<B: Backend> WindowManager<B> {
     /// Flow positions may be outside every output: never infer ownership from
     /// its current frame center once an output affinity has been recorded.
     pub fn client_output_index(&self, id: ClientId) -> usize {
+        if let Some(output) = self.clients.get(id).and_then(|c| self.workspace_output_index(c.workspace)) { return output; }
         let Some(c) = self.clients.get(id) else {
             return self.primary_monitor_index();
         };
@@ -249,7 +251,12 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub fn move_client_to_output(&mut self, id: ClientId, index: usize) -> bool {
+        if !self.clients.contains_key(id) { return false; }
         self.cancel_client_layout_interaction(id);
+        if self.monitors_ref().get(index).is_none() { return false; }
+        if self.separate_spaces() && self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::FULLSCREEN)) { self.unfullscreen(id); }
+        if self.separate_spaces() { self.translate_space_move(id, self.regular_workspace_on_output(index)); }
+        self.move_family_to_display(id, index);
         self.place_client_on_output(id, index)
     }
 
@@ -829,12 +836,11 @@ impl<B: Backend> WindowManager<B> {
 
     pub(super) fn preview_managed_move(&mut self, id: ClientId, root: Point) {
         let workspace = self.clients[id].workspace;
-        let target = self
-            .layout_order(workspace)
-            .iter()
-            .copied()
-            .filter(|&other| other != id && self.is_layout_managed(other))
-            .find(|&other| client_frame_rect(&self.clients[other]).contains(root));
+        let output = self.monitor_index_at(root);
+        let target = self.clients.iter().filter(|(other, c)| *other != id && self.is_layout_managed(*other)
+            && (c.workspace == workspace || (self.separate_spaces() && self.workspace_visible(c.workspace)))
+            && self.client_output_index(*other) == output)
+            .find(|(_, c)| client_frame_rect(c).contains(root)).map(|(id, _)| id);
         let next = target.map(|target| (id, target));
         self.layout_drop = next;
         let c = &self.clients[id];
@@ -863,9 +869,22 @@ impl<B: Backend> WindowManager<B> {
             if self.is_layout_managed(id) && self.is_layout_managed(target) {
                 let output = self.client_output_index(target);
                 if self.client_output_index(id) != output {
+                    if self.separate_spaces() { self.translate_space_move(id, self.regular_workspace_on_output(output)); }
+                    self.move_family_to_display(id, output);
                     self.place_client_on_output(id, output);
                 }
                 self.reorder_layout_window(id, target);
+            }
+        } else if self.separate_spaces() {
+            if let Some(id) = self.active_move.as_ref().map(|m| m.client).filter(|&id| self.is_layout_managed(id)) {
+                if let Some(at) = self.last_pointer {
+                    let output = self.monitor_index_at(at);
+                    if self.client_output_index(id) != output {
+                        self.translate_space_move(id, self.regular_workspace_on_output(output));
+                        self.move_family_to_display(id, output);
+                        self.place_client_on_output(id, output);
+                    }
+                }
             }
         }
         self.backend.preview_layout_drop(None, None);

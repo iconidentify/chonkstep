@@ -541,3 +541,46 @@ fn capture_flood_yields_to_unrelated_clients_and_input_and_bounds_pending_admiss
     client.sync();
     assert!(session.compositor_alive());
 }
+
+#[path = "support/readback.rs"]
+mod readback;
+
+#[test]
+#[ignore = "needs nested Wayland: scripts/e2e.sh --headless --host-renderer gl --release --test image_capture"]
+fn pending_download_does_not_block_input_and_destroyed_buffer_is_never_written() {
+    let mut session = Session::boot("image-capture-pending", SessionOptions {
+        config_extra: "show_dock = false\n".into(),
+        env: vec![("CHONKSTEP_TEST_READBACK_DELAY_MS".into(), "800".into())],
+        ..Default::default()
+    }).unwrap();
+    let expected = session.screenshot("pending-source").unwrap();
+    let mut client = Client::connect(&session);
+    let (copy, size) = client.session();
+    let first = client.frame(&copy, size);
+    let before = readback::counter(&session, "queued");
+    first.resource.capture();
+    client.sync();
+    poll_until(EVENT, "GPU capture queued", || {
+        (readback::counter(&session, "queued") > before).then_some(())
+    }).unwrap();
+    let start = Instant::now();
+    session.door().barrier().unwrap();
+    client.sync();
+    assert!(start.elapsed() < Duration::from_millis(500));
+    assert!(!client.probe.ready.contains(&first.id));
+    first.buffer.destroy();
+    client.until("destroyed pending buffer fails", |p| p.failed.contains(&first.id));
+    let mut untouched = vec![0; (size.0 * size.1 * 4) as usize];
+    first.pixels.read_exact_at(&mut untouched, 0).unwrap();
+    assert!(untouched.iter().all(|byte| *byte == 0));
+    first.resource.destroy(); first.pool.destroy();
+    let next = client.frame(&copy, size);
+    client.capture(&next);
+    next.compare(&expected);
+    next.destroy(); copy.destroy(); client.sync();
+    assert!(readback::counter(&session, "pending_polls") > 0);
+    poll_until(EVENT, "GPU storage released", || {
+        (readback::counter(&session, "active_bytes") == 0).then_some(())
+    }).unwrap();
+    assert!(session.compositor_alive());
+}

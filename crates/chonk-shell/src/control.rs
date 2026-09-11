@@ -338,7 +338,7 @@ pub(crate) fn snapshot<B: Backend>(wm: &WindowManager<B>, surroundings: &Surroun
     } else {
         let pointer = wm.backend().pointer_position().unwrap_or(surroundings.pointer_root);
         OutputsEvent {
-            focused: Some(wm.monitor_index_at(pointer)),
+            focused: Some(if wm.separate_spaces() { wm.active_output_index() } else { wm.monitor_index_at(pointer) }),
             outputs: monitors
                 .iter()
                 .enumerate()

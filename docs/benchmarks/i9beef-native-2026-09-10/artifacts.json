@@ -1,0 +1,23 @@
+{
+  "directory": "/home/chrisk/.local/state/chonkstep/benchmarks/i9beef-native-2026-09-10",
+  "files": {
+    "raw-results.tar.zst": {
+      "bytes": 2565502142,
+      "sha256": "1cc5fa7e04ea8028c41a74fcbeeb0448de56e4977af7c157b285d268d406a4b5"
+    },
+    "chonkstep-wayland": {
+      "bytes": 120829824,
+      "sha256": "2727bc755de151d0285d2cfff24d59f1b186e1ae40fb71db8ea14ec75b926da2"
+    },
+    "source.patch": {
+      "bytes": 27892,
+      "sha256": "4b5dac3348dbafec8fcc2079da6e0024bc07bc9a725eedea732c9b8985d5853a"
+    }
+  },
+  "raw_exclusions": [
+    "runtime sockets",
+    "cache directories",
+    "XDG data directories"
+  ],
+  "retained": "Logs, GPU CSV, hardware timestamps, images, intermediate/failed runs, exact binaries and source patch."
+}

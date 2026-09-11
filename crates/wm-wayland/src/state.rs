@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+use smithay::backend::renderer::element::memory::{MemoryBuffer, MemoryRenderBuffer};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
 use smithay::desktop::{PopupKind, PopupManager};
@@ -51,7 +51,7 @@ use chonk_hyprland_ipc::MonitorMode;
 use smithay::reexports::wayland_protocols::xwayland::keyboard_grab::zv1::server::zwp_xwayland_keyboard_grab_v1::ZwpXwaylandKeyboardGrabV1;
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{
-    EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken,
+    Dispatcher, EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken,
 };
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
 use smithay::reexports::wayland_server::backend::{
@@ -378,6 +378,9 @@ pub(crate) struct WindowRecord {
     /// window can occlude desktop-level `Top` and shell furniture on
     /// only the output it occupies.
     pub fullscreen: bool,
+    /// Display boundary for independently visible Spaces; shared by pixels and input.
+    pub space_output: Option<String>,
+    pub space_clip_id: smithay::backend::renderer::element::Id,
     /// Cached title (xdg `set_title` / XWayland property events keep
     /// it current and queue `BackendEvent::TitleChanged`).
     pub title: Option<String>,
@@ -485,6 +488,8 @@ impl WindowRecord {
             content,
             mapped: false,
             fullscreen: false,
+            space_output: None,
+            space_clip_id: smithay::backend::renderer::element::Id::new(),
             title: None,
             app_id: None,
             window_type: WindowType::Normal,
@@ -752,6 +757,8 @@ pub struct WaylandBackend {
     /// switcher): while set, *every* press becomes a `KeyPress` and
     /// releases additionally queue `KeyRelease` — see wm-x11's
     /// KeyRelease commentary, mirrored by `input.rs`.
+    pub(crate) pending_quit: Vec<(WlWindowId, Instant)>,
+    pub(crate) killed_clients: Vec<ClientId>,
     pub(crate) keyboard_grabbed: bool,
     /// A modal keyboard ownership transition waiting to reach the seat.
     /// Canceling back to the same window may produce no window-focus intent.
@@ -827,6 +834,8 @@ pub struct WaylandBackend {
     /// Selected graphics stack and hardware identity for live system
     /// information (`nested-winit` or the KMS/driver/render-node set).
     pub(crate) graphics_diagnostics: String,
+    pub(crate) gpu_timings: std::rc::Rc<std::cell::RefCell<crate::gpu_timer::Measurements>>,
+    pub(crate) native_frame_stats: Vec<crate::gpu_stats::OutputStats>,
     /// Handle to the wayland display, for verbs that must touch
     /// protocol state directly (client credentials for `window_pid`,
     /// disconnecting a client for `kill_client`).
@@ -1042,6 +1051,8 @@ impl WaylandBackend {
             repeating_combos: Vec::new(),
             repeat_rate: 25,
             repeat_delay: std::time::Duration::from_millis(200),
+            pending_quit: Vec::new(),
+            killed_clients: Vec::new(),
             keyboard_grabbed: false,
             keyboard_grab_changed: false,
             root_background: RootBackground::Color((0, 0, 0)),
@@ -1067,6 +1078,8 @@ impl WaylandBackend {
             cursor_hidden: false,
             cursor_hidden_owner: None,
             graphics_diagnostics: "backend=uninitialized".to_string(),
+            gpu_timings: Default::default(),
+            native_frame_stats: Vec::new(),
             display_handle,
             pending_focus: None,
             preview_edge: None,
@@ -1196,6 +1209,16 @@ impl WaylandBackend {
         scale_for_rect(&self.monitors, &self.monitor_scales, rect)
     }
 
+    /// Display ownership wins over the geometry of a clipped or sliding window.
+    /// Keep scale negotiation, popup rendering and input on the same output.
+    pub(crate) fn window_output_scale(&self, record: &WindowRecord) -> f64 {
+        if let Some(index) = self.space_output_for(record).and_then(|name| self.monitors.iter().position(|m| m.name == name)) {
+            return self.monitor_scales.get(index).copied().unwrap_or(1.0);
+        }
+        self.scale_at(record.surface.wl_surface().as_ref().and_then(|surface| self.window_for_surface(surface))
+            .and_then(|id| self.layout_scene.workarea(id)).unwrap_or(record.content))
+    }
+
     /// The factor one managed window's surface is composed at: what the
     /// client itself committed, corrected only for the integral-fallback
     /// case (`xdg::effective_surface_scale`) on the output the window
@@ -1215,11 +1238,7 @@ impl WaylandBackend {
         }
         crate::xdg::effective_surface_scale(
             crate::xdg::committed_surface_scale(&surface),
-            self.scale_at(
-                self.window_for_surface(&surface)
-                    .and_then(|id| self.layout_scene.workarea(id))
-                    .unwrap_or(record.content),
-            ),
+            self.window_output_scale(record),
         )
     }
 
@@ -2043,12 +2062,18 @@ pub(crate) fn apply_connector_hotplug(
     removed: &[usize],
     added: Vec<OutputSetup>,
 ) {
+    // Retire gesture-owned output geometry before changing any output indices.
+    crate::input::gestures::cancel(comp);
+    comp.dmabuf.invalidate();
+    comp.surface_outputs.reset_feedback(comp.dmabuf.default_feedback());
+    comp.wm.backend_mut().native_frame_stats = crate::session::native_frame_stats(&comp.graphics);
     let mut departed = Vec::new();
     for &index in removed {
         if index >= comp.outputs.len() {
             continue;
         }
         let entry = comp.outputs.remove(index);
+        comp.surface_outputs.remove_output(&entry.output);
         departed.push(Rect::new(entry.position, entry.size));
         // Registry clients see global_remove immediately. Keep the disabled
         // server-side record rather than freeing it in the same dispatch,
@@ -2136,8 +2161,10 @@ pub(crate) fn apply_connector_hotplug(
         backend.layer_layout_dirty = true;
         backend.idle_policy_dirty = true;
     }
-    for rect in departed {
-        comp.wm.rescue_clients_from_removed_monitor(rect);
+    if comp.wm.mac_mode() && comp.wm.interaction_config().separate_spaces {
+        comp.wm.reconcile_display_spaces();
+    } else {
+        for rect in departed { comp.wm.rescue_clients_from_removed_monitor(rect); }
     }
     crate::input::reconcile_pointer_after_output_change(comp);
     crate::gamma::outputs_changed(&mut comp.gamma, &comp.graphics, &comp.display_handle);
@@ -2299,6 +2326,7 @@ pub struct Compositor {
     /// Fixed-size timing counters exposed through the opt-in test door.
     /// Reading them resets the bracket, so a harness can measure one
     /// interaction without parsing tracing output or wall-clock sleeps.
+    pub(crate) gpu_timer: crate::gpu_timer::GpuTimer,
     pub(crate) frame_stats: FrameStats,
 
     // Per-protocol smithay state. Constructed once in `run`; the
@@ -2320,6 +2348,9 @@ pub struct Compositor {
     /// Last successfully installed settings, not merely the latest request.
     /// `None` after startup fallback so a later valid edit still installs.
     pub(crate) keyboard_config: Option<ResolvedKeyboard>,
+    pub(crate) clipboard_persistence: crate::selection::persistence::Persistence,
+    pub(crate) mac_keyboard: crate::input::keyboard::mac::MacKeyboard,
+    pub(crate) mac_copy_order: crate::input::keyboard::copy_order::CopyOrder,
     pub output_manager_state: OutputManagerState,
     pub data_device_state: DataDeviceState,
     /// The middle-click clipboard. Advertised because the X11 half of
@@ -2364,6 +2395,7 @@ pub struct Compositor {
     /// Every live `wl_surface`, including role-less surfaces and hidden
     /// subsurfaces. Commit-timing blockers can be installed before a role is
     /// assigned, so the ordinary scene ledgers are not a complete registry.
+    pub(crate) surface_outputs: crate::surface_outputs::SurfaceOutputs,
     pub(crate) pacing_surfaces: HashMap<ObjectId, WlSurface>,
     pub(crate) pacing_scratch: crate::xdg::PacingScratch,
     /// Bounded escape for a FIFO barrier whose presentation never completes.
@@ -2391,6 +2423,7 @@ pub struct Compositor {
     /// Cached marker path and deadline for compositor-native PNG
     /// requests. Kept beside the renderer because servicing one needs
     /// the live graphics context even when the scene is otherwise idle.
+    pub(crate) snapshot_downloads: crate::capture::SnapshotDownloads,
     pub(crate) screenshot_poller: crate::capture::ScreenshotRequestPoller,
     pub(crate) capture_tool: crate::capture_tool::Service,
     /// linux-dmabuf: the format set we advertise and the protocol
@@ -2525,6 +2558,9 @@ impl Compositor {
     /// ever needs to move.
     #[cfg_attr(feature = "profile", profiling::function)]
     pub(crate) fn dispatch_pending(&mut self) {
+        crate::input::keyboard::copy_order::service(self);
+        crate::selection::persistence::tick(self);
+        crate::capture::service_snapshots(self);
         crate::capture_tool::tick(self);
         let dispatch_span = tracing::info_span!("dispatch_pass");
         let _dispatch_guard = dispatch_span.enter();
@@ -3275,6 +3311,7 @@ impl Compositor {
     /// and re-advertise all of them, which is the connector-hot-plug
     /// work `session.rs`'s module docs scope out.
     pub(crate) fn on_output_resized(&mut self, size: SSize<i32, Physical>) {
+        if matches!(self.graphics, Graphics::Winit(_)) && self.outputs.len() > 1 { return; }
         let mode = Mode { size, refresh: 60_000 };
         let logical = Size::new(size.w.max(0) as u32, size.h.max(0) as u32);
         let Some(entry) = self.outputs.first_mut() else {
@@ -3314,6 +3351,7 @@ impl Compositor {
         backend.output_size = union_size(&backend.monitors);
         backend.pending_resize = Some(backend.output_size);
         backend.mark_damaged();
+        self.wm.reconcile_display_spaces();
         self.layer_shell.needs_arrange = true;
     }
 
@@ -3904,8 +3942,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             }
         })
         .map_err(|error| format!("failed to register the wayland socket source: {error}"))?;
-    loop_handle
-        .insert_source(Generic::new(display, Interest::READ, TriggerMode::Level), |_, display, comp| {
+    let display_source = Dispatcher::new(Generic::new(display, Interest::READ, TriggerMode::Level), |_, display, comp: &mut Compositor| {
             // SAFETY: the display is owned by this source and never
             // moved out of it; `get_mut` is the documented access
             // pattern for dispatching from inside calloop.
@@ -3914,7 +3951,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
                 comp.running = false;
             }
             Ok(PostAction::Continue)
-        })
+        });
+    loop_handle
+        .register_dispatcher(display_source.clone())
         .map_err(|error| format!("failed to register the wayland display source: {error}"))?;
 
     // This binary IS the Wayland session, and says so rather than
@@ -4027,8 +4066,11 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // The desktop shell is built against the mutable backend before
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
+    let gpu_timer = crate::gpu_timer::GpuTimer::default();
     let mut backend = WaylandBackend::new(display_handle.clone(), monitors, scale);
     backend.graphics_diagnostics = crate::session::graphics_diagnostics(&graphics);
+    backend.gpu_timings = gpu_timer.measurements.clone();
+    backend.native_frame_stats = crate::session::native_frame_stats(&graphics);
     backend.monitor_scales = effective_monitor_scales;
     backend.repeat_delay = std::time::Duration::from_millis(repeat_delay as u64);
     backend.repeat_rate = repeat_rate as u32;
@@ -4075,6 +4117,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         foreign_toplevel_dirty: true,
         observed_wm_protocol_revision: wm.protocol_state_revision(),
         protocol_publish_metrics: ProtocolPublishMetrics::default(),
+        gpu_timer,
         frame_stats: FrameStats::default(),
         wm,
         shell,
@@ -4087,6 +4130,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         shm_state,
         seat_state,
         keyboard_config,
+        clipboard_persistence: crate::selection::persistence::Persistence::default(),
+        mac_keyboard: crate::input::keyboard::mac::MacKeyboard::default(),
+        mac_copy_order: Default::default(),
         output_manager_state,
         data_device_state,
         primary_selection_state,
@@ -4102,12 +4148,14 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         hyprland_source_scratch: HashSet::new(),
         seat,
         outputs,
+        surface_outputs: crate::surface_outputs::SurfaceOutputs::default(),
         pacing_surfaces: HashMap::new(),
         pacing_scratch: crate::xdg::PacingScratch::default(),
         pacing_fifo_deadlines: HashMap::new(),
         xwayland: crate::xwayland::State::default(),
         ui_scale: scale,
         graphics,
+        snapshot_downloads: crate::capture::SnapshotDownloads::default(),
         screenshot_poller: crate::capture::ScreenshotRequestPoller::new(Instant::now()),
         capture_tool,
         dmabuf,
@@ -4234,6 +4282,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // the seat, not to the backend-generic shell.
         let now = std::time::Instant::now();
         let mut wait = comp.shell.next_housekeeping_in(now);
+        if let Some(deadline) = comp.mac_copy_order.deadline() { wait = wait.min(deadline.saturating_duration_since(now)); }
+        if comp.clipboard_persistence.active() || !comp.wm.backend().pending_quit.is_empty() { wait = wait.min(Duration::from_millis(5)); }
         wait = wait.min(request_poller.next_deadline().saturating_duration_since(now));
         wait = wait.min(comp.screenshot_poller.next_deadline().saturating_duration_since(now));
         if let Some(deadline) = crate::input::repeating_binding_deadline(&comp) {
@@ -4246,6 +4296,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::gesture_scene::deadline(&comp) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = comp.snapshot_downloads.deadline() {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::capture_tool::deadline(&comp) {
@@ -4265,6 +4318,23 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         }
         event_loop.dispatch(Some(wait), &mut comp)?;
         comp.dispatch_pending();
+        let killed = std::mem::take(&mut comp.wm.backend_mut().killed_clients);
+        if !killed.is_empty() {
+            // Server-initiated kills can happen outside display dispatch. The
+            // Rust Wayland backend otherwise defers resource destruction until
+            // another client becomes readable, leaving a hung app's frame up.
+            let mut source = display_source.as_source_mut();
+            // SAFETY: the registered display stays in its Generic source; no
+            // descriptor is moved or replaced, and event dispatch has returned.
+            let display = unsafe { source.get_mut() };
+            for client in killed {
+                // The client may already be gone; dispatch still drains its
+                // queued destructors and never blocks on a silent connection.
+                let _ = display.backend().dispatch_single_client(&mut comp, client);
+            }
+            drop(source);
+            comp.dispatch_pending();
+        }
     }
 
     // Whatever ended the loop — the root menu's Exit, a theme pick, a
@@ -4422,19 +4492,28 @@ impl CursorSet {
     }
 }
 
-/// Imports one cursor's pixels. RGBA byte order is the little-endian
-/// DRM fourcc Abgr8888, NOT Argb8888 — mixing those up swaps red and
-/// blue. Fully opaque or fully transparent pixels only, so these bytes
-/// are also already valid premultiplied alpha, which is what the GLES
-/// renderer's blending expects (and what tiny-skia's `data()` provides
-/// for the decoration buffers `backend_impl` imports the same way).
+/// Converts the rasterizer's premultiplied RGBA bytes to the BGRA byte order
+/// of little-endian Argb8888. Smithay's hardware cursor copy path requires
+/// this format. Keeping Abgr8888 forced the compositor's own pointer through
+/// GLES and retried an unusable cursor-plane copy on every animated frame.
+/// Convert once when building the cached sprite, preserving alpha and colors
+/// for both hardware scanout and the ordinary composition fallback.
+fn cursor_memory(pixels: &[u8], width: i32, height: i32) -> MemoryBuffer {
+    let mut memory = MemoryBuffer::from_slice(pixels, Fourcc::Argb8888, (width, height));
+    for pixel in memory.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    memory
+}
+
+/// Imports one cursor's converted pixels.
 ///
 /// Buffer scale 1 for the reason `backend_impl::import_buffer`
 /// documents for decoration buffers: this session's ledger is in
 /// physical pixels, so a buffer already rasterized at the UI scale is
 /// 1 buffer pixel per unit of that space.
 fn import_cursor(pixels: &[u8], width: i32, height: i32) -> MemoryRenderBuffer {
-    MemoryRenderBuffer::from_slice(pixels, Fourcc::Abgr8888, (width, height), 1, Transform::Normal, None)
+    MemoryRenderBuffer::from_memory(cursor_memory(pixels, width, height), 1, Transform::Normal, None)
 }
 
 fn build_default_cursor(scale: f32) -> CursorSprite {
@@ -4716,6 +4795,15 @@ mod tests {
     /// Alpha of the pixel at (x, y) in a `default_cursor_pixels` buffer.
     fn alpha_at(pixels: &[u8], width: i32, x: i32, y: i32) -> u8 {
         pixels[((y * width + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn cursor_storage_matches_the_hardware_format_without_swapping_visible_colors() {
+        let rgba = [0x20, 0x40, 0x60, 0x80, 0x90, 0x30, 0x10, 0xff];
+        let memory = cursor_memory(&rgba, 2, 1);
+        assert_eq!(memory.format(), Fourcc::Argb8888);
+        assert_eq!(&*memory, &[0x60, 0x40, 0x20, 0x80, 0x10, 0x30, 0x90, 0xff]);
+        assert_eq!(memory.stride(), 8);
     }
 
     #[test]

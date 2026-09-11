@@ -204,6 +204,31 @@ where
     }
 }
 
+/// Inter-device frame copies, counted without per-frame allocation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CopyStats {
+    /// Frames transferred using a shared DMA-BUF texture on the target GPU.
+    pub dma_frames: u64,
+    /// Frames attempting CPU mappings and target memory uploads.
+    pub cpu_frames: u64,
+    /// Total damaged pixels copied through CPU memory (before format packing).
+    pub cpu_pixels: u64,
+}
+
+static DMA_COPY_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CPU_COPY_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CPU_COPY_PIXELS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Process-wide copy counters. Single-renderer frames add no transfer count.
+pub fn copy_stats() -> CopyStats {
+    use std::sync::atomic::Ordering::Relaxed;
+    CopyStats {
+        dma_frames: DMA_COPY_FRAMES.load(Relaxed),
+        cpu_frames: CPU_COPY_FRAMES.load(Relaxed),
+        cpu_pixels: CPU_COPY_PIXELS.load(Relaxed),
+    }
+}
+
 impl<A: GraphicsApi> AsRef<A> for GpuManager<A> {
     fn as_ref(&self) -> &A {
         &self.api
@@ -1334,6 +1359,14 @@ where
     <<R::Device as ApiDevice>::Renderer as RendererSuper>::Error: 'static,
     <<T::Device as ApiDevice>::Renderer as RendererSuper>::Error: 'static,
 {
+    /// Record physical output damage produced by custom drawing through
+    /// `AsMut<Frame>`. Those calls bypass the normal Frame methods, so their
+    /// destination-relative damage must be translated to output coordinates
+    /// and included in the transfer to the target GPU explicitly.
+    pub fn add_damage(&mut self, damage: impl IntoIterator<Item = Rectangle<i32, Physical>>) {
+        self.damage.extend(damage);
+    }
+
     fn flush_frame(&mut self) -> Result<(), Error<R, T>> {
         if self.target.is_some() {
             let _ = self.finish_internal()?;
@@ -1423,6 +1456,7 @@ where
                         .cleanup_texture_cache()
                         .map_err(Error::Render)?;
 
+                    DMA_COPY_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return Ok(sync);
                 }
 
@@ -1483,6 +1517,9 @@ where
                     return Ok(sync::SyncPoint::signaled());
                 }
 
+                CPU_COPY_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                CPU_COPY_PIXELS.fetch_add(mappings.iter().map(|(_, rect)| rect.size.w as u64 * rect.size.h as u64).sum(),
+                    std::sync::atomic::Ordering::Relaxed);
                 let textures = mappings
                     .into_iter()
                     .map(|(mapping, rect)| {

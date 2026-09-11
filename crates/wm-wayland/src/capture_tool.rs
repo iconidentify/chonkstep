@@ -27,7 +27,7 @@ use wm_theme_api::{Point, Rect, Size};
 
 use crate::renderer::SceneElement;
 use crate::state::{Compositor, StackEntry, WaylandBackend, WlWindowId};
-use worker::{Job, Update};
+use worker::{Destination, Job, Update};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -49,6 +49,7 @@ impl Mode {
 
 pub(crate) struct Overlay {
     mode: Mode,
+    destination: Destination,
     quick: bool,
     /// A recording indicator is clickable but must never grab client input.
     badge: bool,
@@ -74,6 +75,11 @@ struct Worker {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
+struct PendingScreenshot {
+    image: crate::capture::PendingImage,
+    destination: Option<Destination>,
+}
+
 pub(crate) struct Service {
     worker: Option<Worker>,
     fonts: FontState,
@@ -84,6 +90,8 @@ pub(crate) struct Service {
     started: Instant,
     last_second: u64,
     screenshots: usize,
+    downloads: Vec<PendingScreenshot>,
+    download_poll: Instant,
     label_dirty: bool,
     label_deadline: Instant,
 }
@@ -100,6 +108,8 @@ impl Service {
             started: Instant::now(),
             last_second: 0,
             screenshots: 0,
+            downloads: Vec::new(),
+            download_poll: Instant::now(),
             label_dirty: false,
             label_deadline: Instant::now(),
         }
@@ -153,6 +163,12 @@ pub(crate) fn owns_cursor(backend: &WaylandBackend, at: Point) -> bool {
 }
 
 pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
+    let (mode, destination) = match mode {
+        CaptureMode::ScreenClipboard => (CaptureMode::Screen, Destination::Clipboard),
+        CaptureMode::AreaClipboard => (CaptureMode::Area, Destination::Clipboard),
+        CaptureMode::WindowClipboard => (CaptureMode::Window, Destination::Clipboard),
+        mode => (mode, if comp.wm.mac_mode() { Destination::File } else { Destination::Legacy }),
+    };
     if mode == CaptureMode::Stop {
         stop(comp);
         return;
@@ -183,7 +199,7 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
     }
     if mode == CaptureMode::Screen {
         let rect = Rect::new(Point::new(0, 0), comp.wm.backend().output_size);
-        photograph(comp, rect, None);
+        photograph(comp, rect, None, destination);
         return;
     }
     let at = pointer(comp);
@@ -215,6 +231,7 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
     };
     comp.wm.backend_mut().capture_ui = Some(Overlay {
         mode: selected_mode,
+        destination,
         quick: mode != CaptureMode::Toolbar,
         badge: false,
         monitor,
@@ -257,21 +274,21 @@ fn dismiss(comp: &mut Compositor) {
     crate::input::sync_pointer_focus(comp);
 }
 
-fn photograph(comp: &mut Compositor, rect: Rect, window: Option<WlWindowId>) -> bool {
+fn photograph(comp: &mut Compositor, rect: Rect, window: Option<WlWindowId>, destination: Destination) -> bool {
     // Bound readback memory as well as worker queue length, including the image
     // currently being encoded. Repeated shortcuts cannot accumulate 4K buffers.
-    if comp.capture_tool.screenshots >= 2 {
+    if comp.capture_tool.screenshots >= 2 || comp.capture_tool.downloads.len() >= 2 {
         comp.capture_tool.submit(Job::Error(
             "Finishing previous screenshots; please try again shortly".into(),
         ));
         return false;
     }
     match crate::capture::capture_user_pixels(comp, rect, window) {
-        Some(pixels) => {
-            if comp.capture_tool.submit(Job::Screenshot(pixels)) {
-                comp.capture_tool.screenshots += 1;
-                return true;
-            }
+        Some(image) => {
+            comp.capture_tool.downloads.push(PendingScreenshot { image, destination: Some(destination) });
+            comp.capture_tool.download_poll = Instant::now() + std::time::Duration::from_millis(4);
+            comp.capture_tool.screenshots += 1;
+            return true;
         }
         None => {
             comp.capture_tool
@@ -286,6 +303,10 @@ fn commit(comp: &mut Compositor) {
         return;
     };
     let mode = ui.mode;
+    let destination = if ui.destination == Destination::File && comp.wm.mac_mode()
+        && comp.seat.get_keyboard().is_some_and(|keyboard| keyboard.modifier_state().ctrl) {
+        Destination::Clipboard
+    } else { ui.destination };
     let Some(rect) = ui.selection.filter(|r| r.size.w > 0 && r.size.h > 0) else {
         return;
     };
@@ -327,6 +348,7 @@ fn commit(comp: &mut Compositor) {
             return;
         };
         if comp.capture_tool.submit(Job::Record {
+            policy: destination,
             output,
             geometry,
             filter,
@@ -339,6 +361,7 @@ fn commit(comp: &mut Compositor) {
             let width = ((280.0 * scale) as u32).min(monitor.size.w);
             comp.wm.backend_mut().capture_ui = Some(Overlay {
                 mode,
+                destination,
                 quick: false,
                 badge: true,
                 monitor,
@@ -371,7 +394,7 @@ fn commit(comp: &mut Compositor) {
             }
             repaint(comp);
         }
-    } else if photograph(comp, rect, window) {
+    } else if photograph(comp, rect, window, destination) {
         dismiss(comp);
     }
 }
@@ -783,7 +806,37 @@ fn moved_rect(mut rect: Rect, dx: i32, dy: i32, bounds: Rect) -> Rect {
     rect
 }
 
+fn service_screenshots(comp: &mut Compositor) {
+    let now = Instant::now();
+    if comp.capture_tool.downloads.is_empty() || now < comp.capture_tool.download_poll { return; }
+    let Compositor { wm, graphics, capture_tool: service, .. } = comp;
+    let renderer = crate::capture::graphics_renderer(graphics);
+    let mut pending = std::mem::take(&mut service.downloads);
+    pending.retain_mut(|pending| {
+        if (wm.backend().locked || pending.image.pixels.expired(now)) && pending.destination.take().is_some() {
+            service.screenshots = service.screenshots.saturating_sub(1);
+            service.submit(Job::Error("Screenshot canceled before its pixels became available".into()));
+        }
+        // Retire canceled downloads in their original bounded slots until the
+        // GPU has finished reading client buffers; never block the input loop.
+        if !pending.image.pixels.ready() { return true; }
+        pending.image.pixels.release_scene();
+        if let Some(destination) = pending.destination.take() {
+            let submitted = match pending.image.copy_pixels(renderer) {
+                Ok(pixels) => service.submit(Job::Screenshot(pixels, destination)),
+                Err(error) => { service.submit(Job::Error(error)); false }
+            };
+            if !submitted { service.screenshots = service.screenshots.saturating_sub(1); }
+        }
+        false
+    });
+    service.download_poll = now + std::time::Duration::from_millis(
+        if pending.iter().all(|pending| pending.destination.is_none()) { 100 } else { 4 });
+    service.downloads = pending;
+}
+
 pub(crate) fn tick(comp: &mut Compositor) {
+    service_screenshots(comp);
     if comp.capture_tool.label_dirty && Instant::now() >= comp.capture_tool.label_deadline {
         repaint(comp);
     }
@@ -867,13 +920,12 @@ fn repaint(comp: &mut Compositor) {
 /// A settled selector adds no periodic wakeups to the compositor.
 pub(crate) fn deadline(comp: &Compositor) -> Option<Instant> {
     let service = &comp.capture_tool;
-    if service.label_dirty {
+    let ui = if service.label_dirty {
         Some(service.label_deadline)
     } else if service.recording && !service.finishing {
         Some(service.started + std::time::Duration::from_secs(service.last_second + 1))
-    } else {
-        None
-    }
+    } else { None };
+    ui.into_iter().chain((!service.downloads.is_empty()).then_some(service.download_poll)).min()
 }
 
 /// Scanout-only overlay. Stable geometry keeps selection damage sparse; no

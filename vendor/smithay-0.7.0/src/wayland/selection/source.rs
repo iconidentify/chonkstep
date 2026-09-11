@@ -22,6 +22,13 @@ pub struct SelectionSource {
 }
 
 impl SelectionSource {
+    /// Whether the original selection resource still exists.
+    pub fn is_alive(&self) -> bool { self.provider.alive() }
+
+    /// Request this specific offer asynchronously, independent of later seat
+    /// ownership changes. The destination must be drained by the caller.
+    pub fn send(&self, mime: String, fd: OwnedFd) { self.provider.send(mime, fd); }
+
     /// Mime types associated with the source.
     pub fn mime_types(&self) -> Vec<String> {
         self.provider.mime_types()

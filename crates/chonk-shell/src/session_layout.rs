@@ -108,6 +108,8 @@ pub struct WindowRecord {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct SpatialRecord {
+    pub fullscreen_origin: Option<usize>,
+    pub home_geometry: Option<HomeGeometryRecord>,
     pub floating: bool,
     pub order: usize,
     pub flow_width: u32,
@@ -116,6 +118,43 @@ pub struct SpatialRecord {
     pub focused: bool,
     pub floating_geometry: Option<[i64; 4]>,
     pub floating_monitor: Option<String>,
+}
+
+/// Optional home placement, retained across a restart while a monitor is absent.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HomeGeometryRecord {
+    pub display: String,
+    pub bounds: [i64; 4],
+    pub normal: [i64; 4],
+    pub freeform: Option<[i64; 4]>,
+}
+
+fn rect_record(rect: Rect) -> [i64; 4] {
+    [i64::from(rect.pos.x), i64::from(rect.pos.y), i64::from(rect.size.w), i64::from(rect.size.h)]
+}
+
+impl From<&wm_core::SpaceHomeGeometry> for HomeGeometryRecord {
+    fn from(saved: &wm_core::SpaceHomeGeometry) -> Self {
+        Self { display: saved.display.clone(), bounds: rect_record(saved.bounds),
+            normal: rect_record(saved.normal), freeform: saved.freeform.map(rect_record) }
+    }
+}
+
+impl HomeGeometryRecord {
+    pub fn matches(&self, saved: &wm_core::SpaceHomeGeometry) -> bool {
+        self.display == saved.display && self.bounds == rect_record(saved.bounds)
+            && self.normal == rect_record(saved.normal) && self.freeform == saved.freeform.map(rect_record)
+    }
+
+    pub fn to_geometry(&self) -> Option<wm_core::SpaceHomeGeometry> {
+        let rect = |r: [i64; 4]| Some(Rect::new(
+            Point::new(i32::try_from(r[0]).ok()?, i32::try_from(r[1]).ok()?),
+            Size::new(u32::try_from(r[2]).ok()?, u32::try_from(r[3]).ok()?)));
+        let saved = wm_core::SpaceHomeGeometry { display: self.display.clone(),
+            bounds: rect(self.bounds)?, normal: rect(self.normal)?,
+            freeform: match self.freeform { Some(r) => Some(rect(r)?), None => None } };
+        saved.valid().then_some(saved)
+    }
 }
 
 /// How one record's application should be brought back. Split from the
@@ -170,7 +209,7 @@ pub(crate) fn restored_on_monitor(
     };
     let target = monitors
         .iter()
-        .find(|monitor| monitor.identity.as_deref() == Some(identity))
+        .find(|monitor| monitor.identity.as_deref() == Some(identity) || monitor.name == identity)
         .or_else(|| monitors.iter().find(|monitor| monitor.primary))
         .or_else(|| monitors.first());
     let Some(target) = target else {
@@ -185,6 +224,9 @@ pub(crate) fn restored_on_monitor(
 /// and when the file was last worth writing.
 pub struct SessionLayout {
     path: Option<PathBuf>,
+    spaces: Option<wm_core::DisplaySpacesSnapshot>,
+    restored_spaces: Option<wm_core::DisplaySpacesSnapshot>,
+    persisted_spaces: Option<wm_core::DisplaySpacesSnapshot>,
     modes: Vec<LayoutMode>,
     restored_modes: Option<Vec<LayoutMode>>,
     persisted_modes: Vec<LayoutMode>,
@@ -216,6 +258,9 @@ impl SessionLayout {
     pub fn start_at(path: Option<PathBuf>, restore: bool, apps: &[AppEntry], now: Instant) -> (Self, Vec<RelaunchPlan>) {
         let mut layout = Self {
             path,
+            spaces: None,
+            restored_spaces: None,
+            persisted_spaces: None,
             modes: Vec::new(),
             restored_modes: None,
             persisted_modes: Vec::new(),
@@ -233,6 +278,9 @@ impl SessionLayout {
             // to restore is the normal case, not a problem.
             return (layout, Vec::new());
         };
+        layout.spaces = parse_spaces(&text);
+        layout.restored_spaces = layout.spaces.clone();
+        layout.persisted_spaces = layout.spaces.clone();
         let records = parse(&text);
         layout.modes = parse_modes(&text);
         layout.persisted_modes = layout.modes.clone();
@@ -252,6 +300,12 @@ impl SessionLayout {
     /// Whether application windows are still claiming saved records.
     pub fn restoring(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    pub fn take_restored_spaces(&mut self) -> Option<wm_core::DisplaySpacesSnapshot> { self.restored_spaces.take() }
+
+    pub fn note_spaces(&mut self, spaces: Option<&wm_core::DisplaySpacesSnapshot>, now: Instant) {
+        if self.spaces.as_ref() != spaces { self.spaces = spaces.cloned(); self.settled_at = now; }
     }
 
     pub fn take_restored_modes(&mut self) -> Option<Vec<LayoutMode>> {
@@ -334,7 +388,7 @@ impl SessionLayout {
             return false;
         }
         if self.persisted.as_ref() == Some(&self.last_snapshot)
-            && self.persisted_modes == self.modes
+            && self.persisted_modes == self.modes && self.persisted_spaces == self.spaces
         {
             return false;
         }
@@ -343,6 +397,7 @@ impl SessionLayout {
         }
         self.persisted = Some(self.last_snapshot.clone());
         self.persisted_modes.clone_from(&self.modes);
+        self.persisted_spaces.clone_from(&self.spaces);
         true
     }
 
@@ -367,12 +422,13 @@ impl SessionLayout {
     pub fn flush(&mut self) {
         if !self.pending.is_empty()
             || (self.persisted.as_ref() == Some(&self.last_snapshot)
-                && self.persisted_modes == self.modes)
+                && self.persisted_modes == self.modes && self.persisted_spaces == self.spaces)
         {
             return;
         }
         self.persisted = Some(self.last_snapshot.clone());
         self.persisted_modes.clone_from(&self.modes);
+        self.persisted_spaces.clone_from(&self.spaces);
         self.write_out(Instant::now());
     }
 
@@ -384,6 +440,7 @@ impl SessionLayout {
             return;
         };
         let mut text = serialize(&self.last_snapshot);
+        if let Some(spaces) = &self.spaces { text.push_str(&serialize_spaces(spaces)); }
         for (index, mode) in self.modes.iter().enumerate() {
             text.push_str(&format!(
                 "@workspace\t{index}\t{}\n",
@@ -548,7 +605,8 @@ fn parse_line(line: &str) -> Option<WindowRecord> {
         .get(1)
         .and_then(|text| serde_json::from_str::<SpatialRecord>(text).ok())
         .filter(|s| {
-            s.order < 10000
+            s.home_geometry.as_ref().is_none_or(|r| r.to_geometry().is_some())
+                && s.order < 10000
                 && s.flow_width <= 65536
                 && s.mosaic_weight.iter().all(|&v| v <= 1_000_000)
                 && s.floating_geometry.is_none_or(|r| {
@@ -593,6 +651,33 @@ fn parse_line(line: &str) -> Option<WindowRecord> {
 /// complete layout or the new complete one, never a torn write — the
 /// whole point of persisting is surviving a crash, and a crash is
 /// allowed to happen mid-write.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedSpaces {
+    spaces: Vec<(u64, String, String)>,
+    displays: Vec<(String, String, [i64; 4], u64)>,
+    selected: String,
+    next_id: u64,
+}
+fn serialize_spaces(snapshot: &wm_core::DisplaySpacesSnapshot) -> String {
+    let record = SavedSpaces { spaces: snapshot.spaces.iter().map(|s| (s.id, s.home_display.clone(), s.output_display.clone())).collect(),
+        displays: snapshot.displays.iter().map(|d| (d.key.clone(), d.name.clone(), [d.geometry.pos.x as i64, d.geometry.pos.y as i64,
+            d.geometry.size.w as i64, d.geometry.size.h as i64], d.active)).collect(), selected: snapshot.selected.clone(), next_id: snapshot.next_id };
+    format!("@spaces\t{}\n", serde_json::to_string(&record).expect("Space metadata is serializable"))
+}
+fn parse_spaces(text: &str) -> Option<wm_core::DisplaySpacesSnapshot> {
+    let line = text.lines().find_map(|line| line.strip_prefix("@spaces\t"))?;
+    if line.len() > 512 * 1024 { return None; }
+    let record: SavedSpaces = serde_json::from_str(line).ok()?;
+    let displays = record.displays.into_iter().map(|(key, name, r, active)| {
+        Some(wm_core::DisplaySpace { key, name, active, connected: false, geometry: Rect::new(
+            Point::new(i32::try_from(r[0]).ok()?, i32::try_from(r[1]).ok()?),
+            Size::new(u32::try_from(r[2]).ok()?, u32::try_from(r[3]).ok()?)) })
+    }).collect::<Option<Vec<_>>>()?;
+    let snapshot = wm_core::DisplaySpacesSnapshot { spaces: record.spaces.into_iter().map(|(id, home_display, output_display)|
+        wm_core::Space { id, home_display, output_display }).collect(), displays, selected: record.selected, next_id: record.next_id };
+    snapshot.valid().then_some(snapshot)
+}
+
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -990,6 +1075,8 @@ mod tests {
     fn spatial_metadata_roundtrips_order_membership_width_and_empty_workspace_modes() {
         let mut item = record("foot", 80);
         item.spatial = Some(SpatialRecord {
+            fullscreen_origin: None,
+            home_geometry: None,
             floating: true,
             order: 3,
             flow_width: 780,
@@ -1049,5 +1136,76 @@ mod tests {
             ),
             vec![LayoutMode::Freeform]
         );
+    }
+}
+
+#[cfg(test)]
+mod display_space_tests {
+    use super::*;
+    fn snapshot() -> wm_core::DisplaySpacesSnapshot {
+        wm_core::DisplaySpacesSnapshot {
+            spaces: vec![wm_core::Space { id: 7, home_display: "connector:one".into(), output_display: "connector:one".into() },
+                wm_core::Space { id: 19, home_display: "connector:two".into(), output_display: "connector:two".into() }],
+            displays: vec![wm_core::DisplaySpace { key: "connector:one".into(), name: "one".into(), geometry: Rect::new(Point::new(-800, 0), Size::new(800, 600)), active: 7, connected: false },
+                wm_core::DisplaySpace { key: "connector:two".into(), name: "two".into(), geometry: Rect::new(Point::new(0, 0), Size::new(800, 600)), active: 19, connected: false }],
+            selected: "connector:two".into(), next_id: 19,
+        }
+    }
+    #[test]
+    fn empty_display_rows_survive_atomic_persistence_and_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-layout");
+        let now = Instant::now();
+        let (mut store, _) = SessionLayout::start_at(Some(path.clone()), false, &[], now);
+        store.note_spaces(Some(&snapshot()), now);
+        store.flush();
+        assert_eq!(parse_spaces(&std::fs::read_to_string(&path).unwrap()), Some(snapshot()));
+        let (mut restored, plans) = SessionLayout::start_at(Some(path), true, &[], now);
+        assert!(plans.is_empty());
+        assert_eq!(restored.take_restored_spaces(), Some(snapshot()));
+    }
+    #[test]
+    fn invalid_space_metadata_does_not_discard_legacy_window_records() {
+        let legacy = "foot\t-\t10\t20\t300\t200\t0\t-\n";
+        assert_eq!(parse(&format!("{legacy}@spaces\t{{broken}}\n")), parse(legacy));
+        assert_eq!(parse_spaces("@spaces\t{broken}\n"), None);
+        let mut bad = snapshot();
+        bad.spaces[1].id = 7;
+        assert_eq!(parse_spaces(&serialize_spaces(&bad)), None);
+        let malformed = serialize_spaces(&snapshot()).replace("800,600", "-1,600");
+        assert_eq!(parse_spaces(&malformed), None);
+    }
+    #[test]
+    fn connector_fallback_restores_relative_geometry_after_reordering() {
+        let monitors = vec![MonitorInfo { name: "two".into(), identity: None, primary: true,
+            geometry: Rect::new(Point::new(-640, 0), Size::new(640, 800)) }];
+        let geometry = restored_on_monitor(&monitors, Rect::new(Point::new(12, 80), Size::new(400, 300)), Some("two"));
+        assert_eq!(geometry.pos, Point::new(-628, 80));
+    }
+}
+
+#[cfg(test)]
+mod home_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn home_geometry_roundtrips_and_rejects_out_of_range_coordinates() {
+        let saved = wm_core::SpaceHomeGeometry {
+            display: "connector:external".into(),
+            bounds: Rect::new(Point::new(800, 0), Size::new(800, 600)),
+            normal: Rect::new(Point::new(1100, 300), Size::new(400, 200)),
+            freeform: Some(Rect::new(Point::new(1050, 200), Size::new(350, 300))),
+        };
+        let record = HomeGeometryRecord::from(&saved);
+        assert_eq!(record.to_geometry(), Some(saved.clone()));
+        assert!(record.matches(&saved));
+        let encoded = serde_json::to_string(&record).unwrap();
+        let mut decoded: HomeGeometryRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, record);
+        decoded.normal[0] = i64::MAX;
+        assert!(decoded.to_geometry().is_none());
+        decoded.normal[0] = 1100;
+        decoded.bounds[2] = 0;
+        assert!(decoded.to_geometry().is_none());
     }
 }

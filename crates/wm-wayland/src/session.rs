@@ -13,12 +13,11 @@
 //! Scope, stated up front so the omissions read as decisions rather
 //! than gaps:
 //!
-//! - **One GPU, every connected connector on it.** [`init`] picks the
-//!   primary DRM device and drives every connector on it that is
-//!   plugged in, each with its own crtc, its own `DrmCompositor`, and
-//!   its own page-flip bookkeeping (the kernel reports flips per crtc,
-//!   so nothing about frame scheduling can be shared between outputs).
-//!   A second GPU's outputs are dark.
+//! - **One KMS device, every connected connector on it.** Each output has
+//!   its own crtc, `DrmCompositor`, and page-flip bookkeeping. An explicit
+//!   `CHONKSTEP_RENDER_DEVICE` selects a second GPU for composition, with
+//!   Smithay MultiRenderer transferring into the KMS device's swapchain.
+//!   Additional KMS devices are not driven concurrently.
 //! - **The startup layout is a guess; the running layout is
 //!   configurable.** Outputs come up left to right in
 //!   connector-enumeration order at their preferred modes — nothing at
@@ -27,16 +26,9 @@
 //!   outputs, change their modes ([`apply_mode`] re-programs the crtc)
 //!   and set per-output scales — which is how `kanshi` gives a session
 //!   a remembered layout. Mirroring and rotation remain future work.
-//! - **No per-surface output tracking.** Nothing sends
-//!   `wl_surface.enter`/`leave`, so a client is never told which screen
-//!   it is on. That was invisible while there was one screen and one
-//!   possible answer; with several, a client that scales itself per
-//!   output (or wants that output's refresh) gets no signal and falls
-//!   back to its default. The same bookkeeping would give frame
-//!   callbacks a per-output cadence instead of the primary's (see
-//!   [`render_frame_session`]) and is the prerequisite for
-//!   `wp_presentation` feedback, so all three arrive together or not
-//!   at all.
+//! - **Per-surface output tracking.** Scene membership sends enter/leave and
+//!   output-specific allocation feedback. Retained rendered visibility chooses
+//!   each surface's primary presentation output and callback cadence.
 //! - **No GPU hot-plug.** The udev source logs device add/remove and
 //!   does not act on it. Adopting a GPU that appeared after startup
 //!   means re-running every step of [`init`] against it while the old
@@ -367,9 +359,8 @@ fn pnp_name(code: &str) -> String {
 /// visible scene element, and the driver's atomic test must accept it.
 /// A Dock, bar, menu, composited cursor, non-opaque surface, mismatched
 /// modifier, or failed test leaves the ordinary composition path in
-/// place. Overlay scanout and the format-agnostic primary variant stay
-/// off; either would multiply the hardware-dependent state space for a
-/// smaller win.
+/// place. Overlay scanout and the format-agnostic primary variant are
+/// independent experimental opt-ins; both retain atomic testing and fallback.
 ///
 /// `SKIP_CURSOR_ONLY_UPDATES` is deliberately absent: it suppresses the
 /// commit when nothing but the cursor moved, which is the one update
@@ -395,12 +386,24 @@ const FRAME_FLAGS: FrameFlags =
 /// the culprit and the default deserves revisiting; if it stays, that
 /// hypothesis is dead and the switch cost one experiment.
 pub(crate) fn frame_flags() -> FrameFlags {
+    scanout_policy_flags(
+        crate::diagnostics::enabled("no-cursor-plane"),
+        crate::diagnostics::enabled("no-direct-scanout"),
+        crate::diagnostics::enabled("overlay-scanout"),
+        crate::diagnostics::enabled("primary-scanout-any"),
+    )
+}
+
+fn scanout_policy_flags(no_cursor: bool, no_direct: bool, overlay: bool, primary_any: bool) -> FrameFlags {
     let mut flags = FRAME_FLAGS;
-    if crate::diagnostics::enabled("no-cursor-plane") {
+    if overlay { flags.insert(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT); }
+    if primary_any { flags.insert(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY); }
+    if no_cursor {
         flags.remove(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
     }
-    if crate::diagnostics::enabled("no-direct-scanout") {
-        flags.remove(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT);
+    if no_direct {
+        flags.remove(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT | FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY
+            | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT);
     }
     flags
 }
@@ -413,14 +416,8 @@ fn configured_frame_flags(
     no_cursor: Option<std::ffi::OsString>,
     no_direct_scanout: Option<std::ffi::OsString>,
 ) -> FrameFlags {
-    let mut flags = FRAME_FLAGS;
-    if no_cursor.is_some_and(|value| value != "0") {
-        flags.remove(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
-    }
-    if no_direct_scanout.is_some_and(|value| value != "0") {
-        flags.remove(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT);
-    }
-    flags
+    scanout_policy_flags(no_cursor.is_some_and(|value| value != "0"),
+        no_direct_scanout.is_some_and(|value| value != "0"), false, false)
 }
 
 /// Whether a composited client buffer's release is deferred to the
@@ -611,7 +608,7 @@ pub(crate) struct SessionGraphics {
     /// [`SessionGraphics::renderer`], which is the spelling
     /// backend-blind code uses so both arms of [`Graphics`] read the
     /// same.
-    pub(crate) renderer: GlesRenderer,
+    render_stack: crate::multi_gpu::Stack,
     /// The exact render node backing `renderer`, if it could be proved.
     /// This is deliberately not the KMS primary node: split display /
     /// render hardware has no render node on the display device, and
@@ -661,6 +658,9 @@ pub(crate) struct SessionGraphics {
 /// moments, so "is a flip in flight" and "does this need redrawing"
 /// are questions with one answer each per output.
 struct SessionOutput {
+    telemetry: crate::gpu_stats::OutputStats,
+    primary_formats: FormatSet,
+    overlay_formats: FormatSet,
     /// Connector name (`eDP-1`, `HDMI-A-2`), for log lines that have to
     /// name which screen is misbehaving.
     name: String,
@@ -732,7 +732,7 @@ struct SessionOutput {
     /// `scanout_scene` instead when this commit makes a client buffer
     /// the display's continuing source.
     pending_scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
-    /// The elements backing the primary plane currently being scanned
+    /// Elements backing the client planes currently being scanned
     /// out directly. A vblank makes an atomic commit *current*, not
     /// finished: the display engine keeps reading that buffer until a
     /// later flip replaces it. Keeping this scene separate from
@@ -742,7 +742,7 @@ struct SessionOutput {
     scanout_scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
     /// Cached solely for transition telemetry; unlike inspecting the
     /// scene, this costs no walk in the vblank callback.
-    direct_scanout_active: bool,
+    client_scanout_active: bool,
     /// Connector capability and the user's policy are separate from the live
     /// DRM property. The latter is enabled only for a frame the renderer has
     /// proved will directly scan out.
@@ -782,6 +782,7 @@ struct FrameClock {
     last_sample: Option<Instant>,
     deadline: Option<Instant>,
     target_vblank: Option<Instant>,
+    last_late_presentation: Option<Instant>,
 }
 
 impl FrameClock {
@@ -796,6 +797,7 @@ impl FrameClock {
             last_sample: None,
             deadline: None,
             target_vblank: None,
+            last_late_presentation: None,
         }
     }
 
@@ -811,6 +813,7 @@ impl FrameClock {
             last_sample: None,
             deadline: None,
             target_vblank: None,
+            last_late_presentation: None,
         }
     }
 
@@ -820,6 +823,7 @@ impl FrameClock {
         self.last_vblank = None;
         self.deadline = None;
         self.target_vblank = None;
+        self.last_late_presentation = None;
     }
 
     fn note_vblank(&mut self, at: Instant) {
@@ -832,6 +836,25 @@ impl FrameClock {
         self.last_vblank = None;
         self.deadline = None;
         self.target_vblank = None;
+        self.last_late_presentation = None;
+    }
+
+    /// CPU submission can finish on time while an asynchronous GPU fence
+    /// misses the intended refresh. Learn from the completed KMS flip too.
+    /// Only a queued frame carries a target; idle/unsubmitted frames cannot
+    /// manufacture misses. Half a refresh tolerates timestamp jitter, and
+    /// small bounded steps avoid turning one stall into a full-frame delay.
+    fn observe_presentation(&mut self, target: Option<Instant>, presented: Instant) -> bool {
+        let (Some(target), Some(period)) = (target, self.period) else { return false; };
+        if period.is_zero() || presented.saturating_duration_since(target) <= period / 2 {
+            return false;
+        }
+        let ceiling = MAX_RENDER_MARGIN.min(period / 2);
+        if self.margin < ceiling {
+            self.margin = self.margin.saturating_add(Duration::from_micros(250)).min(ceiling);
+        }
+        self.last_late_presentation = Some(presented);
+        true
     }
 
     fn pessimistic_budget(&self) -> Duration {
@@ -909,7 +932,7 @@ impl FrameClock {
         if self.target_vblank.is_some_and(|target| finished > target) {
             let overrun = self.target_vblank.map(|target| finished.duration_since(target)).unwrap_or_default();
             self.margin = self.margin.saturating_add(overrun.max(Duration::from_micros(250))).min(MAX_RENDER_MARGIN);
-        } else {
+        } else if self.last_late_presentation.is_none_or(|late| finished.saturating_duration_since(late) >= Duration::from_secs(30)) {
             let margin = self.margin.as_secs_f64();
             let base = BASE_RENDER_MARGIN.as_secs_f64();
             self.margin = Duration::from_secs_f64((margin + (base - margin) * decay_alpha).max(base));
@@ -948,10 +971,11 @@ fn drm_monotonic_instant(timestamp: Duration) -> Instant {
 
 /// A page flip the kernel has accepted and not yet reported back.
 struct PendingFlip {
+    target_vblank: Option<Instant>,
     queued_at: Instant,
-    /// Whether this commit put a client buffer, rather than a
-    /// compositor swapchain buffer, on the primary plane.
-    direct_scanout: bool,
+    /// Any client plane needs its buffers held until replacement, including a
+    /// composited primary with an overlay. Primary-only tracking is unsafe.
+    client_scanout: bool,
     /// Whether this flip has already been named in the log as stalled,
     /// so [`FLIP_STALL_WARNING`] produces one line per stuck frame
     /// rather than one per event-loop wakeup.
@@ -961,7 +985,7 @@ struct PendingFlip {
 /// Advances client-buffer ownership at a completed page flip.
 ///
 /// `pending` belongs to the commit that just became current. A direct
-/// primary-plane buffer moves into `scanout` because the display keeps
+/// plane buffer moves into `scanout` because the display keeps
 /// reading it after vblank; a composited commit replaces any previous
 /// direct buffer with the compositor's swapchain and can release both
 /// scene holds. Returns whether direct scanout changed state, for one
@@ -1001,7 +1025,7 @@ impl SessionGraphics {
     /// two arms of [`Graphics`] into one expression instead of
     /// branching on a method here and a field there.
     pub(crate) fn renderer(&mut self) -> &mut GlesRenderer {
-        &mut self.renderer
+        self.render_stack.gles()
     }
 
     /// The KMS device's fd, cloned for whoever needs to import into
@@ -1018,20 +1042,37 @@ impl SessionGraphics {
         self.render_node
     }
 
-    /// Formats a client can allocate for the conservative primary-plane
-    /// direct-scanout path on *every* active output. The default feedback
-    /// is global rather than per-surface, so advertising the intersection
-    /// is the only claim that stays true when a window moves monitors.
-    pub(crate) fn direct_scanout_formats(&self) -> FormatSet {
-        if !frame_flags().contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT) {
-            return FormatSet::default();
+    /// Device clients should prefer for buffers intended for this KMS target.
+    pub(crate) fn scanout_node(&self) -> Option<DrmNode> {
+        match &self.render_stack {
+            crate::multi_gpu::Stack::Single(_) => self.render_node,
+            crate::multi_gpu::Stack::Multi(multi) => Some(multi.target),
         }
-        common_scanout_formats(
-            self.outputs
-                .iter()
-                .map(|output| (output.drm_compositor.format(), output.drm_compositor.modifiers())),
-        )
     }
+
+    /// Exact plane capabilities for this output and the active experiment.
+    /// The caller intersects these with renderer imports so a rejected atomic
+    /// assignment can always fall back to composition.
+    pub(crate) fn output_scanout_formats(&self, index: usize) -> FormatSet {
+        let Some(output) = self.outputs.get(index) else { return FormatSet::default(); };
+        let flags = frame_flags();
+        let mut formats = Vec::new();
+        if flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY) {
+            formats.extend(output.primary_formats.indexset().iter().copied());
+        } else if flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT) {
+            formats.extend(output.drm_compositor.modifiers().iter().map(|modifier| Format {
+                code: output.drm_compositor.format(), modifier: *modifier,
+            }));
+        }
+        if flags.contains(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT) {
+            formats.extend(output.overlay_formats.indexset().iter().copied());
+        }
+        if let crate::multi_gpu::Stack::Multi(multi) = &self.render_stack {
+            formats.retain(|format| multi.scanout_imports.contains(format));
+        }
+        formats.into_iter().collect()
+    }
+
 }
 
 /// Stable, user-facing identity of the graphics backend currently
@@ -1042,34 +1083,22 @@ pub(crate) fn graphics_diagnostics(graphics: &Graphics) -> String {
     match graphics {
         Graphics::Winit(_) => "backend=nested-winit renderer=GLES host_output=true".to_string(),
         Graphics::Session(session) => format!(
-            "backend=drm-session kms_device={} drm_driver={} render_node={}",
+            "backend=drm-session kms_device={} drm_driver={} render_node={} {}",
             session.device_path.display(),
             session.driver_name,
             session
                 .render_node
                 .map_or_else(|| "unknown".to_string(), |node| node.to_string()),
+            session.render_stack.diagnostics(),
         ),
     }
 }
 
-/// Intersects exact format/modifier pairs across outputs for global
-/// linux-dmabuf feedback. Kept pure both for tests and to make the
-/// deliberately conservative multi-monitor promise unmistakable.
-fn common_scanout_formats<'a>(
-    mut outputs: impl Iterator<Item = (Fourcc, &'a [Modifier])>,
-) -> FormatSet {
-    let Some((first_code, first_modifiers)) = outputs.next() else {
-        return FormatSet::default();
-    };
-    let mut common: Vec<Format> = first_modifiers
-        .iter()
-        .copied()
-        .map(|modifier| Format { code: first_code, modifier })
-        .collect();
-    for (code, modifiers) in outputs {
-        common.retain(|format| format.code == code && modifiers.contains(&format.modifier));
+pub(crate) fn native_frame_stats(graphics: &Graphics) -> Vec<crate::gpu_stats::OutputStats> {
+    match graphics {
+        Graphics::Session(session) => session.outputs.iter().map(|output| output.telemetry.clone()).collect(),
+        Graphics::Winit(_) => Vec::new(),
     }
-    common.into_iter().collect()
 }
 
 /// Resolves a render node paired with a KMS fd.
@@ -1151,7 +1180,7 @@ pub(crate) fn init(
     // exact identity. If the optional EGL query extension is absent,
     // pairing the KMS node is safe only when a real render node exists;
     // `render_node_for_fd` deliberately declines a primary-node guess.
-    let render_node = crate::dmabuf::render_node_for_renderer(&renderer)
+    let mut render_node = crate::dmabuf::render_node_for_renderer(&renderer)
         .or_else(|| render_node_for_fd(drm.device_fd()));
     match render_node {
         Some(node) => tracing::info!(render_node = %node, "session backend: renderer device identified"),
@@ -1164,7 +1193,24 @@ pub(crate) fn init(
     // against the primary plane's formats by `DrmCompositor::new` to
     // choose the swapchain format. Collected eagerly so the borrow of
     // the renderer ends here.
-    let render_formats: Vec<Format> = renderer.egl_context().dmabuf_render_formats().iter().copied().collect();
+    let mut render_formats: Vec<Format> = renderer.egl_context().dmabuf_render_formats().iter().copied().collect();
+    let mut render_stack = crate::multi_gpu::Stack::Single(Box::new(renderer));
+    if let Some(path) = std::env::var_os("CHONKSTEP_RENDER_DEVICE") {
+        let path = PathBuf::from(path);
+        let requested = DrmNode::from_path(&path).map_err(|error| format!("requested render device: {error}"))?;
+        if requested.ty() != NodeType::Render { return Err("CHONKSTEP_RENDER_DEVICE must name a DRM render node".into()); }
+        let target = render_node.ok_or("multi-GPU requires an identified target renderer device")?;
+        if requested != target {
+            let mut multi = crate::multi_gpu::CrossGpu::new(&path, target, drm.device_fd().device_fd())?;
+            // The scanout swapchain belongs to the target GPU. Its renderable
+            // formats, not the source GPU's, constrain DRM allocation.
+            render_formats = multi.target_formats();
+            render_node = Some(multi.render);
+            tracing::warn!(render = %multi.render, target = %multi.target,
+                "experimental multi-GPU composition enabled; DMA transfer preferred, CPU fallback possible");
+            render_stack = crate::multi_gpu::Stack::Multi(Box::new(multi));
+        }
+    }
 
     // 4. One output per connected connector, laid out left to right in
     //    connector order at their mode sizes (see the module docs on
@@ -1287,17 +1333,27 @@ pub(crate) fn init(
                         // buffers now. A direct-scanout frame cannot:
                         // this vblank made its client buffer current.
                         if let Some(pending) = pending {
+                            // Use the kernel clock, not delayed event-loop
+                            // receipt, to distinguish a missed GPU deadline.
+                            let late = monotonic_metadata.is_some()
+                                && output.frame_clock.observe_presentation(pending.target_vblank, vblank_at);
+                            {
+                                let mut stats = output.telemetry.stats.borrow_mut();
+                                stats.flips = stats.flips.saturating_add(1);
+                                stats.late_presentations = stats.late_presentations.saturating_add(u64::from(late));
+                                stats.stage(9, vblank_at.saturating_duration_since(pending.queued_at));
+                            }
                             let changed = complete_scene_flip(
                                 &mut output.pending_scene,
                                 &mut output.scanout_scene,
-                                &mut output.direct_scanout_active,
-                                pending.direct_scanout,
+                                &mut output.client_scanout_active,
+                                pending.client_scanout,
                             );
                             if changed {
                                 tracing::info!(
                                     output = %output.name,
-                                    active = pending.direct_scanout,
-                                    "DRM primary-plane direct scanout changed"
+                                    active = pending.client_scanout,
+                                    "DRM client-plane scanout changed"
                                 );
                             }
                         }
@@ -1336,7 +1392,7 @@ pub(crate) fn init(
     loop_handle
         .insert_source(udev_backend, |event, _, comp: &mut Compositor| match event {
             UdevEvent::Added { device_id, path } => {
-                tracing::info!(?device_id, path = %path.display(), "a DRM device appeared; chonkstep drives a single GPU and will not adopt it");
+                tracing::info!(?device_id, path = %path.display(), "a DRM device appeared; chonkstep drives one KMS device and will not adopt another during this session");
             }
             UdevEvent::Changed { device_id } => {
                 let Graphics::Session(session) = &mut comp.graphics else { return };
@@ -1400,7 +1456,7 @@ pub(crate) fn init(
                         clear_scene_holds(
                             &mut output.pending_scene,
                             &mut output.scanout_scene,
-                            &mut output.direct_scanout_active,
+                            &mut output.client_scanout_active,
                         );
                     }
                 }
@@ -1465,7 +1521,7 @@ pub(crate) fn init(
                         clear_scene_holds(
                             &mut output.pending_scene,
                             &mut output.scanout_scene,
-                            &mut output.direct_scanout_active,
+                            &mut output.client_scanout_active,
                         );
                     }
                     // Marks every output dirty on the next render pass
@@ -1493,7 +1549,7 @@ pub(crate) fn init(
     //    them.
     let strict_release = strict_release_configured(
         std::env::var_os("CHONKSTEP_STRICT_BUFFER_RELEASE"),
-        driver_is_nvidia(drm.device_fd()),
+        driver_is_nvidia(drm.device_fd()) || matches!(render_stack, crate::multi_gpu::Stack::Multi(_)),
     );
     let driver_name = {
         use smithay::reexports::drm::Device as _;
@@ -1513,7 +1569,7 @@ pub(crate) fn init(
             driver_name,
             seat_session,
             drm,
-            renderer,
+            render_stack,
             render_node,
             gbm,
             render_formats,
@@ -1671,6 +1727,9 @@ fn attach_output(
         "DRM planes available to this crtc"
     );
 
+    let primary_formats = surface.plane_info().formats.clone();
+    let overlay_formats = planes.overlay.iter().flat_map(|plane| plane.formats.indexset().iter().copied()).collect();
+
     let mut drm_compositor = SessionDrmCompositor::new(
         OutputModeSource::Static {
             size: wl_mode.size,
@@ -1720,6 +1779,9 @@ fn attach_output(
 
     Ok((
         SessionOutput {
+            telemetry: crate::gpu_stats::OutputStats::new(name.clone()),
+            primary_formats,
+            overlay_formats,
             name,
             connector: info.handle(),
             crtc: *crtc,
@@ -1736,7 +1798,7 @@ fn attach_output(
             scene_scratch: Vec::new(),
             pending_scene: Vec::new(),
             scanout_scene: Vec::new(),
-            direct_scanout_active: false,
+            client_scanout_active: false,
             vrr_supported,
             vrr_requested,
             presentation: None,
@@ -2053,7 +2115,7 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
         clear_scene_holds(
             &mut output.pending_scene,
             &mut output.scanout_scene,
-            &mut output.direct_scanout_active,
+            &mut output.client_scanout_active,
         );
         if let Some(mut feedback) = output.presentation.take() {
             feedback.discarded();
@@ -2220,7 +2282,7 @@ pub(crate) fn set_output_power(graphics: &mut Graphics, index: usize, powered: b
         clear_scene_holds(
             &mut output.pending_scene,
             &mut output.scanout_scene,
-            &mut output.direct_scanout_active,
+            &mut output.client_scanout_active,
         );
         if let Some(mut feedback) = output.presentation.take() {
             feedback.discarded();
@@ -2527,6 +2589,9 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         pointer_location,
         cursor_status,
         cursors,
+        surface_outputs,
+        dmabuf,
+        gpu_timer,
         ..
     } = comp;
     let Graphics::Session(session) = graphics else {
@@ -2560,14 +2625,18 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         service_pending_flips(session);
     }
 
-    let SessionGraphics { renderer, outputs: session_outputs, strict_release, .. } = &mut **session;
+    let SessionGraphics { render_stack, outputs: session_outputs, strict_release, .. } = &mut **session;
     let strict_release = *strict_release;
     let mut drew_any = false;
     for (output_index, output) in session_outputs.iter_mut().enumerate() {
+        let mut stats = output.telemetry.stats.borrow_mut();
+        stats.passes = stats.passes.saturating_add(1);
         if !output.powered {
+            stats.skips[0] = stats.skips[0].saturating_add(1);
             continue;
         }
         if output.frame_pending.is_some() {
+            stats.skips[1] = stats.skips[1].saturating_add(1);
             // A page flip is in flight on this crtc. Rendering now would
             // burn a swapchain slot on a frame the display cannot show
             // before the one already queued, so leave the output dirty
@@ -2578,17 +2647,22 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             continue;
         }
         if !output.dirty {
+            stats.skips[2] = stats.skips[2].saturating_add(1);
             continue;
         }
         if !device_active {
+            stats.skips[3] = stats.skips[3].saturating_add(1);
             continue;
         }
         let now = Instant::now();
         if output.frame_clock.arm(now) > now {
+            stats.skips[4] = stats.skips[4].saturating_add(1);
             continue;
         }
 
         let render_started = Instant::now();
+        let flags = frame_flags();
+        stats.begin(flags.bits());
 
         // Resetting every buffer age makes the internal damage tracker
         // treat the whole output as stale, forcing a full-frame submit —
@@ -2617,6 +2691,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         // hits before a developer does, and one that would otherwise
         // require a rebuild to escape.
         if full_damage_forced() || plain_capture_pending || output.full_damage_required {
+            stats.current.full_damage = true;
             output.drm_compositor.reset_buffer_ages();
         }
 
@@ -2635,6 +2710,8 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                     .map(|monitor| monitor.geometry)
                     .unwrap_or_else(|| Rect::new(output.position, wm.backend().output_size))
             });
+        let renderer = render_stack.gles();
+        let scene_started = Instant::now();
         let gesture_build = wm.backend().gesture_scene.as_ref().map(|_| Instant::now());
         let clear_color = crate::renderer::build_scene_into(
             &mut output.scene_scratch,
@@ -2646,12 +2723,35 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             viewport,
         );
         if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
+        stats.stage(0, scene_started.elapsed());
 
+        let chrome_started = Instant::now();
         crate::capture_tool::render(&mut output.scene_scratch, renderer, wm.backend(), viewport);
-        let (rendered, direct_scanout, render_states) =
-            match output.drm_compositor.render_frame(renderer, &output.scene_scratch, clear_color, frame_flags()) {
+        stats.stage(1, chrome_started.elapsed());
+        stats.current.elements = output.scene_scratch.len();
+        if let Some(entry) = output_entries.get(output_index) {
+            surface_outputs.update_scene(&entry.output, (entry.size.w as i32, entry.size.h as i32).into(), &output.scene_scratch, dmabuf.default_feedback());
+        }
+        let timing = gpu_timer.begin(renderer, &output.name);
+        let frame = match render_stack {
+            crate::multi_gpu::Stack::Single(renderer) => output.drm_compositor
+                .render_frame(renderer.as_mut(), &output.scene_scratch, clear_color, flags).map_err(|error| format!("{error:?}")),
+            crate::multi_gpu::Stack::Multi(multi) => multi.renderer(output.drm_compositor.format()).and_then(|mut renderer| {
+                output.drm_compositor.render_frame(&mut renderer, &output.scene_scratch, clear_color, flags)
+                    .map_err(|error| format!("{error:?}"))
+            }),
+        };
+        gpu_timer.end(render_stack.gles(), timing);
+        let (rendered, direct_scanout, render_states) = match frame {
             Ok(result) => {
                 let direct_scanout = matches!(&result.primary_element, PrimaryPlaneElement::Element(_));
+                stats.current.primary = direct_scanout;
+                stats.current.overlays = result.overlay_elements.len();
+                stats.current.cursor = result.cursor_element.is_some();
+                stats.current.elements(&result.states);
+                stats.stage(2, result.cpu_timings.preparation);
+                stats.stage(3, result.cpu_timings.planes);
+                stats.stage(4, result.cpu_timings.composition);
                 // The GPU may still be drawing into the buffer we are
                 // about to hand the scanout engine. Where the driver
                 // supports fencing the DRM compositor passes the fence
@@ -2660,9 +2760,11 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                 // standing between us and a half-drawn frame on screen.
                 if result.needs_sync() {
                     if let PrimaryPlaneElement::Swapchain(element) = &result.primary_element {
+                        let fence_started = Instant::now();
                         if let Err(error) = element.sync.wait() {
                             tracing::warn!(?error, output = %output.name, "interrupted waiting on the render fence; the frame may tear");
                         }
+                        stats.stage(5, fence_started.elapsed());
                     }
                 }
                 (!result.is_empty, direct_scanout, result.states)
@@ -2676,6 +2778,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                     tracing::warn!(?error, output = %output.name, "DRM render failed; keeping this output dirty for a retry");
                 }
                 output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
+                stats.finish("render_failed", render_started.elapsed());
                 output.scene_scratch.clear();
                 continue;
             }
@@ -2722,12 +2825,18 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         }
 
         let mut frame_queued = false;
+        let client_scanout = direct_scanout || stats.current.overlays > 0 || stats.current.cursor;
         if rendered {
-            match output.drm_compositor.queue_frame(()) {
+            let queue_started = Instant::now();
+            let queue = output.drm_compositor.queue_frame(());
+            stats.stage(6, queue_started.elapsed());
+            let feedback_started = Instant::now();
+            match queue {
                 Ok(()) => {
                     output.frame_pending = Some(PendingFlip {
+                        target_vblank: output.frame_clock.target_vblank,
                         queued_at: Instant::now(),
-                        direct_scanout,
+                        client_scanout,
                         stall_reported: false,
                     });
                     frame_queued = true;
@@ -2735,6 +2844,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                         (output_entries.get(output_index), wm.backend().monitors.get(output_index))
                     {
                         output.presentation = Some(crate::renderer::take_presentation_feedback(
+                            surface_outputs,
                             wm.backend(),
                             &entry.output,
                             monitor.geometry,
@@ -2742,6 +2852,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                             cursor_status,
                             *pointer_location,
                         ));
+                        surface_outputs.send_feedback(&entry.output, &render_states, dmabuf);
                     }
                 }
                 // Nothing on the crtc actually changed. Not an error,
@@ -2752,6 +2863,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                         (output_entries.get(output_index), wm.backend().monitors.get(output_index))
                     {
                         let mut feedback = crate::renderer::take_presentation_feedback(
+                            surface_outputs,
                             wm.backend(),
                             &entry.output,
                             monitor.geometry,
@@ -2759,6 +2871,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                             cursor_status,
                             *pointer_location,
                         );
+                        surface_outputs.send_feedback(&entry.output, &render_states, dmabuf);
                         let flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync;
                         if let Some((at, sequence)) = output.last_vblank {
                             crate::renderer::present_at(
@@ -2788,10 +2901,12 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                     output.drm_compositor.reset_buffer_ages();
                     tracing::warn!(?error, output = %output.name, "queueing the page flip failed; keeping this output dirty for a retry");
                     output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
+                    stats.finish("queue_failed", render_started.elapsed());
                     output.scene_scratch.clear();
                     continue;
                 }
             }
+            stats.stage(7, feedback_started.elapsed());
             // Keep this frame's elements — and through them its client
             // buffers — alive until the ownership point appropriate to
             // the path. Strict compositing waits through this flip so
@@ -2801,7 +2916,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             // strict `EmptyFrame` case keeps its scene too: with no
             // vblank coming, deferring those releases to the next real
             // flip errs on the side the mechanism exists for.
-            if strict_release || (direct_scanout && frame_queued) {
+            if strict_release || (client_scanout && frame_queued) {
                 // `append` transfers element ownership without taking
                 // the source vector's allocation. Usually pending is
                 // empty; after a strict EmptyFrame it deliberately
@@ -2814,6 +2929,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         // they were appended above this is an empty, allocation-
         // preserving no-op.
         output.scene_scratch.clear();
+        stats.finish(if frame_queued { "queued" } else { "empty" }, render_started.elapsed());
         output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
         output.dirty = false;
         output.full_damage_required = false;
@@ -3240,6 +3356,21 @@ mod tests {
     }
 
     #[test]
+    fn experimental_scanout_flags_obey_independent_escape_switches() {
+        for bits in 0..16 {
+            let no_cursor = bits & 1 != 0;
+            let no_direct = bits & 2 != 0;
+            let overlay = bits & 4 != 0;
+            let primary_any = bits & 8 != 0;
+            let flags = scanout_policy_flags(no_cursor, no_direct, overlay, primary_any);
+            assert_eq!(flags.contains(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT), !no_cursor);
+            assert_eq!(flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT), !no_direct);
+            assert_eq!(flags.contains(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT), overlay && !no_direct);
+            assert_eq!(flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY), primary_any && !no_direct);
+        }
+    }
+
+    #[test]
     fn vrr_runs_only_for_requested_direct_scanout() {
         assert!(runtime_vrr_enabled(true, true, true, false));
         assert!(!runtime_vrr_enabled(false, true, true, false));
@@ -3295,25 +3426,6 @@ mod tests {
     }
 
     #[test]
-    fn scanout_feedback_promises_only_pairs_shared_by_every_output() {
-        let first = [Modifier::Linear, Modifier::Invalid];
-        let second = [Modifier::Invalid];
-        let formats = common_scanout_formats(
-            [(Fourcc::Argb8888, first.as_slice()), (Fourcc::Argb8888, second.as_slice())].into_iter(),
-        );
-        assert_eq!(
-            formats.indexset().iter().copied().collect::<Vec<_>>(),
-            vec![Format { code: Fourcc::Argb8888, modifier: Modifier::Invalid }]
-        );
-
-        let mismatched = common_scanout_formats(
-            [(Fourcc::Argb8888, first.as_slice()), (Fourcc::Abgr8888, first.as_slice())].into_iter(),
-        );
-        assert!(mismatched.indexset().is_empty());
-        assert!(common_scanout_formats(std::iter::empty()).indexset().is_empty());
-    }
-
-    #[test]
     fn first_and_post_idle_frames_are_never_delayed() {
         let period = Duration::from_millis(16);
         let now = Instant::now();
@@ -3363,5 +3475,41 @@ mod tests {
         clock.observe_render(Duration::from_millis(1), start + Duration::from_millis(16));
         assert!(clock.pessimistic_budget() > Duration::from_millis(5));
         assert!(clock.pessimistic_budget() <= raised);
+    }
+
+    #[test]
+    fn on_time_cpu_submission_still_learns_a_late_gpu_presentation() {
+        let period = Duration::from_nanos(6_944_444);
+        let start = Instant::now();
+        let mut clock = FrameClock::for_period(period);
+        clock.note_vblank(start);
+        let deadline = clock.arm(start + Duration::from_micros(100));
+        let queued_target = clock.target_vblank;
+        clock.observe_render(Duration::from_micros(100), deadline + Duration::from_micros(100));
+        let old_margin = clock.margin;
+        let completed = queued_target.unwrap() + period;
+        assert!(clock.observe_presentation(queued_target, completed));
+        assert!(clock.margin > old_margin);
+        let learned = clock.margin;
+        clock.observe_render(Duration::from_micros(100), completed + period);
+        assert_eq!(clock.margin, learned, "CPU-only samples must not immediately erase GPU feedback");
+    }
+
+    #[test]
+    fn presentation_jitter_and_unsubmitted_frames_do_not_raise_the_margin() {
+        let period = Duration::from_nanos(6_944_444);
+        let at = Instant::now();
+        let mut clock = FrameClock::for_period(period);
+        let original = clock.margin;
+        assert!(!clock.observe_presentation(None, at + Duration::from_secs(10)));
+        assert!(!clock.observe_presentation(Some(at), at + Duration::from_micros(100)));
+        assert!(!clock.observe_presentation(Some(at), at - Duration::from_micros(100)));
+        assert_eq!(clock.margin, original);
+        for _ in 0..100 {
+            assert!(clock.observe_presentation(Some(at), at + period));
+        }
+        assert_eq!(clock.margin, period / 2, "GPU correction cannot consume a whole refresh");
+        clock.disarm();
+        assert!(clock.last_late_presentation.is_none());
     }
 }

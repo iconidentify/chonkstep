@@ -1,0 +1,2880 @@
+{
+  "metadata": {
+    "date_utc": "2026-09-10T19:55:28Z",
+    "backend": "native DRM/KMS",
+    "arguments": {
+      "binary": [
+        "final=/tmp/cim/bin/final"
+      ],
+      "probe": "/tmp/cim/bin/probe",
+      "drm_info": "/tmp/cim/bin/drm-info",
+      "device": "/dev/dri/card1",
+      "render_device": null,
+      "connector": "eDP-1",
+      "test_vt": 3,
+      "return_vt": 1,
+      "width": 3840,
+      "height": 2160,
+      "hz": 59.997,
+      "cases": [
+        "native",
+        "fractional"
+      ],
+      "policies": [
+        "default"
+      ],
+      "seconds": 12.0,
+      "settle_seconds": 6.0,
+      "runs": 2,
+      "gpu_timings": true,
+      "vrr": "off",
+      "log_filter": "info",
+      "require_scanout": null,
+      "stress": false,
+      "skip_modesets": null,
+      "frame_marker": false,
+      "capture_every": 0,
+      "output": "/tmp/cim/timers-high"
+    },
+    "binaries": {
+      "final": {
+        "path": "/tmp/cim/bin/final",
+        "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-11-ga416af5-native-qualified\nbuild id: ab789770f61f743a4f7d5b0d8c3ed11f91460b08",
+        "sha256": "2727bc755de151d0285d2cfff24d59f1b186e1ae40fb71db8ea14ec75b926da2"
+      }
+    },
+    "probe_sha256": "b3cff7d4b921f04cd22ed731e6281aaf327dd79aac9bc5390a6eb3bb00f3ffba",
+    "harness_sha256": "011e8a0f37e1fac9b5afdf615b92f9633ab5a7fdba083a8f839413ec8c24a8d4",
+    "kernel": "Linux imac 7.1.9-arch1-2 #1 SMP PREEMPT_DYNAMIC Fri, 21 Aug 2026 22:18:59 +0000 x86_64 GNU/Linux",
+    "load_average": [
+      0.44482421875,
+      0.82080078125,
+      0.73388671875
+    ],
+    "driver": [
+      {
+        "pci": "0000:01:00.0",
+        "vendor": "0x1002",
+        "device": "0x67df",
+        "subsystem_vendor": "0x106b",
+        "subsystem_device": "0x0195",
+        "driver": "amdgpu",
+        "power_policy": "high",
+        "power_scope": "amdgpu hwmon PPT sensor; not system or wall power"
+      }
+    ],
+    "limitations": "Synthetic frame-paced opaque EGL producer uses glFinish before handoff. Single physical output. Presentation is hardware completion, not photon/input latency. GPU board telemetry includes other processes. Histogram percentiles are upper bounds."
+  },
+  "summary": {
+    "final/fractional/default": {
+      "cpu_percent": {
+        "n": 2,
+        "median": 2.6666018892446033,
+        "mean": 2.6666018892446033,
+        "min": 2.583273986488405,
+        "max": 2.749929792000802,
+        "values": [
+          2.583273986488405,
+          2.749929792000802
+        ]
+      },
+      "presentation_fps": {
+        "n": 2,
+        "median": 59.99566345670407,
+        "mean": 59.99566345670407,
+        "min": 59.99566095358889,
+        "max": 59.995665959819256,
+        "values": [
+          59.995665959819256,
+          59.99566095358889
+        ]
+      },
+      "cpu_us_per_presented_frame": {
+        "n": 2,
+        "median": 444.44444444444446,
+        "mean": 444.44444444444446,
+        "min": 430.55555555555566,
+        "max": 458.3333333333333,
+        "values": [
+          430.55555555555566,
+          458.3333333333333
+        ]
+      },
+      "render_wall_us_per_frame": {
+        "n": 2,
+        "median": 339.8358831710709,
+        "mean": 339.8358831710709,
+        "min": 335.08205841446454,
+        "max": 344.58970792767735,
+        "values": [
+          335.08205841446454,
+          344.58970792767735
+        ]
+      },
+      "missed_refreshes": {
+        "n": 2,
+        "median": 0.0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0,
+          0
+        ]
+      }
+    },
+    "final/native/default": {
+      "cpu_percent": {
+        "n": 2,
+        "median": 2.8332787473635563,
+        "mean": 2.8332787473635563,
+        "min": 2.749934947080569,
+        "max": 2.9166225476465435,
+        "values": [
+          2.9166225476465435,
+          2.749934947080569
+        ]
+      },
+      "presentation_fps": {
+        "n": 2,
+        "median": 59.99566345670491,
+        "mean": 59.99566345670491,
+        "min": 59.99565594735936,
+        "max": 59.99567096605046,
+        "values": [
+          59.99567096605046,
+          59.99565594735936
+        ]
+      },
+      "cpu_us_per_presented_frame": {
+        "n": 2,
+        "median": 472.2222222222222,
+        "mean": 472.2222222222222,
+        "min": 458.3333333333333,
+        "max": 486.11111111111103,
+        "values": [
+          486.11111111111103,
+          458.3333333333333
+        ]
+      },
+      "render_wall_us_per_frame": {
+        "n": 2,
+        "median": 347.77885952712097,
+        "mean": 347.77885952712097,
+        "min": 346.6842837273992,
+        "max": 348.8734353268428,
+        "values": [
+          348.8734353268428,
+          346.6842837273992
+        ]
+      },
+      "missed_refreshes": {
+        "n": 2,
+        "median": 0.0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0,
+          0
+        ]
+      }
+    }
+  },
+  "samples": [
+    {
+      "label": "final",
+      "case": "native",
+      "policy": "default",
+      "seconds": 12.000181521,
+      "cpu_percent": 2.9166225476465435,
+      "render_fps": 59.915760335939005,
+      "render_wall_us_per_frame": 348.8734353268428,
+      "presentation": {
+        "count": 720,
+        "fps": 59.99567096605046,
+        "interval_ms_p50": 16.668,
+        "interval_ms_p95": 16.668,
+        "interval_ms_p99": 16.668,
+        "interval_ms_p99_9": 16.681,
+        "interval_ms_max": 16.681,
+        "intervals_over_1_5_refresh": 0,
+        "estimated_missed_refreshes": 0,
+        "zero_copy_count": 0,
+        "advertised_refresh_ns": [
+          16667500
+        ]
+      },
+      "frames": {
+        "dispatch_calls": 2407,
+        "dispatch_us": 330269,
+        "dispatch_max_us": 859,
+        "input_us": 941,
+        "shell_us": 42095,
+        "protocol_us": 12737,
+        "layout_us": 10115,
+        "render_calls": 719,
+        "render_us": 250840,
+        "render_max_us": 803,
+        "flush_us": 5659,
+        "ipc_us": 2883,
+        "render_attempts": 1636,
+        "gesture_build_calls": 0,
+        "gesture_build_us": 0,
+        "gesture_build_max_us": 0
+      },
+      "before": {
+        "monotonic_ns": 167822916044315,
+        "wall_ns": 1789070136300046897,
+        "cpu_ticks": 71,
+        "rss_bytes": 325791744
+      },
+      "after": {
+        "monotonic_ns": 167834916225836,
+        "wall_ns": 1789070148300228025,
+        "cpu_ticks": 106,
+        "rss_bytes": 325410816
+      },
+      "native_delta": {
+        "passes": 1644,
+        "skips_off": 0,
+        "skips_flip": 103,
+        "skips_clean": 0,
+        "skips_inactive": 0,
+        "skips_deadline": 819,
+        "attempts": 722,
+        "queued": 722,
+        "empty": 0,
+        "render_failed": 0,
+        "queue_failed": 0,
+        "flips": 722,
+        "primary": 0,
+        "overlay": 0,
+        "composited": 722,
+        "late_presentations": 0
+      },
+      "stages": {
+        "composition_gpu": {
+          "count": 722,
+          "mean_us": 394.1657617728532,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            722,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 513,
+          "p95_upper_us": 513,
+          "p99_upper_us": 513
+        },
+        "scene": {
+          "count": 722,
+          "mean_us": 25.341326869806093,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            212,
+            462,
+            48,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 33,
+          "p95_upper_us": 65,
+          "p99_upper_us": 65
+        },
+        "capture_chrome": {
+          "count": 722,
+          "mean_us": 0.07815373961218836,
+          "histogram": [
+            722,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 2,
+          "p95_upper_us": 2,
+          "p99_upper_us": 2
+        },
+        "prepare": {
+          "count": 722,
+          "mean_us": 6.151206371191136,
+          "histogram": [
+            0,
+            0,
+            239,
+            472,
+            7,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 9,
+          "p95_upper_us": 9,
+          "p99_upper_us": 17
+        },
+        "planes": {
+          "count": 722,
+          "mean_us": 5.1756454293628815,
+          "histogram": [
+            0,
+            48,
+            222,
+            447,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 9,
+          "p95_upper_us": 9,
+          "p99_upper_us": 9
+        },
+        "composition_submit": {
+          "count": 722,
+          "mean_us": 170.55534487534626,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            47,
+            673,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 257,
+          "p95_upper_us": 257,
+          "p99_upper_us": 257
+        },
+        "kms_queue": {
+          "count": 722,
+          "mean_us": 37.15137534626039,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            260,
+            455,
+            7,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 65,
+          "p95_upper_us": 65,
+          "p99_upper_us": 65
+        },
+        "presentation_feedback": {
+          "count": 722,
+          "mean_us": 4.782831024930748,
+          "histogram": [
+            0,
+            95,
+            321,
+            297,
+            7,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 5,
+          "p95_upper_us": 9,
+          "p99_upper_us": 17
+        },
+        "render_attempt": {
+          "count": 722,
+          "mean_us": 341.8275817174515,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            57,
+            665,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 513,
+          "p95_upper_us": 513,
+          "p99_upper_us": 513
+        },
+        "queue_to_vblank": {
+          "count": 722,
+          "mean_us": 6648.661175900277,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            166,
+            352,
+            204,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 8193,
+          "p95_upper_us": 16385,
+          "p99_upper_us": 16385
+        }
+      },
+      "captures": [],
+      "readback_before": {
+        "queued": 6,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 147456,
+        "maps": 6,
+        "map_cpu_ns": 31247
+      },
+      "readback_after": {
+        "queued": 18,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 147456,
+        "maps": 18,
+        "map_cpu_ns": 77304
+      },
+      "multi_gpu_delta": {
+        "dma_frames": 0,
+        "cpu_frames": 0,
+        "cpu_pixels": 0
+      },
+      "monitors": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "monitors_after": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 2,
+            "name": "2"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "renderers": [
+        "AMD Radeon Pro 580X (radeonsi, polaris10, ACO, DRM 3.64, 7.1.9-arch1-2)"
+      ],
+      "pixels": {
+        "size": [
+          3840,
+          2160
+        ],
+        "fullscreen_pattern_verified": true,
+        "client_pattern_verified": true,
+        "sha256": "376472af953c1f5d2d854949f8a17fe084c1f3bf387f0a03f81a91ffef210ccc"
+      },
+      "load_average": [
+        0.62060546875,
+        0.833984375,
+        0.7392578125
+      ],
+      "active_hardware_planes": [
+        {
+          "id": 59,
+          "type": 1,
+          "crtc": 64,
+          "framebuffer": 124
+        },
+        {
+          "id": 62,
+          "type": 2,
+          "crtc": 64,
+          "framebuffer": 128
+        }
+      ],
+      "run": 0,
+      "directory": "000",
+      "presentation_fps": 59.99567096605046,
+      "missed_refreshes": 0,
+      "cpu_us_per_presented_frame": 486.11111111111103,
+      "boards": {
+        "0000:01:00.0": {
+          "utilization_percent": {
+            "n": 10,
+            "median": 0.0,
+            "mean": 4.3,
+            "min": 0.0,
+            "max": 32.0,
+            "values": [
+              0.0,
+              0.0,
+              1.0,
+              10.0,
+              32.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "memory_utilization_percent": {
+            "n": 10,
+            "median": 1.0,
+            "mean": 4.7,
+            "min": 1.0,
+            "max": 29.0,
+            "values": [
+              1.0,
+              1.0,
+              2.0,
+              9.0,
+              29.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "memory_mib": {
+            "n": 10,
+            "median": 528.3203125,
+            "mean": 529.1203125,
+            "min": 528.3203125,
+            "max": 532.3203125,
+            "values": [
+              532.3203125,
+              532.3203125,
+              528.3203125,
+              528.3203125,
+              528.3203125,
+              528.3203125,
+              528.3203125,
+              528.3203125,
+              528.3203125,
+              528.3203125
+            ]
+          },
+          "graphics_mhz": {
+            "n": 10,
+            "median": 1200.0,
+            "mean": 1200.0,
+            "min": 1200.0,
+            "max": 1200.0,
+            "values": [
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0
+            ]
+          },
+          "memory_mhz": {
+            "n": 10,
+            "median": 1695.0,
+            "mean": 1695.0,
+            "min": 1695.0,
+            "max": 1695.0,
+            "values": [
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0
+            ]
+          },
+          "power_w": {
+            "n": 10,
+            "median": 26.082,
+            "mean": 26.0527,
+            "min": 25.445,
+            "max": 26.551,
+            "values": [
+              25.445,
+              25.531,
+              26.105,
+              26.086,
+              26.434,
+              26.043,
+              26.289,
+              26.078,
+              26.551,
+              25.965
+            ]
+          },
+          "temperature_c": {
+            "n": 10,
+            "median": 63.0,
+            "mean": 62.8,
+            "min": 62.0,
+            "max": 63.0,
+            "values": [
+              62.0,
+              62.0,
+              63.0,
+              63.0,
+              63.0,
+              63.0,
+              63.0,
+              63.0,
+              63.0,
+              63.0
+            ]
+          }
+        }
+      }
+    },
+    {
+      "label": "final",
+      "case": "fractional",
+      "policy": "default",
+      "seconds": 12.000275682,
+      "cpu_percent": 2.583273986488405,
+      "render_fps": 59.915290202747194,
+      "render_wall_us_per_frame": 335.08205841446454,
+      "presentation": {
+        "count": 720,
+        "fps": 59.995665959819256,
+        "interval_ms_p50": 16.668,
+        "interval_ms_p95": 16.668,
+        "interval_ms_p99": 16.668,
+        "interval_ms_p99_9": 16.681,
+        "interval_ms_max": 16.681,
+        "intervals_over_1_5_refresh": 0,
+        "estimated_missed_refreshes": 0,
+        "zero_copy_count": 0,
+        "advertised_refresh_ns": [
+          16667500
+        ]
+      },
+      "frames": {
+        "dispatch_calls": 2326,
+        "dispatch_us": 314403,
+        "dispatch_max_us": 766,
+        "input_us": 982,
+        "shell_us": 38947,
+        "protocol_us": 12201,
+        "layout_us": 8714,
+        "render_calls": 719,
+        "render_us": 240924,
+        "render_max_us": 725,
+        "flush_us": 5333,
+        "ipc_us": 2658,
+        "render_attempts": 1603,
+        "gesture_build_calls": 0,
+        "gesture_build_us": 0,
+        "gesture_build_max_us": 0
+      },
+      "before": {
+        "monotonic_ns": 167842827541246,
+        "wall_ns": 1789070156211543450,
+        "cpu_ticks": 72,
+        "rss_bytes": 326352896
+      },
+      "after": {
+        "monotonic_ns": 167854827816928,
+        "wall_ns": 1789070168211819162,
+        "cpu_ticks": 103,
+        "rss_bytes": 325615616
+      },
+      "native_delta": {
+        "passes": 1611,
+        "skips_off": 0,
+        "skips_flip": 164,
+        "skips_clean": 0,
+        "skips_inactive": 0,
+        "skips_deadline": 725,
+        "attempts": 722,
+        "queued": 722,
+        "empty": 0,
+        "render_failed": 0,
+        "queue_failed": 0,
+        "flips": 722,
+        "primary": 0,
+        "overlay": 0,
+        "composited": 722,
+        "late_presentations": 0
+      },
+      "stages": {
+        "composition_gpu": {
+          "count": 722,
+          "mean_us": 539.5368421052632,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            722,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 1025,
+          "p95_upper_us": 1025,
+          "p99_upper_us": 1025
+        },
+        "scene": {
+          "count": 722,
+          "mean_us": 24.324628808864265,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            200,
+            451,
+            70,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 33,
+          "p95_upper_us": 65,
+          "p99_upper_us": 65
+        },
+        "capture_chrome": {
+          "count": 722,
+          "mean_us": 0.05675207756232687,
+          "histogram": [
+            722,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 2,
+          "p95_upper_us": 2,
+          "p99_upper_us": 2
+        },
+        "prepare": {
+          "count": 722,
+          "mean_us": 5.880483379501385,
+          "histogram": [
+            0,
+            0,
+            240,
+            477,
+            4,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 9,
+          "p95_upper_us": 9,
+          "p99_upper_us": 9
+        },
+        "planes": {
+          "count": 722,
+          "mean_us": 4.9071939058171745,
+          "histogram": [
+            0,
+            88,
+            238,
+            390,
+            5,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 9,
+          "p95_upper_us": 9,
+          "p99_upper_us": 9
+        },
+        "composition_submit": {
+          "count": 722,
+          "mean_us": 165.14862188365652,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            71,
+            648,
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 257,
+          "p95_upper_us": 257,
+          "p99_upper_us": 257
+        },
+        "kms_queue": {
+          "count": 722,
+          "mean_us": 35.952897506925204,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            279,
+            435,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 65,
+          "p95_upper_us": 65,
+          "p99_upper_us": 129
+        },
+        "presentation_feedback": {
+          "count": 722,
+          "mean_us": 4.489965373961218,
+          "histogram": [
+            0,
+            161,
+            321,
+            233,
+            3,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 5,
+          "p95_upper_us": 9,
+          "p99_upper_us": 9
+        },
+        "render_attempt": {
+          "count": 722,
+          "mean_us": 327.938407202216,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            88,
+            634,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 513,
+          "p95_upper_us": 513,
+          "p99_upper_us": 513
+        },
+        "queue_to_vblank": {
+          "count": 722,
+          "mean_us": 6027.090296398892,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            220,
+            332,
+            170,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 8193,
+          "p95_upper_us": 16385,
+          "p99_upper_us": 16385
+        }
+      },
+      "captures": [],
+      "readback_before": {
+        "queued": 6,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 147456,
+        "maps": 6,
+        "map_cpu_ns": 33438
+      },
+      "readback_after": {
+        "queued": 18,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 147456,
+        "maps": 18,
+        "map_cpu_ns": 84487
+      },
+      "multi_gpu_delta": {
+        "dma_frames": 0,
+        "cpu_frames": 0,
+        "cpu_pixels": 0
+      },
+      "monitors": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 1.5,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "monitors_after": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 2,
+            "name": "2"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 1.5,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "renderers": [
+        "AMD Radeon Pro 580X (radeonsi, polaris10, ACO, DRM 3.64, 7.1.9-arch1-2)"
+      ],
+      "pixels": {
+        "size": [
+          3840,
+          2160
+        ],
+        "fullscreen_pattern_verified": true,
+        "client_pattern_verified": true,
+        "sha256": "5d18387f846d599114745885f8bc124daa5d6c14413eb6a8813cd6f22b92b769"
+      },
+      "load_average": [
+        0.52392578125,
+        0.79638671875,
+        0.72802734375
+      ],
+      "active_hardware_planes": [
+        {
+          "id": 59,
+          "type": 1,
+          "crtc": 64,
+          "framebuffer": 122
+        },
+        {
+          "id": 62,
+          "type": 2,
+          "crtc": 64,
+          "framebuffer": 126
+        }
+      ],
+      "run": 0,
+      "directory": "001",
+      "presentation_fps": 59.995665959819256,
+      "missed_refreshes": 0,
+      "cpu_us_per_presented_frame": 430.55555555555566,
+      "boards": {
+        "0000:01:00.0": {
+          "utilization_percent": {
+            "n": 10,
+            "median": 0.0,
+            "mean": 3.4,
+            "min": 0.0,
+            "max": 27.0,
+            "values": [
+              0.0,
+              1.0,
+              6.0,
+              27.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "memory_utilization_percent": {
+            "n": 10,
+            "median": 1.0,
+            "mean": 3.6,
+            "min": 1.0,
+            "max": 25.0,
+            "values": [
+              1.0,
+              2.0,
+              2.0,
+              25.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "memory_mib": {
+            "n": 10,
+            "median": 550.203125,
+            "mean": 550.203125,
+            "min": 550.203125,
+            "max": 550.203125,
+            "values": [
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125
+            ]
+          },
+          "graphics_mhz": {
+            "n": 10,
+            "median": 1200.0,
+            "mean": 1200.0,
+            "min": 1200.0,
+            "max": 1200.0,
+            "values": [
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0
+            ]
+          },
+          "memory_mhz": {
+            "n": 10,
+            "median": 1695.0,
+            "mean": 1695.0,
+            "min": 1695.0,
+            "max": 1695.0,
+            "values": [
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0
+            ]
+          },
+          "power_w": {
+            "n": 10,
+            "median": 26.902,
+            "mean": 26.8839,
+            "min": 26.379,
+            "max": 27.352,
+            "values": [
+              27.035,
+              26.707,
+              26.695,
+              27.352,
+              26.82,
+              26.984,
+              26.379,
+              27.152,
+              26.703,
+              27.012
+            ]
+          },
+          "temperature_c": {
+            "n": 10,
+            "median": 64.0,
+            "mean": 64.0,
+            "min": 64.0,
+            "max": 64.0,
+            "values": [
+              64.0,
+              64.0,
+              64.0,
+              64.0,
+              64.0,
+              64.0,
+              64.0,
+              64.0,
+              64.0,
+              64.0
+            ]
+          }
+        }
+      }
+    },
+    {
+      "label": "final",
+      "case": "fractional",
+      "policy": "default",
+      "seconds": 12.00030637,
+      "cpu_percent": 2.749929792000802,
+      "render_fps": 59.915136983290196,
+      "render_wall_us_per_frame": 344.58970792767735,
+      "presentation": {
+        "count": 720,
+        "fps": 59.99566095358889,
+        "interval_ms_p50": 16.668,
+        "interval_ms_p95": 16.668,
+        "interval_ms_p99": 16.668,
+        "interval_ms_p99_9": 16.668,
+        "interval_ms_max": 16.668,
+        "intervals_over_1_5_refresh": 0,
+        "estimated_missed_refreshes": 0,
+        "zero_copy_count": 0,
+        "advertised_refresh_ns": [
+          16667500
+        ]
+      },
+      "frames": {
+        "dispatch_calls": 2303,
+        "dispatch_us": 323421,
+        "dispatch_max_us": 780,
+        "input_us": 922,
+        "shell_us": 39772,
+        "protocol_us": 12978,
+        "layout_us": 8857,
+        "render_calls": 719,
+        "render_us": 247760,
+        "render_max_us": 730,
+        "flush_us": 5481,
+        "ipc_us": 2848,
+        "render_attempts": 1580,
+        "gesture_build_calls": 0,
+        "gesture_build_us": 0,
+        "gesture_build_max_us": 0
+      },
+      "before": {
+        "monotonic_ns": 167862786945370,
+        "wall_ns": 1789070176170947544,
+        "cpu_ticks": 71,
+        "rss_bytes": 326070272
+      },
+      "after": {
+        "monotonic_ns": 167874787251740,
+        "wall_ns": 1789070188171253980,
+        "cpu_ticks": 104,
+        "rss_bytes": 325574656
+      },
+      "native_delta": {
+        "passes": 1589,
+        "skips_off": 0,
+        "skips_flip": 11,
+        "skips_clean": 0,
+        "skips_inactive": 0,
+        "skips_deadline": 856,
+        "attempts": 722,
+        "queued": 722,
+        "empty": 0,
+        "render_failed": 0,
+        "queue_failed": 0,
+        "flips": 723,
+        "primary": 0,
+        "overlay": 0,
+        "composited": 722,
+        "late_presentations": 0
+      },
+      "stages": {
+        "composition_gpu": {
+          "count": 722,
+          "mean_us": 539.5818282548477,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            722,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 1025,
+          "p95_upper_us": 1025,
+          "p99_upper_us": 1025
+        },
+        "scene": {
+          "count": 722,
+          "mean_us": 24.293204986149583,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            230,
+            471,
+            20,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 33,
+          "p95_upper_us": 33,
+          "p99_upper_us": 65
+        },
+        "capture_chrome": {
+          "count": 722,
+          "mean_us": 0.055182825484764546,
+          "histogram": [
+            722,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 2,
+          "p95_upper_us": 2,
+          "p99_upper_us": 2
+        },
+        "prepare": {
+          "count": 722,
+          "mean_us": 5.790934903047091,
+          "histogram": [
+            0,
+            0,
+            268,
+            446,
+            7,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 9,
+          "p95_upper_us": 9,
+          "p99_upper_us": 17
+        },
+        "planes": {
+          "count": 722,
+          "mean_us": 4.9116246537396115,
+          "histogram": [
+            0,
+            129,
+            171,
+            419,
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 9,
+          "p95_upper_us": 9,
+          "p99_upper_us": 9
+        },
+        "composition_submit": {
+          "count": 722,
+          "mean_us": 169.38703324099723,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            53,
+            667,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 257,
+          "p95_upper_us": 257,
+          "p99_upper_us": 257
+        },
+        "kms_queue": {
+          "count": 722,
+          "mean_us": 35.99769667590027,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            290,
+            427,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 65,
+          "p95_upper_us": 65,
+          "p99_upper_us": 65
+        },
+        "presentation_feedback": {
+          "count": 722,
+          "mean_us": 4.622134349030471,
+          "histogram": [
+            0,
+            166,
+            230,
+            322,
+            1,
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 5,
+          "p95_upper_us": 9,
+          "p99_upper_us": 9
+        },
+        "render_attempt": {
+          "count": 722,
+          "mean_us": 337.32613434903044,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            73,
+            648,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 513,
+          "p95_upper_us": 513,
+          "p99_upper_us": 513
+        },
+        "queue_to_vblank": {
+          "count": 723,
+          "mean_us": 6261.630702627939,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            193,
+            347,
+            183,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 8193,
+          "p95_upper_us": 16385,
+          "p99_upper_us": 16385
+        }
+      },
+      "captures": [],
+      "readback_before": {
+        "queued": 6,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 147456,
+        "maps": 6,
+        "map_cpu_ns": 34083
+      },
+      "readback_after": {
+        "queued": 18,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 147456,
+        "maps": 18,
+        "map_cpu_ns": 78911
+      },
+      "multi_gpu_delta": {
+        "dma_frames": 0,
+        "cpu_frames": 0,
+        "cpu_pixels": 0
+      },
+      "monitors": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 1.5,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "monitors_after": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 2,
+            "name": "2"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 1.5,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "renderers": [
+        "AMD Radeon Pro 580X (radeonsi, polaris10, ACO, DRM 3.64, 7.1.9-arch1-2)"
+      ],
+      "pixels": {
+        "size": [
+          3840,
+          2160
+        ],
+        "fullscreen_pattern_verified": true,
+        "client_pattern_verified": true,
+        "sha256": "5d18387f846d599114745885f8bc124daa5d6c14413eb6a8813cd6f22b92b769"
+      },
+      "load_average": [
+        0.59716796875,
+        0.79443359375,
+        0.72900390625
+      ],
+      "active_hardware_planes": [
+        {
+          "id": 59,
+          "type": 1,
+          "crtc": 64,
+          "framebuffer": 118
+        },
+        {
+          "id": 62,
+          "type": 2,
+          "crtc": 64,
+          "framebuffer": 126
+        }
+      ],
+      "run": 1,
+      "directory": "002",
+      "presentation_fps": 59.99566095358889,
+      "missed_refreshes": 0,
+      "cpu_us_per_presented_frame": 458.3333333333333,
+      "boards": {
+        "0000:01:00.0": {
+          "utilization_percent": {
+            "n": 10,
+            "median": 0.0,
+            "mean": 5.1,
+            "min": 0.0,
+            "max": 48.0,
+            "values": [
+              0.0,
+              3.0,
+              48.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "memory_utilization_percent": {
+            "n": 10,
+            "median": 1.0,
+            "mean": 5.6,
+            "min": 1.0,
+            "max": 44.0,
+            "values": [
+              1.0,
+              4.0,
+              44.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "memory_mib": {
+            "n": 10,
+            "median": 550.203125,
+            "mean": 550.203125,
+            "min": 550.203125,
+            "max": 550.203125,
+            "values": [
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125,
+              550.203125
+            ]
+          },
+          "graphics_mhz": {
+            "n": 10,
+            "median": 1200.0,
+            "mean": 1200.0,
+            "min": 1200.0,
+            "max": 1200.0,
+            "values": [
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0
+            ]
+          },
+          "memory_mhz": {
+            "n": 10,
+            "median": 1695.0,
+            "mean": 1695.0,
+            "min": 1695.0,
+            "max": 1695.0,
+            "values": [
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0
+            ]
+          },
+          "power_w": {
+            "n": 10,
+            "median": 26.9105,
+            "mean": 26.9189,
+            "min": 26.484,
+            "max": 27.25,
+            "values": [
+              27.18,
+              26.895,
+              27.199,
+              26.676,
+              26.793,
+              27.25,
+              26.938,
+              26.848,
+              26.926,
+              26.484
+            ]
+          },
+          "temperature_c": {
+            "n": 10,
+            "median": 65.0,
+            "mean": 64.7,
+            "min": 64.0,
+            "max": 65.0,
+            "values": [
+              64.0,
+              65.0,
+              64.0,
+              64.0,
+              65.0,
+              65.0,
+              65.0,
+              65.0,
+              65.0,
+              65.0
+            ]
+          }
+        }
+      }
+    },
+    {
+      "label": "final",
+      "case": "native",
+      "policy": "default",
+      "seconds": 12.000283874,
+      "cpu_percent": 2.749934947080569,
+      "render_fps": 59.91524930154331,
+      "render_wall_us_per_frame": 346.6842837273992,
+      "presentation": {
+        "count": 720,
+        "fps": 59.99565594735936,
+        "interval_ms_p50": 16.668,
+        "interval_ms_p95": 16.668,
+        "interval_ms_p99": 16.668,
+        "interval_ms_p99_9": 16.685,
+        "interval_ms_max": 16.685,
+        "intervals_over_1_5_refresh": 0,
+        "estimated_missed_refreshes": 0,
+        "zero_copy_count": 0,
+        "advertised_refresh_ns": [
+          16667500
+        ]
+      },
+      "frames": {
+        "dispatch_calls": 2449,
+        "dispatch_us": 330040,
+        "dispatch_max_us": 796,
+        "input_us": 920,
+        "shell_us": 43106,
+        "protocol_us": 13513,
+        "layout_us": 9703,
+        "render_calls": 719,
+        "render_us": 249266,
+        "render_max_us": 741,
+        "flush_us": 5652,
+        "ipc_us": 2784,
+        "render_attempts": 1658,
+        "gesture_build_calls": 0,
+        "gesture_build_us": 0,
+        "gesture_build_max_us": 0
+      },
+      "before": {
+        "monotonic_ns": 167882749821206,
+        "wall_ns": 1789070196133823343,
+        "cpu_ticks": 71,
+        "rss_bytes": 325926912
+      },
+      "after": {
+        "monotonic_ns": 167894750105080,
+        "wall_ns": 1789070208134107307,
+        "cpu_ticks": 104,
+        "rss_bytes": 325410816
+      },
+      "native_delta": {
+        "passes": 1665,
+        "skips_off": 0,
+        "skips_flip": 111,
+        "skips_clean": 0,
+        "skips_inactive": 0,
+        "skips_deadline": 832,
+        "attempts": 722,
+        "queued": 722,
+        "empty": 0,
+        "render_failed": 0,
+        "queue_failed": 0,
+        "flips": 722,
+        "primary": 0,
+        "overlay": 0,
+        "composited": 722,
+        "late_presentations": 0
+      },
+      "stages": {
+        "composition_gpu": {
+          "count": 722,
+          "mean_us": 394.2293628808864,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            722,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 513,
+          "p95_upper_us": 513,
+          "p99_upper_us": 513
+        },
+        "scene": {
+          "count": 722,
+          "mean_us": 25.007236842105264,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            230,
+            407,
+            85,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 33,
+          "p95_upper_us": 65,
+          "p99_upper_us": 65
+        },
+        "capture_chrome": {
+          "count": 722,
+          "mean_us": 0.0485775623268698,
+          "histogram": [
+            722,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 2,
+          "p95_upper_us": 2,
+          "p99_upper_us": 2
+        },
+        "prepare": {
+          "count": 722,
+          "mean_us": 6.2054362880886424,
+          "histogram": [
+            0,
+            0,
+            254,
+            463,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 9,
+          "p95_upper_us": 9,
+          "p99_upper_us": 9
+        },
+        "planes": {
+          "count": 722,
+          "mean_us": 5.093421052631579,
+          "histogram": [
+            0,
+            73,
+            212,
+            435,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 9,
+          "p95_upper_us": 9,
+          "p99_upper_us": 9
+        },
+        "composition_submit": {
+          "count": 722,
+          "mean_us": 170.27607756232686,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            57,
+            663,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 257,
+          "p95_upper_us": 257,
+          "p99_upper_us": 257
+        },
+        "kms_queue": {
+          "count": 722,
+          "mean_us": 36.70424099722992,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            271,
+            450,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 65,
+          "p95_upper_us": 65,
+          "p99_upper_us": 65
+        },
+        "presentation_feedback": {
+          "count": 722,
+          "mean_us": 4.423538781163435,
+          "histogram": [
+            0,
+            188,
+            210,
+            322,
+            0,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 5,
+          "p95_upper_us": 9,
+          "p99_upper_us": 9
+        },
+        "render_attempt": {
+          "count": 722,
+          "mean_us": 339.78442243767313,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            64,
+            658,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 513,
+          "p95_upper_us": 513,
+          "p99_upper_us": 513
+        },
+        "queue_to_vblank": {
+          "count": 722,
+          "mean_us": 6217.112824099723,
+          "histogram": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            177,
+            383,
+            162,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "p50_upper_us": 8193,
+          "p95_upper_us": 16385,
+          "p99_upper_us": 16385
+        }
+      },
+      "captures": [],
+      "readback_before": {
+        "queued": 6,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 147456,
+        "maps": 6,
+        "map_cpu_ns": 37018
+      },
+      "readback_after": {
+        "queued": 18,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 147456,
+        "maps": 18,
+        "map_cpu_ns": 84824
+      },
+      "multi_gpu_delta": {
+        "dma_frames": 0,
+        "cpu_frames": 0,
+        "cpu_pixels": 0
+      },
+      "monitors": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "monitors_after": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "Apple Computer Inc iMac 89865974C242D",
+          "make": "Apple Computer Inc",
+          "model": "iMac",
+          "serial": "89865974C242D",
+          "width": 3840,
+          "height": 2160,
+          "refreshRate": 59.997,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 2,
+            "name": "2"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "3840x2160@60.00Hz",
+            "3200x1800@59.98Hz",
+            "2560x1440@59.95Hz",
+            "1920x1200@60.00Hz",
+            "1920x1080@60.00Hz",
+            "1600x1200@60.00Hz",
+            "1680x1050@60.00Hz",
+            "1280x1024@60.00Hz",
+            "1440x900@60.00Hz",
+            "1280x800@60.00Hz",
+            "1280x720@60.00Hz",
+            "1024x768@60.00Hz",
+            "800x600@60.00Hz",
+            "640x480@60.00Hz"
+          ]
+        }
+      ],
+      "renderers": [
+        "AMD Radeon Pro 580X (radeonsi, polaris10, ACO, DRM 3.64, 7.1.9-arch1-2)"
+      ],
+      "pixels": {
+        "size": [
+          3840,
+          2160
+        ],
+        "fullscreen_pattern_verified": true,
+        "client_pattern_verified": true,
+        "sha256": "376472af953c1f5d2d854949f8a17fe084c1f3bf387f0a03f81a91ffef210ccc"
+      },
+      "load_average": [
+        0.49462890625,
+        0.75830078125,
+        0.71875
+      ],
+      "active_hardware_planes": [
+        {
+          "id": 59,
+          "type": 1,
+          "crtc": 64,
+          "framebuffer": 122
+        },
+        {
+          "id": 62,
+          "type": 2,
+          "crtc": 64,
+          "framebuffer": 126
+        }
+      ],
+      "run": 1,
+      "directory": "003",
+      "presentation_fps": 59.99565594735936,
+      "missed_refreshes": 0,
+      "cpu_us_per_presented_frame": 458.3333333333333,
+      "boards": {
+        "0000:01:00.0": {
+          "utilization_percent": {
+            "n": 10,
+            "median": 0.0,
+            "mean": 3.8,
+            "min": 0.0,
+            "max": 33.0,
+            "values": [
+              0.0,
+              1.0,
+              4.0,
+              33.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "memory_utilization_percent": {
+            "n": 10,
+            "median": 1.0,
+            "mean": 4.4,
+            "min": 1.0,
+            "max": 31.0,
+            "values": [
+              1.0,
+              1.0,
+              5.0,
+              31.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "memory_mib": {
+            "n": 10,
+            "median": 496.4453125,
+            "mean": 497.2453125,
+            "min": 496.4453125,
+            "max": 500.4453125,
+            "values": [
+              500.4453125,
+              500.4453125,
+              496.4453125,
+              496.4453125,
+              496.4453125,
+              496.4453125,
+              496.4453125,
+              496.4453125,
+              496.4453125,
+              496.4453125
+            ]
+          },
+          "graphics_mhz": {
+            "n": 10,
+            "median": 1200.0,
+            "mean": 1200.0,
+            "min": 1200.0,
+            "max": 1200.0,
+            "values": [
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0,
+              1200.0
+            ]
+          },
+          "memory_mhz": {
+            "n": 10,
+            "median": 1695.0,
+            "mean": 1695.0,
+            "min": 1695.0,
+            "max": 1695.0,
+            "values": [
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0,
+              1695.0
+            ]
+          },
+          "power_w": {
+            "n": 10,
+            "median": 25.799,
+            "mean": 25.8926,
+            "min": 25.652,
+            "max": 26.266,
+            "values": [
+              25.863,
+              25.789,
+              26.094,
+              26.207,
+              26.266,
+              25.809,
+              25.652,
+              25.766,
+              25.746,
+              25.734
+            ]
+          },
+          "temperature_c": {
+            "n": 10,
+            "median": 65.0,
+            "mean": 64.9,
+            "min": 64.0,
+            "max": 65.0,
+            "values": [
+              65.0,
+              64.0,
+              65.0,
+              65.0,
+              65.0,
+              65.0,
+              65.0,
+              65.0,
+              65.0,
+              65.0
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "cpu_comparison": {},
+  "cpu_per_frame_comparison": {}
+}

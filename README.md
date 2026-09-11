@@ -322,6 +322,26 @@ logind already hands the active session its devices. On a machine
 without logind, enable `seatd` and join the `seat` group; the installer
 prints this only when it finds logind missing.
 
+### GPU pipeline diagnostics
+
+Native frame timings, scanout decisions, per-output DMA-BUF feedback and optional
+GPU queries are documented in [GPU pipeline diagnostics](docs/gpu-pipeline.md),
+along with experimental overlay/primary scanout switches and the reproducible
+5K rendering benchmark.
+
+### Mac keyboard interaction
+
+The Wayland session supports an opt-in Mac interaction profile:
+
+```toml
+interaction_mode = "mac"
+```
+
+It provides app-aware Command shortcuts, terminal copy/paste, application
+switching and hiding, fullscreen desktops, and Mac screenshot destinations.
+It also works with `desktop = "omarchy"`. See [Mac mode](docs/mac-mode.md) for
+setup, tested workflows, providers, and the remaining macOS parity work.
+
 ### One line: chonkstep as Omarchy's window manager
 
 Everything in the rest of this section is a switch you can throw
@@ -528,7 +548,7 @@ GLES scene that draws the chrome.
 
 An opaque fullscreen dmabuf can bypass that GLES scene and become the DRM
 primary plane directly. The path is intentionally conservative: the buffer
-must come from the session GPU, exactly match the output swapchain format,
+must be importable, exactly match the output swapchain format,
 cover the output, sit above every visible element, and pass the driver's
 atomic KMS test. A visible dock, bar, menu, software cursor, or unsupported
 buffer simply keeps the normal compositor path; there is no separate mode a
@@ -536,15 +556,25 @@ user has to manage. `CHONKSTEP_NO_DIRECT_SCANOUT=1` disables the optimization
 for the next session as a hardware-debug escape hatch. Transitions are named
 in the session log as `DRM primary-plane direct scanout changed`.
 
+Independent experiments enable overlay planes and broader primary-plane
+formats. Per-output diagnostics explain frame decisions and stage timings;
+optional GPU queries measure composition asynchronously. Surface membership
+supplies per-output allocation feedback and callback cadence. Capture downloads
+use bounded fence-polled staging, including screenshots and previews. See
+[GPU controls, render-device selection, and measured 5K results](docs/gpu-pipeline.md).
+
 What the session backend does not do yet, stated plainly:
 
-- **One GPU, every connector on it.** The session drives every display
+- **One KMS device, every connector on it.** The session drives every display
   plugged into the primary DRM device, each with its own mode, page
   flips, and place in the desktop layout; a second GPU's outputs stay
   dark, but connected desktop outputs on those omitted devices are
   named in the log with the `CHONKSTEP_DRM_DEVICE` override. Connectors
   on the selected GPU hot-plug live; adding another GPU still requires
   a new session because device selection is a startup decision.
+  `CHONKSTEP_RENDER_DEVICE` can experimentally select a separate composition
+  GPU while that KMS device continues driving the displays. DMA sharing depends
+  on driver interoperability; the measured NVIDIA pair uses CPU transfer fallback.
   Arrangement is configurable now, not compiled in: the compositor
   speaks wlr-output-management, so `wlr-randr` and `kanshi` list and
   configure outputs - position, mode, rotation, and per-output scale

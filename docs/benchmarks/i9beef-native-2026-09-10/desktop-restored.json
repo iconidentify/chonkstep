@@ -1,0 +1,35 @@
+{
+  "active_vt": "tty2",
+  "original_desktop_pid": 137376,
+  "original_desktop_alive": true,
+  "client_count": 2,
+  "monitor": "DP-1",
+  "mode": {
+    "width": 3840,
+    "height": 2160,
+    "refresh": 144.0,
+    "preferred": false,
+    "current": true
+  },
+  "scale": 1.5,
+  "adaptive_sync": true,
+  "kms_mode": {
+    "id": 200,
+    "active": true,
+    "width": 3840,
+    "height": 2160,
+    "hz": 143.999568,
+    "sequence_available": false,
+    "sequence": 0,
+    "sequence_ns": 0
+  },
+  "test_vt_sessions": 0,
+  "config_reload": "ok; applied live mode through wlr-output-management",
+  "new_config_diagnostics": [],
+  "preexisting_config_diagnostic_lines": 165,
+  "config_change": {
+    "file": "/home/chrisk/.config/hypr/monitors.lua",
+    "backup": "/home/chrisk/.config/hypr/monitors.lua.bak.i9beef-144hz-1789067602834917449",
+    "added": "hl.monitor({ output = \"DP-1\", mode = \"3840x2160@144\", position = \"0x0\", scale = 1.5 })"
+  }
+}

@@ -1,0 +1,158 @@
+{
+  "host": "i9beef",
+  "date": "2026-09-10",
+  "prior_binary_sha256": "2727bc755de151d0285d2cfff24d59f1b186e1ae40fb71db8ea14ec75b926da2",
+  "regression": "Original binary fails Command-A through a real Fcitx keyboard grab; patched debug binary passes cross-app clipboard and modifier restoration.",
+  "unit_tests": {
+    "passed": 288,
+    "failed": 0,
+    "ignored": 3
+  },
+  "clippy": "passed with -D warnings for wm-wayland and chonk-testkit all targets",
+  "initial_debug_suite": {
+    "passed": 11,
+    "failed": 1,
+    "failure": "Nautilus file-copy timeout; isolated reruns passed on original and patched binaries."
+  },
+  "logs": {
+    "ime-e2e-before.log": {
+      "sha256": "b1e0ca39ea8d0caea0a31c4c4953647ffa7e6e771daf90c44977139b68934244",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/ime-e2e-before.log"
+    },
+    "ime-e2e.log": {
+      "sha256": "c47f5e750eedb5f733ede26b5bb017eb3373093c6e64df4f3f5e1ca152207ae3",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/ime-e2e.log"
+    },
+    "unit-tests.log": {
+      "sha256": "4e5bd941da309599c5c427f5cc169c3f328117cfa5c653a630f87c2e7d7052d5",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/unit-tests.log"
+    },
+    "clippy.log": {
+      "sha256": "38f5722dfe28d2c46247f10319750e78aa1de8d5e5b6ce3f1eba48cd268dcdfd",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/clippy.log"
+    },
+    "mac-suite.log": {
+      "sha256": "473cfcfc1be455c70e8b77f44a23a0d5e297e606b0f2e3a99d53aac7739461ec",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/mac-suite.log"
+    },
+    "nautilus-before.log": {
+      "sha256": "02866569dc981797e3bbb1188acb89b118b6c88722963155aec706c43f3334ac",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/nautilus-before.log"
+    },
+    "nautilus-after.log": {
+      "sha256": "ceafda3fe493e3974ef9f8a451c508ff54484f9e6e784eb9bae2f3a612547b62",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/nautilus-after.log"
+    },
+    "release-clean-build.log": {
+      "sha256": "81508693a311304219c4774cbacfa6672b8e25e178bd722b4e1bd9600d2bd80d",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/release-clean-build.log"
+    },
+    "release-mac-suite.log": {
+      "sha256": "f9105a77f642b557e1e90b9f143bd80527bc819ddcdd75f0cdfcc59113abd397",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/release-mac-suite.log"
+    },
+    "release-keyboard-focus.log": {
+      "sha256": "d5c4234a11b3e9098d85d1ca491ef6bfc6b4a1344091f1faf8ee208a051e191a",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/release-keyboard-focus.log"
+    },
+    "release-config-check.log": {
+      "sha256": "d5ba6e3566cc371d188da979d5d9c2bcca145268950e68ead0f5098c984342fb",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/release-config-check.log"
+    },
+    "live-smoke.log": {
+      "sha256": "b049293997f0c7f3ec3fb1231e7237a845690d38d737308e982e77b2d94d9636",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/live-smoke.log"
+    },
+    "live-scene.txt": {
+      "sha256": "575ee8720e89d306676e55a858302c0c32b3c2089ebb1e61a0ec10fe08d2b067",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/live-scene.txt"
+    },
+    "terminal-smoke.log": {
+      "sha256": "029b764c5bc393ba4683a50399b9b120ec223102fe3e992136e08aecd4e9d304",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/terminal-smoke.log"
+    },
+    "foot-config-check.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/foot-config-check.log"
+    },
+    "installed-foot-config-e2e.log": {
+      "sha256": "d48bba8cc4fc85689d701104c2a8b69f2d9b60c51e9c307722f4bc0a3235b920",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/installed-foot-config-e2e.log"
+    }
+  },
+  "release": {
+    "binary": "/usr/bin/chonkstep-wayland",
+    "source_id": "10c2ca7-mac-ime-uat",
+    "sha256": "4fd06ab4e74319cf612d84976759f9a81d49f1f00f5ebaa39d2911d13f629182",
+    "build_id": "64bffab86b904c668656354c90fab3df4c8d99b6",
+    "build_command": "CHONKSTEP_GIT_DESCRIBE=10c2ca7-mac-ime-uat CARGO_TARGET_DIR=target/mac-uat-clean cargo build --locked --release -p chonkstep-wayland",
+    "mac_mode_e2e": {
+      "passed": 12,
+      "failed": 0
+    },
+    "keyboard_focus_e2e": {
+      "passed": 7,
+      "failed": 0
+    },
+    "test_command": "CHONKSTEP_WAYLAND_BIN=/home/chrisk/src/chonkstep/target/mac-uat-clean/release/chonkstep-wayland scripts/e2e.sh --headless --host-renderer gl --test <mac_mode|keyboard_focus>"
+  },
+  "live": {
+    "pid": 137376,
+    "running_binary_sha256_matches_release": true,
+    "mode": "mac",
+    "separate_spaces": true,
+    "clipboard_persistence": true,
+    "fcitx_enabled": true,
+    "gtk_im_module_override": false,
+    "input_injection": "Temporary uinput keyboard through native libinput, removed after verification. GTK applications received normal client events.",
+    "passed": [
+      "Command-A selects all in native GTK",
+      "Command-C copies selected text",
+      "Command-Tab switches applications",
+      "Command-V pastes into another native app",
+      "Control-Command-F enters a dedicated fullscreen Space",
+      "Control-Command-F restores original Space",
+      "Command-Q closes test app normally",
+      "Copied text survives source app quitting"
+    ],
+    "output": {
+      "name": "DP-1",
+      "width": 3840,
+      "height": 2160,
+      "refresh_hz": 144,
+      "scale": 1.5
+    },
+    "experimental_overlay_scanout": false,
+    "experimental_primary_scanout_any": false,
+    "normal_scanout_allowed": true,
+    "pipeline_render_failures": 0,
+    "pipeline_queue_failures": 0,
+    "terminal_session_restored": true,
+    "steam_reopened": true,
+    "rollback_binary": "/usr/local/lib/chonkstep/mac-uat-20260910/chonkstep-wayland.before",
+    "configuration_backups": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901",
+    "configuration_check_exit_code": 0,
+    "preexisting_hypr_compatibility_diagnostics": 165
+  },
+  "terminal_configuration_followup": {
+    "cause": "Installed Foot config replaced Control-Shift-C/V bindings with Control-Insert and Shift-Insert, allowing Command-C translation to fall through as a PTY interrupt.",
+    "fix": "Restored standard clipboard bindings alongside existing Insert alternatives; reopened both terminal windows and preserved tmux session 0.",
+    "foot_config_check_exit_code": 0,
+    "live_uinput_checks": [
+      "Original Foot config reproduced Command-C as byte 03",
+      "Corrected Foot config: Command-C sends no PTY bytes",
+      "Physical Control-C still sends byte 03",
+      "Command-V pastes the exact current clipboard into the raw PTY"
+    ],
+    "installed_config_terminal_clipboard_e2e": {
+      "passed": 1,
+      "failed": 0,
+      "binary": "/usr/bin/chonkstep-wayland",
+      "config": "/home/chrisk/.config/foot/foot.ini",
+      "test": "terminal_clipboard_control_and_copy_quit_paste",
+      "method": "Private headless session with a foot launcher that loads the actual installed config via --config; real terminal selection copied to a browser, paste into raw PTY, and physical Control-C verified."
+    },
+    "clipboard_preserved_during_live_test": true,
+    "config_backup": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/foot.ini.before"
+  }
+}

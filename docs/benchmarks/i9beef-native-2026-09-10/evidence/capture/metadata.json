@@ -1,0 +1,61 @@
+{
+  "date_utc": "2026-09-10T18:55:45Z",
+  "backend": "native DRM/KMS",
+  "arguments": {
+    "binary": [
+      "baseline=/tmp/chonk-gpu-baseline/chonkstep-wayland",
+      "final=/tmp/cni9/final/chonkstep-wayland"
+    ],
+    "probe": "/tmp/cni9/final-probe",
+    "drm_info": "/tmp/cni9/drm-info",
+    "device": "/dev/dri/card1",
+    "render_device": null,
+    "connector": "DP-1",
+    "test_vt": 3,
+    "return_vt": 2,
+    "width": 3840,
+    "height": 2160,
+    "hz": 144,
+    "cases": [
+      "native"
+    ],
+    "policies": [
+      "default"
+    ],
+    "seconds": 20.0,
+    "settle_seconds": 8.0,
+    "runs": 2,
+    "gpu_timings": false,
+    "vrr": "off",
+    "log_filter": "info",
+    "require_scanout": null,
+    "stress": false,
+    "capture_every": 2.0,
+    "output": "/tmp/cni9/capture"
+  },
+  "binaries": {
+    "baseline": {
+      "path": "/tmp/chonk-gpu-baseline/chonkstep-wayland",
+      "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-1-gda52c0d\nbuild id: 74f7d20488b6a604efa2ef2f90dc71ebac6a19c4",
+      "sha256": "a59b0b54995e47f9d8924f7723f5355e85a573869fdfcaa11d94fc793b4b751b"
+    },
+    "final": {
+      "path": "/tmp/cni9/final/chonkstep-wayland",
+      "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-11-ga416af5-native-three-fixes\nbuild id: f70bfab86c15499d7fdf004703fd99c2f53718c6",
+      "sha256": "5e646fb2209e7191c84c2242002f5dedb9da44df059fd33bd044075a9772e64e"
+    }
+  },
+  "probe_sha256": "b3cff7d4b921f04cd22ed731e6281aaf327dd79aac9bc5390a6eb3bb00f3ffba",
+  "harness_sha256": "07298305c49eba2804af7b843efac37566304cbba5c7e012e1f1b447779810d0",
+  "kernel": "Linux i9beef 7.1.9-arch1-2 #1 SMP PREEMPT_DYNAMIC Fri, 21 Aug 2026 22:18:59 +0000 x86_64 GNU/Linux",
+  "gpus": {
+    "load_average": [
+      4.25,
+      3.46533203125,
+      3.50537109375
+    ],
+    "gpus": "GPU-11bbc6a2-0731-d44b-4c66-d0f432d0054b, NVIDIA GeForce RTX 3090, 0, 22089, 49, 45.44\nGPU-42f6fc47-dfb4-ba39-d876-5ba114a21947, NVIDIA GeForce RTX 3090, 0, 21620, 30, 29.49"
+  },
+  "driver": "0, 00000000:01:00.0, NVIDIA GeForce RTX 3090, 610.57.04\n1, 00000000:02:00.0, NVIDIA GeForce RTX 3090, 610.57.04",
+  "limitations": "Synthetic frame-paced opaque EGL producer uses glFinish before handoff. Single physical output. Presentation is hardware completion, not photon/input latency. GPU board telemetry includes other processes. Histogram percentiles are upper bounds."
+}

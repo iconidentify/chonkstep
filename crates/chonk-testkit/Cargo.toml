@@ -11,6 +11,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+gpu-probe = ["dep:wayland-egl", "wayland-client/system"]
+
 [dependencies]
 wm-theme-api = { path = "../wm-theme-api" }
 # PNG decode for screenshot assertions — already in the workspace's
@@ -30,6 +33,7 @@ chonk-dock-proto = { path = "../chonk-dock-proto" }
 # `wayland-client`; `wm-wayland` implements the wlr protocols), so the
 # client half adds no new code to vet — only the `client` feature.
 wayland-client = "0.31"
+wayland-egl = { version = "0.32", optional = true }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # The fullscreen e2e drives a client that asks for states and reports
 # what it was told back: `src/bin/chonk-fullscreen-probe.rs` is an

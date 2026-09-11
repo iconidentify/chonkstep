@@ -4,7 +4,7 @@
 //! a window. Closing drops the scene and captions while preserving shell IDs.
 //!
 //! Noncompositing backends retain the raster fallback: a full panel on entry,
-//! a separate selection surface, and one catch-up fetch for sharper previews.
+//! a separate selection surface, and catch-up fetches for completed preview batches.
 
 use wm_core::{Backend, ClientId, DragHandle, OverviewDrag};
 use wm_theme::overview::{self as ov, OverviewEntry, OverviewLayout};
@@ -93,9 +93,9 @@ pub struct OverviewPanel<B: Backend> {
     workspace: (usize, usize),
     visible: bool,
     /// Set at show time when the backend may still owe sharper
-    /// previews than it answered with (see the module doc); cleared by
-    /// the one catch-up fetch. `preview_generation` is the backend
-    /// counter reading that catch-up waits to see move.
+    /// previews than it answered with (see the module doc). It stays armed
+    /// while visible because asynchronous backends can finish several batches;
+    /// the generation comparison prevents repeat fetches between batches.
     awaiting_previews: bool,
     preview_generation: u64,
     live: bool,
@@ -142,10 +142,24 @@ impl<B: Backend> OverviewPanel<B> {
         tile: u32,
         items: Vec<OverviewItem<B>>,
         workspace: (usize, usize),
-        workspace_counts: &[usize],
+        workspace_windows: Vec<Vec<wm_core::OverviewThumbnail<B::WindowId, B::FrameId>>>,
         selected: usize,
     ) {
-        self.invalidate_pointer(backend);
+        let live = backend.supports_live_overview();
+        // Semantic refreshes include ordinary title updates. Keep an armed
+        // gesture only when every indexed target and its geometry are stable;
+        // topology, membership and layout changes must still consume release.
+        let preserve_pointer = self.visible && self.live && live
+            && self.geometry == primary && self.workspace == workspace
+            && self.drag_limit == Size::new(tile * 3, tile * 2)
+            && self.items.len() == items.len()
+            && self.items.iter().zip(&items).all(|(old, new)|
+                old.client == new.client && old.window == new.window
+                    && old.frame == new.frame && old.geometry == new.geometry
+                    && old.miniaturized == new.miniaturized && old.managed == new.managed);
+        if !preserve_pointer {
+            self.invalidate_pointer(backend);
+        }
         if self.window.is_some() && self.geometry != primary {
             // The monitor arrangement moved under a kept surface; a
             // stale-sized buffer would letterbox or clip the panel.
@@ -154,10 +168,12 @@ impl<B: Backend> OverviewPanel<B> {
             // surfaces.
             self.discard(backend);
         }
-        self.selected = selected.min(items.len().saturating_sub(1));
+        if !preserve_pointer || self.press.is_none() {
+            self.selected = selected.min(items.len().saturating_sub(1));
+        }
         self.items = items;
         self.workspace = workspace;
-        self.live = backend.supports_live_overview();
+        self.live = live;
         self.drag_threshold = (tile as f64 * 3.0 / 56.0).ceil().max(2.0) as i32;
         self.drag_limit = Size::new(tile * 3, tile * 2);
         let layout = if self.live {
@@ -179,8 +195,8 @@ impl<B: Backend> OverviewPanel<B> {
         };
         // The card size is the preview resolution worth having, and
         // the backend must hear it before its next capture pass; the
-        // catch-up bookkeeping is armed here so the fetch fires
-        // exactly once per entry-set, when the counter moves.
+        // catch-up bookkeeping is armed here so each newly completed batch
+        // is fetched once, when the counter moves.
         backend.set_preview_edge(if self.live {
             None
         } else {
@@ -229,18 +245,20 @@ impl<B: Backend> OverviewPanel<B> {
                     .strip
                     .iter()
                     .enumerate()
-                    .map(|(i, rect)| wm_core::OverviewWorkspace {
+                    .zip(workspace_windows)
+                    .map(|((i, rect), windows)| wm_core::OverviewWorkspace {
                             rect: *rect,
                             label: ov::live::label(
                                 theme,
                                 font_system,
                                 swash_cache,
-                                &format!("Desktop {} · {}", i + 1, workspace_counts.get(i).copied().unwrap_or(0)),
+                                &format!("Desktop {} · {}", i + 1, windows.len()),
                                 rect.size.w,
                                 label_h,
                             ),
                             drop_label: ov::live::label(theme, font_system, swash_cache,
                                 &format!("Move to Desktop {}", i + 1), rect.size.w, label_h),
+                            windows,
                             close: layout.workspace_close_rect(i)
                                 .map(|rect| (rect, ov::workspace_close_glyph(rect.size.w))),
                     })
@@ -256,6 +274,9 @@ impl<B: Backend> OverviewPanel<B> {
                         gap: layout.pad,
                     },
                 );
+                // Rebuilding the labels/miniatures replaces the backend scene.
+                // Its drag visual must follow the retained shell gesture.
+                backend.drag_live_overview(self.drag);
             }
             if !self.visible {
                 backend.map_shell_surface(window);
@@ -572,7 +593,7 @@ impl<B: Backend> OverviewPanel<B> {
         self.items.iter().map(|item| item.client).collect()
     }
 
-    /// Whether the one-shot preview catch-up should fire: a session is
+    /// Whether a preview catch-up should fire: a session is
     /// open, entry noted that sharper previews may still be owed, and
     /// the backend's counter has since moved (a backend that answers
     /// captures synchronously never moves it, so this never fires
@@ -594,7 +615,8 @@ impl<B: Backend> OverviewPanel<B> {
         previews: Vec<Option<DecorationBuffer>>,
         generation: u64,
     ) {
-        self.awaiting_previews = false;
+        // A bounded asynchronous backend may still owe later batches. Keep
+        // listening until hide(); unchanged generations do not fetch/repaint.
         self.preview_generation = generation;
         for (item, preview) in self.items.iter_mut().zip(previews) {
             if preview.is_some() {
@@ -670,6 +692,23 @@ impl<B: Backend> OverviewPanel<B> {
 #[cfg(test)]
 mod drag_tests {
     use super::*;
+    #[test]
+    fn later_asynchronous_preview_batches_remain_visible_until_panel_closes() {
+        use wm_core::fake_backend::FakeBackend;
+        let mut backend = FakeBackend::new();
+        let mut panel = OverviewPanel::<FakeBackend> { visible: true, awaiting_previews: true, ..Default::default() };
+        let theme = wm_theme::default_theme::theme_variant("nextstep-classic", wm_theme::Appearance::Dark).unwrap();
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut cache = cosmic_text::SwashCache::new();
+        for generation in [1, 2, 3] {
+            assert!(panel.wants_fresh_previews(generation), "later batches must not be stranded");
+            panel.update_previews(&mut backend, &theme, &mut fonts, &mut cache, Vec::new(), generation);
+            assert!(!panel.wants_fresh_previews(generation), "no repeat fetches without new pixels");
+        }
+        panel.hide(&mut backend);
+        assert!(!panel.wants_fresh_previews(4), "closed panels must not consume late completion");
+    }
+
     #[test]
     fn threshold_is_radial_scale_aware_and_overflow_safe() {
         for scale in [1, 2] {

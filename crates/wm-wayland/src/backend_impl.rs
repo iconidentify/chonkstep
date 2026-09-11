@@ -181,6 +181,16 @@ fn set_combo_membership(combos: &mut Vec<KeyCombo>, combo: KeyCombo, enabled: bo
 }
 
 impl WaylandBackend {
+    /// Unmanaged X11 menus inherit the managed parent's display boundary.
+    pub(crate) fn space_output_for<'a>(&'a self, record: &'a crate::state::WindowRecord) -> Option<&'a str> {
+        let mut record = record;
+        for _ in 0..32 {
+            if let Some(output) = record.space_output.as_deref() { return Some(output); }
+            record = self.windows.get(&record.parent?)?;
+        }
+        None
+    }
+
     /// Cheap build/hardware half of `hyprctl systeminfo`. Kept apart
     /// from the full diagnostic dump so routine compatibility queries
     /// never walk every protocol object or `/proc` entry.
@@ -188,6 +198,12 @@ impl WaylandBackend {
         use std::fmt::Write as _;
 
         let mut report = format!("graphics {}\n", self.graphics_diagnostics);
+        // Graphics identity is cached at startup; transfer counters are live.
+        // Including them in that cached string made native sessions report
+        // zero copies forever, even while using the CPU fallback every frame.
+        let copies = smithay::backend::renderer::multigpu::copy_stats();
+        let _ = writeln!(report, "multi_gpu_copies dma_frames={} cpu_frames={} cpu_pixels={}",
+            copies.dma_frames, copies.cpu_frames, copies.cpu_pixels);
         for (index, monitor) in self.monitors.iter().enumerate() {
             let scale = self.monitor_scales.get(index).copied().unwrap_or(1.0);
             let hardware = self.monitor_outputs.get(index);
@@ -210,6 +226,7 @@ impl WaylandBackend {
 }
 
 impl Backend for WaylandBackend {
+    fn supports_mac_interaction(&self) -> bool { true }
     type WindowId = WlWindowId;
     type FrameId = WlFrameId;
     type ShellId = WlShellId;
@@ -309,6 +326,9 @@ impl Backend for WaylandBackend {
             self.pending_pointer_grab.is_some(),
         );
         let _ = writeln!(report, "diagnostics {}", crate::diagnostics::describe());
+        self.gpu_timings.borrow().describe(&mut report);
+        report.push_str(&crate::readback::diagnostics());
+        for output in &self.native_frame_stats { output.describe(&mut report); }
 
         report.push_str("scene bottom-to-top\n");
         for entry in &self.stacking {
@@ -345,6 +365,18 @@ impl Backend for WaylandBackend {
                         window.title.as_deref().unwrap_or(""),
                     );
                 }
+            }
+        }
+        for (id, window) in &self.windows {
+            if let Some(surface) = window.surface.wl_surface() {
+                smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |state| {
+                    let kind = state.buffer().and_then(|buffer| smithay::backend::renderer::buffer_type(buffer));
+                    let size = state.buffer().and_then(|buffer| smithay::backend::renderer::buffer_dimensions(buffer));
+                    let dma = state.buffer().and_then(|buffer| smithay::wayland::dmabuf::get_dmabuf(buffer).ok());
+                    let _ = writeln!(report, "surface_buffer window={} kind={:?} scale={} pixels={:?} import_node={:?} format={:?}",
+                        id.0, kind, state.buffer_scale(), size, dma.and_then(|dma| dma.node()),
+                        dma.map(smithay::backend::allocator::Buffer::format));
+                });
             }
         }
         for layer in &self.layers {
@@ -817,13 +849,11 @@ impl Backend for WaylandBackend {
     }
 
     fn supports_protocol(&self, window: Self::WindowId, protocol: WmProtocol) -> bool {
-        let _ = window;
         match protocol {
-            // Every xdg toplevel understands xdg_toplevel.close, and
-            // smithay's `X11Surface::close` handles the WM_DELETE-vs-
-            // destroy decision internally — so from `wm-core`'s
-            // perspective a polite close is always available.
-            WmProtocol::DeleteWindow => true,
+            WmProtocol::DeleteWindow => self.windows.get(&window).is_some_and(|record| match &record.surface {
+                ManagedSurface::Xdg(_) => true,
+                ManagedSurface::X11(surface) => surface.supports_delete_window(),
+            }),
             // No Wayland analog of `WM_TAKE_FOCUS` exists (focus is
             // compositor-assigned, never client-negotiated), so no
             // client "supports" it — `wm-core` then just focuses
@@ -1415,6 +1445,14 @@ impl Backend for WaylandBackend {
         self.pending_focus = Some(crate::state::FocusIntent::Window(window));
     }
 
+    fn send_quit(&mut self, window: Self::WindowId) {
+        if !self.pending_quit.iter().any(|(id, _)| *id == window) {
+            // Give the client the already-delivered Copy key before requesting
+            // shutdown. Actual pending transfers then govern the handoff.
+            self.pending_quit.push((window, std::time::Instant::now() + std::time::Duration::from_millis(100)));
+        }
+    }
+
     fn send_close(&mut self, window: Self::WindowId) {
         let Some(record) = self.windows.get(&window) else {
             return;
@@ -1450,6 +1488,7 @@ impl Backend for WaylandBackend {
                 // disconnect; the object fields are zero because no
                 // object misbehaved — the user did the killing.
                 if let Some(client) = toplevel.wl_surface().client() {
+                    if !self.killed_clients.contains(&client.id()) { self.killed_clients.push(client.id()); }
                     client.kill(
                         &self.display_handle,
                         ProtocolError {
@@ -1462,14 +1501,9 @@ impl Backend for WaylandBackend {
                 }
             }
             ManagedSurface::X11(surface) => {
-                // Smithay exposes no XKillClient; close() at least
-                // destroys the window outright for clients without
-                // WM_DELETE_WINDOW. A true connection kill for a hung
-                // XWayland client is a follow-up (needs the XWM's own
-                // connection, which the xwayland module owns).
                 if surface.alive() {
-                    if let Err(error) = surface.close() {
-                        tracing::warn!(?error, ?window, "X11 kill (close) failed");
+                    if let Err(error) = surface.kill_client() {
+                        tracing::warn!(?error, ?window, "X11 force quit failed");
                     }
                 }
             }
@@ -1622,6 +1656,15 @@ impl Backend for WaylandBackend {
 
     fn publish_workarea(&mut self, area: Rect, workspace_count: usize) {
         self.ewmh.note_workarea(area, workspace_count);
+    }
+
+    fn set_window_space_output(&mut self, window: Self::WindowId, output: Option<&str>) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            if record.space_output.as_deref() != output {
+                record.space_output = output.map(str::to_owned);
+                self.mark_damaged();
+            }
+        }
     }
 
     fn publish_window_desktop(&mut self, window: Self::WindowId, desktop: usize) {

@@ -1,0 +1,7 @@
+interaction_mode = "mac"
+omarchy_shell = false
+omarchy_menu = false
+hyprland_config = true
+show_dock = false
+restore_session = false
+theme = "nextstep-classic"

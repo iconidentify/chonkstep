@@ -87,14 +87,14 @@ use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRenderElement};
-use smithay::backend::renderer::element::{default_primary_scanout_output_compare, Kind, RenderElementStates};
+use smithay::backend::renderer::element::{Kind, RenderElementStates};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData};
 use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
 use smithay::desktop::utils::{
     bbox_from_surface_tree, send_frames_surface_tree, take_presentation_feedback_surface_tree,
     surface_presentation_feedback_flags_from_states, surface_primary_scanout_output,
-    update_surface_primary_scanout_output, OutputPresentationFeedback,
+    OutputPresentationFeedback,
 };
 use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -124,6 +124,10 @@ render_elements! {
     CroppedMemory = CropRenderElement<MemoryRenderBufferRenderElement<R>>,
     CroppedScaledMemory = CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<R>>>,
     CroppedSolid = CropRenderElement<SolidColorRenderElement>,
+    DisplaySurface = CropRenderElement<CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<R>>>>,
+    DisplayMemory = CropRenderElement<CropRenderElement<MemoryRenderBufferRenderElement<R>>>,
+    DisplayScaledMemory = CropRenderElement<CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<R>>>>,
+    DisplaySolid = CropRenderElement<CropRenderElement<SolidColorRenderElement>>,
 }
 
 /// Clip a just-appended plane in place. Stable IDs and retained vector capacity
@@ -133,20 +137,28 @@ pub(crate) fn clip_plane(elements: &mut Vec<SceneElement<GlesRenderer>>, start: 
     let crop = SRect::new((rect.pos.x, rect.pos.y).into(), (rect.size.w as i32, rect.size.h as i32).into());
     let empty = SolidColorRenderElement::new(id.clone(), SRect::from_size((0, 0).into()),
         CommitCounter::default(), Color32F::TRANSPARENT, Kind::Unspecified);
-    let mut index = 0;
-    elements.retain_mut(|element| {
-        index += 1;
-        if index <= start { return true; }
-        let old = std::mem::replace(element, empty.clone().into());
-        let clipped = match old {
+    use smithay::backend::renderer::element::Element;
+    let mut write = start;
+    for index in start..elements.len() {
+        let old = std::mem::replace(&mut elements[index], empty.clone().into());
+        // Fully contained surfaces keep their original render element and
+        // scanout eligibility. Only edge crossings need a crop wrapper.
+        let clipped = if crop.contains_rect(old.geometry(1.0.into())) { Some(old) } else {
+        match old {
             SceneElement::Surface(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::Memory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::ScaledMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::Solid(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::CroppedSurface(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::CroppedMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::CroppedScaledMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::CroppedSolid(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             other => Some(other),
+        }
         };
-        if let Some(clipped) = clipped { *element = clipped; true } else { false }
-    });
+        if let Some(clipped) = clipped { elements[write] = clipped; write += 1; }
+    }
+    elements.truncate(write);
 }
 
 /// Renders one full frame from the current ledger, submits it, sends
@@ -263,7 +275,7 @@ pub(crate) fn build_scene_into(
     // annotations) — including the desktop's own dock and menus.
     push_layer_band(elements, renderer, backend, WlrLayer::Overlay, viewport);
 
-    if let Some(transition) = backend.gesture_scene.as_ref().filter(|t| t.horizontal()) {
+    if let Some(transition) = backend.gesture_scene.as_ref().filter(|t| t.horizontal() && t.output.is_none_or(|output| output == viewport)) {
         return crate::gesture_scene::render(elements, renderer, backend, transition, viewport);
     }
 
@@ -329,13 +341,24 @@ pub(crate) fn build_scene_into(
     // window in practice.
     for window in backend.scene_index.unmanaged() {
         if let Some(record) = backend.windows.get(&window).filter(|record| record.mapped) {
+            let start = elements.len();
             push_window_content(elements, renderer, backend, record.content, record, viewport);
+            if let Some(name) = backend.space_output_for(record) {
+                if let Some(monitor) = backend.monitors.iter().find(|m| m.name == name) {
+                    let mut rect = monitor.geometry;
+                    rect.pos.x -= viewport.pos.x;
+                    rect.pos.y -= viewport.pos.y;
+                    clip_plane(elements, start, rect, &record.space_clip_id);
+                } else { elements.truncate(start); }
+            }
         }
     }
 
     for entry in backend.stacking.iter().rev() {
+        let start = elements.len();
+        (|| {
         if crate::layout_scene::render_window(elements, renderer, backend, entry, viewport) {
-            continue;
+            return;
         }
         // A managed window whose client drew its own chrome has no
         // frame and no decoration buffer — just its content, at the
@@ -347,7 +370,7 @@ pub(crate) fn build_scene_into(
         // invisible the moment they stop being framed.
         if let StackEntry::Window(id) = entry {
             let Some(record) = backend.windows.get(id) else {
-                continue;
+                return;
             };
             if record.mapped && backend.scene_index.is_presented(*id) {
                 push_window_content(elements, renderer, backend, record.content, record, viewport);
@@ -355,10 +378,10 @@ pub(crate) fn build_scene_into(
         }
         if let StackEntry::Frame(id) = entry {
             let Some(frame) = backend.frames.get(id) else {
-                continue;
+                return;
             };
             if !frame.mapped {
-                continue;
+                return;
             }
             let window = backend.windows.get(&frame.window);
             // Content above chrome: the client's tree first
@@ -372,7 +395,7 @@ pub(crate) fn build_scene_into(
                 }
             }
             if overlap_area(frame.geometry, viewport) == 0 {
-                continue;
+                return;
             }
             for part in &frame.parts {
                 let location = SPoint::<f64, Physical>::from((
@@ -414,6 +437,21 @@ pub(crate) fn build_scene_into(
                 )
                 .into(),
             );
+        }
+            })();
+        let window = match entry {
+            StackEntry::Window(id) => Some(*id),
+            StackEntry::Frame(id) => backend.frames.get(id).map(|frame| frame.window),
+        };
+        if let Some(record) = window.and_then(|id| backend.windows.get(&id)) {
+            if let Some(name) = &record.space_output {
+                if let Some(monitor) = backend.monitors.iter().find(|m| &m.name == name) {
+                    let mut rect = monitor.geometry;
+                    rect.pos.x -= viewport.pos.x;
+                    rect.pos.y -= viewport.pos.y;
+                    clip_plane(elements, start, rect, &record.space_clip_id);
+                } else { elements.truncate(start); }
+            }
         }
     }
 
@@ -589,7 +627,9 @@ fn signal_pacing_barriers(surface: &WlSurface, output: &smithay::output::Output)
 /// Update surface visibility from a successfully submitted frame and drain
 /// feedback only for surfaces actually presented on their primary output.
 /// Smithay selects that output from visible area and refresh rate.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn take_presentation_feedback(
+    surface_outputs: &mut crate::surface_outputs::SurfaceOutputs,
     backend: &WaylandBackend,
     output: &smithay::output::Output,
     output_rect: Rect,
@@ -607,8 +647,7 @@ pub(crate) fn take_presentation_feedback(
             surface,
             &mut feedback,
             |surface, states| {
-                update_surface_primary_scanout_output(surface, output, states, render_states,
-                    default_primary_scanout_output_compare)
+                surface_outputs.update_primary(surface, output, states, render_states)
             },
             |surface, _| surface_presentation_feedback_flags_from_states(surface, render_states),
         );
@@ -663,6 +702,10 @@ pub(crate) fn take_presentation_feedback(
 /// entries on every frame callback and presentation-feedback drain.
 fn for_each_presented_window(backend: &WaylandBackend, mut visit: impl FnMut(&WindowRecord)) {
     crate::gesture_scene::for_each_neighbor(backend, &mut visit);
+    if let Some(overview) = backend.overview.as_ref()
+        .filter(|o| backend.shells.get(&o.surface).is_some_and(|s| s.mapped)) {
+        for record in overview.extra_windows(backend) { visit(record); }
+    }
     for window in backend.scene_index.unmanaged() {
         if let Some(record) = backend
             .windows
@@ -709,6 +752,12 @@ pub(crate) fn fullscreen_occludes_desktop_bands(backend: &WaylandBackend, viewpo
         .is_some_and(|o| o.presented(backend, viewport))
     {
         return false;
+    }
+    // Each independently visible fullscreen Space owns its display furniture,
+    // even while keyboard focus is on another output.
+    if backend.windows.iter().any(|(id, record)| record.space_output.is_some() && record.fullscreen
+        && backend.scene_index.is_presented(*id) && record.mapped && record.surface.alive() && fullscreen_rect_occludes_viewport(record.content, viewport)) {
+        return true;
     }
     let Some(window) = backend.ewmh.active_window() else {
         return false;
@@ -784,6 +833,9 @@ pub(crate) fn note_frame_success() {
 /// flip) and live with their backends; everything visible above them
 /// is [`build_scene`].
 pub(crate) fn render_frame(comp: &mut Compositor) -> bool {
+    if comp.dmabuf.refresh(&comp.graphics, &comp.outputs) {
+        comp.surface_outputs.reset_feedback(comp.dmabuf.default_feedback());
+    }
     // A plain screencopy must complete even when it lands on an idle desktop.
     // The coarse damage bit gets us here; forcing age zero below makes the
     // output damage tracker produce the actual presentation that paces it.
@@ -810,11 +862,12 @@ pub(crate) fn render_frame(comp: &mut Compositor) -> bool {
 }
 
 fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> bool {
+    if comp.outputs.len() > 1 { return render_frame_winit_outputs(comp, plain_capture_pending); }
     // Disjoint field borrows: the winit backend (renderer +
     // framebuffer) mutates while the ledger is read — both live on
     // `Compositor`, so destructure instead of going through `&mut
     // self` methods.
-    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, frame_stats, .. } = comp;
+    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, frame_stats, surface_outputs, dmabuf, gpu_timer, .. } = comp;
     let Graphics::Winit(winit_backend) = graphics else {
         return false;
     };
@@ -829,11 +882,36 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     let damage_tracker = &mut entry.damage_tracker;
     let scene_scratch = &mut entry.scene_scratch;
 
+    // Imports and timer setup can bind a surfaceless EGL context. Finish them
+    // before latching the window backbuffer and asking for its age; unbinding
+    // between that query and drawing can select a different buffer on NVIDIA.
+    let (clear_color, timing) = {
+        let renderer = winit_backend.renderer();
+        let gesture_build = wm.backend().gesture_scene.as_ref().map(|_| std::time::Instant::now());
+        let clear_color = build_scene_into(
+            scene_scratch,
+            wm.backend(),
+            renderer,
+            *pointer_location,
+            cursor_status,
+            cursors,
+            Rect::new(Point::new(0, 0), entry.size),
+        );
+        if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
+
+        crate::capture_tool::render(scene_scratch, renderer, wm.backend(), Rect::new(Point::new(0, 0), entry.size));
+        surface_outputs.update_scene(output, (entry.size.w as i32, entry.size.h as i32).into(), scene_scratch, dmabuf.default_feedback());
+        let timing = if gpu_timer.enabled() { gpu_timer.begin(renderer, &output.name()) } else { None };
+        (clear_color, timing)
+    };
+
     // Smithay 0.7's bind prepares a target and handles resize, but
     // does not make the surface current until Renderer::render. That
     // is too late for buffer_age: captures may have left a surfaceless
     // context current, making this query fail and force full damage.
     if let Err(error) = make_winit_surface_current(winit_backend) {
+        gpu_timer.end(winit_backend.renderer(), timing);
+        scene_scratch.clear();
         if note_frame_failure() {
             tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
         }
@@ -851,52 +929,30 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     } else {
         winit_backend.buffer_age().unwrap_or(0)
     };
-    let render_states = {
-        let (renderer, mut framebuffer) = match winit_backend.bind() {
-            Ok(bound) => bound,
-            Err(error) => {
-                if note_frame_failure() {
-                    tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
-                }
-                return false;
+    let rendered = (|| {
+        let (renderer, mut framebuffer) = winit_backend.bind().map_err(|error| {
+            if note_frame_failure() {
+                tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
             }
-        };
-
-        let gesture_build = wm.backend().gesture_scene.as_ref().map(|_| std::time::Instant::now());
-        let clear_color = build_scene_into(
-            scene_scratch,
-            wm.backend(),
-            renderer,
-            *pointer_location,
-            cursor_status,
-            cursors,
-            Rect::new(Point::new(0, 0), entry.size),
-        );
-        if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
-
-        crate::capture_tool::render(scene_scratch, renderer, wm.backend(), Rect::new(Point::new(0, 0), entry.size));
+        })?;
         match damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color) {
             Ok(result) => {
                 log_damage(age, result.damage.map(Vec::as_slice));
-                result.damage.is_some().then_some(result.states)
+                Ok(result.damage.is_some().then_some(result.states))
             }
             Err(error) => {
                 if note_frame_failure() {
                     tracing::warn!(?error, "render failed; keeping damage for a retry");
                 }
-                // Release element-owned client buffers on the same
-                // boundary the former temporary vector did, while
-                // retaining only its allocation for the retry.
-                scene_scratch.clear();
-                return false;
+                Err(())
             }
         }
-    };
-    // The nested backend has no asynchronous page-flip ownership to
-    // honor. Do not make reusable storage delay `wl_buffer.release`
-    // until some future frame; clear the handles now, exactly where
-    // the old per-frame vector was dropped.
+    })();
+    gpu_timer.end(winit_backend.renderer(), timing);
+    // The nested backend has no asynchronous page-flip ownership. Release
+    // element-owned client buffers on success and failure, retaining capacity.
     scene_scratch.clear();
+    let Ok(render_states) = rendered else { return false; };
 
     if render_states.is_some() {
         // The buffer holds a complete frame either way (the tracker
@@ -924,7 +980,8 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
 
     note_frame_success();
     let output_rect = wm.backend().monitors.first().map(|monitor| monitor.geometry).unwrap_or_default();
-    let mut feedback = take_presentation_feedback(wm.backend(), output, output_rect, &render_states, cursor_status, *pointer_location);
+    let mut feedback = take_presentation_feedback(surface_outputs, wm.backend(), output, output_rect, &render_states, cursor_status, *pointer_location);
+    surface_outputs.send_feedback(output, &render_states, dmabuf);
     present_now(
         &mut feedback,
         presentation_refresh(output),
@@ -938,6 +995,57 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
         *pointer_location,
         start_time.elapsed(),
     );
+    wm.backend_mut().damage = false;
+    true
+}
+
+/// Multiple virtual heads share one nested host swap. Each head builds the
+/// production output viewport independently, then only its final elements are
+/// translated into the host framebuffer. This exercises output-local Overview,
+/// fullscreen, clipping and surface membership without claiming KMS cadence.
+fn render_frame_winit_outputs(comp: &mut Compositor, capture_pending: bool) -> bool {
+    use smithay::backend::renderer::element::utils::{RelocateRenderElement, Relocate};
+    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors,
+        start_time, surface_outputs, dmabuf, .. } = comp;
+    let Graphics::Winit(backend) = graphics else { return false; };
+    let mut elements = Vec::new();
+    {
+        let renderer = backend.renderer();
+        for entry in outputs.iter_mut() {
+            let viewport = Rect::new(entry.position, entry.size);
+            let scene = &mut entry.scene_scratch;
+            build_scene_into(scene, wm.backend(), renderer, *pointer_location, cursor_status, cursors, viewport);
+            crate::capture_tool::render(scene, renderer, wm.backend(), viewport);
+            // Native output framebuffers enforce this boundary themselves.
+            // The shared host framebuffer needs it before translating the head,
+            // especially for an entering swipe plane or an edge cursor.
+            if let Some(id) = scene.first().map(|element| smithay::backend::renderer::element::Element::id(element).clone()) {
+                clip_plane(scene, 0, Rect::new(Point::new(0, 0), entry.size), &id);
+            }
+            surface_outputs.update_scene(&entry.output, (entry.size.w as i32, entry.size.h as i32).into(), scene, dmabuf.default_feedback());
+            elements.extend(scene.drain(..).map(|e| RelocateRenderElement::from_element(e,
+                (entry.position.x, entry.position.y), Relocate::Relative)));
+        }
+    }
+    if make_winit_surface_current(backend).is_err() { return false; }
+    let age = if capture_pending || crate::session::full_damage_forced() { 0 } else { backend.buffer_age().unwrap_or(0) };
+    let result = {
+        let Ok((renderer, mut framebuffer)) = backend.bind() else { return false; };
+        outputs[0].damage_tracker.render_output(renderer, &mut framebuffer, age, &elements,
+            Color32F::new(0.015, 0.015, 0.018, 1.0)).map(|r| r.damage.is_some().then_some(r.states))
+    };
+    let states = match result { Ok(Some(states)) => states, Ok(None) => { wm.backend_mut().damage = false; return false; },
+        Err(error) => { tracing::warn!(?error, "nested display render failed"); return false; } };
+    if backend.submit(Some(&[SRect::from_size(backend.window_size())])).is_err() { return false; }
+    for entry in outputs.iter() {
+        let rect = Rect::new(entry.position, entry.size);
+        let mut feedback = take_presentation_feedback(surface_outputs, wm.backend(), &entry.output, rect,
+            &states, cursor_status, *pointer_location);
+        surface_outputs.send_feedback(&entry.output, &states, dmabuf);
+        present_now(&mut feedback, presentation_refresh(&entry.output),
+            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync);
+        send_frame_callbacks(wm.backend(), &entry.output, rect, cursor_status, *pointer_location, start_time.elapsed());
+    }
     wm.backend_mut().damage = false;
     true
 }
@@ -1237,7 +1345,7 @@ fn push_window_content(
         let popup_surface = popup.wl_surface();
         let popup_factor = crate::xdg::effective_surface_scale(
             crate::xdg::committed_surface_scale(popup_surface),
-            backend.scale_at(content),
+            backend.window_output_scale(record),
         );
         let global = Point::new(
             global_origin.x.saturating_add(crate::xdg::scale_length(offset.x, factor)),
