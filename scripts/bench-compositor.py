@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shlex
 import signal
 import socket
 import statistics
@@ -133,8 +134,11 @@ class Door:
         self.stream.connect(str(path))
         self.reader = self.stream.makefile("rb")
 
-    def query(self, command, multiple=False):
+    def send(self, command):
         self.stream.sendall((command + "\n").encode())
+
+    def query(self, command, multiple=False):
+        self.send(command)
         lines = []
         while True:
             line = self.reader.readline().decode().strip()
@@ -238,7 +242,7 @@ def measure(args, binary, label, host_socket, directory):
     door_path = directory / "runtime/door.sock"
     env["CHONKSTEP_TEST_SOCKET"] = str(door_path)
     started = time.monotonic_ns()
-    with child([str(binary)], env, directory / "compositor.log") as process:
+    with child([str(binary)], env, directory / "compositor.log") as process, contextlib.ExitStack() as fixtures:
         socket_path = wait_for_socket(Path(env["XDG_RUNTIME_DIR"]), process)
         socket_ms = (time.monotonic_ns() - started) / 1e6
         wayland_roundtrip(socket_path)
@@ -250,6 +254,11 @@ def measure(args, binary, label, host_socket, directory):
             # Compatibility is part of this fixture. A socket-path bind
             # failure must not silently become a faster, reduced session.
             ipc_version = hyprland_roundtrip(Path(env["XDG_RUNTIME_DIR"]))
+            fixture_ready_ms = None
+            if args.decoration_workload:
+                start_decoration_clients(fixtures, directory, env, socket_path, door)
+                assert door.query("barrier") == "ok"
+                fixture_ready_ms = (time.monotonic_ns() - started) / 1e6
             world = door.query("windows", multiple=True)
             (directory / "world.txt").write_text("\n".join(world) + "\n")
             time.sleep(args.settle_seconds)
@@ -270,6 +279,9 @@ def measure(args, binary, label, host_socket, directory):
                 "world": world,
                 "hyprland_version": ipc_version,
             }
+            if args.decoration_workload:
+                metrics["three_client_ready_ms"] = fixture_ready_ms
+                metrics["drag"] = measure_decoration_drag(door, process.pid, directory, args.drag_seconds)
             (directory / "sample.json").write_text(json.dumps(metrics, indent=2) + "\n")
             print(json.dumps({key: metrics[key] for key in (
                 "label", "ready_ms", "frame_ms", "cpu_percent", "context_switches_per_second")}
@@ -277,6 +289,78 @@ def measure(args, binary, label, host_socket, directory):
             return metrics
         finally:
             door.close()
+
+
+def scene_records(lines, kind):
+    """Parse the door's quoted fields without treating a client's title as code."""
+    return [dict(field.split("=", 1) for field in shlex.split(line)[1:])
+            for line in lines if line.startswith(kind + " ")]
+
+
+def start_decoration_clients(fixtures, directory, env, socket_path, door):
+    applications = {f"org.chonkstep.bench.{index}" for index in range(3)}
+    processes = []
+    for index, application in enumerate(sorted(applications)):
+        processes.append(fixtures.enter_context(child([
+            "foot", "--config=/dev/null", f"--app-id={application}",
+            f"--title=Decoration benchmark {index + 1}", "--window-size-pixels=320x180",
+            "sh", "-c", "printf 'Decoration benchmark\\n'; exec sleep 86400",
+        ], env | {"WAYLAND_DISPLAY": str(socket_path)}, directory / f"foot-{index}.log")))
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if any(process.poll() is not None for process in processes):
+            raise RuntimeError("decoration fixture terminal exited before mapping")
+        world = door.query("windows", multiple=True)
+        windows = scene_records(world, "window")
+        mapped = {window["app"] for window in windows if window.get("mapped") == "true"}
+        frames = {frame["window"] for frame in scene_records(world, "frame") if frame.get("mapped") == "true"}
+        clients = [window for window in windows if window.get("app") in applications]
+        if applications <= mapped and len(clients) == 3 and all(window["id"] in frames for window in clients):
+            return
+        time.sleep(0.02)
+    raise TimeoutError("all three framed decoration clients must map before measuring")
+
+
+def measure_decoration_drag(door, pid, directory, seconds):
+    world = door.query("windows", multiple=True)
+    clients = scene_records(world, "window")
+    window = next(window for window in clients if window.get("app") == "org.chonkstep.bench.2")
+    frame = next(frame for frame in scene_records(world, "frame") if frame["window"] == window["id"])
+    start_x = int(frame["x"]) + int(frame["w"]) // 2
+    start_y = int(frame["y"]) + (int(window["y"]) - int(frame["y"])) // 2
+    door.send(f"motion {start_x} {start_y}")
+    assert door.query("barrier") == "ok"
+    door.send("button left press")
+    assert door.query("barrier") == "ok"
+    door.query("frame-stats")
+    before = proc_snapshot(pid, directory / "drag-before")
+    started = time.monotonic()
+    count = max(1, round(seconds * 125))
+    try:
+        for sample in range(count):
+            phase = sample % 250
+            distance = 16 + (phase if phase <= 125 else 250 - phase)
+            door.send(f"motion {start_x + distance} {start_y + distance // 2}")
+            delay = started + (sample + 1) / 125 - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+    finally:
+        door.send("button left release")
+    elapsed = time.monotonic() - started
+    assert door.query("barrier") == "ok"
+    after = proc_snapshot(pid, directory / "drag-after")
+    frame_stats = door.query("frame-stats")
+    ending = door.query("windows", multiple=True)
+    end_frame = next(part for part in scene_records(ending, "frame") if part["window"] == window["id"])
+    if (end_frame["x"], end_frame["y"]) == (frame["x"], frame["y"]):
+        raise RuntimeError("drag workload did not move its framed client")
+    interval = (after["sample_monotonic_ns"] - before["sample_monotonic_ns"]) / 1e9
+    return {
+        "motion_samples": count, "elapsed_seconds": elapsed, "input_hz": count / elapsed,
+        "cpu_percent": (after["cpu_ticks"] - before["cpu_ticks"]) / os.sysconf("SC_CLK_TCK") / interval * 100,
+        "before": before, "after": after, "frame_stats": frame_stats,
+        "initial_frame": frame, "final_frame": end_frame,
+    }
 
 
 def main():
@@ -287,13 +371,17 @@ def main():
     parser.add_argument("--idle-seconds", type=float, default=10)
     parser.add_argument("--settle-seconds", type=float, default=3)
     parser.add_argument("--dock", action="store_true")
+    parser.add_argument("--decoration-workload", action="store_true",
+                        help="Map three real terminals; measure loaded idle and a 125 Hz titlebar drag")
+    parser.add_argument("--drag-seconds", type=float, default=5)
     parser.add_argument("--hardware", action="store_true", help="Use the host's default GPU driver")
     parser.add_argument("--host-renderer", choices=("pixman", "gl"), default="pixman",
                         help="Weston's headless renderer; gl permits hardware-nested EGL clients")
     args = parser.parse_args()
     if (args.runs < 1 or not math.isfinite(args.idle_seconds) or args.idle_seconds <= 0
-            or not math.isfinite(args.settle_seconds) or args.settle_seconds < 0):
-        parser.error("runs/idle-seconds must be positive and finite; settle-seconds must be nonnegative and finite")
+            or not math.isfinite(args.settle_seconds) or args.settle_seconds < 0
+            or not math.isfinite(args.drag_seconds) or args.drag_seconds <= 0):
+        parser.error("runs/idle-seconds/drag-seconds must be positive and finite; settle-seconds must be nonnegative and finite")
     binaries = []
     for value in args.binary:
         label, separator, path = value.partition("=")
@@ -339,6 +427,8 @@ def main():
         "host_shader_cache": "private per experiment; reused by that experiment's host",
         "page_cache": "warm/uncontrolled; no system cache dropping",
         "dock": args.dock, "runs_per_binary": args.runs,
+        "decoration_workload": args.decoration_workload,
+        "drag_seconds": args.drag_seconds if args.decoration_workload else None,
         "cpu_affinity": sorted(os.sched_getaffinity(0)),
         "load_average_at_start": os.getloadavg(),
         "renderer_environment": {key: value for key, value in os.environ.items()
@@ -376,6 +466,10 @@ def main():
                    for key in ("ready_ms", "frame_ms", "cpu_percent", "context_switches_per_second")}
         metrics.update({key: [sample["after"][key] for sample in group]
                         for key in ("rss_kib", "pss_kib", "private_kib", "tree_pss_kib", "fds", "threads")})
+        if args.decoration_workload:
+            metrics["three_client_ready_ms"] = [sample["three_client_ready_ms"] for sample in group]
+            metrics["drag_cpu_percent"] = [sample["drag"]["cpu_percent"] for sample in group]
+            metrics["drag_input_hz"] = [sample["drag"]["input_hz"] for sample in group]
         summary[label] = {key: {"median": statistics.median(values), "min": min(values),
                                "max": max(values), "samples": values}
                           for key, values in metrics.items()}

@@ -69,6 +69,7 @@ pub mod paint;
 pub mod panel;
 pub mod power;
 mod raster;
+mod styles;
 pub mod soundctl;
 pub mod switcher;
 pub mod sysload;
@@ -78,3 +79,5 @@ pub mod workspace;
 
 pub use model::{Appearance, Theme};
 pub use raster::{FontCacheStatistics, FontState, RasterThemeEngine};
+pub use styles::{UnsupportedDecorationStyle, SUPPORTED_DECORATION_STYLES};
+pub use wm_theme_api::DecorationStyle;

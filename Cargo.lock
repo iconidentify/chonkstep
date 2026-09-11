@@ -3442,6 +3442,8 @@ version = "0.5.0"
 dependencies = [
  "chonk-test-support",
  "cosmic-text",
+ "flate2",
+ "libc",
  "serde",
  "tiny-skia",
  "toml",

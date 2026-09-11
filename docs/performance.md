@@ -5,6 +5,26 @@ output geometry, configuration, clients, and measurement interval. The harness
 in `scripts/bench-compositor.py` writes individual samples and raw process
 accounting so a reported median can be checked against the underlying runs.
 
+## Decoration-style baseline — 2026-09-11
+
+Before refactoring the chrome renderer, main `22f5590` was measured on i9beef
+in a release build. The [complete baseline](benchmarks/decoration-styles-2026-09-11/README.md)
+contains five-run tables for layout/cold/warm rendering at three content sizes
+and two scales, exact allocation/storage counts, executable hashes and all raw
+samples. The unchanged WindowMaker warm path currently allocates eight times;
+layout allocates four times. Those real budgets are now regression gates.
+
+Five private three-Foot-window nested llvmpipe sessions measured median idle
+CPU **0.0666% of one core**, RSS **300,228 KiB**, first-scene barrier **260.773 ms**,
+and three-client barrier **534.530 ms**. A five-second drag delivered approximately
+125 inputs/s and used median **17.855% of one core**. These are baseline values,
+not improvement claims or native GPU measurements. The linked report includes
+ranges and the idle CPU tick-resolution limitation.
+
+The real renderer produced **60 rasters for 125 synthetic resize samples across
+60 frame boundaries**. The [performance contract](decoration-styles.md#performance-contract)
+defines the gates every subsequent decoration style must preserve.
+
 ## Capture and pressure campaign — 2026-09-07
 
 The [capture performance report](engineering/2026-09-07/capture-performance.md)

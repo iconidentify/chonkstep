@@ -10,7 +10,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
-use wm_theme::{instrument_panel, overview, RasterThemeEngine};
+use wm_theme::{instrument_panel, overview, DecorationStyle, RasterThemeEngine, SUPPORTED_DECORATION_STYLES};
 use wm_theme_api::{DecorationRequest, Size, ThemeEngine};
 
 struct CountingAllocator;
@@ -80,6 +80,16 @@ fn digest(bytes: &[u8]) -> u64 {
 }
 
 fn measure<T>(name: &str, iterations: usize, mut work: impl FnMut() -> T, fingerprint: impl Fn(&T) -> u64) {
+    measure_with_metadata(name, iterations, &mut work, fingerprint, "");
+}
+
+fn measure_with_metadata<T>(
+    name: &str,
+    iterations: usize,
+    mut work: impl FnMut() -> T,
+    fingerprint: impl Fn(&T) -> u64,
+    metadata: &str,
+) {
     // Warm font and title caches, and checksum a complete output outside
     // the timed interval. Matching checksums guard against changed pixels.
     let first = work();
@@ -98,18 +108,45 @@ fn measure<T>(name: &str, iterations: usize, mut work: impl FnMut() -> T, finger
     let bytes = ALLOCATED_BYTES.load(Relaxed) - bytes;
     let peak = PEAK_BYTES.load(Relaxed).saturating_sub(live);
     println!(
-        "{{\"workload\":\"{name}\",\"iterations\":{iterations},\"ns_per_iteration\":{},\"allocations_per_iteration\":{},\"allocated_bytes_per_iteration\":{},\"peak_live_growth_bytes\":{peak},\"checksum\":\"{checksum:016x}\"}}",
+        "{{\"workload\":\"{name}\",\"iterations\":{iterations},\"ns_per_iteration\":{},\"allocations_per_iteration\":{},\"allocated_bytes_per_iteration\":{},\"peak_live_growth_bytes\":{peak},\"checksum\":\"{checksum:016x}\"{metadata}}}",
         elapsed.as_nanos() / iterations as u128, allocations / iterations, bytes / iterations,
     );
 }
 
 fn main() {
-    if std::env::args().any(|argument| argument == "--glyph-churn") {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let mut style = DecorationStyle::WindowMaker;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--style" => {
+                index += 1;
+                let name = arguments.get(index).map(String::as_str).unwrap_or("");
+                let selected = DecorationStyle::from_name(name).filter(|style| SUPPORTED_DECORATION_STYLES.contains(style));
+                let Some(selected) = selected else {
+                    eprintln!("unsupported style {name:?}; available: {:?}", SUPPORTED_DECORATION_STYLES);
+                    std::process::exit(2);
+                };
+                style = selected;
+            }
+            "--glyph-churn" | "--decoration-matrix" => {}
+            argument => {
+                eprintln!("unknown argument {argument:?}; use --style windowmaker, --decoration-matrix or --glyph-churn");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+    if arguments.iter().any(|argument| argument == "--glyph-churn") {
         glyph_churn();
         return;
     }
+    decoration_matrix(style);
+    if arguments.iter().any(|argument| argument == "--decoration-matrix") {
+        return;
+    }
     let theme = wm_theme::default_theme::nextstep_classic();
-    let engine = RasterThemeEngine::new(theme.clone());
+    let engine = RasterThemeEngine::new(theme.clone()).with_style(style).unwrap();
     let request = DecorationRequest {
         content_size: Size::new(1600, 1000), title: "Terminal — compositor performance".into(),
         focused: true, resizable: true, buttons: Vec::new(),
@@ -137,6 +174,54 @@ fn main() {
         measure(&format!("panel-label-{length}"), iterations,
             || instrument_panel::fit_type(&mut fonts, &font, text, 160),
             |output| digest(output.as_bytes()));
+    }
+}
+
+/// A cold render misses the engine's title cache, while font discovery, glyph
+/// warming, engine construction and per-scale setup remain outside the interval.
+/// The warm case calls the actual owned-buffer API: its copies/allocations count.
+fn decoration_matrix(style: DecorationStyle) {
+    let theme = wm_theme::default_theme::nextstep_classic();
+    let fonts = wm_theme::FontState::new();
+    for size in [Size::new(800, 600), Size::new(1280, 800), Size::new(2560, 1600)] {
+        for scale in [1.0, 2.0] {
+            let engine = RasterThemeEngine::with_fonts(theme.clone(), fonts.clone()).with_style(style).unwrap();
+            let request = DecorationRequest {
+                content_size: size,
+                title: "Terminal — compositor performance".into(),
+                focused: true,
+                resizable: true,
+                buttons: Vec::new(),
+            };
+            let layout = engine.layout_at(&request, scale);
+            let surface = engine.render_surface_at(&request, &layout, scale);
+            let retained = surface.retained_bytes();
+            let metadata = format!(
+                ",\"style\":\"{}\",\"width\":{},\"height\":{},\"scale\":{scale},\"retained_bytes\":{retained}",
+                style.name(), size.w, size.h,
+            );
+            let fingerprint = |surface: &wm_theme_api::DecorationSurface| {
+                surface.parts.iter().fold(0, |hash, part| hash ^ digest(&part.buffer.pixels))
+            };
+            measure_with_metadata("layout", 100_000,
+                || engine.layout_at(black_box(&request), scale),
+                |layout| u64::from(layout.frame_size.w) << 32 | u64::from(layout.frame_size.h),
+                &metadata);
+            measure_with_metadata("render-warm", 1000,
+                || engine.render_surface_at(black_box(&request), &layout, scale),
+                fingerprint, &metadata);
+            // One disposable engine per render, plus the untimed checksum call.
+            // Nothing is constructed inside the measured closure.
+            let engines: Vec<_> = (0..101).map(|_| {
+                let engine = RasterThemeEngine::with_fonts(theme.clone(), fonts.clone()).with_style(style).unwrap();
+                black_box(engine.layout_at(&request, scale));
+                engine
+            }).collect();
+            let mut engines = engines.iter();
+            measure_with_metadata("render-cold", 100,
+                || engines.next().unwrap().render_surface_at(black_box(&request), &layout, scale),
+                fingerprint, &metadata);
+        }
     }
 }
 

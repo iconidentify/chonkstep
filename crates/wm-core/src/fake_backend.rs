@@ -92,6 +92,10 @@ pub struct FakeBackend {
     /// though X11's server-side clipping would hide it.
     pub last_paint_size: HashMap<FakeFrameId, Size>,
     pub last_paint_bytes: HashMap<FakeFrameId, usize>,
+    /// Opt-in pixel evidence for decoration contract tests; ordinary fake
+    /// clients do not retain copies of their chrome.
+    pub record_paint_parts: bool,
+    pub last_paint_parts: HashMap<FakeFrameId, DecorationSurface>,
     pub last_frame_geometry: HashMap<FakeFrameId, Rect>,
     /// Where each client window was last positioned directly. For a
     /// framed window this is its offset inside its frame; for a
@@ -435,6 +439,9 @@ impl Backend for FakeBackend {
         *self.paint_count.entry(frame).or_insert(0) += 1;
         self.last_paint_size.insert(frame, surface.frame_size);
         self.last_paint_bytes.insert(frame, surface.retained_bytes());
+        if self.record_paint_parts {
+            self.last_paint_parts.insert(frame, surface.clone());
+        }
     }
 
     fn set_frame_cursor(&mut self, frame: Self::FrameId, edge: Option<ResizeEdge>) {

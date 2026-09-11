@@ -157,6 +157,57 @@ class IsolationTests(unittest.TestCase):
                 self.assertTrue(bench.command_output(["optional-probe"]).startswith("unavailable:"))
 
 
+class DecorationWorkloadTests(unittest.TestCase):
+    def test_quoted_client_titles_do_not_become_geometry_fields(self):
+        lines = ['window id=3 x=10 app="org.chonkstep.bench.2" title="a title x=999"',
+                 'frame id=4 window=3 x=9 y=0 w=320 h=213 mapped=true']
+        self.assertEqual(bench.scene_records(lines, "window"), [
+            {"id": "3", "x": "10", "app": "org.chonkstep.bench.2", "title": "a title x=999"}])
+
+    def drag(self, moved):
+        class Door:
+            def __init__(self):
+                self.snapshots = 0
+                self.sent = []
+
+            def send(self, command):
+                self.sent.append(command)
+
+            def query(self, command, multiple=False):
+                # Input commands have no reply. Accidentally using query for
+                # them is a real protocol timeout, not a slower benchmark.
+                if command == "barrier":
+                    return "ok"
+                if command == "frame-stats":
+                    return "frame-stats render_calls=2"
+                if command != "windows" or not multiple:
+                    raise AssertionError(f"unexpected query: {command}")
+                x = 100 + (17 if self.snapshots and moved else 0)
+                self.snapshots += 1
+                return ['window id=3 x=101 y=124 app="org.chonkstep.bench.2"',
+                        f'frame id=4 window=3 x={x} y=100 w=320 h=213 mapped=true']
+
+        door = Door()
+        snapshots = [dict(sample_monotonic_ns=0, cpu_ticks=10),
+                     dict(sample_monotonic_ns=20_000_000, cpu_ticks=11)]
+        with mock.patch.object(bench, "proc_snapshot", side_effect=snapshots), \
+                mock.patch.object(bench.time, "monotonic", side_effect=[1.0, 1.001, 1.009, 1.016]), \
+                mock.patch.object(bench.time, "sleep"):
+            result = bench.measure_decoration_drag(door, 123, Path("/unused"), 0.016)
+        self.assertEqual(result["motion_samples"], 2)
+        self.assertAlmostEqual(result["input_hz"], 125)
+        self.assertEqual(door.sent[0], "motion 260 112")
+        self.assertEqual(door.sent[1], "button left press")
+        self.assertEqual(door.sent[-1], "button left release")
+
+    def test_drag_sends_input_without_waiting_for_nonexistent_replies(self):
+        self.drag(moved=True)
+
+    def test_a_stationary_client_cannot_count_as_a_successful_drag(self):
+        with self.assertRaisesRegex(RuntimeError, "did not move"):
+            self.drag(moved=False)
+
+
 class ArgumentTests(unittest.TestCase):
     def reject(self, *options):
         with tempfile.TemporaryDirectory(prefix="chonk-bench-test-") as temporary:

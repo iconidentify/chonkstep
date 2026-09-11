@@ -5,6 +5,10 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Establish decoration-style selection in the renderer while preserving every
+  WindowMaker pixel, with 720 compatibility fixtures and measured performance gates.
+- Skip unchanged decoration-band uploads on both backends while retrying failed
+  X11 uploads and repainting correctly after frame resizes.
 - `chonkrec start --demo` records compositor capture controls and cursors for
   product walkthroughs, while concurrent normal captures stay clean. Recordings
   recover across compositor restarts and open in Omacut when finalized.

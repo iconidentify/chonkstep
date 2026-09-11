@@ -7848,6 +7848,85 @@ mod tests {
     }
 
     #[test]
+    fn real_decoration_styles_keep_title_damage_local_and_coalesce_resizes() {
+        let fonts = wm_theme::FontState::new();
+        for &style in wm_theme::SUPPORTED_DECORATION_STYLES {
+            let mut backend = FakeBackend::new();
+            backend.record_paint_parts = true;
+            let window = backend.create_window();
+            backend.set_geometry(window, Rect::new(Point::new(100, 100), Size::new(800, 600)));
+            backend.set_title(window, "Original title");
+            let engine = wm_theme::RasterThemeEngine::with_fonts(
+                wm_theme::default_theme::nextstep_classic(), fonts.clone(),
+            ).with_style(style).unwrap();
+            let mut wm = WindowManager::new(backend, Box::new(engine));
+            wm.dispatch(BackendEvent::MapRequest(window));
+            wm.flush_decorations();
+            let id = wm.client_for_window(window).unwrap();
+            let frame = wm.client(id).unwrap().frame.unwrap();
+            for transition in 0..3 {
+                if transition == 2 {
+                    // Measure a button-state change independently of the
+                    // preceding focus-loss transition.
+                    wm.focus_client(id);
+                    wm.flush_decorations();
+                }
+                let before = wm.backend().last_paint_parts[&frame].clone();
+                let count = wm.backend().paint_count[&frame];
+                match transition {
+                    0 => {
+                        wm.backend_mut().set_title(window, "Updated title");
+                        wm.dispatch(BackendEvent::TitleChanged(window));
+                    }
+                    1 => {
+                        let other = wm.backend_mut().create_window();
+                        wm.backend_mut().set_geometry(other,
+                            Rect::new(Point::new(1000, 100), Size::new(300, 200)));
+                        wm.dispatch(BackendEvent::MapRequest(other));
+                    }
+                    _ => {
+                        let close = wm.client(id).unwrap().layout.button_hitboxes.iter()
+                            .find(|(kind, _)| *kind == ButtonKind::Close).unwrap().1;
+                        wm.dispatch(frame_press(frame, Point::new(close.pos.x + 2, close.pos.y + 2)));
+                    }
+                }
+                wm.flush_decorations();
+                assert_eq!(wm.backend().paint_count[&frame], count + 1, "{style:?} transition {transition}");
+                let after = &wm.backend().last_paint_parts[&frame];
+                assert_eq!(before.frame_size, after.frame_size);
+                assert_ne!(before.parts[0], after.parts[0], "title pixels must actually change");
+                assert_eq!(before.parts[1..], after.parts[1..], "non-title pixels must remain unchanged");
+            }
+            // Cancel the held close box by releasing outside it.
+            wm.dispatch(frame_release(frame, Point::new(100, 100)));
+            wm.flush_decorations();
+            wm.backend_mut().record_paint_parts = false;
+            let initial = wm.backend().paint_count[&frame];
+            let geometry = wm.backend().last_frame_geometry[&frame];
+            wm.dispatch(BackendEvent::PointerMotion {
+                root: Point::new(geometry.pos.x + geometry.size.w as i32 - 2,
+                                 geometry.pos.y + geometry.size.h as i32 - 2),
+                surface_local: None,
+            });
+            wm.dispatch(BackendEvent::ResizeRequest { window, edge: ResizeEdge::SouthEast });
+            for sample in 0..125 {
+                wm.dispatch(BackendEvent::PointerMotion {
+                    root: Point::new(geometry.pos.x + geometry.size.w as i32 + sample,
+                                     geometry.pos.y + geometry.size.h as i32 + sample),
+                    surface_local: None,
+                });
+                if (sample + 1) * 60 / 125 != sample * 60 / 125 {
+                    wm.flush_decorations();
+                }
+            }
+            wm.flush_decorations();
+            let rasters = wm.backend().paint_count[&frame] - initial;
+            assert_eq!(rasters, 60, "{style:?}: 125 input samples must produce 60 rasters");
+            eprintln!("{style:?}: 125 resize samples / 60 synthetic frames / {rasters} rasters; title-only changes preserve other bands");
+        }
+    }
+
+    #[test]
     fn resize_from_southwest_grows_width_leftward_and_moves_the_frame() {
         let (mut wm, id, frame) = client_for_resize(FakeBackend::new());
 
