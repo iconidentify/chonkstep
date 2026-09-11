@@ -85,6 +85,22 @@ session restart to update this resident set. Fallback text is compatible, not
 pixel-exact Chicago. The offline System 7 API caps scale at 16 and client
 dimensions at 8192, matching the compositor's client-dimension safety limit.
 
+## Desktop captures
+
+Unmodified captures of a real Foot client from the `system7` end-to-end test,
+using the classic palette. The 2× frame is drawn at native output density.
+The reference column is the genuine monochrome System 7.5 emulator capture;
+its test oracle at 2× is exact nearest-neighbor replication of the 1× pixels.
+
+| Live ChonkStep | Historical reference |
+| --- | --- |
+| [![System 7 frame at 1×](../site/shots/system7-1x.png)](../site/shots/system7-1x.png) | [![System 7.5 reference](decoration-styles/system7/reference/1bit/zoom-short-active.png)](decoration-styles/system7/reference/1bit/zoom-short-active.png) |
+| [![System 7 frame at 2×](../site/shots/system7-2x.png)](../site/shots/system7-2x.png) | The same 1× reference replicated exactly at 2×; no additional historical capture is implied. |
+
+Reproduce the client scenes, pixel assertions and captures with
+`scripts/e2e.sh --headless --test system7`. The terminal text is fixture content,
+not a test-result display; the test runner records the assertions separately.
+
 ## Performance contract
 
 Every style inherits the gates in [issue #159](https://github.com/iconidentify/chonkstep/issues/159).
@@ -96,10 +112,12 @@ records main before the style refactor, including executable hashes and raw samp
   exact retained pixel bytes and output checksums. WindowMaker must remain
   within measured run-to-run noise; a new style must not exceed its equivalent
   WindowMaker workload. Archive every sample and compare the same binary/config.
-- `decoration_contract` pins the actual existing allocation budgets: layout has
-  four requests/600 bytes; warm rendering has eight requests with size-dependent
-  bytes. The owned-buffer API currently allocates. A style must not raise these
-  budgets or call itself allocation-free while making the same copies.
+- `decoration_contract` preserves the pre-style ceilings: four requests/600 bytes
+  for layout and eight requests with size-dependent bytes for warm rendering.
+  The [current measurements](benchmarks/decoration-styles-2026-09-11/system7/README.md)
+  use two layout allocations (360 bytes for WindowMaker, 280 for System 7) and
+  six warm-render allocations for either style. The owned-buffer API allocates;
+  a style must not raise the ceilings or call these copies allocation-free.
 - Sparse parts stay within the frame, never cover client pixels, never overlap,
   and retain at most perimeter × maximum band width × four RGBA bytes, across
   focused/inactive, resizable/fixed, shaded and button states at 1/1.5/2 scales.

@@ -1,0 +1,53 @@
+{
+  "before": {
+    "source_sample": "00-before",
+    "source_file": "after/smaps",
+    "source_sha256": "f376f12127ddcf7f03cbf4e0d1130c1e5144462cfed76dd1e5f2ad9168c777b4",
+    "font_rss_kib": 444,
+    "fonts_rss_kib": {
+      "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf": 252,
+      "/usr/share/fonts/noto/NotoSans-Regular.ttf": 192
+    }
+  },
+  "wm": {
+    "source_sample": "00-wm",
+    "source_file": "after/smaps",
+    "source_sha256": "4856626f03ab08e2c37604613cdbf4da240df4ac0568ede6870539898646b553",
+    "font_rss_kib": 22292,
+    "fonts_rss_kib": {
+      "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc": 19584,
+      "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf": 232,
+      "/usr/share/fonts/noto/NotoSansEthiopic-Bold.ttf": 368,
+      "/usr/share/fonts/noto/NotoSans-Bold.ttf": 620,
+      "/usr/share/fonts/noto/NotoSansGeorgian-Bold.ttf": 56,
+      "/usr/share/fonts/noto/NotoSansTamil-Bold.ttf": 76,
+      "/usr/share/fonts/noto/NotoSansDevanagari-Bold.ttf": 248,
+      "/usr/share/fonts/noto/NotoSansArabic-Bold.ttf": 256,
+      "/usr/share/fonts/noto/NotoSans-Regular.ttf": 608,
+      "/usr/share/fonts/noto/NotoSansThai-Bold.ttf": 40,
+      "/usr/share/fonts/noto/NotoSansBengali-Bold.ttf": 144,
+      "/usr/share/fonts/noto/NotoSansArmenian-Bold.ttf": 32,
+      "/usr/share/fonts/noto/NotoSansHebrew-Bold.ttf": 28
+    }
+  },
+  "sys": {
+    "source_sample": "00-sys",
+    "source_file": "after/smaps",
+    "source_sha256": "283ccf584faa02d5d38f3874d7b51050a45b412869d090aa5760de6b3400e83d",
+    "font_rss_kib": 22060,
+    "fonts_rss_kib": {
+      "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc": 19584,
+      "/usr/share/fonts/noto/NotoSans-Bold.ttf": 620,
+      "/usr/share/fonts/noto/NotoSansEthiopic-Bold.ttf": 368,
+      "/usr/share/fonts/noto/NotoSansArmenian-Bold.ttf": 32,
+      "/usr/share/fonts/noto/NotoSansGeorgian-Bold.ttf": 56,
+      "/usr/share/fonts/noto/NotoSansThai-Bold.ttf": 40,
+      "/usr/share/fonts/noto/NotoSansTamil-Bold.ttf": 76,
+      "/usr/share/fonts/noto/NotoSansBengali-Bold.ttf": 144,
+      "/usr/share/fonts/noto/NotoSans-Regular.ttf": 608,
+      "/usr/share/fonts/noto/NotoSansDevanagari-Bold.ttf": 248,
+      "/usr/share/fonts/noto/NotoSansArabic-Bold.ttf": 256,
+      "/usr/share/fonts/noto/NotoSansHebrew-Bold.ttf": 28
+    }
+  }
+}
