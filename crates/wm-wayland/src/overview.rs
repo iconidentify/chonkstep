@@ -449,7 +449,7 @@ pub(crate) fn render(
         for window in &space.windows {
             let Some(record) = backend.windows.get(&window.window) else { continue; };
             let source = window.frame.and_then(|id| backend.frames.get(&id))
-                .map_or(record.content, |frame| frame.geometry);
+                .map_or(record.content, |frame| frame.visual_geometry());
             let destination = thumbnail_rect(source, overview.geometry, rect);
             let start = elements.len();
             render_window_scaled(elements, renderer, backend, window, destination, alpha, false, None, Some(source));
@@ -677,12 +677,14 @@ fn render_window_scaled(
                 );
             }
         }
-        solid(
-            elements,
-            &frame.fill_id,
-            destination,
-            Color32F::new(0.0, 0.0, 0.0, alpha),
-        );
+        if let Some(record) = backend.windows.get(&window.window).filter(|record| record.mapped) {
+            let content = Rect::new(Point::new(
+                destination.pos.x + ((record.content.pos.x - source.pos.x) as f64 * sx).round() as i32,
+                destination.pos.y + ((record.content.pos.y - source.pos.y) as f64 * sy).round() as i32),
+                Size::new((record.content.size.w as f64 * sx).round() as u32,
+                    (record.content.size.h as f64 * sy).round() as u32));
+            solid(elements, &frame.fill_id, content, Color32F::new(0.0, 0.0, 0.0, alpha));
+        }
     }
 }
 

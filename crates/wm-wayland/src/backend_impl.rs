@@ -132,6 +132,40 @@ fn update_chrome_band(memory: &mut [u8], pixels: &[u8], size: Size) -> Vec<Smith
     vec![SmithayRect::<i32, Buffer>::from_size((size.w as i32, size.h as i32).into())]
 }
 
+/// Only premultiplied zero texels can be omitted without changing a blend.
+fn has_binary_transparency(buffer: &DecorationBuffer) -> bool {
+    let mut transparent = false;
+    for pixel in buffer.pixels.as_chunks::<4>().0 {
+        match *pixel { [0, 0, 0, 0] => transparent = true, [_, _, _, 255] => {}, _ => return false }
+    }
+    transparent
+}
+
+/// Exact opaque runs, coalesced vertically. The limit bounds pathological
+/// masks; reporting no opaque region remains correct for arbitrary alpha.
+fn chrome_opaque_regions(buffer: &DecorationBuffer) -> Vec<SmithayRect<i32, Buffer>> {
+    let mut regions: Vec<SmithayRect<i32, Buffer>> = Vec::new();
+    for y in 0..buffer.height {
+        let mut x = 0;
+        while x < buffer.width {
+            let opaque = |x| buffer.pixels[((y * buffer.width + x) * 4 + 3) as usize] == 255;
+            while x < buffer.width && !opaque(x) { x += 1; }
+            let start = x;
+            while x < buffer.width && opaque(x) { x += 1; }
+            if x == start { continue; }
+            if let Some(previous) = regions.iter_mut().rev().find(|rect| {
+                rect.loc.x == start as i32 && rect.size.w == (x - start) as i32 && rect.loc.y + rect.size.h == y as i32
+            }) {
+                previous.size.h += 1;
+            } else {
+                if regions.len() >= 64 { return Vec::new(); }
+                regions.push(SmithayRect::new((start as i32, y as i32).into(), ((x - start) as i32, 1).into()));
+            }
+        }
+    }
+    regions
+}
+
 /// Reads one field of the xdg toplevel's role attributes (title,
 /// app_id) — smithay parks them on the surface's user-data map as
 /// `XdgToplevelSurfaceData`. `None` if the toplevel is gone, the data
@@ -946,6 +980,7 @@ impl Backend for WaylandBackend {
             FrameRecord {
                 window,
                 geometry,
+                input_margin: layout.input_margin,
                 parts: Vec::new(),
                 fill_id: smithay::backend::renderer::element::Id::new(),
                 mapped: false,
@@ -1042,22 +1077,37 @@ impl Backend for WaylandBackend {
                     continue;
                 }
                 let old = previous.next();
-                let buffer = match old {
+                let (buffer, binary_alpha) = match old {
                     Some(mut old) if old.offset == part.offset && old.size == size => {
                         let pixels = &part.buffer.pixels;
                         let mut render = old.buffer.render();
+                        let mut opacity_changed = false;
                         let _ = render.draw(|memory| {
+                            // Focus/title/hover repaints normally change only
+                            // RGB. Reuse the stored opaque rectangles unless
+                            // the actual alpha mask changed; no new region
+                            // allocation on an ordinary same-sized repaint.
+                            opacity_changed = memory.len() != pixels.len() || (memory != pixels
+                                && memory.as_chunks::<4>().0.iter().zip(pixels.as_chunks::<4>().0)
+                                    .any(|(before, after)| before[3] != after[3] || (before[3] == 0 && before != after)));
                             Ok::<_, std::convert::Infallible>(update_chrome_band(memory, pixels, size))
                         });
+                        if opacity_changed {
+                            render.update_opaque_regions(Some(chrome_opaque_regions(&part.buffer)));
+                            old.binary_alpha = has_binary_transparency(&part.buffer);
+                        }
                         drop(render);
-                        old.buffer
+                        (old.buffer, old.binary_alpha)
                     }
-                    _ => match import_buffer(&part.buffer, true) {
-                        Some(buffer) => buffer,
+                    _ => match import_buffer(&part.buffer, false) {
+                        Some(mut buffer) => {
+                            buffer.render().update_opaque_regions(Some(chrome_opaque_regions(&part.buffer)));
+                            (buffer, has_binary_transparency(&part.buffer))
+                        }
                         None => continue,
                     },
                 };
-                imported.push(FramePart { offset: part.offset, size, buffer });
+                imported.push(FramePart { offset: part.offset, size, buffer, binary_alpha });
             }
             record.parts = imported;
             if retires_visible_chrome {
@@ -1136,6 +1186,12 @@ impl Backend for WaylandBackend {
             }
         }
         self.mark_damaged();
+    }
+
+    fn set_decoration_layout(&mut self, frame: Self::FrameId, layout: &DecorationLayout) {
+        if let Some(record) = self.frames.get_mut(&frame) {
+            record.input_margin = layout.input_margin;
+        }
     }
 
     fn resize_client(&mut self, window: Self::WindowId, size: Size) {
@@ -2086,6 +2142,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn binary_chrome_requires_exact_zero_holes_and_fully_opaque_visible_pixels() {
+        let buffer = |pixels| DecorationBuffer { width: 2, height: 1, pixels };
+        assert!(has_binary_transparency(&buffer(vec![0, 0, 0, 0, 30, 40, 50, 255])));
+        assert!(!has_binary_transparency(&buffer(vec![1, 0, 0, 0, 30, 40, 50, 255])));
+        assert!(!has_binary_transparency(&buffer(vec![0, 0, 0, 0, 30, 40, 50, 128])));
+        assert!(!has_binary_transparency(&buffer(vec![1, 2, 3, 255, 30, 40, 50, 255])));
+    }
+
+    #[test]
     fn unchanged_chrome_bands_keep_their_damage_empty() {
         let mut pixels = vec![0_u8; 64 * 4];
         let mut next = pixels.clone();
@@ -2095,6 +2160,31 @@ mod tests {
             vec![SmithayRect::<i32, Buffer>::from_size((64, 1).into())]);
         assert_eq!(pixels, next);
         assert!(update_chrome_band(&mut pixels, &next, Size::new(64, 1)).is_empty());
+    }
+
+    #[test]
+    fn system7_opaque_regions_exclude_every_transparent_corner_and_input_pixel() {
+        use wm_theme_api::{DecorationRequest, ThemeEngine};
+        let engine = wm_theme::RasterThemeEngine::nextstep_classic()
+            .with_style(wm_theme::DecorationStyle::System7).unwrap();
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let request = DecorationRequest { content_size: Size::new(400, 240), title: "Terminal".into(),
+                focused: true, resizable: true, buttons: Vec::new() };
+            let layout = engine.layout_at(&request, scale);
+            let surface = engine.render_surface_at(&request, &layout, scale);
+            for part in surface.parts {
+                let regions = chrome_opaque_regions(&part.buffer);
+                assert!(regions.len() <= 2, "ordinary bands need at most two opaque rectangles");
+                for y in 0..part.buffer.height {
+                    for x in 0..part.buffer.width {
+                        let declared = regions.iter().any(|r| r.contains((x as i32, y as i32)));
+                        assert_eq!(declared, part.buffer.pixels[((y * part.buffer.width + x) * 4 + 3) as usize] == 255);
+                        let global = Point::new(part.offset.x + x as i32, part.offset.y + y as i32);
+                        assert!(layout.visual_bounds().contains(global), "no imported pixel may cover the resize margin");
+                    }
+                }
+            }
+        }
     }
 
     // Everything else in this file needs a live client on a socket;

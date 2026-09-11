@@ -60,6 +60,7 @@ mod output_power;
 mod protocols;
 mod readback;
 mod renderer;
+mod binary_alpha;
 mod restart;
 mod overview;
 mod gesture_scene;

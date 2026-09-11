@@ -35,6 +35,13 @@ fn resident_engine_rebuild_does_no_file_or_process_io() {
                 let layout = engine.layout_at(&request, scale);
                 let rendered = engine.render_surface_at(&request, &layout, scale);
                 assert!(rendered.retained_bytes() > 0);
+                if style == wm_theme::DecorationStyle::System7 {
+                    // These glyphs were never rendered before installing the
+                    // filter. Even a cold Unicode title must use resident data.
+                    let unicode = DecorationRequest { title: "Terminal — Живет 中文 日本語 العربية 🦀 \u{10ffff}".into(), ..request.clone() };
+                    let layout = engine.layout_at(&unicode, scale);
+                    assert!(engine.render_surface_at(&unicode, &layout, scale).retained_bytes() > 0);
+                }
             }
         }
         std::process::exit(0);

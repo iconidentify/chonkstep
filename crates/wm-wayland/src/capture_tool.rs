@@ -702,7 +702,7 @@ fn hovered_window(backend: &WaylandBackend, at: Point) -> Option<(WlWindowId, Re
                 if !frame.mapped {
                     return None;
                 }
-                (frame.window, frame.geometry)
+                (frame.window, frame.visual_geometry())
             }
         };
         backend

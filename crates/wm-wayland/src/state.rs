@@ -74,7 +74,7 @@ use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::X11Surface;
 
 use wm_core::{Backend, BackendEvent, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, WindowManager, WindowType};
-use wm_theme::{FontState, RasterThemeEngine};
+use wm_theme::FontState;
 use wm_theme_api::{DecorationBuffer, Point, Rect, ResizeEdge, Size};
 
 use crate::input::DragGrab;
@@ -515,6 +515,8 @@ pub(crate) struct FramePart {
     pub offset: Point,
     pub size: Size,
     pub buffer: MemoryRenderBuffer,
+    /// Every texel is opaque or fully transparent, with at least one hole.
+    pub binary_alpha: bool,
 }
 
 /// Ledger entry for one decoration frame. `parts` holds only the imported
@@ -525,9 +527,18 @@ pub(crate) struct FramePart {
 pub(crate) struct FrameRecord {
     pub window: WlWindowId,
     pub geometry: Rect,
+    pub input_margin: u32,
     pub parts: Vec<FramePart>,
     pub fill_id: smithay::backend::renderer::element::Id,
     pub mapped: bool,
+}
+
+impl FrameRecord {
+    pub(crate) fn visual_geometry(&self) -> Rect {
+        let margin = self.input_margin.min(self.geometry.size.w / 2).min(self.geometry.size.h / 2);
+        Rect::new(Point::new(self.geometry.pos.x + margin as i32, self.geometry.pos.y + margin as i32),
+            Size::new(self.geometry.size.w - margin * 2, self.geometry.size.h - margin * 2))
+    }
 }
 
 /// Ledger entry for one shell surface. `buffer: None` means "never
@@ -4058,7 +4069,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     chonk_shell::startup::apply_session_env(&state.session_env);
     chonk_shell::startup::clear_inherited_gtk_scale_env();
     let theme = state.theme();
-    tracing::info!(theme = %theme.id, "theme loaded");
+    tracing::info!(theme = %theme.id, decoration_style = state.decoration_style.name(), "theme loaded");
     // The font database is built out here rather than inside the engine
     // so the shell can hold on to it and build this engine's
     // replacements around the same one on every later restyle. A
@@ -4067,7 +4078,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // the display server every client is waiting on. See
     // `wm_theme::FontState`.
     let fonts = FontState::new();
-    let engine = RasterThemeEngine::with_fonts_at_scale(theme, fonts.clone(), state.scale);
+    let engine = state.decoration_engine(fonts.clone());
 
     // The outputs advertise the session's scale from here on — the only
     // way a native Wayland client ever learns this desktop is scaled
@@ -5336,6 +5347,7 @@ mod tests {
             frames.insert(
                 frame_id,
                 FrameRecord {
+                    input_margin: 0,
                     window,
                     geometry: Rect::default(),
                     parts: Vec::new(),

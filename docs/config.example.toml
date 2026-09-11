@@ -249,6 +249,13 @@
 # their next launch. An unknown value is warned about and ignored.
 #appearance = "dark"
 
+# Frame geometry and glyphs, independent of the palette and Mac keyboard mode.
+# Exact spellings: "windowmaker" (default) or "system7". Config-only selector: edit
+# this line, then run /usr/lib/chonkstep/reload.sh. Both backends and XWayland update in place.
+# System 7 chrome is always light, including when appearance is dark.
+# See docs/decoration-styles.md for capture references and scaling policy.
+#decoration_style = "windowmaker"
+
 # Where a newly mapped window goes when the application itself asked
 # for no particular position (an explicit position, like a terminal's
 # -geometry +x+y, is always honored instead). One of:

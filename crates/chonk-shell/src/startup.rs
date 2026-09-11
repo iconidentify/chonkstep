@@ -93,6 +93,8 @@ pub struct SessionState {
     /// see [`crate::appearance`] for the resolution layers and the
     /// published/request file contract.
     pub appearance: Appearance,
+    /// Config-only frame recipe, independent of theme and appearance state files.
+    pub decoration_style: wm_theme_api::DecorationStyle,
     /// `Some(wm_theme::omarchy::ID)` while this session *follows*
     /// Omarchy — its theme choice is "whatever Omarchy's current theme
     /// is" rather than one of the built-ins — and `None` otherwise.
@@ -256,6 +258,7 @@ impl SessionState {
         Self {
             base_theme: look.theme,
             appearance: look.appearance,
+            decoration_style: config.decoration_style,
             following: look.following,
             scale: read_scale_factor_with_default(config.scale, scale_default),
             focus: if read_focus_follows_mouse(config.focus_follows_mouse) {
@@ -303,6 +306,14 @@ impl SessionState {
             keybindings: config.keybindings.clone(),
             config_diagnostics: config.diagnostics.clone(),
         }
+    }
+
+    /// Build the frame engine identically at startup and on live reload.
+    /// Font state is resident and shared across both paths.
+    pub fn decoration_engine(&self, fonts: wm_theme::FontState) -> wm_theme::RasterThemeEngine {
+        wm_theme::RasterThemeEngine::with_fonts_at_scale(self.theme(), fonts, self.scale)
+            .with_style(self.decoration_style)
+            .expect("configured decoration styles have a renderer")
     }
 
     /// The theme every surface is actually drawn from: [`Self::base_theme`]
@@ -958,11 +969,21 @@ mod tests {
     }
 
     #[test]
+    fn decoration_style_resolves_from_config_on_every_reload() {
+        for name in ["system7", "windowmaker", "system7"] {
+            let config = wm_config::parse(&format!("decoration_style = {name:?}")).unwrap();
+            assert_eq!(SessionState::resolve(&config).decoration_style.name(), name);
+        }
+        assert_eq!(SessionState::resolve(&Config::default_config()).decoration_style.name(), "windowmaker");
+    }
+
+    #[test]
     fn a_session_state_scales_a_theme_it_keeps_at_1x() {
         let base = wm_theme::default_theme::nextstep_classic();
         let state = SessionState {
             base_theme: base.clone(),
             appearance: Appearance::Dark,
+            decoration_style: wm_theme_api::DecorationStyle::WindowMaker,
             following: None,
             scale: 2.0,
             focus: FocusPolicy::ClickToFocus,

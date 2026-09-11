@@ -50,7 +50,9 @@ pub(crate) fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> D
         button_hitboxes.push((style.kind, rect));
     }
 
-    let mut resize_hitboxes = Vec::new();
+    // Match the final capacity of the former 4 -> 8 -> 16 growth path,
+    // avoiding two reallocations on every layout without retaining more.
+    let mut resize_hitboxes = Vec::with_capacity(if request.resizable { 16 } else { 0 });
     if request.resizable {
         // Proportional to the titlebar's own (already-scaled) height,
         // not a flat 10px literal — the flat version never grew with
@@ -117,6 +119,7 @@ pub(crate) fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> D
     }
 
     DecorationLayout {
+        input_margin: 0,
         frame_size,
         client_offset: Point::new(border as i32, (border + titlebar_height) as i32),
         titlebar_height,
@@ -182,25 +185,10 @@ pub(crate) fn render_sparse_decoration(
     }
 
     if frame.w > 0 && bottom_h > 0 {
-        // The full painter puts the resize bar immediately above its bottom
-        // border. Add a disposable top border and crop it off.
-        let mut bottom_layout = DecorationLayout {
-            frame_size: Size::new(frame.w, bottom_h.saturating_add(border)),
-            client_offset: Point::new(border as i32, border as i32),
-            titlebar_height: 0,
-            button_hitboxes: Vec::new(),
-            resize_hitboxes: Vec::new(),
-            shaded_frame_height: 0,
-        };
-        // `render_decoration` only consults this field for geometry already
-        // represented above; keep it explicit for future theme additions.
-        bottom_layout.client_offset.y = border as i32;
-        let mut bottom_request = request.clone();
-        bottom_request.content_size = Size::new(frame.w.saturating_sub(border * 2), 0);
-        bottom_request.title.clear();
-        bottom_request.buttons.clear();
-        let rendered = render_decoration(theme, font_system, swash_cache, &bottom_request, &bottom_layout);
-        let bottom = crop_rows(&rendered, border, bottom_h);
+        // Paint the band at its final size. The old path cloned the request,
+        // painted a disposable top border and allocated another vector to
+        // crop that border off on every warm repaint.
+        let bottom = render_bottom(theme, request, frame.w, bottom_h);
         parts.push(DecorationPart {
             offset: Point::new(0, frame.h.saturating_sub(bottom_h) as i32),
             buffer: bottom,
@@ -218,6 +206,30 @@ pub(crate) fn render_sparse_decoration(
     }
 
     DecorationSurface { frame_size: frame, parts }
+}
+
+fn render_bottom(theme: &Theme, request: &DecorationRequest, w: u32, h: u32) -> DecorationBuffer {
+    let Some(mut pixmap) = Pixmap::new(w, h) else {
+        return DecorationBuffer { width: 1, height: 1, pixels: vec![0, 0, 0, 255] };
+    };
+    let border = u32::from(theme.border.width);
+    let inner_w = w.saturating_sub(border * 2);
+    paint::fill_rect(&mut pixmap, 0, 0, w, h, crate::model::Color::rgb(0, 0, 0));
+    if request.resizable {
+        let bar_h = u32::from(theme.resize_bar.height).min(h);
+        let bar_y = h.saturating_sub(border).saturating_sub(bar_h);
+        paint::fill_area(&mut pixmap, border as i32, bar_y as i32, inner_w, bar_h, &theme.resize_bar.fill);
+        let cw = u32::from(theme.resize_bar.corner_width).min(w / 3).max(1);
+        let bar_t = u32::from(theme.resize_bar.bevel.width.max(1));
+        paint::draw_resizebar_relief(&mut pixmap, border as i32, bar_y as i32, inner_w, bar_h, cw, bar_t);
+    }
+    let color = if request.focused { theme.border.color_active } else { theme.border.color_inactive };
+    if border > 0 {
+        paint::fill_rect(&mut pixmap, 0, h as i32 - border as i32, w, border, color);
+        paint::fill_rect(&mut pixmap, 0, 0, border, h, color);
+        paint::fill_rect(&mut pixmap, w as i32 - border as i32, 0, border, h, color);
+    }
+    DecorationBuffer { width: w, height: h, pixels: pixmap.take() }
 }
 
 fn crop_rows(buffer: &DecorationBuffer, first: u32, height: u32) -> DecorationBuffer {

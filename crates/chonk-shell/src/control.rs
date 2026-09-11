@@ -77,7 +77,7 @@ use chonk_dock_proto::transport::{self, Stream, StreamListener};
 use serde::{Deserialize, Serialize};
 use wm_core::{Backend, Lifecycle, WindowManager};
 use wm_theme::{Appearance, Theme};
-use wm_theme_api::Point;
+use wm_theme_api::{DecorationStyle, Point};
 
 use crate::spawn;
 
@@ -198,6 +198,9 @@ pub(crate) struct ThemeEvent {
     pub name: String,
     /// `"dark"` or `"light"`.
     pub appearance: String,
+    /// Additive protocol field; old snapshots imply the existing frame recipe.
+    #[serde(default)]
+    pub decoration_style: DecorationStyle,
     /// `"omarchy"` when the session follows Omarchy's palette
     /// (`SessionState::following`, see `docs/appearance.md`), else
     /// `null`. It reports the choice rather than the outcome: a follow
@@ -276,6 +279,7 @@ impl Snapshot {
 pub(crate) struct Surroundings<'a> {
     pub theme: &'a Theme,
     pub appearance: Appearance,
+    pub decoration_style: DecorationStyle,
     /// The shell's UI scale — one number for every output today.
     pub scale: f32,
     /// The pointer's last known root position, for `outputs.focused`
@@ -363,6 +367,7 @@ pub(crate) fn snapshot<B: Backend>(wm: &WindowManager<B>, surroundings: &Surroun
             id: surroundings.theme.id.clone(),
             name: surroundings.theme.name.clone(),
             appearance: surroundings.appearance.name().to_string(),
+            decoration_style: surroundings.decoration_style,
             following: surroundings.following.clone(),
         },
     }
@@ -1135,6 +1140,7 @@ mod tests {
                 id: "nextstep-classic".to_string(),
                 name: "NeXTSTEP Classic".to_string(),
                 appearance: "dark".to_string(),
+                decoration_style: DecorationStyle::WindowMaker,
                 following: None,
             },
         }
@@ -1355,7 +1361,7 @@ mod tests {
         );
         assert_eq!(
             text(&Event::Theme(s.theme.clone())),
-            "{\"event\":\"theme\",\"id\":\"nextstep-classic\",\"name\":\"NeXTSTEP Classic\",\"appearance\":\"dark\",\"following\":null}\n"
+            "{\"event\":\"theme\",\"id\":\"nextstep-classic\",\"name\":\"NeXTSTEP Classic\",\"appearance\":\"dark\",\"decoration_style\":\"windowmaker\",\"following\":null}\n"
         );
         assert_eq!(
             text(&Event::Hello(Hello { protocol: 1, session: "wayland".to_string(), pid: 1441097 })),
@@ -1815,7 +1821,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     fn surroundings<'a>(theme: &'a Theme) -> Surroundings<'a> {
-        Surroundings { theme, appearance: Appearance::Dark, scale: 2.0, pointer_root: Point::new(10, 10), following: None }
+        Surroundings { theme, appearance: Appearance::Dark, decoration_style: DecorationStyle::WindowMaker, scale: 2.0, pointer_root: Point::new(10, 10), following: None }
     }
 
     fn manager(backend: FakeBackend) -> WindowManager<FakeBackend> {
@@ -1906,6 +1912,21 @@ mod tests {
     }
 
     #[test]
+    fn decoration_style_is_reported_and_old_theme_snapshots_remain_readable() {
+        let old: ThemeEvent = serde_json::from_str(
+            r#"{"id":"nextstep-classic","name":"Classic","appearance":"dark","following":null}"#
+        ).unwrap();
+        assert_eq!(old.decoration_style, DecorationStyle::WindowMaker);
+        let theme = wm_theme::default_theme::nextstep_classic();
+        let mut surroundings = surroundings(&theme);
+        surroundings.decoration_style = DecorationStyle::System7;
+        let wm = WindowManager::new(FakeBackend::new(), Box::new(FakeTheme));
+        let event = snapshot(&wm, &surroundings).theme;
+        assert_eq!(event.decoration_style, DecorationStyle::System7);
+        assert!(text(&Event::Theme(event)).contains("\"decoration_style\":\"system7\""));
+    }
+
+    #[test]
     fn theme_reports_the_active_theme_and_appearance_and_no_following_yet() {
         let wm = manager(FakeBackend::new());
         let theme = theme();
@@ -1914,7 +1935,7 @@ mod tests {
         let s = snapshot(&wm, &surroundings);
         assert_eq!(
             s.theme,
-            ThemeEvent { id: "nextstep-classic".to_string(), name: "NeXTSTEP Classic".to_string(), appearance: "light".to_string(), following: None }
+            ThemeEvent { id: "nextstep-classic".to_string(), name: "NeXTSTEP Classic".to_string(), appearance: "light".to_string(), decoration_style: DecorationStyle::WindowMaker, following: None }
         );
     }
 

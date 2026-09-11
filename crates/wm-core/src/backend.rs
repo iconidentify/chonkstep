@@ -397,6 +397,10 @@ pub trait Backend {
 
     // -- geometry / visibility ------------------------------------------------
     fn set_frame_geometry(&mut self, frame: Self::FrameId, geometry: Rect);
+
+    /// Refresh input-only decoration margins before moving/resizing the frame.
+    /// Backends with shaped native windows also update their input siblings.
+    fn set_decoration_layout(&mut self, _frame: Self::FrameId, _layout: &DecorationLayout) {}
     /// Resizes an already-decorated client's own window in place (its
     /// position within the frame, at `DecorationLayout::client_offset`,
     /// doesn't change from a content resize alone).

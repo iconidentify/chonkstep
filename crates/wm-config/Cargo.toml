@@ -7,6 +7,7 @@ description = "User configuration: config.toml loading, keybinding parsing, and 
 
 [dependencies]
 wm-core = { path = "../wm-core" }
+wm-theme-api = { path = "../wm-theme-api" }
 # Window rules in somebody else's config file are regular expressions —
 # `^(zoom|vlc|mpv|org.kde.kdenlive)$`, `.*[Rr]esolve.*` — and they
 # arrive from a file this crate does not own. `regex` is the right

@@ -97,6 +97,10 @@ pub struct FakeBackend {
     pub record_paint_parts: bool,
     pub last_paint_parts: HashMap<FakeFrameId, DecorationSurface>,
     pub last_frame_geometry: HashMap<FakeFrameId, Rect>,
+    /// Exact reflow/configure counts, independent of paint coalescing.
+    pub frame_geometry_count: HashMap<FakeFrameId, u32>,
+    pub client_resize_count: HashMap<FakeWindowId, u32>,
+    pub last_client_size: HashMap<FakeWindowId, Size>,
     /// Where each client window was last positioned directly. For a
     /// framed window this is its offset inside its frame; for a
     /// frameless one it is a root position, and it is the only record
@@ -450,9 +454,13 @@ impl Backend for FakeBackend {
 
     fn set_frame_geometry(&mut self, frame: Self::FrameId, geometry: Rect) {
         self.last_frame_geometry.insert(frame, geometry);
+        *self.frame_geometry_count.entry(frame).or_default() += 1;
     }
 
-    fn resize_client(&mut self, _window: Self::WindowId, _size: Size) {}
+    fn resize_client(&mut self, window: Self::WindowId, size: Size) {
+        *self.client_resize_count.entry(window).or_default() += 1;
+        self.last_client_size.insert(window, size);
+    }
 
     fn configure_unmanaged(&mut self, _window: Self::WindowId, _geometry: Rect) {}
 
@@ -606,6 +614,7 @@ impl ThemeEngine for FakeTheme {
     fn layout(&self, request: &DecorationRequest) -> DecorationLayout {
         let frame_size = Size::new(request.content_size.w, request.content_size.h + TITLEBAR_HEIGHT);
         DecorationLayout {
+            input_margin: 0,
             frame_size,
             client_offset: Point::new(0, TITLEBAR_HEIGHT as i32),
             titlebar_height: TITLEBAR_HEIGHT,

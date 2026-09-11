@@ -16,6 +16,7 @@ wm-theme-api = { path = "../wm-theme-api" }
 serde = { version = "1", features = ["derive"] }
 tiny-skia = "0.11"
 cosmic-text = "0.19"
+unicode-segmentation = "1.13"
 tracing = "0.1"
 # Omarchy's `colors.toml` palette (`omarchy` module), and the serde
 # round-trip tests: `theme_toml` (the dockapp wire palette, serialized
@@ -26,6 +27,7 @@ toml = "0.9"
 [dev-dependencies]
 chonk-test-support = { path = "../chonk-test-support" }
 flate2 = "1"
+serde_json = "1"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2"

@@ -21,7 +21,8 @@ pub fn hit_test(layout: &DecorationLayout, point: Point) -> HitTarget {
     if let Some((edge, _)) = layout.resize_hitboxes.iter().find(|(_, rect)| rect.contains(point)) {
         return HitTarget::ResizeEdge(*edge);
     }
-    if point.y < layout.titlebar_height as i32 {
+    let title_end = if layout.input_margin > 0 { layout.client_offset.y } else { layout.titlebar_height as i32 };
+    if point.y < title_end {
         return HitTarget::TitlebarDrag;
     }
     HitTarget::ClientArea
@@ -34,6 +35,7 @@ mod tests {
 
     fn sample_layout() -> DecorationLayout {
         DecorationLayout {
+            input_margin: 0,
             frame_size: Size::new(200, 220),
             client_offset: Point::new(0, 20),
             titlebar_height: 20,

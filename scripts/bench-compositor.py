@@ -237,6 +237,7 @@ def measure(args, binary, label, host_socket, directory):
         'omarchy_shell = false\nomarchy_menu = false\nhyprland_config = false\n'
         'theme = "nextstep-classic"\nscale = 1\nrestore_session = false\n'
         f'show_dock = {str(args.dock).lower()}\n'
+        f'decoration_style = "{args.decoration_styles.get(label, "windowmaker")}"\n'
     )
     (config / "config.toml").write_text(config_text)
     door_path = directory / "runtime/door.sock"
@@ -269,7 +270,8 @@ def measure(args, binary, label, host_socket, directory):
             frame_stats = door.query("frame-stats")
             interval = (after["sample_monotonic_ns"] - before["sample_monotonic_ns"]) / 1e9
             metrics = {
-                "label": label, "socket_ms": socket_ms, "ready_ms": ready_ms,
+                "label": label, "decoration_style": args.decoration_styles.get(label, "windowmaker"),
+                "socket_ms": socket_ms, "ready_ms": ready_ms,
                 "frame_ms": frame_ms, "idle_seconds": interval,
                 "cpu_percent": (after["cpu_ticks"] - before["cpu_ticks"]) /
                                os.sysconf("SC_CLK_TCK") / interval * 100,
@@ -298,27 +300,37 @@ def scene_records(lines, kind):
 
 
 def start_decoration_clients(fixtures, directory, env, socket_path, door):
-    applications = {f"org.chonkstep.bench.{index}" for index in range(3)}
+    applications = set()
     processes = []
-    for index, application in enumerate(sorted(applications)):
+    # Map one framed client before launching the next. Concurrent startup made
+    # app.2 sometimes the middle window and sometimes the rightmost one, changing
+    # occlusion/damage during the same nominal drag workload between samples.
+    for index in range(3):
+        application = f"org.chonkstep.bench.{index}"
+        applications.add(application)
         processes.append(fixtures.enter_context(child([
             "foot", "--config=/dev/null", f"--app-id={application}",
             f"--title=Decoration benchmark {index + 1}", "--window-size-pixels=320x180",
             "sh", "-c", "printf 'Decoration benchmark\\n'; exec sleep 86400",
         ], env | {"WAYLAND_DISPLAY": str(socket_path)}, directory / f"foot-{index}.log")))
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if any(process.poll() is not None for process in processes):
-            raise RuntimeError("decoration fixture terminal exited before mapping")
-        world = door.query("windows", multiple=True)
-        windows = scene_records(world, "window")
-        mapped = {window["app"] for window in windows if window.get("mapped") == "true"}
-        frames = {frame["window"] for frame in scene_records(world, "frame") if frame.get("mapped") == "true"}
-        clients = [window for window in windows if window.get("app") in applications]
-        if applications <= mapped and len(clients) == 3 and all(window["id"] in frames for window in clients):
-            return
-        time.sleep(0.02)
-    raise TimeoutError("all three framed decoration clients must map before measuring")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if any(process.poll() is not None for process in processes):
+                raise RuntimeError("decoration fixture terminal exited before mapping")
+            world = door.query("windows", multiple=True)
+            windows = scene_records(world, "window")
+            mapped = {window["app"] for window in windows if window.get("mapped") == "true"}
+            frames = {frame["window"] for frame in scene_records(world, "frame") if frame.get("mapped") == "true"}
+            clients = [window for window in windows if window.get("app") in applications]
+            if applications <= mapped and len(clients) == len(applications) and all(window["id"] in frames for window in clients):
+                break
+            time.sleep(0.02)
+        else:
+            raise TimeoutError("each decoration client must map with its frame before launching the next")
+    ordered = sorted(clients, key=lambda window: window["app"])
+    if not (len({window["y"] for window in ordered}) == 1
+            and all(int(left["x"]) < int(right["x"]) for left, right in zip(ordered, ordered[1:]))):
+        raise RuntimeError("decoration fixture must place clients in application order on one row")
 
 
 def measure_decoration_drag(door, pid, directory, seconds):
@@ -373,6 +385,8 @@ def main():
     parser.add_argument("--dock", action="store_true")
     parser.add_argument("--decoration-workload", action="store_true",
                         help="Map three real terminals; measure loaded idle and a 125 Hz titlebar drag")
+    parser.add_argument("--decoration-style", action="append", default=[], metavar="LABEL=STYLE",
+                        help="Select windowmaker or system7 for a binary label (default windowmaker)")
     parser.add_argument("--drag-seconds", type=float, default=5)
     parser.add_argument("--hardware", action="store_true", help="Use the host's default GPU driver")
     parser.add_argument("--host-renderer", choices=("pixman", "gl"), default="pixman",
@@ -396,6 +410,13 @@ def main():
         if not binary.is_file() or not os.access(binary, os.X_OK):
             parser.error(f"binary is not an executable file: {binary}")
         binaries.append((label, binary))
+    args.decoration_styles = {}
+    for value in args.decoration_style:
+        label, separator, style = value.partition("=")
+        if (not separator or label not in dict(binaries) or style not in ("windowmaker", "system7")
+                or label in args.decoration_styles):
+            parser.error("--decoration-style needs a known, unique LABEL=windowmaker or LABEL=system7")
+        args.decoration_styles[label] = style
     args.output = args.output.resolve()
     for label, _ in binaries:
         # The compatibility socket is longer than wayland-N. Reserve a
@@ -428,6 +449,7 @@ def main():
         "page_cache": "warm/uncontrolled; no system cache dropping",
         "dock": args.dock, "runs_per_binary": args.runs,
         "decoration_workload": args.decoration_workload,
+        "decoration_styles": {label: args.decoration_styles.get(label, "windowmaker") for label, _ in binaries},
         "drag_seconds": args.drag_seconds if args.decoration_workload else None,
         "cpu_affinity": sorted(os.sched_getaffinity(0)),
         "load_average_at_start": os.getloadavg(),

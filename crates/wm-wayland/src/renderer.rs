@@ -117,15 +117,18 @@ render_elements! {
     pub SceneElement<R> where R: ImportAll + ImportMem;
     Surface = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
     Memory = MemoryRenderBufferRenderElement<R>,
+    BinaryMemory = crate::binary_alpha::BinaryAlpha<MemoryRenderBufferRenderElement<R>>,
     ScaledMemory = RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
     Solid = SolidColorRenderElement,
     CaptureDimming = crate::capture_tool::dimming::DimmingElement,
     CroppedSurface = CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<R>>>,
     CroppedMemory = CropRenderElement<MemoryRenderBufferRenderElement<R>>,
+    CroppedBinaryMemory = CropRenderElement<crate::binary_alpha::BinaryAlpha<MemoryRenderBufferRenderElement<R>>>,
     CroppedScaledMemory = CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<R>>>,
     CroppedSolid = CropRenderElement<SolidColorRenderElement>,
     DisplaySurface = CropRenderElement<CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<R>>>>,
     DisplayMemory = CropRenderElement<CropRenderElement<MemoryRenderBufferRenderElement<R>>>,
+    DisplayBinaryMemory = CropRenderElement<CropRenderElement<crate::binary_alpha::BinaryAlpha<MemoryRenderBufferRenderElement<R>>>>,
     DisplayScaledMemory = CropRenderElement<CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<R>>>>,
     DisplaySolid = CropRenderElement<CropRenderElement<SolidColorRenderElement>>,
 }
@@ -147,10 +150,12 @@ pub(crate) fn clip_plane(elements: &mut Vec<SceneElement<GlesRenderer>>, start: 
         match old {
             SceneElement::Surface(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::Memory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::BinaryMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::ScaledMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::Solid(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::CroppedSurface(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::CroppedMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::CroppedBinaryMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::CroppedScaledMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::CroppedSolid(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             other => Some(other),
@@ -411,7 +416,9 @@ pub(crate) fn build_scene_into(
                     None,
                     Kind::Unspecified,
                 ) {
-                    Ok(element) => elements.push(element.into()),
+                    Ok(element) => elements.push(if part.binary_alpha {
+                        crate::binary_alpha::BinaryAlpha(element).into()
+                    } else { element.into() }),
                     Err(error) => tracing::warn!(?error, "failed to import a decoration buffer"),
                 }
             }
@@ -419,13 +426,17 @@ pub(crate) fn build_scene_into(
             // window-sized pixel buffer supplied, but as four floats plus a
             // stable id instead of frame-width * frame-height * 4 retained
             // bytes. It is behind both the client content and sparse chrome.
+            // Fill only the client's requested interior. Filling the outer
+            // frame would turn transparent resize margins and shadow corners
+            // black underneath the correctly alpha-masked chrome bands.
+            let Some(content) = window.filter(|record| record.mapped).map(|record| record.content) else { return; };
             let geometry = SRect::<i32, Physical>::new(
                 (
-                    frame.geometry.pos.x - viewport.pos.x,
-                    frame.geometry.pos.y - viewport.pos.y,
+                    content.pos.x - viewport.pos.x,
+                    content.pos.y - viewport.pos.y,
                 )
                     .into(),
-                (frame.geometry.size.w as i32, frame.geometry.size.h as i32).into(),
+                (content.size.w as i32, content.size.h as i32).into(),
             );
             elements.push(
                 SolidColorRenderElement::new(

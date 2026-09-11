@@ -82,6 +82,10 @@ pub struct DecorationRequest {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DecorationLayout {
     pub frame_size: Size,
+    /// Fully transparent input-only space surrounding the visible frame on
+    /// all four sides. Included in frame_size and client_offset; excluded
+    /// from placement, snapping, previews and opaque regions.
+    pub input_margin: u32,
     pub client_offset: Point,
     pub titlebar_height: u32,
     pub button_hitboxes: Vec<(ButtonKind, Rect)>,
@@ -93,6 +97,16 @@ pub struct DecorationLayout {
     /// `wm-core` derives from the other fields, so it stays correct
     /// under any future border styling.
     pub shaded_frame_height: u32,
+}
+
+impl DecorationLayout {
+    /// Visible frame bounds in frame-local coordinates, also for a shortened
+    /// shaded layout. Computing this avoids stale cached bounds after resize.
+    pub fn visual_bounds(&self) -> Rect {
+        let margin = self.input_margin.min(self.frame_size.w / 2).min(self.frame_size.h / 2);
+        Rect::new(Point::new(margin as i32, margin as i32),
+            Size::new(self.frame_size.w - margin * 2, self.frame_size.h - margin * 2))
+    }
 }
 
 /// Rasterized decoration pixels: RGBA8, row-major, no row padding

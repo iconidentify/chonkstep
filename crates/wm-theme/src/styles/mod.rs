@@ -1,21 +1,23 @@
 //! Frame recipes. Font discovery, title/glyph caches and scale variants live
 //! in the engine; each recipe owns only its geometry and sparse painting.
 pub(crate) mod windowmaker;
+pub(crate) mod system7;
 
 use wm_theme_api::DecorationStyle;
 
 /// Renderers actually implemented in this build. Tests/benchmarks iterate this
 /// list; reserved names must never silently fall back to another style's pixels.
-pub const SUPPORTED_DECORATION_STYLES: &[DecorationStyle] = &[DecorationStyle::WindowMaker];
+pub const SUPPORTED_DECORATION_STYLES: &[DecorationStyle] = &[DecorationStyle::WindowMaker, DecorationStyle::System7];
 
 #[derive(Clone, Copy)]
 pub(crate) enum FrameStyle {
     WindowMaker,
+    System7,
 }
 
 impl FrameStyle {
     pub(crate) const fn name(self) -> DecorationStyle {
-        match self { Self::WindowMaker => DecorationStyle::WindowMaker }
+        match self { Self::WindowMaker => DecorationStyle::WindowMaker, Self::System7 => DecorationStyle::System7 }
     }
 }
 
@@ -37,7 +39,7 @@ impl TryFrom<DecorationStyle> for FrameStyle {
     fn try_from(style: DecorationStyle) -> Result<Self, Self::Error> {
         match style {
             DecorationStyle::WindowMaker => Ok(Self::WindowMaker),
-            DecorationStyle::System7 => Err(UnsupportedDecorationStyle(style)),
+            DecorationStyle::System7 => Ok(Self::System7),
         }
     }
 }
@@ -80,7 +82,8 @@ mod tests {
             assert_eq!(explicit.layout_at(&request, scale), layout);
             assert_eq!(default.render_surface_at(&request, &layout, scale), explicit.render_surface_at(&request, &layout, scale));
         }
-        assert!(RasterThemeEngine::with_fonts(theme, fonts).with_style(DecorationStyle::System7).is_err(),
-            "a reserved renderer must not silently draw WindowMaker");
+        let system7 = RasterThemeEngine::with_fonts(theme, fonts).with_style(DecorationStyle::System7).unwrap();
+        assert_eq!(system7.style(), DecorationStyle::System7);
+        assert_ne!(system7.layout(&request), default.layout(&request));
     }
 }

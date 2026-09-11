@@ -182,6 +182,19 @@ pub struct Client<B: Backend> {
 }
 
 impl<B: Backend> Client<B> {
+    /// Root-relative visible frame, excluding fully transparent input margins.
+    /// Previews and placement use the shortened height of a shaded window.
+    pub fn visual_geometry(&self) -> Rect {
+        let margin = self.layout.input_margin;
+        let height = if self.flags.contains(ClientFlags::SHADED) {
+            self.layout.shaded_frame_height
+        } else { self.layout.frame_size.h };
+        Rect::new(wm_theme_api::Point::new(
+            self.geometry.pos.x - self.layout.client_offset.x + margin as i32,
+            self.geometry.pos.y - self.layout.client_offset.y + margin as i32),
+            wm_theme_api::Size::new(self.layout.frame_size.w.saturating_sub(margin * 2), height.saturating_sub(margin * 2)))
+    }
+
     pub fn new(window: B::WindowId, title: String) -> Self {
         Self {
             window,
