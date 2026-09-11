@@ -1,0 +1,20 @@
+{
+  "date_utc": "2026-09-11T20:02:52Z",
+  "machine": "Linux-7.1.9-arch1-2-x86_64-with-glibc2.44",
+  "rounds": 7,
+  "order": "before WM, after WM, before System7, after System7; reversed on alternate rounds",
+  "baseline_renderer_commit": "4f8de18",
+  "candidate_base": "d66dc2d",
+  "candidate": "issue-164 working tree",
+  "binaries": {
+    "before": {
+      "name": "performance-system7-final",
+      "sha256": "ad02ea6965f34b198587371fa08c2c264e7e1499fb326dbc1e0d9ee135489fb6"
+    },
+    "after": {
+      "name": "performance-shell-chrome",
+      "sha256": "19d688b4f46da1ed987b5a71b0af251b29e75193a9da10c0aa59d1f0d7e86f9b"
+    }
+  },
+  "tested_compositor_sha256": "ac67b8139446e155a4b068fcfecaa90b59d66578b1e4c1a5d5dbfb0cabf09095"
+}

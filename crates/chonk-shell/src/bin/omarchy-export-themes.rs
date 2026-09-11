@@ -4,6 +4,8 @@
 //! own theme menu) can dress the rest of the machine in Amber Phosphor.
 //! Runs in a moment, touches only `TARGET`, and refreshes in place:
 //! run it again after an update and the palettes follow.
+//! Sample frames intentionally use WindowMaker to compare palettes consistently;
+//! the exporter does not read the running desktop's `decoration_style` setting.
 //!
 //! The work is `chonk_shell::omarchy_export::export`; this is the
 //! doorstep. See `docs/appearance.md`, "Omarchy".

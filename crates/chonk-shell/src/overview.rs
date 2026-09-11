@@ -11,6 +11,16 @@ use wm_theme::overview::{self as ov, OverviewEntry, OverviewLayout};
 use wm_theme::Theme;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
+#[allow(clippy::too_many_arguments)] // Same caption call plus the optional session style.
+fn styled_label(chrome: Option<&wm_theme::UiChrome>, inverted: bool, theme: &Theme,
+    fonts: &mut cosmic_text::FontSystem, cache: &mut cosmic_text::SwashCache,
+    text: &str, width: u32, height: u32) -> DecorationBuffer {
+    match chrome {
+        Some(chrome) => chrome.label(theme, fonts, cache, text, width, height, inverted),
+        None => ov::live::label(theme, fonts, cache, text, width, height),
+    }
+}
+
 /// One window's stored session entry. `window` rides along so a
 /// commit can take the public `ActivateRequested` path (which speaks
 /// backend window ids), and `client` so window-menu and deminiaturize
@@ -79,6 +89,7 @@ fn drag_rect(cell: Rect, start: Point, point: Point, limit: Size) -> Rect {
 
 pub struct OverviewPanel<B: Backend> {
     window: Option<B::ShellId>,
+    chrome: Option<wm_theme::UiChrome>,
     /// The selection: highlight plate plus the awake card, on its own
     /// small surface over the panel — see the module doc's repaint
     /// discipline. Created beside the panel, moved per selection
@@ -109,6 +120,7 @@ impl<B: Backend> Default for OverviewPanel<B> {
     fn default() -> Self {
         Self {
             window: None,
+            chrome: None,
             selection: None,
             geometry: Rect::default(),
             items: Vec::new(),
@@ -128,6 +140,9 @@ impl<B: Backend> Default for OverviewPanel<B> {
 }
 
 impl<B: Backend> OverviewPanel<B> {
+    pub fn set_chrome(&mut self, chrome: wm_theme::UiChrome) { self.chrome = Some(chrome); }
+
+
     /// Opens (or, while already open, re-populates) the panel over
     /// `primary` with a fresh entry set. `tile` is the Clip/dock tile
     /// edge, which sizes the workspace strip and derives the gutters.
@@ -231,7 +246,7 @@ impl<B: Backend> OverviewPanel<B> {
                         frame: item.frame,
                         source: item.geometry,
                         destination: *cell,
-                        label: ov::live::label(
+                        label: styled_label(self.chrome.as_ref(), true,
                             theme,
                             font_system,
                             swash_cache,
@@ -248,7 +263,7 @@ impl<B: Backend> OverviewPanel<B> {
                     .zip(workspace_windows)
                     .map(|((i, rect), windows)| wm_core::OverviewWorkspace {
                             rect: *rect,
-                            label: ov::live::label(
+                            label: styled_label(self.chrome.as_ref(), i == workspace.0,
                                 theme,
                                 font_system,
                                 swash_cache,
@@ -256,11 +271,12 @@ impl<B: Backend> OverviewPanel<B> {
                                 rect.size.w,
                                 label_h,
                             ),
-                            drop_label: ov::live::label(theme, font_system, swash_cache,
+                            drop_label: styled_label(self.chrome.as_ref(), true, theme, font_system, swash_cache,
                                 &format!("Move to Desktop {}", i + 1), rect.size.w, label_h),
                             windows,
                             close: layout.workspace_close_rect(i)
-                                .map(|rect| (rect, ov::workspace_close_glyph(rect.size.w))),
+                                .map(|rect| (rect, self.chrome.as_ref().map_or_else(
+                                    || ov::workspace_close_glyph(rect.size.w), |chrome| chrome.workspace_close(rect.size.w)))),
                     })
                     .collect();
                 backend.show_live_overview(
@@ -272,6 +288,8 @@ impl<B: Backend> OverviewPanel<B> {
                         workspace: workspace.0,
                         selected: self.selected,
                         gap: layout.pad,
+                        chrome: self.chrome.as_ref().and_then(|chrome| chrome.overview_ink())
+                            .map(|(ink, line)| wm_core::OverviewChrome { ink, line }),
                     },
                 );
                 // Rebuilding the labels/miniatures replaces the backend scene.
@@ -320,7 +338,10 @@ impl<B: Backend> OverviewPanel<B> {
                 miniaturized: item.miniaturized,
             })
             .collect();
-        let buffer = ov::render_overview(theme, font_system, swash_cache, &entries, self.workspace, layout);
+        let buffer = match &self.chrome {
+            Some(chrome) => chrome.overview(theme, font_system, swash_cache, &entries, self.workspace, layout),
+            None => ov::render_overview(theme, font_system, swash_cache, &entries, self.workspace, layout),
+        };
         if buffer.width > 0 {
             backend.paint_shell_surface(window, &buffer);
         }
@@ -380,7 +401,10 @@ impl<B: Backend> OverviewPanel<B> {
             preview: item.preview.as_ref(),
             miniaturized: item.miniaturized,
         };
-        let buffer = ov::render_selection(theme, font_system, swash_cache, &entry, cell.size, layout.pad);
+        let buffer = match &self.chrome {
+            Some(chrome) => chrome.selection(theme, font_system, swash_cache, &entry, cell.size, layout.pad),
+            None => ov::render_selection(theme, font_system, swash_cache, &entry, cell.size, layout.pad),
+        };
         backend.configure_shell_surface(selection, global);
         if buffer.width > 0 {
             backend.paint_shell_surface(selection, &buffer);

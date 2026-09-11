@@ -35,6 +35,48 @@ their normal decoration exemptions.
 Mac keyboard behavior is a separate feature: changing decoration style does not
 change Command-key translations, shortcuts or Spaces policy.
 
+## Window-derived shell surfaces
+
+Root and window commands menus, Alt-Tab, minimized window icons, and Overview
+cards/captions follow `decoration_style`. System 7 uses light paper and ink,
+the same original Chicago-metric atlas as its frames, flat outlines, offset
+shadows and inverted menu selections. These shell designs are original
+adaptations; the historical pixel-exact claim applies to the document frames.
+Changing style closes an open menu and releases its input grabs; subsequent
+menus use the new geometry and hit targets. Minimized icons repaint in place.
+
+Wayland Overview continues to transform live client textures. Only small
+captions are rasterized when the scene's text or layout changes. Hover and
+animation retain their caption buffers and GPU element identities; opening
+Overview does not request window screenshots or an output-sized shell buffer.
+Native X11 uses the raster fallback. Both backends preserve the flat panels'
+transparent shadow corners; X11 installs and caches a matching Shape region,
+then restores the server's default shape when a surface returns to WindowMaker.
+
+The dock platform, dock instruments and their instrument panels, launchers,
+and the standalone workspace Clip remain WindowMaker. They are NeXT desktop
+furniture rather than window-derived surfaces. `omarchy-export-themes` also
+keeps its sample frames in WindowMaker: those previews compare palette colors
+and do not read a running session's decoration-style setting. Capture overlays
+and other independent tools retain their own existing interfaces.
+
+The public `wm_theme::UiChrome` handle shares the session's resident `FontState`;
+construct it at startup or a look change, and retain rendered captions. Existing
+standalone menu/icon/switcher/Overview APIs keep their WindowMaker defaults.
+The [120-case shell oracle](../crates/wm-theme/tests/fixtures/shell-chrome/README.md)
+covers both styles at 1×, 1.5× and 2× in two palettes. Its generator also compares
+each WindowMaker result to the original public renderer. Reproduce actual
+desktop interactions and captures with `scripts/e2e.sh --headless --test shell_chrome`.
+The [shell gallery](../site/shots/shell-chrome/README.md) shows each surface in
+both styles at 1× and 2×. The [release measurements](benchmarks/decoration-styles-2026-09-11/shell-chrome/README.md)
+include the unchanged surrounding workloads and the event-time shell raster costs.
+
+System 7 bounds popup raster dimensions to 8192 physical pixels. A menu that
+cannot represent all its rows is rejected without taking input grabs; hidden
+rows cannot remain keyboard-activatable. Very large switchers show a bounded
+window of entries around the selected client. These limits do not change the
+underlying window list or the selected window.
+
 ## Rendering and verification
 
 `RasterThemeEngine::with_style(DecorationStyle)` explicitly selects a renderer and

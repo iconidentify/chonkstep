@@ -151,6 +151,7 @@ pub struct X11Backend {
     /// Frame XID -> client XID, populated by `create_decoration`.
     frame_to_client: HashMap<Window, Window>,
     frame_shapes: HashMap<Window, FrameShape>,
+    shell_shapes: HashMap<Window, (Size, u32)>,
     ring_to_frame: HashMap<Window, Window>,
     sequences_to_ignore: BinaryHeap<Reverse<u16>>,
     /// Cached server-format pixels per painted window (frame or shell
@@ -491,6 +492,7 @@ impl X11Backend {
             known_clients: HashSet::new(),
             frame_to_client: HashMap::new(),
             frame_shapes: HashMap::new(),
+            shell_shapes: HashMap::new(),
             ring_to_frame: HashMap::new(),
             sequences_to_ignore: BinaryHeap::new(),
             painted: HashMap::new(),
@@ -807,6 +809,7 @@ impl X11Backend {
     /// every time they're shown, so repeated show/hide cycles don't
     /// leak invisible-but-still-alive X11 windows.
     pub fn destroy_shell_window(&mut self, win: Window) -> Result<(), X11BackendError> {
+        self.shell_shapes.remove(&win);
         self.painted.remove(&win);
         self.conn.destroy_window(win)?;
         self.conn.flush()?;
@@ -2301,7 +2304,7 @@ impl Backend for X11Backend {
     }
 
     fn paint_shell_surface(&mut self, id: Self::ShellId, buffer: &DecorationBuffer) {
-        self.blit(id, buffer);
+        self.blit_shell(id, buffer);
     }
 
     fn release_shell_buffer(&mut self, _id: Self::ShellId) {
@@ -3402,7 +3405,7 @@ impl wm_theme_api::PopupHost for X11Backend {
     }
 
     fn paint_popup(&mut self, popup: Window, buffer: &DecorationBuffer) {
-        self.blit(popup, buffer);
+        self.blit_shell(popup, buffer);
     }
 
     fn grab_pointer(&mut self) -> wm_theme_api::PopupGrab {

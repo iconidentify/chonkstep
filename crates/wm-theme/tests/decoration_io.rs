@@ -41,6 +41,13 @@ fn resident_engine_rebuild_does_no_file_or_process_io() {
                     let unicode = DecorationRequest { title: "Terminal — Живет 中文 日本語 العربية 🦀 \u{10ffff}".into(), ..request.clone() };
                     let layout = engine.layout_at(&unicode, scale);
                     assert!(engine.render_surface_at(&unicode, &layout, scale).retained_bytes() > 0);
+                    let chrome = wm_theme::UiChrome::new(&theme, fonts.clone(), style, scale);
+                    let items = [wm_theme::menu::MenuItem::Action { label: "Κόσμος עברית · 端末".into(), action: 7 }];
+                    let menu = chrome.menu(&theme, &mut fonts.system(), "Applications", &items, Some(0), true);
+                    assert!(!menu.buffer.pixels.is_empty());
+                    let caption = chrome.label(&theme, &mut fonts.system(), &mut fonts.swash(),
+                        "E\u{301}ditor 👩\u{200d}💻", 180, 28, true);
+                    assert!(!caption.pixels.is_empty());
                 }
             }
         }

@@ -129,9 +129,9 @@ fn main() {
                 };
                 style = selected;
             }
-            "--glyph-churn" | "--decoration-matrix" => {}
+            "--glyph-churn" | "--decoration-matrix" | "--shell-chrome" => {}
             argument => {
-                eprintln!("unknown argument {argument:?}; use --style windowmaker, --decoration-matrix or --glyph-churn");
+                eprintln!("unknown argument {argument:?}; use --style windowmaker, --decoration-matrix, --shell-chrome or --glyph-churn");
                 std::process::exit(2);
             }
         }
@@ -139,6 +139,10 @@ fn main() {
     }
     if arguments.iter().any(|argument| argument == "--glyph-churn") {
         glyph_churn();
+        return;
+    }
+    if arguments.iter().any(|argument| argument == "--shell-chrome") {
+        shell_chrome(style);
         return;
     }
     decoration_matrix(style);
@@ -174,6 +178,35 @@ fn main() {
         measure(&format!("panel-label-{length}"), iterations,
             || instrument_panel::fit_type(&mut fonts, &font, text, 160),
             |output| digest(output.as_bytes()));
+    }
+}
+
+/// Event-time shell raster costs. These calls happen on open/semantic changes;
+/// native Overview frames reuse their outputs instead of invoking them again.
+fn shell_chrome(style: DecorationStyle) {
+    let fonts = wm_theme::FontState::new();
+    let items = [wm_theme::menu::MenuItem::Action { label: "Terminal".into(), action: 1 },
+        wm_theme::menu::MenuItem::Submenu { label: "Applications".into(), items: Vec::new() }];
+    let entries = [wm_theme::switcher::SwitcherEntry { title: "Terminal".into(), preview: None },
+        wm_theme::switcher::SwitcherEntry { title: "Notes".into(), preview: None }];
+    for scale in [1.0, 2.0] {
+        let theme = wm_theme::default_theme::nextstep_classic().scaled(scale);
+        let chrome = wm_theme::UiChrome::new(&theme, fonts.clone(), style, scale);
+        let (mut fs, mut sc) = (fonts.system(), fonts.swash());
+        let metadata = format!(",\"style\":\"{}\",\"scale\":{scale}", style.name());
+        let tile = (56.0 * scale) as u32;
+        measure_with_metadata("shell-menu", 200,
+            || chrome.menu(&theme, &mut fs, "ChonkStep", &items, Some(1), true),
+            |menu| digest(&menu.buffer.pixels), &metadata);
+        measure_with_metadata("shell-switcher", 200,
+            || chrome.switcher(&theme, &mut fs, &mut sc, &entries, 0, tile),
+            |buffer| digest(&buffer.pixels), &metadata);
+        measure_with_metadata("shell-icon", 500,
+            || chrome.icon(&theme, &mut fs, &mut sc, tile, "Terminal", None),
+            |buffer| digest(&buffer.pixels), &metadata);
+        measure_with_metadata("shell-caption", 500,
+            || chrome.label(&theme, &mut fs, &mut sc, "Desktop 2 - Terminal", tile * 4, tile / 2, true),
+            |buffer| digest(&buffer.pixels), &metadata);
     }
 }
 
