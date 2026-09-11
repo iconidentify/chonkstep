@@ -941,6 +941,11 @@ fn record(output: &str, geometry: &str, filter: &str, policy: Destination) -> Re
             "preset=veryfast",
             "-p",
             "crf=18",
+            // RGB capture is converted to limited-range yuv420p. Match the
+            // encoder metadata; wf-recorder otherwise labels it full-range
+            // on newer FFmpeg, lifting blacks and compressing highlights.
+            "-p",
+            "color_range=tv",
             "-r",
             "60",
             "-x",

@@ -2,8 +2,10 @@
 import importlib.util
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
+from PIL import Image
 
 spec = importlib.util.spec_from_file_location('product_demo', Path(__file__).parents[1] / 'product-demo.py')
 demo = importlib.util.module_from_spec(spec)
@@ -38,3 +40,22 @@ class RecordedPixels(unittest.TestCase):
         with patch.object(demo.subprocess, 'check_output', side_effect=subprocess.CalledProcessError(1, 'ffmpeg')):
             with self.assertRaises(subprocess.CalledProcessError):
                 demo.verify_capture_video(Path('sample.mp4'), self.timeline)
+
+    def test_video_colors_match_the_independent_screenshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            reference = Path(temporary)/'reference.png'
+            Image.new('RGB', (1920,1080), (19,23,35)).save(reference)
+            with patch.object(demo.subprocess, 'check_output', return_value=bytes([18,22,35])*16*8*45):
+                result = demo.verify_capture_colors(Path('sample.mp4'), self.timeline, reference)
+            self.assertEqual(result['max_channel_difference'], 1)
+            self.assertEqual(result['frames'], 45)
+
+    def test_uniformly_washed_out_video_cannot_pass_the_color_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            reference = Path(temporary)/'reference.png'
+            Image.new('RGB', (1920,1080), (19,23,35)).save(reference)
+            # Limited-range samples mislabeled full-range have no spatial
+            # variation, but lift dark RGB levels by about twelve steps.
+            with patch.object(demo.subprocess, 'check_output', return_value=bytes([31,35,46])*16*8*45):
+                with self.assertRaisesRegex(RuntimeError, 'differ from the screenshot'):
+                    demo.verify_capture_colors(Path('sample.mp4'), self.timeline, reference)

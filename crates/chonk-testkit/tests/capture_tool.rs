@@ -727,6 +727,11 @@ fn recording_screen_and_area_preserve_changing_content() {
         for rgb in decoded.stdout.as_chunks::<3>().0 {
             let is_red = rgb[0] > 150 && rgb[2] < 100;
             let is_blue = rgb[2] > 150 && rgb[0] < 100;
+            if is_red || is_blue {
+                let expected: [u8; 3] = if is_red { [240, 20, 20] } else { [20, 20, 240] };
+                assert!(rgb.iter().zip(expected).all(|(actual, expected)| actual.abs_diff(expected) < 8),
+                    "recording mode {mode} preserves RGB levels: {rgb:?} vs {expected:?}");
+            }
             red |= is_red;
             blue |= is_blue;
             if is_red || is_blue {

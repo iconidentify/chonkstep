@@ -255,6 +255,27 @@ def caption_file(timeline, output):
     (output/'timeline.srt').write_text('\n'.join(blocks),encoding='utf-8')
 
 
+def verify_capture_colors(video, timeline, reference):
+    from PIL import Image
+    start = next(item['seconds'] for item in timeline if item['action'] == 'Select a region') + .25
+    # Flat, unchanging board pixels inside the selected region. Compare the
+    # decoded video with the independent PNG, including absolute dark levels:
+    # a uniformly washed-out recording passes a spatial-variation check.
+    with Image.open(reference) as png:
+        expected = png.convert('RGB').getpixel((1100, 400))
+    pixels = subprocess.check_output(['ffmpeg','-v','error','-ss',str(start),'-t','1.5',
+        '-i',str(video),'-vf','format=rgb24,crop=16:8:1100:400',
+        '-f','rawvideo','-pix_fmt','rgb24','-'],timeout=30)
+    stride = 16*8*3
+    if len(pixels) % stride or len(pixels) < 20*stride:
+        raise RuntimeError('too few complete frames to verify capture colors')
+    delta = max(abs(value-expected[index%3]) for index,value in enumerate(pixels))
+    if delta > 8:
+        raise RuntimeError(f'recorded colors differ from the screenshot by {delta} levels')
+    return {'frames':len(pixels)//stride,'max_channel_difference':delta,'allowed_difference':8,
+            'reference':reference.name,'sample_origin':[1100,400],'sample_size':[16,8]}
+
+
 def run(args):
     binary = args.binary.resolve(strict=True)
     for command in ('weston', 'foot', 'wf-recorder', 'grim', 'ffmpeg', 'ffprobe'):
@@ -303,7 +324,8 @@ def run(args):
         time.sleep(1)
         raw = output/'demo.raw.mp4'
         recorder = stack.enter_context(b.child(['wf-recorder','--no-dmabuf','-D','-r','30','-c','libx264',
-            '-p','preset=fast','-p','crf=18','-x','yuv420p','-f',str(raw)], recording_env, output/'recorder.log'))
+            '-p','preset=fast','-p','crf=18','-p','color_range=tv',
+            '-x','yuv420p','-f',str(raw)], recording_env, output/'recorder.log'))
         started = time.monotonic()
 
         def step(name, pause=1):
@@ -362,6 +384,8 @@ def run(args):
     raw.unlink()
     if args.scenario == 'capture':
         metadata['repaint_verification'] = verify_capture_video(final, metadata['timeline'])
+        metadata['color_verification'] = verify_capture_colors(final, metadata['timeline'],
+            output/'capture-area-overlay-diagnostic.png')
     caption_file(metadata['timeline'],output)
     captioned = output/f'chonkstep-{args.scenario}-captioned.mp4'
     alignment = 8 if args.scenario == 'capture' else 2
@@ -372,6 +396,9 @@ def run(args):
                     '-movflags','+faststart',captioned.name],cwd=output,check=True,timeout=60)
     metadata['editorial_captions'] = {'video':captioned.name,'subtitles':'timeline.srt',
         'description':'Action labels added to the same uncut recording; the raw walkthrough remains available.'}
+    if args.scenario == 'capture':
+        metadata['caption_color_verification'] = verify_capture_colors(captioned,
+            metadata['timeline'],output/'capture-area-overlay-diagnostic.png')
     metadata['artifacts'] = []
     for path in sorted(output.rglob('*')):
         if path.suffix not in ('.png','.mp4','.srt'):

@@ -25,8 +25,8 @@ python3 -B scripts/product-demo.py \
 
 The output directory must be new. Dependencies: Weston with its GL headless
 backend and kiosk shell, Foot, grim, wf-recorder, FFmpeg/ffprobe, dbus-run-session,
-Python 3, PyGObject, GTK 4 and the Python Cairo/GI bridge. On Debian/Ubuntu the
-Python packages are `python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-4.0`.
+Python 3, Pillow, PyGObject, GTK 4 and the Python Cairo/GI bridge. On Debian/Ubuntu the
+Python packages are `python3-pil python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-4.0`.
 A headless Mesa software driver can be selected with
 `LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe`; these demos are not performance
 measurements. No root access or physical display is needed.
@@ -56,7 +56,9 @@ Outputs:
   hashes, ffprobe results and Spaces membership checkpoints. Every video must
   also pass a complete FFmpeg decode. Capture additionally checks every frame
   in a stable selection interval for stale dimming, before a diagnostic PNG can
-  force a repaint. An invalid recording fails the run. Logs and final window geometry remain alongside it.
+  force a repaint. Both raw and captioned capture videos must also match the
+  independent PNG's dark RGB levels; the encoder explicitly labels limited-range
+  YUV correctly. An invalid recording fails the run. Logs and final window geometry remain alongside it.
 
 The runner stops its process groups and private bus on exit, refuses to replace
 an existing artifact directory, bounds waits, and rejects missing outputs or
