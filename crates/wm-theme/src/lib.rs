@@ -80,4 +80,5 @@ pub mod workspace;
 pub use model::{Appearance, Theme};
 pub use raster::{FontCacheStatistics, FontState, RasterThemeEngine};
 pub use styles::{UnsupportedDecorationStyle, SUPPORTED_DECORATION_STYLES};
+pub use styles::system7::ui::UiChrome;
 pub use wm_theme_api::DecorationStyle;

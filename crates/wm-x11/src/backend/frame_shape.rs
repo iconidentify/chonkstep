@@ -22,6 +22,25 @@ impl FrameShape {
 }
 
 impl X11Backend {
+    /// Shell panels with the flat style's offset shadow have two transparent
+    /// corners. Native X11 needs an explicit bounding shape; without it the
+    /// server paints those RGBA-zero pixels black. Ordinary opaque dock paints
+    /// take a constant-time corner check and allocate nothing here.
+    pub(super) fn blit_shell(&mut self, window: Window, buffer: &DecorationBuffer) {
+        if let Some(key @ (size, shadow)) = shell_shadow(buffer) {
+            if self.shell_shapes.get(&window) != Some(&key) {
+                let rectangles = [rectangle(0, 0, size.w - shadow, size.h - shadow),
+                    rectangle(shadow, shadow, size.w - shadow, size.h - shadow)];
+                let _ = self.conn.shape_rectangles(SO::SET, SK::BOUNDING, ClipOrdering::UNSORTED,
+                    window, 0, 0, &rectangles);
+                self.shell_shapes.insert(window, key);
+            }
+        } else if self.shell_shapes.remove(&window).is_some() {
+            let _ = self.conn.shape_mask(SO::SET, SK::BOUNDING, window, 0, 0, NONE);
+        }
+        self.blit(window, buffer);
+    }
+
     pub(super) fn event_frame(&self, window: Window) -> Window {
         self.ring_to_frame.get(&window).copied().unwrap_or(window)
     }
@@ -101,6 +120,26 @@ impl X11Backend {
     }
 }
 
+fn shell_shadow(buffer: &DecorationBuffer) -> Option<(Size, u32)> {
+    let (w, h) = (buffer.width as usize, buffer.height as usize);
+    if w < 2 || h < 2 || w.checked_mul(h)?.checked_mul(4)? != buffer.pixels.len() { return None; }
+    let alpha = |x, y| buffer.pixels[(y * w + x) * 4 + 3];
+    if alpha(w - 1, 0) != 0 || alpha(0, h - 1) != 0 || alpha(0, 0) != 255 || alpha(w - 1, h - 1) != 255 {
+        return None;
+    }
+    let shadow = (0..w).rev().take_while(|&x| alpha(x, 0) == 0).count();
+    if shadow == 0 || shadow >= w || shadow >= h { return None; }
+    // Accept only the exact binary silhouette. Arbitrary translucent shell
+    // widgets keep their existing X11 behavior; no bounding-box approximation.
+    for y in 0..h {
+        for x in 0..w {
+            let opaque = (x < w - shadow && y < h - shadow) || (x >= shadow && y >= shadow);
+            if alpha(x, y) != if opaque { 255 } else { 0 } { return None; }
+        }
+    }
+    Some((Size::new(buffer.width, buffer.height), shadow as u32))
+}
+
 fn rectangle(x: u32, y: u32, w: u32, h: u32) -> Rectangle {
     Rectangle { x: x.min(i16::MAX as u32) as i16, y: y.min(i16::MAX as u32) as i16,
         width: w.min(u16::MAX as u32) as u16, height: h.min(u16::MAX as u32) as u16 }
@@ -127,6 +166,47 @@ mod tests {
     use super::*;
     use wm_theme::{DecorationStyle, FontState, RasterThemeEngine};
     use wm_theme_api::{DecorationRequest, ThemeEngine};
+
+    #[test]
+    #[ignore = "private X server only: xvfb-run -a cargo test -p wm-x11 native_system7 -- --ignored --test-threads=1"]
+    fn native_system7_menu_shadow_shape_input_and_toggle_cleanup() {
+        let mut backend = X11Backend::connect_and_become_wm(None, 1.0).unwrap();
+        let fonts = FontState::new();
+        let base = wm_theme::default_theme::nextstep_classic();
+        let items = [wm_theme::menu::MenuItem::Action { label: "Terminal".into(), action: 7 }];
+        for scale in [1.0, 2.0] {
+            let theme = base.scaled(scale);
+            let chrome = wm_theme::UiChrome::new(&theme, fonts.clone(), DecorationStyle::System7, scale);
+            let menu = chrome.menu(&theme, &mut fonts.system(), "Applications", &items, Some(0), true);
+            let size = Size::new(menu.buffer.width, menu.buffer.height);
+            let popup = backend.create_shell_surface(Rect::new(Point::new(100, 100), size), (25, 70, 90), true).unwrap();
+            backend.paint_shell_surface(popup, &menu.buffer);
+            backend.map_shell_surface(popup);
+            let actual = backend.conn.shape_get_rectangles(popup, SK::BOUNDING).unwrap().reply().unwrap();
+            for y in 0..size.h {
+                for x in 0..size.w {
+                    let inside = actual.rectangles.iter().any(|rect| Rect::new(Point::new(rect.x as i32, rect.y as i32),
+                        Size::new(rect.width as u32, rect.height as u32)).contains(Point::new(x as i32, y as i32)));
+                    assert_eq!(inside, menu.buffer.pixels[((y * size.w + x) * 4 + 3) as usize] != 0);
+                }
+            }
+            backend.conn.warp_pointer(NONE, backend.root, 0, 0, 0, 0, (100 + size.w - 1) as i16, 100).unwrap().check().unwrap();
+            assert_eq!(backend.conn.query_pointer(backend.root).unwrap().reply().unwrap().child, NONE,
+                "transparent shadow corner must expose the underlying desktop to input too");
+            assert_eq!(backend.shell_shapes.len(), 1);
+            // Exercise the PopupHost paint path independently of Backend.
+            let wm = wm_theme::menu::render_menu(&theme, &mut fonts.system(), "Applications", &items, None, true);
+            backend.configure_shell_surface(popup, Rect::new(Point::new(100, 100), Size::new(wm.buffer.width, wm.buffer.height)));
+            wm_theme_api::PopupHost::paint_popup(&mut backend, popup, &wm.buffer);
+            assert!(!backend.conn.shape_query_extents(popup).unwrap().reply().unwrap().bounding_shaped);
+            assert!(backend.shell_shapes.is_empty());
+            wm_theme_api::PopupHost::paint_popup(&mut backend, popup, &menu.buffer);
+            assert_eq!(backend.shell_shapes.len(), 1);
+            backend.destroy_shell_surface(popup);
+            assert!(backend.shell_shapes.is_empty());
+            assert!(!backend.painted.contains_key(&popup));
+        }
+    }
 
     #[test]
     #[ignore = "private X server only: xvfb-run -a cargo test -p wm-x11 native_system7 -- --ignored"]

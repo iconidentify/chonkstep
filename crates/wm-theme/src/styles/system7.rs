@@ -2,6 +2,7 @@
 //! fixtures, rather than this painter, own its pixel specification.
 mod atlas;
 mod fallback;
+pub(crate) mod ui;
 pub(crate) use fallback::Fallback;
 
 use std::collections::VecDeque;

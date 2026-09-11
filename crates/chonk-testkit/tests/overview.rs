@@ -271,12 +271,12 @@ fn overview_on_an_empty_desk_is_quiet_not_a_crash() {
 #[test]
 #[ignore = "requires nested Wayland: scripts/e2e.sh --headless --test overview"]
 fn native_overview_keeps_wallpaper_proportions_and_live_pixels() {
-    for scale in [1.0, 2.0] {
+    for (scale, style) in [1.0, 2.0].into_iter().flat_map(|scale| ["windowmaker", "system7"].map(|style| (scale, style))) {
         let mut session = Session::boot(
-            &format!("overview-native-{scale}"),
+            &format!("overview-native-{style}-{scale}"),
             SessionOptions {
                 scale: Some(scale),
-                config_extra: "show_dock = false\n".into(),
+                config_extra: format!("show_dock = false\ndecoration_style = '{style}'\n"),
                 ..Default::default()
             },
         )

@@ -22,7 +22,7 @@ use wm_theme::cascade::{CascadeMenu, MenuClick, MenuKey};
 use wm_theme::menu::MenuItem;
 use wm_theme::switcher::{self, SwitcherEntry};
 use wm_theme::workspace;
-use wm_theme::{icon, paint, panel, tile, Theme};
+use wm_theme::{paint, panel, tile, Theme};
 // `wm_theme_api::PopupHost` is deliberately referenced by full path in
 // bounds rather than imported, and bounded per-method on `Desktop`'s
 // menu-driving methods rather than on the whole impl: a receiver
@@ -1005,7 +1005,9 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
         title: String,
     ) {
         self.menu.close(host);
+        let chrome = self.menu.chrome().cloned();
         self.menu = CascadeMenu::new(title, DESKTOP_BG);
+        self.menu.set_chrome(chrome);
         self.session = session;
     }
 
@@ -1641,6 +1643,7 @@ pub struct Desktop<B: Backend> {
     /// This used to be an owned `FontSystem::new()` — a second
     /// full fontconfig scan for a database the process already had.
     fonts: wm_theme::FontState,
+    chrome: wm_theme::UiChrome,
     /// The one open menu session — root menu or per-window commands
     /// menu, whichever opened last — riding on `wm_theme::cascade::
     /// CascadeMenu`, a generic, reusable SDK primitive rather than
@@ -1921,6 +1924,7 @@ impl<B: Backend> Desktop<B> {
             tile,
             pad,
             drag_threshold: drag_threshold_px(scale),
+            chrome: wm_theme::UiChrome::new(theme, fonts.clone(), wm_theme::DecorationStyle::WindowMaker, scale),
             fonts,
             menu: ShellMenu::new(),
             items,
@@ -2212,6 +2216,18 @@ impl<B: Backend> Desktop<B> {
         self.appearance = appearance;
     }
 
+    /// Update all window-derived shell renderers together. Closing the menu
+    /// releases its grabs and prevents old hit targets surviving a live reload.
+    pub fn set_chrome(&mut self, backend: &mut B, theme: &Theme, style: wm_theme::DecorationStyle, scale: f32)
+    where B: wm_theme_api::PopupHost<PopupId = B::ShellId> {
+        self.close_menu(backend);
+        self.chrome = wm_theme::UiChrome::new(theme, self.fonts.clone(), style, scale);
+        self.menu.menu.set_chrome(Some(self.chrome.clone()));
+        self.overview.set_chrome(self.chrome.clone());
+    }
+
+    pub fn chrome(&self) -> &wm_theme::UiChrome { &self.chrome }
+
     pub fn set_theme_id(&mut self, id: String) {
         self.theme_id = id;
     }
@@ -2290,7 +2306,7 @@ impl<B: Backend> Desktop<B> {
             backend.configure_shell_surface(window, Rect { pos, size: Size::new(tile, tile) });
             let preview = previews.iter().find(|(id, _)| *id == client).and_then(|(_, preview)| preview.as_ref());
             let buffer =
-                icon::render_icon_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), tile, &title, preview);
+                self.chrome.icon(theme, &mut self.fonts.system(), &mut self.fonts.swash(), tile, &title, preview);
             backend.paint_shell_surface(window, &buffer);
             if let Some(icon) = self.icons.get_mut(&window) {
                 icon.pos = pos;
@@ -3659,13 +3675,13 @@ impl<B: Backend> Desktop<B> {
             }
             (None, _) => {}
         }
-        let Self { switcher, fonts, tile, primary, .. } = self;
+        let Self { switcher, fonts, tile, primary, chrome, .. } = self;
         let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
         let Some(panel) = switcher.as_mut() else {
             return;
         };
         let buffer =
-            switcher::render_switcher(theme, &mut font_system, &mut swash_cache, &panel.entries, selected, *tile);
+            chrome.switcher(theme, &mut font_system, &mut swash_cache, &panel.entries, selected, *tile);
         if buffer.width == 0 || buffer.height == 0 {
             return;
         }
@@ -3942,7 +3958,7 @@ impl<B: Backend> Desktop<B> {
         // icons among themselves without lifting them over any frame.
         backend.raise_shell_surface(window);
         let buffer =
-            icon::render_icon_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, title, preview);
+            self.chrome.icon(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, title, preview);
         backend.paint_shell_surface(window, &buffer);
 
         self.icons.insert(window, IconTile { window, client, title: title.to_string(), pos, auto_slot: Some(slot) });

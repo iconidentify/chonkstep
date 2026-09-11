@@ -139,6 +139,10 @@ impl FontState {
         self.font_system.borrow_mut()
     }
 
+    pub(crate) fn system7_fallback(&self) -> std::cell::RefMut<'_, system7::Fallback> {
+        self.system7_fallback.borrow_mut()
+    }
+
     /// The shared glyph raster cache, mutably — [`FontState::system`]'s
     /// companion, under the same short-loan discipline. Evicts glyph
     /// images at soft 8 MiB / 16K-entry watermarks between render calls,

@@ -138,7 +138,7 @@ jobs:
       - name: Reject oversized X11 application properties
         run: |
           xvfb-run -a cargo test --locked -p wm-x11 hostile_properties -- --ignored
-          xvfb-run -a cargo test --locked -p wm-x11 native_system7 -- --ignored
+          xvfb-run -a cargo test --locked -p wm-x11 native_system7 -- --ignored --test-threads=1
 
       - name: Build release binaries
         run: cargo build --release -p chonkstep

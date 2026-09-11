@@ -65,6 +65,7 @@ pub(crate) struct Window {
     label: Label,
     fallback: Option<MemoryRenderBuffer>,
     shadow: Id,
+    border: Option<[Id; 4]>,
     pub desktop_visible: bool,
     pub draw_content: bool,
     pub sticky: bool,
@@ -74,7 +75,7 @@ impl Window {
     pub fn snapshot(window: WlWindowId, frame: Option<WlFrameId>, source: Rect, backend: &WaylandBackend) -> Self {
         Self { window, frame, source, destination: source,
             label: Label { buffer: None, size: Size::default() },
-            fallback: None, shadow: Id::new(),
+            fallback: None, shadow: Id::new(), border: None,
             desktop_visible: backend.windows.get(&window).is_some_and(|r| r.mapped),
             draw_content: true, sticky: false }
     }
@@ -93,6 +94,7 @@ pub(crate) struct Overview {
     paint_order: Vec<usize>,
     workspace: usize,
     gap: u32,
+    chrome: Option<wm_core::OverviewChrome>,
     ring: [Id; 4],
     space_ring: [Id; 4],
     drop_ring: [Id; 4],
@@ -148,6 +150,7 @@ impl Overview {
             },
             workspace: scene.workspace,
             gap: scene.gap,
+            chrome: scene.chrome,
             preview_windows: scene.windows.iter().map(|w| w.window)
                 .chain(scene.spaces.iter().flat_map(|s| s.windows.iter().map(|w| w.window))).collect(),
             windows: scene
@@ -165,6 +168,8 @@ impl Overview {
                         .and_then(|b| import_buffer(b, true));
                     let old = old_windows.remove(&w.window);
                     let shadow = old.as_ref().map_or_else(Id::new, |w| w.shadow.clone());
+                    let border = scene.chrome.map(|_| old.as_ref().and_then(|w| w.border.clone())
+                        .unwrap_or_else(|| std::array::from_fn(|_| Id::new())));
                     let mut label = old.map(|w| w.label).unwrap_or_else(|| Label::new(DecorationBuffer {
                         width: 0, height: 0, pixels: Vec::new(),
                     }));
@@ -177,6 +182,7 @@ impl Overview {
                         label,
                         fallback,
                         shadow,
+                        border,
                         desktop_visible: backend.scene_index.is_presented(w.window)
                             && backend.windows.get(&w.window).is_some_and(|r| r.mapped),
                         draw_content: true,
@@ -316,8 +322,7 @@ pub(crate) fn solid(
     );
 }
 
-fn outline(elements: &mut Vec<SceneElement<GlesRenderer>>, ids: &[Id; 4], rect: Rect, edge: u32, alpha: f32) {
-    let color = Color32F::new(0.23 * alpha, 0.61 * alpha, alpha, alpha);
+fn outline(elements: &mut Vec<SceneElement<GlesRenderer>>, ids: &[Id; 4], rect: Rect, edge: u32, color: Color32F) {
     let x = rect.pos.x - edge as i32;
     let y = rect.pos.y - edge as i32;
     for (id, r) in ids.iter().zip([
@@ -379,11 +384,22 @@ pub(crate) fn render(
             rect.size,
         )
     };
-    let edge = (overview.gap / 6).max(2);
+    let edge = overview.chrome.map_or_else(|| (overview.gap / 6).max(2), |chrome| chrome.line.clamp(1, 64));
     // Geometry follows the spring, including its small elastic excursions.
     // Only opacity saturates; clamping geometry would clip release velocity.
     let progress = overview.progress;
     let alpha = progress.clamp(0.0, 1.0) as f32;
+    let ink = |alpha| match overview.chrome {
+        Some(chrome) => Color32F::new(chrome.ink[0] as f32 / 255.0 * alpha,
+            chrome.ink[1] as f32 / 255.0 * alpha, chrome.ink[2] as f32 / 255.0 * alpha, alpha),
+        None => Color32F::new(0.23 * alpha, 0.61 * alpha, alpha, alpha),
+    };
+    let shadow_rect = |rect: Rect| if overview.chrome.is_some() {
+        Rect::new(Point::new(rect.pos.x + (edge * 2) as i32, rect.pos.y + (edge * 2) as i32), rect.size)
+    } else {
+        Rect::new(Point::new(rect.pos.x - edge as i32, rect.pos.y - edge as i32),
+            Size::new(rect.size.w + edge * 2, rect.size.h + edge * 3))
+    };
     let placed = |window: &Window| interpolate(
         Rect::new(Point::new(window.source.pos.x - viewport.pos.x,
             window.source.pos.y - viewport.pos.y), window.source.size),
@@ -393,31 +409,26 @@ pub(crate) fn render(
             let rect = local(drag.destination);
             // Frontmost, translucent and bounded: the destination remains
             // visible through the live image. No capture or client configure.
+            if let Some(ids) = &window.border { outline(elements, ids, rect, edge, ink(0.82)); }
             render_window(elements, renderer, backend, window, rect, 0.82);
-            solid(elements, &window.shadow, Rect::new(
-                Point::new(rect.pos.x - edge as i32, rect.pos.y - edge as i32),
-                Size::new(rect.size.w + edge * 2, rect.size.h + edge * 3)),
-                Color32F::new(0.0, 0.0, 0.0, 0.24));
+            solid(elements, &window.shadow, shadow_rect(rect),
+                if overview.chrome.is_some() { ink(0.82) } else { Color32F::new(0.0, 0.0, 0.0, 0.24) });
         }
     } else if let Some(window) = overview.windows.get(overview.selected) {
         let rect = placed(window);
-        outline(elements, &overview.ring, rect, edge, alpha);
+        outline(elements, &overview.ring, rect, edge, ink(alpha));
         label(elements, renderer, &window.label, rect, edge * 2, alpha);
     }
     for &index in &overview.paint_order {
         let window = &overview.windows[index];
         if overview.drag.is_some_and(|drag| drag.index == index) { continue; }
         let rect = placed(window);
+        if index != overview.selected || overview.drag.is_some() {
+            if let Some(ids) = &window.border { outline(elements, ids, rect, edge, ink(alpha)); }
+        }
         render_window(elements, renderer, backend, window, rect, if window.desktop_visible { 1.0 } else { alpha });
-        solid(
-            elements,
-            &window.shadow,
-            Rect::new(
-                Point::new(rect.pos.x - edge as i32, rect.pos.y - edge as i32),
-                Size::new(rect.size.w + edge * 2, rect.size.h + edge * 3),
-            ),
-            Color32F::new(0.0, 0.0, 0.0, 0.28 * alpha),
-        );
+        solid(elements, &window.shadow, shadow_rect(rect),
+            if overview.chrome.is_some() { ink(alpha) } else { Color32F::new(0.0, 0.0, 0.0, 0.28 * alpha) });
     }
     for (i, space) in overview.spaces.iter().enumerate() {
         let rect = local(space.rect);
@@ -437,11 +448,12 @@ pub(crate) fn render(
         let targeted = overview.drag.is_some_and(|drag| drag.workspace == Some(i));
         label(elements, renderer, if targeted { &space.drop_label } else { &space.label }, rect, edge * 2, alpha);
         if overview.drag.is_some_and(|drag| drag.workspace == Some(i)) {
-            outline(elements, &overview.drop_ring, rect, edge * 2, alpha);
-            solid(elements, &overview.drop_fill, rect, Color32F::new(0.03, 0.09, 0.16, 0.24));
+            outline(elements, &overview.drop_ring, rect, edge * 2, ink(alpha));
+            solid(elements, &overview.drop_fill, rect, if overview.chrome.is_some() { ink(0.24) }
+                else { Color32F::new(0.03, 0.09, 0.16, 0.24) });
         }
         if i == overview.workspace {
-            outline(elements, &overview.space_ring, rect, edge, alpha);
+            outline(elements, &overview.space_ring, rect, edge, ink(alpha));
         }
         // Miniatures preserve desktop geometry, stacking and output clipping.
         // Read current geometry so external moves/resizes cannot freeze an old
@@ -770,7 +782,7 @@ mod refresh_tests {
                 close: Some((rect, label())), windows: vec![wm_core::OverviewThumbnail {
                     window: WlWindowId(7), frame: None, source: rect, draw_content: true,
                 }] }],
-            workspace: 0, selected: 0, gap: 4,
+            workspace: 0, selected: 0, gap: 4, chrome: None,
         }
     }
 
@@ -800,5 +812,35 @@ mod refresh_tests {
         let new = Overview::refresh(Some(after), WlShellId(4), scene(19), &backend);
         assert_ne!(new.token(), &ids.0, "a replacement surface has a fresh lifetime");
         assert_eq!(new.progress, 1.0);
+    }
+
+    #[test]
+    fn flat_overview_retains_caption_storage_and_border_ids_through_selection_and_refresh() {
+        let display = Display::<crate::state::Compositor>::new().unwrap();
+        let backend = WaylandBackend::new(display.handle(), Vec::new(), 1.0);
+        let mut initial = scene(7);
+        initial.chrome = Some(wm_core::OverviewChrome { ink: [0, 0, 0], line: 2 });
+        let mut overview = Overview::new(WlShellId(3), initial, &backend);
+        let border = overview.windows[0].border.clone().unwrap();
+        let pixels = overview.label_bytes();
+        let mut label = overview.windows[0].label.buffer.as_ref().unwrap().clone();
+        for selected in [1, 0, 99, 0] {
+            overview.selected = selected;
+            assert_eq!(overview.label_bytes(), pixels);
+            let _: Result<(), std::convert::Infallible> = label.render().draw(|pixels| {
+                assert!(pixels.iter().all(|&p| p == 7));
+                Ok(Vec::new())
+            });
+            assert_eq!(overview.windows[0].border.as_ref(), Some(&border));
+        }
+        let mut next = scene(19);
+        next.chrome = overview.chrome;
+        let overview = Overview::refresh(Some(overview), WlShellId(3), next, &backend);
+        assert_eq!(overview.windows[0].border.as_ref(), Some(&border));
+        assert_eq!(overview.label_bytes(), pixels);
+        let _: Result<(), std::convert::Infallible> = label.render().draw(|pixels| {
+            assert!(pixels.iter().all(|&p| p == 19), "semantic refresh updates retained caption storage");
+            Ok(Vec::new())
+        });
     }
 }

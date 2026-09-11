@@ -93,7 +93,7 @@ pub fn render_icon_tile(
 /// ratio as a square icon tile, and cropping would hide real content
 /// (often the most identifying part, like a browser's tab bar) to gain
 /// nothing but a filled corner.
-fn draw_preview(dest: &mut tiny_skia::Pixmap, src: &DecorationBuffer, x: u32, y: u32, w: u32, h: u32) {
+pub(crate) fn draw_preview(dest: &mut tiny_skia::Pixmap, src: &DecorationBuffer, x: u32, y: u32, w: u32, h: u32) {
     if w == 0 || h == 0 || src.width == 0 || src.height == 0 {
         return;
     }

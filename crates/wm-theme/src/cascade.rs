@@ -87,6 +87,7 @@ pub struct CascadeMenu<Id> {
     levels: Vec<OpenLevel<Id>>,
     grab: Option<PopupGrab>,
     pending_submenu: Option<PendingSubmenu>,
+    chrome: Option<crate::UiChrome>,
 }
 
 impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
@@ -103,6 +104,24 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
             levels: Vec::new(),
             grab: None,
             pending_submenu: None,
+            chrome: None,
+        }
+    }
+
+    /// Configure the next session after closing the current one. A style
+    /// change cannot reuse the old popup geometry or row hit targets.
+    pub fn set_chrome(&mut self, chrome: Option<crate::UiChrome>) {
+        assert!(!self.is_open(), "close the menu before changing its chrome");
+        self.chrome = chrome;
+    }
+
+    pub fn chrome(&self) -> Option<&crate::UiChrome> { self.chrome.as_ref() }
+
+    fn render(&self, theme: &Theme, fonts: &mut cosmic_text::FontSystem,
+        title: &str, items: &[MenuItem], selected: Option<usize>, closable: bool) -> menu::MenuRender {
+        match &self.chrome {
+            Some(chrome) => chrome.menu(theme, fonts, title, items, selected, closable),
+            None => menu::render_menu(theme, fonts, title, items, selected, closable),
         }
     }
 
@@ -141,9 +160,9 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         let title = self.title.clone();
         if let Some(level) = self.open_level(host, theme, font_system, title, items, at, None) {
             self.levels.push(level);
+            self.grab = Some(host.grab_pointer());
+            host.grab_keyboard();
         }
-        self.grab = Some(host.grab_pointer());
-        host.grab_keyboard();
     }
 
     pub fn close<H: PopupHost<PopupId = Id>>(&mut self, host: &mut H) {
@@ -345,7 +364,7 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         level: usize,
     ) {
         let closable = self.levels[level].opened_from_item.is_none() && self.closable;
-        let render = menu::render_menu(
+        let render = self.render(
             theme,
             font_system,
             &self.levels[level].title,
@@ -384,14 +403,17 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         opened_from_item: Option<usize>,
     ) -> Option<OpenLevel<Id>> {
         let closable = opened_from_item.is_none() && self.closable;
-        let render = menu::render_menu(theme, font_system, &title, &items, None, closable);
+        let render = self.render(theme, font_system, &title, &items, None, closable);
+        if render.buffer.width == 0 || render.buffer.height == 0 || render.item_rects.len() != items.len() {
+            return None;
+        }
         let geom = Rect { pos: at, size: Size::new(render.buffer.width, render.buffer.height) };
         let window = host.create_popup(geom, self.background)?;
         host.paint_popup(window, &render.buffer);
         let highlighted = (!items.is_empty()).then_some(0);
         if highlighted.is_some() {
             let render =
-                menu::render_menu(theme, font_system, &title, &items, highlighted, closable);
+                self.render(theme, font_system, &title, &items, highlighted, closable);
             host.paint_popup(window, &render.buffer);
         }
         Some(OpenLevel {
@@ -480,6 +502,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeHost {
+        fail_create: bool,
         next_id: u32,
         open: HashSet<u32>,
         /// Last buffer painted into each popup, keyed by popup id — lets
@@ -496,6 +519,7 @@ mod tests {
         type PopupId = u32;
 
         fn create_popup(&mut self, _geometry: Rect, _background: (u8, u8, u8)) -> Option<u32> {
+            if self.fail_create { return None; }
             self.next_id += 1;
             self.open.insert(self.next_id);
             Some(self.next_id)
@@ -606,6 +630,50 @@ mod tests {
         assert_eq!(f.host.grabs, 1);
         assert_eq!(f.host.keyboard_grabs, 1);
         assert!(f.cascade.is_open());
+    }
+
+    #[test]
+    fn failed_or_unrepresentable_popups_never_take_invisible_input_grabs() {
+        let mut f = Fixture::new();
+        f.host.fail_create = true;
+        f.open(vec![action("Terminal", 7)]);
+        assert!(!f.cascade.is_open());
+        assert_eq!((f.host.grabs, f.host.keyboard_grabs), (0, 0));
+        assert_eq!(f.key(MenuKey::Enter), None);
+
+        f.host.fail_create = false;
+        f.cascade.set_chrome(Some(crate::UiChrome::new(&f.theme, crate::FontState::new(),
+            wm_theme_api::DecorationStyle::System7, 1.0)));
+        f.open(vec![action("Unrepresentable menu", 99); 1000]);
+        assert!(!f.cascade.is_open());
+        assert!(f.host.open.is_empty());
+        assert_eq!((f.host.grabs, f.host.keyboard_grabs), (0, 0));
+        assert_eq!(f.key(MenuKey::Enter), None, "clipped rows must not remain keyboard-activatable");
+    }
+
+    #[test]
+    fn system7_cascades_use_their_painted_rows_and_release_every_popup_and_grab() {
+        for scale in [1.0, 2.0] {
+            let mut f = Fixture::new();
+            f.theme = f.theme.scaled(scale);
+            f.cascade.set_chrome(Some(crate::UiChrome::new(&f.theme, crate::FontState::new(),
+                wm_theme_api::DecorationStyle::System7, scale)));
+            f.open(vec![action("Terminal", 7), submenu("Applications", vec![action("Notes", 42)])]);
+            let row = f.cascade.levels[0].item_rects[1];
+            let parent = f.only_open_window();
+            assert_eq!(f.click(parent, Point::new(row.pos.x + 2, row.pos.y + 2)), Some(MenuClick::OpenedSubmenu));
+            assert_eq!(f.cascade.levels.len(), 2);
+            let child = f.cascade.levels[1].window;
+            let row = f.cascade.levels[1].item_rects[0];
+            assert_eq!(f.click(child, Point::new(row.pos.x + 2, row.pos.y + 2)), Some(MenuClick::Action(42)));
+            assert!(f.host.open.is_empty());
+            assert_eq!(f.host.grabs, f.host.ungrabs);
+            assert_eq!(f.host.keyboard_grabs, f.host.keyboard_ungrabs);
+            f.cascade.set_chrome(None);
+            f.open(vec![action("WindowMaker again", 9)]);
+            assert_eq!(f.key(MenuKey::Enter), Some(MenuClick::Action(9)));
+            assert!(f.host.open.is_empty());
+        }
     }
 
     #[test]

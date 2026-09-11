@@ -34,6 +34,14 @@ pub struct OverviewWorkspace<W, F> {
     pub close: Option<(Rect, DecorationBuffer)>,
 }
 
+/// Optional flat chrome for native Overview. Colors/metrics are resolved once
+/// by the shell; the renderer retains existing textures and element identities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverviewChrome {
+    pub ink: [u8; 3],
+    pub line: u32,
+}
+
 /// A compositor can present existing client textures directly. Only small text
 /// labels cross the CPU/GPU boundary; no screenshots or full-output raster.
 pub struct OverviewScene<W, F> {
@@ -43,6 +51,7 @@ pub struct OverviewScene<W, F> {
     pub workspace: usize,
     pub selected: usize,
     pub gap: u32,
+    pub chrome: Option<OverviewChrome>,
 }
 
 /// Pointer-owned Overview presentation. Updating it only moves existing GPU

@@ -1246,6 +1246,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // boot for databases identical to the one already in hand.
         let mut desktop =
             Desktop::new(backend, screen, primary, scale, &theme, state.appearance, apps.clone(), fonts.clone());
+        desktop.set_chrome(backend, &theme, state.decoration_style, state.scale);
         desktop.set_omarchy_menu(omarchy_menu_for(state));
         // The control socket, bound here — after the dock socket it
         // sits beside, and before the first process meant to see it
@@ -1541,6 +1542,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         self.theme = theme;
         self.desktop.set_theme_id(self.theme.id.clone());
+        self.desktop.set_chrome(wm.backend_mut(), &self.theme, self.state.decoration_style, self.state.scale);
         if appearance_changed {
             // Before the relayout below repaints anything: the desktop
             // must already know which rendition of the wallpaper to
@@ -2258,21 +2260,22 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         let (mut fonts, mut swash) = (self.fonts.system(), self.fonts.swash());
         let label_h = (tile / 2).max(16);
-        let mut label = |text: &str, width| live::label(&self.theme, &mut fonts, &mut swash, text, width, label_h);
+        let mut label = |text: &str, width, inverted| self.desktop.chrome().label(&self.theme, &mut fonts, &mut swash, text, width, label_h, inverted);
         let windows = clients.iter().zip(sources).zip(&layout.cells).map(|(((_, c), source), destination)| {
             wm_core::OverviewWindow { window: c.window, frame: c.frame, source, destination: *destination,
-                label: label(&c.title, (tile * 6).min(geometry.size.w)) }
+                label: label(&c.title, (tile * 6).min(geometry.size.w), true) }
         }).collect();
         let workspace_windows = Self::workspace_overview_windows(wm, &row);
         let spaces = layout.strip.iter().enumerate().zip(workspace_windows).map(|((i, rect), windows)| {
             let count = windows.len();
             wm_core::OverviewWorkspace { rect: *rect, windows,
-                label: label(&format!("Desktop {} · {}", i + 1, count), rect.size.w),
-                drop_label: label(&format!("Move to Desktop {}", i + 1), rect.size.w),
-                close: layout.workspace_close_rect(i).map(|r| (r, wm_theme::overview::workspace_close_glyph(r.size.w))) }
+                label: label(&format!("Desktop {} · {}", i + 1, count), rect.size.w, i == local),
+                drop_label: label(&format!("Move to Desktop {}", i + 1), rect.size.w, true),
+                close: layout.workspace_close_rect(i).map(|r| (r, self.desktop.chrome().workspace_close(r.size.w))) }
         }).collect();
         let selected = wm.focused_client().and_then(|focused| clients.iter().position(|(id, _)| *id == focused)).unwrap_or(0);
-        wm_core::OverviewScene { geometry, windows, spaces, workspace: local, selected, gap: layout.pad }
+        wm_core::OverviewScene { geometry, windows, spaces, workspace: local, selected, gap: layout.pad,
+            chrome: self.desktop.chrome().overview_ink().map(|(ink, line)| wm_core::OverviewChrome { ink, line }) }
     }
 
     /// A desktop swipe can share Overview's grab, but cannot displace another
