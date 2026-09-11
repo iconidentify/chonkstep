@@ -283,7 +283,11 @@ fn set_cursor_hidden(session: &mut Session, hidden: bool) {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    write!(stream, "/keyword cursor:invisible {hidden}").unwrap();
+    // Hyprland IPC has no delimiter: format before writing so the server
+    // cannot dispatch the prefix while write_fmt emits the boolean separately.
+    stream
+        .write_all(format!("/keyword cursor:invisible {hidden}").as_bytes())
+        .unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     assert_eq!(response.trim(), "ok");
