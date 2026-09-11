@@ -120,6 +120,18 @@ pub(crate) fn import_buffer(buffer: &DecorationBuffer, opaque: bool) -> Option<M
     ))
 }
 
+/// Damage for updating one retained chrome band. Kept separate so the
+/// same-pixels path can be tested without a GPU or a client connection.
+fn update_chrome_band(memory: &mut [u8], pixels: &[u8], size: Size) -> Vec<SmithayRect<i32, Buffer>> {
+    if memory == pixels {
+        return Vec::new();
+    }
+    if memory.len() == pixels.len() {
+        memory.copy_from_slice(pixels);
+    }
+    vec![SmithayRect::<i32, Buffer>::from_size((size.w as i32, size.h as i32).into())]
+}
+
 /// Reads one field of the xdg toplevel's role attributes (title,
 /// app_id) — smithay parks them on the surface's user-data map as
 /// `XdgToplevelSurfaceData`. `None` if the toplevel is gone, the data
@@ -1035,12 +1047,7 @@ impl Backend for WaylandBackend {
                         let pixels = &part.buffer.pixels;
                         let mut render = old.buffer.render();
                         let _ = render.draw(|memory| {
-                            if memory.len() == pixels.len() {
-                                memory.copy_from_slice(pixels);
-                            }
-                            Ok::<_, std::convert::Infallible>(vec![SmithayRect::<i32, Buffer>::from_size(
-                                (size.w as i32, size.h as i32).into(),
-                            )])
+                            Ok::<_, std::convert::Infallible>(update_chrome_band(memory, pixels, size))
                         });
                         drop(render);
                         old.buffer
@@ -2077,6 +2084,18 @@ impl wm_theme_api::PopupHost for WaylandBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_chrome_bands_keep_their_damage_empty() {
+        let mut pixels = vec![0_u8; 64 * 4];
+        let mut next = pixels.clone();
+        assert!(update_chrome_band(&mut pixels, &next, Size::new(64, 1)).is_empty());
+        next[4] = 255;
+        assert_eq!(update_chrome_band(&mut pixels, &next, Size::new(64, 1)),
+            vec![SmithayRect::<i32, Buffer>::from_size((64, 1).into())]);
+        assert_eq!(pixels, next);
+        assert!(update_chrome_band(&mut pixels, &next, Size::new(64, 1)).is_empty());
+    }
 
     // Everything else in this file needs a live client on a socket;
     // the state-flag projection is the pure decision underneath

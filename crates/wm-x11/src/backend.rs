@@ -31,13 +31,27 @@ pub struct XWindow(pub Window);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct XFrame(pub Window);
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct PaintedPart {
     x: i16,
     y: i16,
     w: u16,
     h: u16,
     data: Vec<u8>,
+    surface_size: Size,
+    uploaded: bool,
+}
+
+fn chrome_band_needs_upload(previous: Option<&PaintedPart>, next: &PaintedPart) -> bool {
+    previous != Some(next)
+}
+
+fn invalidate_resized_chrome(painted: &mut HashMap<Window, Vec<PaintedPart>>, frame: Window, size: Size) {
+    if painted.get(&frame).and_then(|parts| parts.first())
+        .is_some_and(|part| part.surface_size != size)
+    {
+        painted.remove(&frame);
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -819,11 +833,12 @@ impl X11Backend {
         }
         let (w, h) = (buffer.width as u16, buffer.height as u16);
         let data = to_server_bytes(buffer, self.image_byte_order);
-        if let Err(e) = self.put_image_rows(win, w, h, &data) {
+        let uploaded = if let Err(e) = self.put_image_rows(win, w, h, &data) {
             tracing::warn!(?e, window = win, "put_image failed");
-        }
+            false
+        } else { true };
         let _ = self.conn.flush();
-        self.painted.insert(win, vec![PaintedPart { x: 0, y: 0, w, h, data }]);
+        self.painted.insert(win, vec![PaintedPart { x: 0, y: 0, w, h, data, surface_size: Size::new(w.into(), h.into()), uploaded }]);
     }
 
     /// Sends `data` (a `w`x`h` `ZPixmap` buffer, top row first) to
@@ -2828,10 +2843,15 @@ impl Backend for X11Backend {
             let x = part.offset.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             let y = part.offset.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             let data = to_server_bytes(&part.buffer, self.image_byte_order);
-            if let Err(error) = self.put_image_rows_at(frame.0, w, h, &data, x, y) {
-                tracing::warn!(?error, ?frame, "put_image decoration part failed");
+            let mut next = PaintedPart { x, y, w, h, data, surface_size: surface.frame_size, uploaded: true };
+            let previous = self.painted.get(&frame.0).and_then(|parts| parts.get(painted.len()));
+            if chrome_band_needs_upload(previous, &next) {
+                if let Err(error) = self.put_image_rows_at(frame.0, w, h, &next.data, x, y) {
+                    tracing::warn!(?error, ?frame, "put_image decoration part failed");
+                    next.uploaded = false;
+                }
             }
-            painted.push(PaintedPart { x, y, w, h, data });
+            painted.push(next);
         }
         self.painted.insert(frame.0, painted);
         let _ = self.conn.flush();
@@ -2851,6 +2871,10 @@ impl Backend for X11Backend {
     }
 
     fn set_frame_geometry(&mut self, frame: Self::FrameId, geometry: Rect) {
+        // X11's ForgetGravity can discard retained server pixels on resize.
+        // Invalidate immediately, including resize-away-and-back before the
+        // next coalesced paint. A position-only move preserves the cache.
+        invalidate_resized_chrome(&mut self.painted, frame.0, geometry.size);
         let aux = ConfigureWindowAux::new()
             .x(geometry.pos.x)
             .y(geometry.pos.y)
@@ -3375,6 +3399,36 @@ impl wm_theme_api::PopupHost for X11Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_chrome_skips_uploads_but_geometry_and_pixels_invalidate_it() {
+        let part = PaintedPart { x: 0, y: 24, w: 1, h: 64, data: vec![0; 64 * 4], surface_size: Size::new(800, 624), uploaded: true };
+        assert!(chrome_band_needs_upload(None, &part));
+        assert!(!chrome_band_needs_upload(Some(&part), &part));
+        let mut changed = part.clone();
+        changed.data[0] = 255;
+        assert!(chrome_band_needs_upload(Some(&part), &changed));
+        changed = part.clone();
+        changed.x = 1;
+        assert!(chrome_band_needs_upload(Some(&part), &changed));
+        changed = part.clone();
+        changed.uploaded = false;
+        assert!(chrome_band_needs_upload(Some(&changed), &part), "failed uploads must be retried");
+    }
+
+    #[test]
+    fn unchanged_chrome_is_uploaded_again_after_an_intermediate_frame_resize() {
+        let size = Size::new(800, 624);
+        let part = PaintedPart { x: 0, y: 0, w: 800, h: 24, data: vec![0; 800 * 24 * 4],
+            surface_size: size, uploaded: true };
+        let mut cache = HashMap::from([(42, vec![part.clone()])]);
+        invalidate_resized_chrome(&mut cache, 42, size);
+        assert!(!chrome_band_needs_upload(cache.get(&42).and_then(|parts| parts.first()), &part));
+        invalidate_resized_chrome(&mut cache, 42, Size::new(800, 700));
+        invalidate_resized_chrome(&mut cache, 42, size);
+        assert!(chrome_band_needs_upload(cache.get(&42).and_then(|parts| parts.first()), &part),
+            "returning to the old size cannot resurrect discarded X11 pixels");
+    }
 
     #[test]
     #[ignore = "run only on a private server: xvfb-run -a cargo test -p wm-x11 hostile_properties -- --ignored"]

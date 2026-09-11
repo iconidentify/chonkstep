@@ -1,5 +1,36 @@
 use crate::{Point, Rect, Size};
 
+/// The frame's geometry/glyph recipe, independent of palette and appearance.
+/// A name can be reserved here before its renderer is available in a build.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DecorationStyle {
+    /// Chiseled WindowMaker/NeXTSTEP chrome, preserving existing defaults.
+    #[default]
+    WindowMaker,
+    /// Classic System 7.5 document-window chrome.
+    System7,
+}
+
+impl DecorationStyle {
+    /// Parse the stable configuration spelling; unknown names are not aliases.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "windowmaker" => Some(Self::WindowMaker),
+            "system7" => Some(Self::System7),
+            _ => None,
+        }
+    }
+
+    /// Stable configuration and diagnostic spelling.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::WindowMaker => "windowmaker",
+            Self::System7 => "system7",
+        }
+    }
+}
+
 /// A titlebar button. The classic NeXTSTEP desktop has no maximize
 /// button at all (zoom is menu/keybinding-driven); this deliberately
 /// breaks from the classic recipe on that one point by adding one,

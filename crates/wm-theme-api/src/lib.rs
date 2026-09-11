@@ -11,7 +11,7 @@ mod popup;
 
 pub use decoration::{
     ButtonKind, ButtonRuntimeState, DecorationBuffer, DecorationLayout, DecorationPart,
-    DecorationRequest, DecorationSurface, ResizeEdge, ThemeEngine,
+    DecorationRequest, DecorationStyle, DecorationSurface, ResizeEdge, ThemeEngine,
 };
 pub use geometry::{
     clamp_client_size, client_size_limit, subsurface_link_exceeds_depth, Point, Rect, Size,
