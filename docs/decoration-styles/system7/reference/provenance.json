@@ -1,0 +1,32 @@
+{
+  "date_utc": "2026-09-11",
+  "source": "https://infinitemac.org/1996/System%207.5.3",
+  "os": "System Software 7.5.3 Revision 2",
+  "framebuffer": [
+    1024,
+    768
+  ],
+  "css_size": [
+    1024,
+    768
+  ],
+  "device_pixel_ratio": 1,
+  "browser_zoom": 1,
+  "color_control_panel": {
+    "highlight": "Black & White",
+    "window": "Standard"
+  },
+  "windowshade": {
+    "clicks": 2,
+    "modifiers": [],
+    "sounds": false
+  },
+  "fixture_source": "scripts/system7-reference/reference.c",
+  "fixture_source_sha256": "e63ac8b6c13e1db3c6027ea9ccf52a95c196bd49bfe1969dcf11c5fab35369e7",
+  "fixture_disk_sha256": "f6cf6339809bb283da79e909ce464b47f97fbb448d25f9965770bcca9455a868",
+  "toolchain_image": "ghcr.io/autc04/retro68@sha256:459dd3ea9856262162615527021be7b64f198631dc59cca8cedbf197b7656019",
+  "toolchain_interfaces": "Multiversal",
+  "captures": "Raw browser canvas PNGs; no scaling, recoloring or touch-ups",
+  "ram_kib": 131072,
+  "browser_framebuffer_check": "Browser canvas screenshot decoded RGB is byte-identical to canvas.toDataURL; verified no host clipping or resampling."
+}
