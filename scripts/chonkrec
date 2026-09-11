@@ -362,7 +362,7 @@ do_stop() {
   apid=$(cat "$APIDFILE" 2>/dev/null || true)
   out=$(cat "$PATHFILE" 2>/dev/null)
   work=$(cat "$WORKFILE" 2>/dev/null)
-  [ -n "$work" ] && [ -d "$work" ] || die "lost the work directory; nothing to assemble"
+  [[ -n "$work" && -d "$work" ]] || die "lost the work directory; nothing to assemble"
   local skip_open=$NO_OPEN stop_offset=$OFFSET
   # Generated with printf %q in this private work directory.
   # shellcheck disable=SC1091
