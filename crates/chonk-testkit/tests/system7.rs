@@ -25,6 +25,7 @@ fn pixels_on_output(session: &mut Session, id: u64, scale: u32, shaded: bool, de
     session.door().motion(0.0, 0.0).unwrap();
     session.door().barrier().unwrap();
     let (window, mut frame) = pair(session, id);
+    assert_eq!(frame.input_margin, 4 * scale);
     frame.x -= output.map_or(0, |(_, origin)| origin);
     let request = DecorationRequest { content_size: Size::new(window.w, if shaded { 0 } else { window.h }),
         title: window.title, focused: true, resizable: true, buttons: Vec::new() };

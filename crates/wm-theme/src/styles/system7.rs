@@ -5,6 +5,7 @@ mod fallback;
 pub(crate) use fallback::Fallback;
 
 use std::collections::VecDeque;
+use unicode_segmentation::UnicodeSegmentation;
 use wm_theme_api::{ButtonKind, DecorationBuffer, DecorationLayout, DecorationPart,
     DecorationRequest, DecorationSurface, Point, Rect, ResizeEdge, Size};
 use crate::model::{Color, Theme};
@@ -26,22 +27,25 @@ impl Roles {
 }
 
 #[derive(Clone, Copy)]
-struct Metrics { scale: f32, line: u32, title: u32, margin: u32 }
+pub(crate) struct Metrics { scale: f32, integer_scale: u32, line: u32, title: u32, margin: u32 }
 
 impl Metrics {
-    fn new(scale: f32) -> Self {
+    pub(crate) fn new(scale: f32) -> Self {
         // Session outputs are already bounded; keep the offline/public theme
         // API safe when handed an absurd finite scale as well.
         let scale = super::super::raster::normalized_scale(scale).min(16.0);
-        Self { scale, line: rounded(1, scale).max(1), title: rounded(18, scale), margin: rounded(4, scale).max(1) }
+        let integer_scale = if scale.fract() == 0.0 { scale as u32 } else { 0 };
+        let r = |value| if integer_scale > 0 { value * integer_scale } else { rounded(value, scale) };
+        Self { scale, integer_scale, line: r(1).max(1), title: r(18), margin: r(4).max(1) }
     }
-    fn r(self, value: u32) -> u32 { rounded(value, self.scale) }
+    fn r(self, value: u32) -> u32 {
+        if self.integer_scale > 0 { value * self.integer_scale } else { rounded(value, self.scale) }
+    }
 }
 
 fn rounded(value: u32, scale: f32) -> u32 { (value as f32 * scale + 0.5).floor() as u32 }
 
-pub(crate) fn layout(request: &DecorationRequest, scale: f32) -> DecorationLayout {
-    let m = Metrics::new(scale);
+pub(crate) fn layout(request: &DecorationRequest, m: Metrics) -> DecorationLayout {
     let content = wm_theme_api::clamp_client_size(request.content_size,
         Size::new(wm_theme_api::MAX_CLIENT_WINDOW_DIMENSION, wm_theme_api::MAX_CLIENT_WINDOW_DIMENSION));
     let margin = if request.resizable { m.margin } else { 0 };
@@ -81,7 +85,7 @@ pub(crate) fn layout(request: &DecorationRequest, scale: f32) -> DecorationLayou
         let bottom = (margin + m.line * 2).min(corner_h);
         // L-shaped corners occupy only the ring/outline/shadow. A square
         // corner would steal the close button and part of the client surface.
-        for (edge, x, y, cw, ch) in [
+        let hitboxes = [
             (ResizeEdge::NorthWest, 0, 0, corner_w, top),
             (ResizeEdge::NorthWest, 0, 0, left, corner_h),
             (ResizeEdge::NorthEast, w - corner_w, 0, corner_w, top),
@@ -94,10 +98,13 @@ pub(crate) fn layout(request: &DecorationRequest, scale: f32) -> DecorationLayou
             (ResizeEdge::South, corner_w, h - bottom, w - corner_w * 2, bottom),
             (ResizeEdge::West, 0, corner_h, left, h - corner_h * 2),
             (ResizeEdge::East, w - right, corner_h, right, h - corner_h * 2),
-        ] {
-            if cw > 0 && ch > 0 {
-                result.resize_hitboxes.push((edge, Rect::new(Point::new(x as i32, y as i32), Size::new(cw, ch))));
-            }
+        ].map(|(edge, x, y, cw, ch)| (edge, Rect::new(Point::new(x as i32, y as i32), Size::new(cw, ch))));
+        if w > corner_w * 2 && h > corner_h * 2 {
+            // The ordinary frame has all twelve rectangles. Copy the bounded
+            // array directly, without twelve independent capacity branches.
+            result.resize_hitboxes.extend_from_slice(&hitboxes);
+        } else {
+            result.resize_hitboxes.extend(hitboxes.into_iter().filter(|(_, rect)| rect.size.w > 0 && rect.size.h > 0));
         }
     }
     result
@@ -190,7 +197,8 @@ fn paint_title(roles: Roles, m: Metrics, w: u32, h: u32, request: &DecorationReq
     let content_w = request.content_size.w.min(wm_theme_api::MAX_CLIENT_WINDOW_DIMENSION);
     let limit = content_w.saturating_sub(m.r(64));
     // Latin-1 takes the allocation-free atlas path. Consecutive uncovered
-    // scalars are shaped together, preserving joining within Unicode runs.
+    // graphemes are shaped together, preserving joining within Unicode runs
+    // and keeping a decomposed accent attached to its base character.
     let mut fallback_runs = Vec::new();
     let mut measured = 0u32;
     for (offset, text, covered) in spans(&request.title) {
@@ -261,8 +269,9 @@ const PRESSED: [u16; 11] = [0x7ff, 0x421, 0x525, 0x4a9, 0x401, 0x78f, 0x401, 0x4
 fn spans(mut text: &str) -> impl Iterator<Item = (usize, &str, bool)> {
     let mut offset = 0;
     std::iter::from_fn(move || {
-        let covered = atlas::glyph(text.chars().next()?).is_some();
-        let end = text.char_indices().find(|(_, ch)| atlas::glyph(*ch).is_some() != covered).map_or(text.len(), |(i, _)| i);
+        let is_covered = |cluster: &str| cluster.chars().all(|ch| atlas::glyph(ch).is_some());
+        let covered = is_covered(text.graphemes(true).next()?);
+        let end = text.grapheme_indices(true).find(|(_, cluster)| is_covered(cluster) != covered).map_or(text.len(), |(i, _)| i);
         let result = (offset, &text[..end], covered);
         text = &text[end..];
         offset += end;
@@ -300,11 +309,19 @@ mod tests {
     use wm_theme_api::{ButtonRuntimeState, ThemeEngine};
 
     #[test]
+    fn fallback_spans_preserve_decomposed_accents_and_emoji_clusters() {
+        assert_eq!(spans("Cafe\u{301} — 🧑‍💻").collect::<Vec<_>>(), [
+            (0, "Caf", true), (3, "e\u{301}", false), (6, " ", true), (7, "—", false),
+            (10, " ", true), (11, "🧑‍💻", false),
+        ]);
+    }
+
+    #[test]
     fn unicode_missing_fonts_and_hover_keep_one_bit_pixels_and_cached_titles() {
         let engine = RasterThemeEngine::with_fonts(crate::default_theme::nextstep_classic(), FontState::new())
             .with_style(DecorationStyle::System7).unwrap();
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            for title in ["Café Ångström", "Terminal — Живет 中文 日本語 العربية 🦀 \u{10ffff}"] {
+            for title in ["Café Ångström", "Cafe\u{301} — Живет 中文 日本語 العربية 🧑‍💻 \u{10ffff}"] {
                 let mut request = DecorationRequest { content_size: Size::new(800, 600), title: title.into(),
                     focused: true, resizable: true, buttons: vec![ButtonRuntimeState {
                         kind: ButtonKind::Close, hovered: false, pressed: false,

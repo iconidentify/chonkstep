@@ -959,7 +959,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             }
             for (id, record) in &backend.frames {
                 reply.push_str(&format!(
-                    "frame id={} window={} x={} y={} w={} h={} mapped={}\n",
+                    "frame id={} window={} x={} y={} w={} h={} mapped={} input_margin={}\n",
                     id.0,
                     record.window.0,
                     record.geometry.pos.x,
@@ -967,6 +967,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     record.geometry.size.w,
                     record.geometry.size.h,
                     record.mapped,
+                    record.input_margin,
                 ));
             }
             // Shell surfaces too — the dock, the pager, menus. The

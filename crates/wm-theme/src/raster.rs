@@ -202,6 +202,8 @@ pub struct RasterThemeEngine {
     theme: Theme,
     style: FrameStyle,
     system7_roles: system7::Roles,
+    system7_metrics: system7::Metrics,
+    scaled_system7_metrics: RefCell<HashMap<u32, system7::Metrics>>,
     fonts: FontState,
     base_scale: f32,
     scaled_themes: RefCell<HashMap<u32, Theme>>,
@@ -237,6 +239,8 @@ impl RasterThemeEngine {
         }
         Self {
             system7_roles: system7::Roles::from_theme(&theme),
+            system7_metrics: system7::Metrics::new(base_scale),
+            scaled_system7_metrics: RefCell::new(HashMap::new()),
             theme,
             style: FrameStyle::WindowMaker,
             fonts,
@@ -287,7 +291,7 @@ impl ThemeEngine for RasterThemeEngine {
     fn layout(&self, request: &DecorationRequest) -> DecorationLayout {
         match self.style {
             FrameStyle::WindowMaker => windowmaker::layout_decoration(&self.theme, request),
-            FrameStyle::System7 => system7::layout(request, self.base_scale),
+            FrameStyle::System7 => system7::layout(request, self.system7_metrics),
         }
     }
 
@@ -305,7 +309,11 @@ impl ThemeEngine for RasterThemeEngine {
         if same_scale(scale, self.base_scale) {
             return self.layout(request);
         }
-        if matches!(self.style, FrameStyle::System7) { return system7::layout(request, scale); }
+        if matches!(self.style, FrameStyle::System7) {
+            let key = normalized_scale(scale).to_bits();
+            let mut metrics = self.scaled_system7_metrics.borrow_mut();
+            return system7::layout(request, *metrics.entry(key).or_insert_with(|| system7::Metrics::new(scale)));
+        }
         let key = normalized_scale(scale).to_bits();
         let mut themes = self.scaled_themes.borrow_mut();
         let theme = themes.entry(key).or_insert_with(|| self.theme.scaled(scale / self.base_scale));

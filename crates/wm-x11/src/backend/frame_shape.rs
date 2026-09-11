@@ -45,7 +45,7 @@ impl X11Backend {
             // blocks. Measure the top band's trailing transparent run once
             // per paint; all other bands and the client remain within shape.
             shape.corner = surface.parts.first().map_or(0, |part| {
-                part.buffer.pixels[..part.buffer.width as usize * 4].as_chunks::<4>().0.iter()
+                part.buffer.pixels.get(..part.buffer.width as usize * 4).unwrap_or_default().as_chunks::<4>().0.iter()
                     .rev().take_while(|pixel| pixel[3] == 0).count() as u32
             });
         }
@@ -78,7 +78,8 @@ impl X11Backend {
         }
         if shape.ring.is_none() {
             let Ok(ring) = self.conn.generate_id() else { return; };
-            let aux = CreateWindowAux::new().override_redirect(1).event_mask(
+            let cursor = self.cursors.for_edge(self.frame_cursor.get(&frame).copied().flatten());
+            let aux = CreateWindowAux::new().override_redirect(1).cursor(cursor).event_mask(
                 EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION | EventMask::ENTER_WINDOW);
             if self.conn.create_window(0, ring, self.root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &aux).is_err() { return; }
             shape.ring = Some(ring);

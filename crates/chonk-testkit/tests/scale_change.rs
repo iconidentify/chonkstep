@@ -172,7 +172,8 @@ fn assert_pixels(s: &mut Session, w: u32, h: u32) {
     );
     // The theme's top band must actually reach the new right edge.
     let bar_y = (f.y + (c.y - f.y) / 2) as u32;
-    let near_right = image.pixel((f.x + f.w as i32 - 8) as u32, bar_y);
-    let outside = image.pixel((f.x + f.w as i32 + 8) as u32, bar_y);
+    let visual_right = f.x + f.w as i32 - f.input_margin as i32;
+    let near_right = image.pixel((visual_right - 8) as u32, bar_y);
+    let outside = image.pixel((visual_right + 8) as u32, bar_y);
     assert_ne!(near_right, outside, "titlebar stopped short of its frame");
 }

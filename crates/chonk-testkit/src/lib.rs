@@ -1091,6 +1091,8 @@ pub struct FrameInfo {
     pub w: u32,
     pub h: u32,
     pub mapped: bool,
+    /// Transparent input-only margin outside the visible chrome.
+    pub input_margin: u32,
 }
 
 /// A parsed `shell` line: a desktop-owned surface — the dock, the
@@ -2031,6 +2033,7 @@ fn parse_frame_line(line: &str) -> Option<FrameInfo> {
         w: field(line, "w=")?,
         h: field(line, "h=")?,
         mapped: field(line, "mapped=")?,
+        input_margin: field(line, "input_margin=").unwrap_or_default(),
     })
 }
 
