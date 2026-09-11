@@ -1,0 +1,632 @@
+[
+  {
+    "file": "doc-short-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-short-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-long-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-long-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-empty-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-empty-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-latin-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-latin-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-close-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": "Close",
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-short-shaded-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-close-shaded-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": "Close",
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-short-shaded-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-long-shaded-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-long-shaded-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-empty-shaded-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-empty-shaded-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-latin-shaded-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "doc-latin-shaded-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-short-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-short-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-long-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-long-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-empty-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-empty-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-latin-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-latin-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-close-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Close",
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-zoom-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Maximize",
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-short-shaded-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-close-shaded-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Close",
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-zoom-shaded-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Maximize",
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-short-shaded-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-long-shaded-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-long-shaded-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-empty-shaded-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-empty-shaded-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-latin-shaded-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-latin-shaded-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "zoom-screen-edge.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      622,
+      525,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "glyph-ascii.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "glyph-macroman-128-223.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  },
+  {
+    "file": "glyph-macroman-224-255.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ]
+  }
+]

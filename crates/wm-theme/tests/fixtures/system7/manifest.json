@@ -1,0 +1,9794 @@
+[
+  {
+    "file": "doc-short-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-short-active.png",
+    "source_sha256": "cc3d9893f049c952a200b327cafd967766453914e6abb5eb09a9afedb555e9a4",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-short-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-short-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-short-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/doc-short-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-short-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-short-inactive.png",
+    "source_sha256": "bf63569685b1132ae7813078dce9a2315eefddd44c14f4884b1544c2c7cfa72f",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-short-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-short-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-short-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/doc-short-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-long-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-long-active.png",
+    "source_sha256": "ef6b68fd7e646c0e147303e8381f211a74372231275eb44aaa32396f2ee3b5ac",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-long-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-long-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-long-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/doc-long-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-long-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-long-inactive.png",
+    "source_sha256": "ee54578467979ddddc4ed7b57dfa0925e5f80448e8df5f7ad596ca1eb631e8d4",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-long-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-long-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-long-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/doc-long-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-empty-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-empty-active.png",
+    "source_sha256": "77dd15ccc54f115f3a30417239900181c9c69e3af25d2e33624c7b5f5d82beab",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-empty-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-empty-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-empty-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/doc-empty-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-empty-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-empty-inactive.png",
+    "source_sha256": "02ea6c28521318f78687d2b9e2b75561c5648a634c4f27d0e7fbeae0f8a6f495",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-empty-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-empty-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-empty-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/doc-empty-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-latin-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-latin-active.png",
+    "source_sha256": "98ce1a5c3bf15c1533228d04f8e4681f41d736f8bcfdf217aa1af4a1ca5e5e28",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-latin-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-latin-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-latin-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/doc-latin-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-latin-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-latin-inactive.png",
+    "source_sha256": "d90642b287d3d5bb331d72bd24a67acb0b6b1e0b7075075a1f71308751e29825",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-latin-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-latin-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-latin-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/doc-latin-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-close-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": "Close",
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-close-pressed.png",
+    "source_sha256": "b167c7bc315b6615c21ec6e84d5877e600b972c00a1be9ca5957b60f7e1dcb86",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-close-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-close-pressed-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-close-pressed-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/doc-close-pressed-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": true,
+          "pressed": true
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-short-shaded-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-short-shaded-active.png",
+    "source_sha256": "c132e831d28afa654b7cbb0290a0f622429bbc7f292da934e881a82f2d14a5c3",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-short-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-short-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-close-shaded-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": "Close",
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-close-shaded-pressed.png",
+    "source_sha256": "de77b3ca91b846908e882e2999d5abf45093fa433a100b4566d266d871dcd966",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-close-shaded-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-close-shaded-pressed-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": true,
+          "pressed": true
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-short-shaded-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-short-shaded-inactive.png",
+    "source_sha256": "5d94d9e1728fd91bef138c6ec9058638c356263c380d14a582b498d8950d8fcf",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-short-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-short-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-long-shaded-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-long-shaded-active.png",
+    "source_sha256": "81a36e27152bfac9cfb956f062b883a275862eaf4a4d3c0fa9387ef9acb9430d",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-long-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-long-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-long-shaded-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-long-shaded-inactive.png",
+    "source_sha256": "d40c8564ae0cc5c2d4911f8fc95b5700cd4d32bc9f3285b0e8090229dad57d63",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-long-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-long-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-empty-shaded-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-empty-shaded-active.png",
+    "source_sha256": "2ccdbbd27b7eb5f972236c95ddecf4f5fca2907874eb56e92ec051a83fb68eb5",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-empty-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-empty-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-empty-shaded-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-empty-shaded-inactive.png",
+    "source_sha256": "fcf8a8d9755c9c24919e5b6419ba4521618841d3c80928d1733fbeb95628bdab",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-empty-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-empty-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-latin-shaded-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-latin-shaded-active.png",
+    "source_sha256": "c0ad7436367fb4f0035f640cb72cc134961a3c640792c8750973c31c319226f8",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-latin-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-latin-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-latin-shaded-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/doc-latin-shaded-inactive.png",
+    "source_sha256": "f77b5ab95c41ded387e57ccc573dbe40ea379adef2272edd878856a0a70fa22a",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/doc-latin-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/doc-latin-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-short-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-short-active.png",
+    "source_sha256": "6fefdcce6398961d27491eb8d08b618662ba9549d1ce466248cde8232df51139",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-short-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-short-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-short-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-short-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-short-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-short-inactive.png",
+    "source_sha256": "bf63569685b1132ae7813078dce9a2315eefddd44c14f4884b1544c2c7cfa72f",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-short-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-short-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-short-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-short-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-long-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-long-active.png",
+    "source_sha256": "37a7d2f39763e87c66e46a6c0b599a163c284914a3e16c6435ac696f58bfa670",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-long-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-long-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-long-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-long-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-long-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-long-inactive.png",
+    "source_sha256": "ee54578467979ddddc4ed7b57dfa0925e5f80448e8df5f7ad596ca1eb631e8d4",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-long-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-long-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-long-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-long-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-empty-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-empty-active.png",
+    "source_sha256": "67297b0a2023a27073c5afc9364e6e40174ac34aa03f6fba1b3db1e6d96dc9bd",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-empty-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-empty-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-empty-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-empty-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-empty-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-empty-inactive.png",
+    "source_sha256": "02ea6c28521318f78687d2b9e2b75561c5648a634c4f27d0e7fbeae0f8a6f495",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-empty-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-empty-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-empty-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-empty-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-latin-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-latin-active.png",
+    "source_sha256": "e52d6153651321b0d489f210e858640bc1f6a87a9b2ffb47663939c6dddfe4f3",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-latin-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-latin-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-latin-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-latin-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-latin-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-latin-inactive.png",
+    "source_sha256": "d90642b287d3d5bb331d72bd24a67acb0b6b1e0b7075075a1f71308751e29825",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-latin-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-latin-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-latin-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-latin-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-close-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Close",
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-close-pressed.png",
+    "source_sha256": "6313cc7b78e004016299dc83d990a61b6f36a57f223690094ee32e8303ec585f",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-close-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-close-pressed-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-close-pressed-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-close-pressed-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": true,
+          "pressed": true
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-zoom-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Maximize",
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-zoom-pressed.png",
+    "source_sha256": "6210435c7ada044ca6bd90781bb5561adb85a9d31961b6445cd26369b3954d43",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-zoom-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-zoom-pressed-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-zoom-pressed-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-zoom-pressed-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": true,
+          "pressed": true
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-short-shaded-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-short-shaded-active.png",
+    "source_sha256": "97063a41cf00e98a8f6be12e038761bcba9d2b5352047ace683de505ccea55e5",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-short-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-short-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-close-shaded-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Close",
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-close-shaded-pressed.png",
+    "source_sha256": "e80e2f2cbcd15efffa72aaee63ea4011e64be0cf28097917439f034b0273a866",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-close-shaded-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-close-shaded-pressed-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": true,
+          "pressed": true
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-zoom-shaded-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Maximize",
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-zoom-shaded-pressed.png",
+    "source_sha256": "814c7d2ea797b036ec4afb5420a28921e45d8bb04bc37bf3bfcd54b209022665",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-zoom-shaded-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-zoom-shaded-pressed-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": true,
+          "pressed": true
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-short-shaded-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-short-shaded-inactive.png",
+    "source_sha256": "5d94d9e1728fd91bef138c6ec9058638c356263c380d14a582b498d8950d8fcf",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-short-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-short-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-long-shaded-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-long-shaded-active.png",
+    "source_sha256": "642a6aa0520b481d2aa0655099de5a57bc73a424e5a5a2d913275c1e6b84e213",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-long-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-long-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-long-shaded-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-long-shaded-inactive.png",
+    "source_sha256": "d40c8564ae0cc5c2d4911f8fc95b5700cd4d32bc9f3285b0e8090229dad57d63",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-long-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-long-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-empty-shaded-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-empty-shaded-active.png",
+    "source_sha256": "63fbb4c389f96b06ab53a1fc1e220981890154ce26cda7afbce19c90e345a1ce",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-empty-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-empty-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-empty-shaded-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-empty-shaded-inactive.png",
+    "source_sha256": "fcf8a8d9755c9c24919e5b6419ba4521618841d3c80928d1733fbeb95628bdab",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-empty-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-empty-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-latin-shaded-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-latin-shaded-active.png",
+    "source_sha256": "1b58b92cb7d36975731427a959b876672a4dec4de9753406b202d8c72905f016",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-latin-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-latin-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-latin-shaded-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-latin-shaded-inactive.png",
+    "source_sha256": "f77b5ab95c41ded387e57ccc573dbe40ea379adef2272edd878856a0a70fa22a",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-latin-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-latin-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-screen-edge.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      622,
+      525,
+      400,
+      240
+    ],
+    "source": "1bit/zoom-screen-edge.png",
+    "source_sha256": "b4bf027c38a9eaaebc01e5eb771232a8d3bd8aaa124fe6913893900201a8d4d0",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/zoom-screen-edge-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          621,
+          506,
+          1024,
+          525
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-screen-edge-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          621,
+          765,
+          1024,
+          767
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/zoom-screen-edge-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          621,
+          525,
+          622,
+          765
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/zoom-screen-edge-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          1022,
+          525,
+          1024,
+          765
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "glyph-ascii.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/glyph-ascii.png",
+    "source_sha256": "6fefdcce6398961d27491eb8d08b618662ba9549d1ce466248cde8232df51139",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/glyph-ascii-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/glyph-ascii-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/glyph-ascii-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/glyph-ascii-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "glyph-macroman-128-223.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/glyph-macroman-128-223.png",
+    "source_sha256": "67f87da9c77d2b17a6c7a4a04657947ffa0db911fdbd750168ef58630b7b88cd",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/glyph-macroman-128-223-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/glyph-macroman-128-223-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/glyph-macroman-128-223-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/glyph-macroman-128-223-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "glyph-macroman-224-255.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "1bit/glyph-macroman-224-255.png",
+    "source_sha256": "41f81bd5fc6a85fadf5210bf757508bdca0aba91eab3065b6385b58f9d7c15a8",
+    "depth": "1bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "1bit/glyph-macroman-224-255-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "1bit/glyph-macroman-224-255-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "1bit/glyph-macroman-224-255-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "1bit/glyph-macroman-224-255-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-short-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-short-active.png",
+    "source_sha256": "ce86115297a8f7d601326dbe1ab9c8621968d28d3280e3a8c589df1b7b0489b2",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-short-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-short-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-short-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/doc-short-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-short-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-short-inactive.png",
+    "source_sha256": "6a5406fcb6e1b4c7703e24f6f541cd608c81309214396dbbb4602602a969c136",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-short-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-short-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-short-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/doc-short-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-long-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-long-active.png",
+    "source_sha256": "5467f1a4ebfe15017b8fbf1107fa8493384ce245c6a9420714426b177f34ddb7",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-long-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-long-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-long-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/doc-long-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-long-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-long-inactive.png",
+    "source_sha256": "e73fc5f559baee66c8215693e3db71e44f210b5697d2ec0d49906323f0fcbfa1",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-long-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-long-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-long-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/doc-long-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-empty-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-empty-active.png",
+    "source_sha256": "bb529d2b34de6af1809da964abb457bb9df42c1cc3297fd80fd5f281fef9cb3d",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-empty-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-empty-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-empty-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/doc-empty-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-empty-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-empty-inactive.png",
+    "source_sha256": "3da0639229a8c3db237ad6ba32fdf98eedceec853c715cde5897eb0b6ad71286",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-empty-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-empty-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-empty-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/doc-empty-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-latin-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-latin-active.png",
+    "source_sha256": "91090f3f23df1e55af15ace4c0b2ed7afb0c33e646cf208e4e6f1f68b7a54482",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-latin-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-latin-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-latin-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/doc-latin-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-latin-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-latin-inactive.png",
+    "source_sha256": "dd39821b2b62811a107af16edf1d814214a9a3e2ee132da69dd26b0b1c151f15",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-latin-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-latin-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-latin-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/doc-latin-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-close-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": "Close",
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-close-pressed.png",
+    "source_sha256": "05999899f7a3fca55c6af8e9e19dee78860140479474dfc40983f5ae45402d16",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-close-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-close-pressed-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-close-pressed-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/doc-close-pressed-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": true,
+          "pressed": true
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-short-shaded-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-short-shaded-active.png",
+    "source_sha256": "db6ca0a083534b2f907e8b36f625fd0fbe72896d65a02b6774c1a926d78c326c",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-short-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-short-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-close-shaded-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": "Close",
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-close-shaded-pressed.png",
+    "source_sha256": "26df2ee3b17c1291910d1325b5f1f7a99e3db5ce07cd24b5873c0bba5861e68b",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-close-shaded-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-close-shaded-pressed-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": true,
+          "pressed": true
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-short-shaded-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-short-shaded-inactive.png",
+    "source_sha256": "2f967f0839d9168761bdb6164872f6098d4ff4f059082558b9c0e712d0547c2c",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-short-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-short-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-long-shaded-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-long-shaded-active.png",
+    "source_sha256": "1b9d130165e36696b34b2a5e4b568622135314714161c25da6146fae2f50b2e3",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-long-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-long-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-long-shaded-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-long-shaded-inactive.png",
+    "source_sha256": "5b957e4fa5dd33bcdee323e01ecaf18532446a7033b3830ddb25f7c5381073cb",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-long-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-long-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-empty-shaded-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-empty-shaded-active.png",
+    "source_sha256": "f1d392e1433d8170437d712a372baa77583f514db035a265a10ed0ee5cafc759",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-empty-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-empty-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-empty-shaded-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-empty-shaded-inactive.png",
+    "source_sha256": "f5bb53c205b21e725bb8a1dd025bb236039301434cc4e0bf58e56a2e8afb440a",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-empty-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-empty-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-latin-shaded-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-latin-shaded-active.png",
+    "source_sha256": "522e433a8e766b3695835cc0a25cbe541b87ba460965e4bc33292e2fcaf6b8dd",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-latin-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-latin-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": true,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "doc-latin-shaded-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": false,
+    "proc_id": 0,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/doc-latin-shaded-inactive.png",
+    "source_sha256": "a4fe8981e2d25f66a36e474c1af2dd33c520ada9343304bbac57c7fb7bf8ea32",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/doc-latin-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/doc-latin-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": false,
+      "resizable": false,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-short-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-short-active.png",
+    "source_sha256": "c8d543c37d2f25ef1ee229fc76e0c941ed7602100d1c38a32deaf5caec8389b2",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-short-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-short-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-short-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-short-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-short-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-short-inactive.png",
+    "source_sha256": "6a5406fcb6e1b4c7703e24f6f541cd608c81309214396dbbb4602602a969c136",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-short-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-short-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-short-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-short-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-long-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-long-active.png",
+    "source_sha256": "cda947eda076d719db520aa02fe851541ab730f34c878d6ee51963c1233af641",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-long-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-long-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-long-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-long-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-long-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-long-inactive.png",
+    "source_sha256": "e73fc5f559baee66c8215693e3db71e44f210b5697d2ec0d49906323f0fcbfa1",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-long-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-long-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-long-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-long-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-empty-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-empty-active.png",
+    "source_sha256": "d48077c46a9df75bf99e487f898d8a3b96241a2cf2176a515fee95d75989cf0b",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-empty-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-empty-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-empty-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-empty-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-empty-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-empty-inactive.png",
+    "source_sha256": "3da0639229a8c3db237ad6ba32fdf98eedceec853c715cde5897eb0b6ad71286",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-empty-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-empty-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-empty-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-empty-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-latin-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-latin-active.png",
+    "source_sha256": "5ddf48f97dbd1b7335767b3e74b33dc0f1b255ec5cba1efdd0e0f0967dadf27c",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-latin-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-latin-active-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-latin-active-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-latin-active-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-latin-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-latin-inactive.png",
+    "source_sha256": "dd39821b2b62811a107af16edf1d814214a9a3e2ee132da69dd26b0b1c151f15",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-latin-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-latin-inactive-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-latin-inactive-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-latin-inactive-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-close-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Close",
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-close-pressed.png",
+    "source_sha256": "0857a1ddd5d4d305d3d3c20ca8588b534dd10464a9309b16bfd6dd16c9d1fb79",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-close-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-close-pressed-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-close-pressed-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-close-pressed-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": true,
+          "pressed": true
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-zoom-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Maximize",
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-zoom-pressed.png",
+    "source_sha256": "ac828834190ddae7834c40d8a2494c893d4f79e31f50e4d2d4133c437f15643a",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-zoom-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-zoom-pressed-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-zoom-pressed-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-zoom-pressed-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": true,
+          "pressed": true
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-short-shaded-active.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-short-shaded-active.png",
+    "source_sha256": "01edd40cdf0067aadfb2f146af58dddab8d1423aae3b7312710e5ad7c163c4d8",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-short-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-short-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-close-shaded-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Close",
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-close-shaded-pressed.png",
+    "source_sha256": "0118dbfc2e94159eecfc7fb3d3ddd9e1d711e0200187951d641f1b9c487023d0",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-close-shaded-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-close-shaded-pressed-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": true,
+          "pressed": true
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-zoom-shaded-pressed.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": "Maximize",
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-zoom-shaded-pressed.png",
+    "source_sha256": "ddc05abfde4e8c019e8a9a53e278f18b68f8d7af8dbdf7a0a66c3e7751da687b",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-zoom-shaded-pressed-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-zoom-shaded-pressed-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": true,
+          "pressed": true
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-short-shaded-inactive.png",
+    "title": "Terminal",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-short-shaded-inactive.png",
+    "source_sha256": "2f967f0839d9168761bdb6164872f6098d4ff4f059082558b9c0e712d0547c2c",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-short-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-short-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Terminal",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-long-shaded-active.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-long-shaded-active.png",
+    "source_sha256": "0f31809b22bfb82a29648c7af169bc3143ccfd5fa668f4d0ab66e0201d5889c2",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-long-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-long-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-long-shaded-inactive.png",
+    "title": "A deliberately long document title that reaches beyond the available title bar width",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-long-shaded-inactive.png",
+    "source_sha256": "5b957e4fa5dd33bcdee323e01ecaf18532446a7033b3830ddb25f7c5381073cb",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-long-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-long-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "A deliberately long document title that reaches beyond the available title bar width",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-empty-shaded-active.png",
+    "title": "",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-empty-shaded-active.png",
+    "source_sha256": "c60f17566f3e21e97a9929aba8f0e4f9b4dc2f80126dc8aa94974e46c92dd7c9",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-empty-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-empty-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-empty-shaded-inactive.png",
+    "title": "",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-empty-shaded-inactive.png",
+    "source_sha256": "f5bb53c205b21e725bb8a1dd025bb236039301434cc4e0bf58e56a2e8afb440a",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-empty-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-empty-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-latin-shaded-active.png",
+    "title": "Café - naïve - Ångström",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-latin-shaded-active.png",
+    "source_sha256": "5831fb1c05e9bea5d8d3b73a5fd456c85b8f18c5a4c3008674baf523185f1330",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-latin-shaded-active-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-latin-shaded-active-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-latin-shaded-inactive.png",
+    "title": "Café - naïve - Ångström",
+    "focused": false,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": true,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-latin-shaded-inactive.png",
+    "source_sha256": "a4fe8981e2d25f66a36e474c1af2dd33c520ada9343304bbac57c7fb7bf8ea32",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      20
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-latin-shaded-inactive-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-latin-shaded-inactive-bottom.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          522,
+          141
+        ],
+        "size": [
+          403,
+          1
+        ],
+        "transparent": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        0
+      ],
+      "title": "Café - naïve - Ångström",
+      "focused": false,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "zoom-screen-edge.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      622,
+      525,
+      400,
+      240
+    ],
+    "source": "8bit/zoom-screen-edge.png",
+    "source_sha256": "74d1f4e7c5fa504119a3f6163d624c8dd264692396b19f89da5344617970459c",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/zoom-screen-edge-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          621,
+          506,
+          1024,
+          525
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-screen-edge-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          621,
+          765,
+          1024,
+          767
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/zoom-screen-edge-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          621,
+          525,
+          622,
+          765
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/zoom-screen-edge-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          1022,
+          525,
+          1024,
+          765
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "glyph-ascii.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/glyph-ascii.png",
+    "source_sha256": "c8d543c37d2f25ef1ee229fc76e0c941ed7602100d1c38a32deaf5caec8389b2",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/glyph-ascii-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/glyph-ascii-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/glyph-ascii-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/glyph-ascii-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "glyph-macroman-128-223.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/glyph-macroman-128-223.png",
+    "source_sha256": "11d0170c987c2cbb2f8f839809e9cd3a1057cac94ddad57748947d97949c949a",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/glyph-macroman-128-223-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/glyph-macroman-128-223-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/glyph-macroman-128-223-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/glyph-macroman-128-223-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "glyph-macroman-224-255.png",
+    "title": "Terminal",
+    "focused": true,
+    "resizable": true,
+    "proc_id": 8,
+    "pressed": null,
+    "shaded": false,
+    "content": [
+      120,
+      140,
+      400,
+      240
+    ],
+    "source": "8bit/glyph-macroman-224-255.png",
+    "source_sha256": "c0b50248bc85d9183469272b93d7fb3264bd4d8d96c97d40b7cb5997992b9668",
+    "depth": "8bit",
+    "frame_size": [
+      403,
+      261
+    ],
+    "client_offset": [
+      1,
+      19
+    ],
+    "titlebar_height": 18,
+    "parts": [
+      {
+        "file": "8bit/glyph-macroman-224-255-top.png",
+        "offset": [
+          0,
+          0
+        ],
+        "source_crop": [
+          119,
+          121,
+          522,
+          140
+        ],
+        "size": [
+          403,
+          19
+        ],
+        "transparent": [
+          [
+            402,
+            0
+          ]
+        ]
+      },
+      {
+        "file": "8bit/glyph-macroman-224-255-bottom.png",
+        "offset": [
+          0,
+          259
+        ],
+        "source_crop": [
+          119,
+          380,
+          522,
+          382
+        ],
+        "size": [
+          403,
+          2
+        ],
+        "transparent": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      {
+        "file": "8bit/glyph-macroman-224-255-left.png",
+        "offset": [
+          0,
+          19
+        ],
+        "source_crop": [
+          119,
+          140,
+          120,
+          380
+        ],
+        "size": [
+          1,
+          240
+        ],
+        "transparent": []
+      },
+      {
+        "file": "8bit/glyph-macroman-224-255-right.png",
+        "offset": [
+          401,
+          19
+        ],
+        "source_crop": [
+          520,
+          140,
+          522,
+          380
+        ],
+        "size": [
+          2,
+          240
+        ],
+        "transparent": []
+      }
+    ],
+    "style": "system7",
+    "scale": 1,
+    "palette": "classic",
+    "request": {
+      "content_size": [
+        400,
+        240
+      ],
+      "title": "Terminal",
+      "focused": true,
+      "resizable": true,
+      "buttons": [
+        {
+          "kind": "Close",
+          "hovered": false,
+          "pressed": false
+        },
+        {
+          "kind": "Maximize",
+          "hovered": false,
+          "pressed": false
+        }
+      ]
+    }
+  }
+]

@@ -45,6 +45,12 @@ fn resident_engine_rebuild_does_no_file_or_process_io() {
         #[allow(clippy::disallowed_methods)]
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "resident_engine_rebuild_does_no_file_or_process_io", "--nocapture"])
+            // libtest runs this body on a helper thread. Glibc's secondary
+            // arena can lazily open /proc/sys/vm/overcommit_memory when first
+            // shrinking, unrelated to font I/O (reproduced in Arch CI).
+            // Give this disposable process one arena, as a main-thread-only
+            // compositor has. Keep every syscall denial and negative control.
+            .env("GLIBC_TUNABLES", "glibc.malloc.arena_max=1")
             .env("CHONK_DECORATION_IO_CHILD", mode)
             .output().unwrap();
         assert_eq!(output.status.signal(), signal,

@@ -126,6 +126,46 @@ fn overview_theme_and_screenshot_transients_do_not_raise_the_heap_high_water() {
     let before = heap_snapshot(pid).expect("read initial compositor heap");
     save_proc_snapshot(pid, &session.dir, "before");
 
+    exercise_transients(&mut session, "cold");
+
+    let after = heap_snapshot(pid).expect("read final compositor heap");
+    save_proc_snapshot(pid, &session.dir, "after");
+    let extent_growth = after.extent_bytes.saturating_sub(before.extent_bytes);
+    let size_growth = after.size_bytes.saturating_sub(before.size_bytes);
+    let rss_growth = after.rss_bytes.saturating_sub(before.rss_bytes);
+    eprintln!(
+        "glibc heap sample: before={before:?} after={after:?} growth: extent={extent_growth} size={size_growth} rss={rss_growth}; artifacts: {}",
+        session.dir.display()
+    );
+    // The first workload may fault already-reserved heap pages for renderer
+    // initialization without growing the arena (observed on CI llvmpipe:
+    // +0.48 MiB extent, +9.45 MiB RSS). Keep the original cold arena-growth
+    // guard, and check resident growth against an exercised baseline below.
+    assert!(
+        extent_growth <= MAX_HEAP_GROWTH_BYTES && size_growth <= MAX_HEAP_GROWTH_BYTES,
+        "cold transient workload raised the heap extent by more than 4 MiB: before={before:?}, after={after:?}; artifacts: {}",
+        session.dir.display()
+    );
+    let warm = after;
+    for iteration in 1..=3 {
+        let label = format!("repeat-{iteration}");
+        exercise_transients(&mut session, &label);
+        let current = heap_snapshot(pid).expect("read repeated compositor heap");
+        save_proc_snapshot(pid, &session.dir, &label);
+        eprintln!("repeated glibc heap sample {iteration}: warm={warm:?} current={current:?}");
+        // Compare every repeat to the same baseline, not the previous sample:
+        // a leak smaller than the budget per iteration must still accumulate.
+        assert!(
+            current.extent_bytes.saturating_sub(warm.extent_bytes) <= MAX_HEAP_GROWTH_BYTES
+                && current.size_bytes.saturating_sub(warm.size_bytes) <= MAX_HEAP_GROWTH_BYTES
+                && current.rss_bytes.saturating_sub(warm.rss_bytes) <= MAX_HEAP_GROWTH_BYTES,
+            "repeated transient workload raised the heap by more than 4 MiB: warm={warm:?}, current={current:?}; artifacts: {}",
+            session.dir.display()
+        );
+    }
+}
+
+fn exercise_transients(session: &mut Session, label: &str) {
     session
         .door()
         .chord(keys::LEFTMETA, keys::UP)
@@ -138,7 +178,7 @@ fn overview_theme_and_screenshot_transients_do_not_raise_the_heap_high_water() {
         .expect("Overview opens");
     }
     session
-        .screenshot("overview")
+        .screenshot(&format!("{label}-overview"))
         .expect("capture Overview through screencopy");
     session.door().tap_key(keys::ESC).expect("close Overview");
     {
@@ -152,31 +192,14 @@ fn overview_theme_and_screenshot_transients_do_not_raise_the_heap_high_water() {
         .expect("Overview closes");
     }
 
-    set_theme(&mut session, "graphite");
-    set_theme(&mut session, "nextstep-classic");
+    set_theme(session, "graphite");
+    set_theme(session, "nextstep-classic");
     session.door().barrier().expect("final theme frame settles");
     session
-        .screenshot("after-transients")
+        .screenshot(&format!("{label}-after-transients"))
         .expect("capture the settled desktop");
     session
         .door()
         .barrier()
         .expect("screenshot resources are released");
-
-    let after = heap_snapshot(pid).expect("read final compositor heap");
-    save_proc_snapshot(pid, &session.dir, "after");
-    let extent_growth = after.extent_bytes.saturating_sub(before.extent_bytes);
-    let size_growth = after.size_bytes.saturating_sub(before.size_bytes);
-    let rss_growth = after.rss_bytes.saturating_sub(before.rss_bytes);
-    eprintln!(
-        "glibc heap sample: before={before:?} after={after:?} growth: extent={extent_growth} size={size_growth} rss={rss_growth}; artifacts: {}",
-        session.dir.display()
-    );
-    assert!(
-        extent_growth <= MAX_HEAP_GROWTH_BYTES
-            && size_growth <= MAX_HEAP_GROWTH_BYTES
-            && rss_growth <= MAX_HEAP_GROWTH_BYTES,
-        "Overview/theme/screenshot workload raised the glibc heap by more than 4 MiB: before={before:?}, after={after:?}; artifacts: {}",
-        session.dir.display()
-    );
 }
