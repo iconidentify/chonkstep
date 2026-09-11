@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+#[path = "capture_tool/demo.rs"]
+mod demo;
+
 fn shortcut(session: &mut Session, number: u32) {
     session.door().key(125, true).unwrap();
     session.door().key(29, true).unwrap();
@@ -42,6 +45,22 @@ fn saved(directory: &Path, count: usize, extension: &str) -> PathBuf {
         (found.len() == count).then(|| found.last().unwrap().clone())
     })
     .unwrap()
+}
+
+fn assert_keyframe_spacing(path: &Path) {
+    let output = Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0",
+        "-skip_frame", "nokey", "-show_entries", "frame=pts_time:format=duration", "-of", "json"])
+        .arg(path).output().unwrap();
+    assert!(output.status.success());
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let times: Vec<f64> = info["frames"].as_array().unwrap().iter()
+        .map(|frame| frame["pts_time"].as_str().unwrap().parse().unwrap()).collect();
+    let duration: f64 = info["format"]["duration"].as_str().unwrap().parse().unwrap();
+    assert!(duration >= 2.0, "exercise multiple GOPs");
+    assert!(times.len() >= duration.floor() as usize, "one keyframe per second: {times:?}, duration={duration}");
+    assert!(times[0] < 0.05);
+    assert!(times.windows(2).all(|pair| pair[1] - pair[0] <= 1.025), "keyframe gaps: {times:?}");
+    assert!(duration - times.last().unwrap() <= 1.05, "the final GOP also remains bounded");
 }
 
 fn boot(name: &str, scale: f32) -> Session {
@@ -596,7 +615,11 @@ fn recording_odd_area_is_playable_and_controls_are_excluded() {
         .unwrap();
     session.door().button("left", false).unwrap();
     session.door().tap_key(28).unwrap(); // Enter starts recording
-    diagnostic(&mut session, "recording-indicator");
+    let indicator = diagnostic(&mut session, "recording-indicator");
+    let boundary = indicator.pixel(430, 120);
+    assert!(boundary[..3].iter().all(|&c| c > 230), "the recording boundary stays visible: {boundary:?}");
+    let clean = session.screenshot("recording-clean").unwrap();
+    assert_eq!(clean.pixel(430, 120), before.pixel(430, 120), "normal screencopy excludes the boundary");
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
         session.door().motion(100.0, 100.0).unwrap();
@@ -605,6 +628,7 @@ fn recording_odd_area_is_playable_and_controls_are_excluded() {
     }
     shortcut(&mut session, 5); // Stop / finish
     let path = saved(&exports, 1, "mp4");
+    assert_keyframe_spacing(&path);
     reviews_opened(&session, &[("omacut", &path)]);
     let preview_path = notification_preview(&session, &path, "Recording saved");
     assert!(preview_path.starts_with(session.dir.join("cache/chonkstep/capture-previews")));
@@ -649,6 +673,10 @@ fn recording_odd_area_is_playable_and_controls_are_excluded() {
         .unwrap()
         .success());
     let frame = Screenshot::load(&frame_path).unwrap();
+    for channel in 0..3 {
+        assert!(frame.pixel(0, 110)[channel].abs_diff(before.pixel(430, 120)[channel]) < 12,
+            "the visible region boundary must not be encoded");
+    }
     // This point is underneath the visible recording badge, not merely outside
     // the selected region. Its original desktop pixels must survive in video.
     let expected = before.pixel(500, 25);
@@ -1011,6 +1039,11 @@ fn toolbar_screen_modes_work_without_moving_off_the_toolbar_and_badge_stops() {
     shortcut(&mut session, 5);
     session.door().tap_key(5).unwrap(); // 4 -> record display
     session.door().tap_key(28).unwrap();
+    let indicator = diagnostic(&mut session, "fullscreen-recording-boundary");
+    for (x, y) in [(0, world.output_h / 2), (world.output_w - 1, world.output_h / 2),
+        (world.output_w / 2, world.output_h - 1)] {
+        assert!(indicator.pixel(x, y)[..3].iter().all(|&c| c > 230), "fullscreen boundary is inside the output");
+    }
     poll_until(Duration::from_secs(10), "recorder creates data", || {
         std::fs::read_dir(&exports)
             .ok()?
@@ -1073,4 +1106,34 @@ fn toolbar_screen_modes_work_without_moving_off_the_toolbar_and_badge_stops() {
         .status()
         .unwrap()
         .success());
+}
+
+#[test]
+#[ignore = "needs nested Wayland, wf-recorder and ffmpeg"]
+fn region_recording_boundary_is_click_through_and_disappears_after_finishing() {
+    let mut session = boot("capture-boundary-input", 2.0);
+    let probe = profile_binary("chonk-input-probe").unwrap();
+    session.launch(probe.to_str().unwrap(), &["2"]).unwrap();
+    let window = session.wait_for_window("input-probe").unwrap();
+    let (x, y) = (window.x + 80, window.y + 100);
+    shortcut(&mut session, 5);
+    session.door().tap_key(6).unwrap();
+    session.door().drag_to((x as f64, y as f64), ((x + 240) as f64, (y + 160) as f64)).unwrap();
+    session.door().button("left", false).unwrap();
+    session.door().tap_key(28).unwrap();
+    let before = session.client_log("chonk-input-probe").matches(" release ").count();
+    for dx in [-10, 0, 10] { session.door().click((x + dx) as f64, (y + 50) as f64).unwrap(); }
+    poll_until(Duration::from_secs(5), "inside, outside and boundary clicks reach client", || {
+        (session.client_log("chonk-input-probe").matches(" release ").count() == before + 3).then_some(())
+    }).unwrap();
+    let display = diagnostic(&mut session, "click-through-boundary");
+    let clean = session.screenshot("clean-boundary-input").unwrap();
+    assert!(display.pixel(x as u32, (y + 80) as u32)[..3].iter().all(|&c| c > 230));
+    assert_ne!(display.pixel(x as u32, (y + 80) as u32), clean.pixel(x as u32, (y + 80) as u32));
+    std::thread::sleep(Duration::from_secs(1));
+    shortcut(&mut session, 5);
+    saved(&session.dir.join("exports"), 1, "mp4");
+    session.door().barrier().unwrap();
+    let ended = diagnostic(&mut session, "boundary-ended");
+    assert_eq!(ended.pixel(x as u32, (y + 80) as u32), clean.pixel(x as u32, (y + 80) as u32));
 }

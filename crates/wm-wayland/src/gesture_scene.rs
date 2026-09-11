@@ -295,20 +295,30 @@ pub(crate) fn validate(comp: &mut Compositor) {
     let Some(scene) = comp.wm.backend().gesture_scene.as_ref() else {
         return;
     };
-    if comp.wm.current_workspace() != scene.origin
-        || comp.wm.workspace_count() != scene.count
-        || (scene.next == Some(scene.count) && !comp.wm.workspace_has_windows(scene.origin))
-        || !crate::input::gestures::available(comp)
-        || scene.monitors.len() != comp.wm.backend().monitors.len()
-        || scene
+    let reason = if comp.wm.current_workspace() != scene.origin {
+        Some("active workspace changed")
+    } else if comp.wm.workspace_count() != scene.count {
+        Some("workspace topology changed")
+    } else if scene.next == Some(scene.count) && !comp.wm.workspace_has_windows(scene.origin) {
+        Some("source workspace became empty")
+    } else if !crate::input::gestures::available(comp) {
+        Some("desktop input ownership lost")
+    } else if scene.monitors.len() != comp.wm.backend().monitors.len() {
+        Some("output topology changed")
+    } else if scene
             .monitors
             .iter()
             .zip(&comp.wm.backend().monitors)
             .any(|((rect, scale), monitor)| {
                 *rect != monitor.geometry || *scale != comp.wm.backend().scale_at(monitor.geometry)
-            })
-        || scene.overview_token.as_ref() != comp.wm.backend().overview.as_ref().map(|o| o.token())
-    {
+            }) {
+        Some("output geometry or scale changed")
+    } else if scene.overview_token.as_ref() != comp.wm.backend().overview.as_ref().map(|o| o.token()) {
+        Some("Overview lifetime ended")
+    } else { None };
+    if let Some(reason) = reason {
+        tracing::debug!(reason, axis = ?scene.motion.axis, origin = scene.origin,
+            progress = scene.position, "cancelling desktop gesture");
         crate::input::gestures::cancel(comp);
     }
 }

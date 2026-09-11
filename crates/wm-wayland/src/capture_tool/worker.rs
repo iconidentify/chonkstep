@@ -904,6 +904,8 @@ impl<W: Write> Write for CheckedWriter<W> {
     }
 }
 
+const RECORDING_FPS: u32 = 60;
+
 fn record(output: &str, geometry: &str, filter: &str, policy: Destination) -> Result<Recording, String> {
     let (partial, destination, file) = paths_at(capture_directory(policy, true)?, true, "mp4")?;
     drop(file);
@@ -928,6 +930,10 @@ fn record(output: &str, geometry: &str, filter: &str, policy: Destination) -> Re
     // wf-recorder releases disagree on automatic RGB-to-YUV range conversion.
     // Set both the conversion and encoder metadata, including older FFmpeg.
     let filter = format!("{filter},scale=in_range=pc:out_range=tv,format=yuv420p");
+    // wf-recorder's -r inserts a constant-rate fps filter. Bound x264's GOP
+    // to one second of that output timeline; scene cuts may add earlier keys.
+    let fps = RECORDING_FPS.to_string();
+    let gop = format!("g={RECORDING_FPS}");
     let child = Command::new("env")
         .args(["--default-signal=INT,TERM,HUP", "wf-recorder"])
         .args([
@@ -944,11 +950,13 @@ fn record(output: &str, geometry: &str, filter: &str, policy: Destination) -> Re
             "preset=veryfast",
             "-p",
             "crf=18",
+            "-p",
+            &gop,
             // Match the explicit limited-range conversion below.
             "-p",
             "color_range=tv",
             "-r",
-            "60",
+            &fps,
             "-x",
             "yuv420p",
             "-F",

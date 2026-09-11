@@ -27,8 +27,9 @@
 #      xdg-desktop-portal-wlr.
 #   5. Seeds ~/.config/chonkstep/config.toml from the fully commented
 #      example, only if there is none.
-#   6. Links the two user-facing tools into ~/.local/bin: chonk-get (the
-#      dockapp installer) and omarchy-export-themes (chonkstep's themes
+#   6. Links the user-facing tools into ~/.local/bin: chonkrec (screen
+#      recording), chonkstep-bugreport, chonk-get (the dockapp installer)
+#      and omarchy-export-themes (chonkstep's themes
 #      as Omarchy themes). Nothing under ~/.config/omarchy is touched;
 #      the Omarchy bar widgets under omarchy/plugins/ are yours to link
 #      or not (omarchy/README.md).
@@ -292,6 +293,7 @@ fi
 bin="$HOME/.local/bin"
 install -d "$bin"
 ln -sfn "${repo}/scripts/chonk-get" "$bin/chonk-get"
+ln -sfn "${repo}/scripts/chonkrec" "$bin/chonkrec"
 ln -sfn "${repo}/scripts/chonkstep-bugreport" "$bin/chonkstep-bugreport"
 ln -sfn "${repo}/target/release/omarchy-export-themes" "$bin/omarchy-export-themes"
 # ...and run it once, so this desktop's themes are in Omarchy's own
@@ -477,7 +479,8 @@ cat <<DONE
     (the whole file is optional and every line is documented; both
     backends read it).
   - On PATH, as links into this checkout: chonk-get (install a dockapp:
-    chonk-get install examples/chonk-shelf) and omarchy-export-themes
+    chonk-get install examples/chonk-shelf), chonkrec (record demos with
+    chonkrec start --demo), chonkstep-bugreport, and omarchy-export-themes
     (write chonkstep's themes where omarchy-theme-set can find them).
 DONE
 if [ -z "$bin_on_path" ]; then

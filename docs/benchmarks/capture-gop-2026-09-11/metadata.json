@@ -1,0 +1,9 @@
+{
+  "binary_sha256": "25f7b524d6e89ccb7ffdd9862a7f7e08a528224955dded30fd4d4760154030e3",
+  "wf_recorder": "wf-recorder 0.6.0",
+  "ffmpeg": "ffmpeg version n9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+  "workload": "Native 3840x2160 at 144Hz, 1.5 scale; one real Foot window with static text and a 5Hz single-digit counter. Four 60-second takes, baseline/candidate/candidate/baseline. Same compositor and client, only x264 g changes. No compile/test workloads overlap timing.",
+  "fps": 60,
+  "crf": 18,
+  "preset": "veryfast"
+}

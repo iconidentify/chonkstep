@@ -1,5 +1,18 @@
 # Repeatable product demos
 
+For a live product demo on your own desktop:
+
+```sh
+chonkrec start --demo
+# Show Spaces, open Command-Shift-5, select an area/window, save, record, review.
+chonkrec stop
+```
+
+The finished recording opens in Omacut. `--demo` includes capture controls,
+selection handles, dimming and the capture cursor. Ordinary screenshots and
+the video created inside the demo still exclude their controls. See
+[chonkrec](chonkrec.md) for monitor, quality, audio and restart options.
+
 Run the actual compositor, open two real Foot terminals and a live GTK design
 board, and demonstrate window screenshots and region recording, including their
 automatic opening in the real imv and Omacut applications. A second
@@ -25,7 +38,8 @@ python3 -B scripts/product-demo.py \
 ```
 
 The output directory must be new. Dependencies: Weston with its GL headless
-backend and kiosk shell, Foot, grim, wf-recorder, FFmpeg/ffprobe, dbus-run-session,
+backend and kiosk shell, Foot, grim, wf-recorder, wlr-randr, wayland-info,
+FFmpeg/ffprobe, dbus-run-session,
 Python 3, Pillow, PyGObject, GTK 4 and the Python Cairo/GI bridge. On Debian/Ubuntu the
 Python packages are `python3-pil python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-4.0`.
 The capture scenario also requires imv and Omacut with their Wayland support.
@@ -34,10 +48,11 @@ A headless Mesa software driver can be selected with
 measurements. No root access or physical display is needed.
 
 The runner creates a private session bus without service activation directories
-and private HOME/XDG paths. A headless Weston hosts a recording ChonkStep, which
-hosts the demonstrated ChonkStep fullscreen at 1920×1080. The recording parent
-sees the real child overlay. Capturing the demonstrated compositor's own
-screencopy stream would correctly omit its capture controls. Diagnostic stills
+and private HOME/XDG paths. A headless Weston hosts the demonstrated ChonkStep
+fullscreen at 1920×1080. The runner invokes the actual `chonkrec --demo`
+supervisor against that compositor's opt-in capture connection. A second
+recording compositor is no longer necessary. This requires a build with demo
+capture support; the original 0.5.0 release predates that option. Diagnostic stills
 provide an independent full repaint of the same scene for visual comparison.
 
 Outputs:
@@ -57,7 +72,7 @@ Outputs:
 - `chonkstep-{capture,spaces}-captioned.mp4` and `timeline.srt`: the same uncut
   footage with readable action labels for sharing. The original walkthrough
   remains available without editorial text. FFmpeg must include libass subtitles.
-- `manifest.json`: executable identity and SHA-256, scenario timeline, artifact
+- `manifest.json`: executable identity and SHA-256, recorder/fixture script hashes, scenario timeline, artifact
   hashes, ffprobe results and Spaces membership checkpoints. Every video must
   also pass a complete FFmpeg decode. Capture additionally checks every frame
   in a stable selection interval for stale dimming, before a diagnostic PNG can

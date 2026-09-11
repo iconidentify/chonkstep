@@ -100,6 +100,7 @@ struct CaptureSourceData(Option<CaptureTarget>);
 struct SessionShared {
     target: Option<CaptureTarget>,
     paint_cursors: bool,
+    include_overlays: bool,
     latest_constraints: Mutex<Option<Constraints>>,
     frame_live: AtomicBool,
     stopped: AtomicBool,
@@ -264,7 +265,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
                 let region = comp.outputs.iter().find(|entry| entry.output.name() == *name)
                     .map(|entry| Rect::new(entry.position, entry.size));
                 region.and_then(|region| crate::protocols::capture_region(
-                    comp, region, Transform::Normal, capture.shared.paint_cursors,
+                    comp, region, Transform::Normal, capture.shared.paint_cursors, capture.shared.include_overlays,
                 ).map_err(|error| tracing::warn!(%error, "ext image-copy-capture could not capture the output")).ok())
             }
             Some(CaptureTarget::Toplevel(window)) => crate::capture::capture_window_full(comp, *window, capture.shared.paint_cursors),
@@ -366,10 +367,12 @@ fn create_session(
     id: New<ExtImageCopyCaptureSessionV1>,
     target: Option<CaptureTarget>,
     paint_cursors: bool,
+    include_overlays: bool,
 ) {
     let shared = Arc::new(SessionShared {
         target,
         paint_cursors,
+        include_overlays,
         latest_constraints: Mutex::new(None),
         frame_live: AtomicBool::new(false),
         stopped: AtomicBool::new(false),
@@ -508,7 +511,7 @@ impl GlobalDispatch<ExtImageCopyCaptureManagerV1, ()> for Compositor {
 impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for Compositor {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &ExtImageCopyCaptureManagerV1,
         request: ext_image_copy_capture_manager_v1::Request,
         _data: &(),
@@ -531,7 +534,7 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for Compositor {
                 let target = source
                     .data::<CaptureSourceData>()
                     .and_then(|data| data.0.clone());
-                create_session(state, data_init, session, target, paint_cursors);
+                create_session(state, data_init, session, target, paint_cursors, crate::state::client_captures_overlays(client));
                 if !valid {
                     resource.post_error(
                         ext_image_copy_capture_manager_v1::Error::InvalidOption,
@@ -718,7 +721,7 @@ impl Dispatch<ExtImageCopyCaptureCursorSessionV1, CursorSessionData> for Composi
                 // Separate cursor-image streams are optional. Create an
                 // immediately stopped base session so clients get a complete
                 // lifecycle instead of an uninitialised object.
-                create_session(state, data_init, session, None, false);
+                create_session(state, data_init, session, None, false, false);
             }
             ext_image_copy_capture_cursor_session_v1::Request::Destroy => {}
             _ => {}

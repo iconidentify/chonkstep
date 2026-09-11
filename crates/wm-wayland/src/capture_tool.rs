@@ -1,9 +1,10 @@
 //! User-facing capture. Selection is compositor-owned; PNG, clipboard and
-//! recorder I/O run on one bounded worker. The overlay is added only to scanout,
-//! never to the scenes exported through screencopy / image-copy-capture.
+//! recorder I/O run on one bounded worker. Normal exports exclude the overlay;
+//! the opt-in demo connection also includes it in output capture streams.
 
 mod chrome;
 pub(crate) mod dimming;
+mod outline;
 mod worker;
 
 use std::collections::HashSet;
@@ -63,6 +64,7 @@ pub(crate) struct Overlay {
     hint: Option<MemoryRenderBuffer>,
     camera: Option<MemoryRenderBuffer>,
     dimming: dimming::Dimming,
+    outline: Option<outline::Outline>,
     ids: [Id; 16],
     armed: Option<usize>,
     armed_window: Option<WlWindowId>,
@@ -244,6 +246,7 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
         hint: None,
         camera: None,
         dimming: dimming::Dimming::default(),
+        outline: None,
         ids: std::array::from_fn(|_| Id::new()),
         armed: None,
         armed_window: None,
@@ -365,7 +368,7 @@ fn commit(comp: &mut Compositor) {
                 quick: false,
                 badge: true,
                 monitor,
-                selection: None,
+                selection: Some(rect),
                 window: None,
                 drag: None,
                 move_selection: false,
@@ -380,6 +383,7 @@ fn commit(comp: &mut Compositor) {
                 hint: None,
                 camera: None,
                 dimming: dimming::Dimming::default(),
+                outline: Some(outline::Outline::new(rect, monitor, scale)),
                 ids: std::array::from_fn(|_| Id::new()),
                 armed: None,
                 armed_window: None,
@@ -928,13 +932,25 @@ pub(crate) fn deadline(comp: &Compositor) -> Option<Instant> {
     ui.into_iter().chain((!service.downloads.is_empty()).then_some(service.download_poll)).min()
 }
 
-/// Scanout-only overlay. Stable geometry keeps selection damage sparse; no
+/// Display overlay. Stable geometry keeps selection damage sparse; no
 /// monitor-sized CPU images are allocated while the pointer moves.
 pub(crate) fn render(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     viewport: Rect,
+) {
+    render_capture(elements, renderer, backend, viewport, true);
+}
+
+/// Also used by demo output captures. Cursor inclusion remains a separate
+/// protocol choice, including the compositor-owned camera and crosshair.
+pub(crate) fn render_capture(
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    renderer: &mut GlesRenderer,
+    backend: &WaylandBackend,
+    viewport: Rect,
+    paint_cursor: bool,
 ) {
     if backend.locked {
         return;
@@ -950,7 +966,7 @@ pub(crate) fn render(
         .take_while(|e| e.kind() == Kind::Cursor)
         .count();
     let scene_end = elements.len();
-    if let Some(at) = selection_cursor(backend) {
+    if let Some(at) = paint_cursor.then(|| selection_cursor(backend)).flatten() {
         if ui.mode == Mode::Window {
             if let Some(buffer) = &ui.camera {
                 let scale = ui.toolbar.size.h as f64 / 86.0;
@@ -1032,22 +1048,20 @@ pub(crate) fn render(
             elements.push(element.into());
         }
     }
+    if let Some(outline) = &ui.outline {
+        elements.extend(outline.elements(viewport).map(Into::into));
+    }
     if !ui.badge {
         let selection = ui
             .selection
             .unwrap_or(Rect::new(viewport.pos, Size::new(0, 0)));
-        let x1 = selection
-            .pos
-            .x
-            .clamp(viewport.pos.x, viewport.pos.x + viewport.size.w as i32);
-        let y1 = selection
-            .pos
-            .y
-            .clamp(viewport.pos.y, viewport.pos.y + viewport.size.h as i32);
-        let x2 = (selection.pos.x + selection.size.w as i32)
-            .clamp(x1, viewport.pos.x + viewport.size.w as i32);
-        let y2 = (selection.pos.y + selection.size.h as i32)
-            .clamp(y1, viewport.pos.y + viewport.size.h as i32);
+        // Preserve actual edges and handles; the output framebuffer clips them.
+        // Clamping the selection itself invents handles at a neighboring
+        // monitor's edge, even when that monitor contains none of the selection.
+        let x1 = selection.pos.x;
+        let y1 = selection.pos.y;
+        let x2 = x1.saturating_add(selection.size.w.min(i32::MAX as u32) as i32);
+        let y2 = y1.saturating_add(selection.size.h.min(i32::MAX as u32) as i32);
         let rects = [
             (x1, y1, (x2 - x1) as u32, 1),
             (x1, y2, (x2 - x1) as u32, 1),

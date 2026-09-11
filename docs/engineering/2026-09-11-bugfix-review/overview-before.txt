@@ -1,0 +1,4 @@
+
+thread 'window_activity_preserves_opening_and_closing_overview_gestures' (2325403) panicked at crates/chonk-testkit/tests/overview_refresh.rs:55:13:
+resize cancelled opening on desktop Space 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

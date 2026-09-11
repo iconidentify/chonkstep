@@ -5,6 +5,21 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- `chonkrec start --demo` records compositor capture controls and cursors for
+  product walkthroughs, while concurrent normal captures stay clean. Recordings
+  recover across compositor restarts and open in Omacut when finalized.
+- Keep Overview under the fingers while busy windows change titles, resize or
+  appear; refresh live content without replacing the panel or resetting progress.
+- Show a persistent, click-through boundary around the area being recorded,
+  with a subtle outward shadow and clipping to the selected display.
+- Keep window frames and content aligned through buffer-density and viewport
+  changes, and cache decoration rasters against consistent layout inputs.
+- Bound recording keyframe gaps to one second, including recovery re-encoding.
+  This improves random access but can substantially increase file size on static
+  desktops; native CPU and storage measurements are documented.
+- Require actual video before reporting recording startup, flush small fragments
+  promptly, and normalize output rotation on both old and new wf-recorder versions.
+
 ## [0.5.0] - 2026-09-10
 
 - Live Spaces thumbnails show actual window content, placement, stacking, and

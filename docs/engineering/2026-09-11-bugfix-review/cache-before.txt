@@ -1,0 +1,6 @@
+
+thread 'manager::tests::decoration_cache_keys_the_requested_layout_even_if_a_theme_returns_different_extents' (2361537) panicked at crates/wm-core/src/manager.rs:7800:9:
+assertion `left == right` failed: identical inputs must reuse the existing raster
+  left: 4
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

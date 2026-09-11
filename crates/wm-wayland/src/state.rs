@@ -475,6 +475,11 @@ pub(crate) struct WindowRecord {
     /// spontaneous client resize) is in no ring and is adopted exactly
     /// as before.
     pub recent_asks: std::collections::VecDeque<Size>,
+    /// Physical resize echoes are valid only within one committed density.
+    /// A scale/viewport change starts a new epoch, including when returning
+    /// to a previously used scale. Otherwise an old ask can hide a genuine
+    /// client resize and leave its frame at half the rendered extent.
+    pub committed_size_scale: Option<f64>,
 }
 
 impl WindowRecord {
@@ -501,6 +506,7 @@ impl WindowRecord {
             decoration: crate::decoration::DecorationNegotiation::default(),
             content_offset: Point::new(0, 0),
             recent_asks: std::collections::VecDeque::new(),
+            committed_size_scale: None,
         }
     }
 }
@@ -1410,6 +1416,9 @@ impl WaylandBackend {
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Output captures on the opt-in demo connection include capture controls.
+    /// Immutable and connection-local: disconnecting cannot leave a global mode on.
+    pub capture_overlays: bool,
     /// Whether this client has bound
     /// `org_kde_kwin_server_decoration_manager`.
     ///
@@ -1459,6 +1468,11 @@ pub(crate) fn privileged_global_visible(
     client: &smithay::reexports::wayland_server::Client,
 ) -> bool {
     !client_is_confined(client)
+}
+
+pub(crate) fn client_captures_overlays(client: &smithay::reexports::wayland_server::Client) -> bool {
+    privileged_global_visible(client)
+        && client.get_data::<ClientState>().is_some_and(|data| data.capture_overlays)
 }
 
 /// The security-context protocol's own recursively-confined-listener guard.
@@ -3942,6 +3956,23 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             }
         })
         .map_err(|error| format!("failed to register the wayland socket source: {error}"))?;
+    // A separate connection lets unmodified recording clients opt into the
+    // displayed UI without changing any concurrent screenshot/recording client.
+    // The name stays outside wayland-* so generic discovery cannot silently
+    // opt an ordinary client in. Both sockets disappear together. A
+    // sandbox-context connection never inherits this connection-local policy.
+    let demo_name = format!("chonkstep-capture-{}", socket_name.to_string_lossy());
+    match ListeningSocketSource::with_name(&demo_name) {
+        Ok(socket) => {
+            loop_handle.insert_source(socket, |stream, _, comp| {
+                let data = ClientState { capture_overlays: true, ..ClientState::default() };
+                if let Err(error) = comp.display_handle.insert_client(stream, Arc::new(data)) {
+                    tracing::warn!(?error, "failed to admit a demo capture client");
+                }
+            }).map_err(|error| format!("failed to register the demo capture socket: {error}"))?;
+        }
+        Err(error) => tracing::warn!(?error, socket = %demo_name, "demo capture connection unavailable"),
+    }
     let display_source = Dispatcher::new(Generic::new(display, Interest::READ, TriggerMode::Level), |_, display, comp: &mut Compositor| {
             // SAFETY: the display is owned by this source and never
             // moved out of it; `get_mut` is the documented access

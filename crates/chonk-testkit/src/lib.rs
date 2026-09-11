@@ -821,6 +821,23 @@ impl Session {
         self.compositor.id()
     }
 
+    /// Request a real in-place restart and reconnect the test client only after
+    /// the replacement compositor announces its listening socket.
+    pub fn restart(&mut self) -> Result<(), String> {
+        let previous = self.log().matches("wayland socket listening").count();
+        std::fs::write(self.dir.join("state/chonkstep/restart"), []).map_err(|e| e.to_string())?;
+        let display = poll_until(BOOT_TIMEOUT, "the restarted Wayland display", || {
+            let log = self.log();
+            let lines: Vec<_> = log.lines().filter(|line| line.contains("wayland socket listening")).collect();
+            if lines.len() <= previous { return None; }
+            lines.last()?.split("\"wayland-").nth(1)?.split('"').next().map(|name| format!("wayland-{name}"))
+        }).map_err(|error| self.boot_error(error))?;
+        self.wayland_display = display;
+        let path = self.dir.join("door.sock");
+        self.door = poll_until(BOOT_TIMEOUT, "the restarted input door", || Door::connect(&path).ok())?;
+        self.door.barrier()
+    }
+
     /// Wait for the compositor to exit without a blocking `wait(2)`.
     pub fn wait_for_compositor_exit(&mut self, timeout: Duration) -> Result<std::process::ExitStatus, String> {
         poll_until(timeout, "the compositor to exit", || self.compositor.try_wait().ok().flatten())

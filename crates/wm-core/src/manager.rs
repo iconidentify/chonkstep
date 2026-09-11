@@ -1853,7 +1853,7 @@ impl<B: Backend> WindowManager<B> {
                 let surface = self.theme.render_surface_at(&request, &layout, decoration_scale);
                 self.backend.paint_decoration(frame, &surface);
                 client.last_decoration_request = Some(request.clone());
-                client.last_decoration_frame_size = surface.frame_size;
+                client.last_decoration_frame_size = layout.frame_size;
                 client.last_decoration_scale_bits = decoration_scale.to_bits();
                 self.backend.map_frame(frame);
                 Some(frame)
@@ -4056,9 +4056,9 @@ impl<B: Backend> WindowManager<B> {
                 if let Some(client) = self.clients.get_mut(id) {
                     client.frame = Some(frame);
                     client.chrome = ClientChrome::ServerDrawn;
+                    client.last_decoration_frame_size = layout.frame_size;
                     client.layout = layout;
                     client.last_decoration_request = Some(request);
-                    client.last_decoration_frame_size = surface.frame_size;
                     client.last_decoration_scale_bits = scale.to_bits();
                 }
             }
@@ -4451,7 +4451,7 @@ impl<B: Backend> WindowManager<B> {
         self.backend.paint_decoration(frame, &surface);
         if let Some(client) = self.clients.get_mut(id) {
             client.last_decoration_request = Some(paint_request);
-            client.last_decoration_frame_size = surface.frame_size;
+            client.last_decoration_frame_size = paint_layout.frame_size;
             client.last_decoration_scale_bits = scale.to_bits();
         }
     }
@@ -7770,6 +7770,37 @@ mod tests {
             wm.backend().last_frame_geometry[&frame].pos,
             Point::new(170, -2)
         );
+    }
+
+    #[test]
+    fn decoration_cache_keys_the_requested_layout_even_if_a_theme_returns_different_extents() {
+        struct InsetTheme;
+        impl ThemeEngine for InsetTheme {
+            fn layout(&self, request: &DecorationRequest) -> DecorationLayout {
+                FakeTheme.layout(request)
+            }
+            fn render(&self, request: &DecorationRequest, layout: &DecorationLayout) -> DecorationBuffer {
+                FakeTheme.render(request, layout)
+            }
+            fn render_surface(&self, request: &DecorationRequest, layout: &DecorationLayout) -> wm_theme_api::DecorationSurface {
+                let mut surface = FakeTheme.render_surface(request, layout);
+                surface.frame_size.w -= 1;
+                surface
+            }
+        }
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = WindowManager::new(backend, Box::new(InsetTheme));
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let count = wm.backend().paint_count[&frame];
+        wm.paint_decoration_now(id);
+        wm.paint_decoration_now(id);
+        assert_eq!(wm.backend().paint_count[&frame], count, "identical inputs must reuse the existing raster");
+        wm.clients.get_mut(id).unwrap().title.push_str(" changed");
+        wm.paint_decoration_now(id);
+        assert_eq!(wm.backend().paint_count[&frame], count + 1);
     }
 
     #[test]

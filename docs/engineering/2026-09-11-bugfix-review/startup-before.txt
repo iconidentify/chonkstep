@@ -1,0 +1,3 @@
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 == 0 : recording -> /tmp/chonkrec-test-_1vovo8p/videos/chonkstep-20260910-230911.mp4
+survives theme changes; stop with: chonkrec stop
