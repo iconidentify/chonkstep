@@ -1,0 +1,494 @@
+#!/usr/bin/env bash
+# chonkrec -- screen recorder for the chonkstep window manager.
+#
+# Why this is a supervisor and not a one-liner around wf-recorder:
+# changing the theme makes chonkstep hot-restart in place, which drops
+# every Wayland client -- the recorder included. (gpu-screen-recorder is
+# no escape: even its KMS path calls gsr_window_wayland_init and dies
+# the same way.) So a take is recorded as a SEQUENCE of segments: when
+# the recorder dies, the supervisor waits for the compositor's socket to
+# come back, starts the next segment, and `stop` joins them into one
+# file. Each restart leaves a gap while the compositor and recorder
+# reconnect; the length depends on how quickly both recover.
+#
+# Audio is captured by a separate ffmpeg/pulse process that never talks
+# to Wayland, so it runs unbroken across restarts. It is also what
+# sidesteps a second chonkstep quirk: screencopy timestamps count from
+# compositor start rather than CLOCK_MONOTONIC (~11h off), so handing
+# wf-recorder its own -a yields a file whose video track is empty.
+#
+# --demo connects only the video recorder to ChonkStep's opt-in capture
+# socket. Normal screenshots, the built-in recording tool and other clients
+# keep their own clean capture streams, even while this take includes the UI.
+
+set -uo pipefail
+
+SELF=$(readlink -f "$0")
+RUNDIR="${XDG_RUNTIME_DIR:-}"
+PIDFILE="$RUNDIR/chonkrec.pid"
+APIDFILE="$RUNDIR/chonkrec.apid"
+PATHFILE="$RUNDIR/chonkrec.path"
+WORKFILE="$RUNDIR/chonkrec.work"
+ALOG="$RUNDIR/chonkrec.audio.log"
+OUTDIR="${CHONKREC_DIR:-$HOME/Videos}"
+
+FPS=30
+GEOMETRY=""
+OUTPUT=""
+INCLUDE_OVERLAYS=0
+NO_OPEN=0
+BASE_DISPLAY="${WAYLAND_DISPLAY:-}"
+# Accept an explicitly selected demo connection too, without applying the
+# prefix a second time when the detached supervisor starts.
+base_name=${BASE_DISPLAY##*/}
+if [[ "$base_name" = chonkstep-capture-* ]]; then
+  if [[ "$BASE_DISPLAY" = */* ]]; then
+    BASE_DISPLAY="${BASE_DISPLAY%/*}/${base_name#chonkstep-capture-}"
+  else
+    BASE_DISPLAY=${base_name#chonkstep-capture-}
+  fi
+fi
+RECORD_DISPLAY=""
+AUDIO=""
+DELAY=0
+OUTFILE=""
+OFFSET=0
+PRESET="${CHONKREC_PRESET:-superfast}"
+CRF="${CHONKREC_CRF:-20}"
+
+die() { printf 'chonkrec: %s\n' "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*" >&2; }
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: chonkrec [start|stop|toggle|status|list-audio] [options]
+
+  start         begin recording (default if no command given)
+  stop          finish, join segments, mux audio, finalize
+  toggle        stop if recording, otherwise start
+  status        show whether recording, and how many segments so far
+  list-audio    print capturable audio sources
+
+Recording survives a chonkstep theme change: the compositor restart ends
+one segment and the next begins automatically. `stop` joins them.
+
+options:
+  -a [DEV]      also record audio (survives restarts; muxed in at stop)
+  -A SECS       shift audio against video, e.g. -A -0.3 pulls it earlier
+  -g "x,y WxH"  record a sub-region, e.g. -g "0,0 1280x800" (numbers only)
+  --demo        include capture controls, selection, dimming and cursor
+  --include-overlays  same as --demo (requires ChonkStep demo capture support)
+  -O OUTPUT     choose a monitor by name (wf-recorder --list-output lists them)
+  -r FPS        constant framerate (default 30)
+  -d SECS       count down before starting
+  -o FILE       output path (default ~/Videos/chonkstep-<timestamp>.mp4)
+  --no-open     do not open the finished recording in Omacut
+  -h            this help
+USAGE
+}
+
+alive() {
+  [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null || return 1
+  # An exited child may remain a zombie until its parent reaps it.
+  local stat; stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  [[ "${stat##*) }" != Z* ]]
+}
+
+recording_pid() {
+  [ -r "$PIDFILE" ] || return 1
+  local pid; pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+  alive "$pid" || return 1
+  local work; work=$(cat "$WORKFILE" 2>/dev/null) || return 1
+  local -a argv=()
+  mapfile -d '' -t argv 2>/dev/null < "/proc/$pid/cmdline" || return 1
+  [ "${#argv[@]}" -ge 3 ] || return 1
+  [[ "${argv[-2]}" = __supervise && "${argv[-1]}" = "$work" ]] || return 1
+  printf '%s' "$pid"
+}
+
+# Re-check the selected compositor's socket before starting each segment.
+wayland_socket_ready() {
+  # Pin a selected desktop across restarts: falling through to a nested or
+  # unrelated live compositor would silently record the wrong session.
+  if [ -z "$BASE_DISPLAY" ]; then
+    local s; local -a candidates=()
+    for s in "$RUNDIR"/wayland-[0-9]*; do
+      [[ "${s##*/}" =~ ^wayland-[0-9]+$ ]] && [ -S "$s" ] && candidates+=("$s")
+    done
+    [ "${#candidates[@]}" -eq 1 ] || return 1
+    BASE_DISPLAY=${candidates[0]}
+  fi
+  local path=$BASE_DISPLAY
+  [[ "$path" = /* ]] || path="$RUNDIR/$path"
+  [ -S "$path" ] || return 1
+  RECORD_DISPLAY=$BASE_DISPLAY
+  if [ "$INCLUDE_OVERLAYS" -eq 1 ]; then
+    local demo_path="${path%/*}/chonkstep-capture-${path##*/}"
+    [ -S "$demo_path" ] || return 1
+    RECORD_DISPLAY=$demo_path
+  fi
+}
+
+# Both encoder tools normally flush on INT. Some wf-recorder versions leave
+# a thread alive after a Wayland disconnect even after closing the stream.
+# Bound shutdown, then reap our child so a failed segment cannot stall a take.
+finish_worker() {
+  local pid=$1 waited=0
+  if alive "$pid"; then
+    kill -INT "$pid" 2>/dev/null
+    while alive "$pid" && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited+1)); done
+  fi
+  if alive "$pid"; then
+    kill -TERM "$pid" 2>/dev/null
+    waited=0
+    while alive "$pid" && [ "$waited" -lt 10 ]; do sleep 0.1; waited=$((waited+1)); done
+  fi
+  alive "$pid" && kill -KILL "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------- supervise
+# Runs detached. Keeps a recorder alive until `stop` plants the flag,
+# writing one segment per compositor lifetime.
+do_supervise() {
+  local work=$1
+  # Generated with printf %q in this private work directory.
+  # shellcheck disable=SC1091
+  . "$work/params"
+  local n=0 consecutive_failures=0
+
+  while [ ! -e "$work/stop" ]; do
+    if ! wayland_socket_ready; then
+      sleep 0.3; continue
+    fi
+    local seg; seg=$(printf '%s/seg-%03d.mp4' "$work" "$n")
+    local fifo="$work/pipe.mkv"
+    rm -f "$fifo"; mkfifo "$fifo" || break
+
+    # wf-recorder streams matroska into a fifo; a SEPARATE ffmpeg owns
+    # the file and writes FRAGMENTED mp4. That indirection is the whole
+    # trick: when the compositor restarts, wf-recorder dies without ever
+    # finalizing anything, and a plain mp4 would be headerless and
+    # unplayable (matroska straight to disk is worse still -- 0 bytes).
+    # The muxer is not a Wayland client, so it survives, sees EOF, and
+    # closes the segment cleanly. Every fragment is self-contained, so
+    # even a hard kill costs at most the last fragment.
+    ffmpeg -hide_banner -nostdin -y -analyzeduration 100000 -probesize 32768 -f matroska -i "$fifo" -c copy \
+      -movflags +frag_keyframe+empty_moov+default_base_moof "$seg" \
+      >>"$work/mux.log" 2>&1 &
+    local mux=$!
+
+    local -a args=(-y --no-dmabuf --no-damage -r "$FPS" -m matroska -c libx264
+      -p "preset=$PRESET" -p "crf=$CRF" -p tune=zerolatency -p color_range=tv
+      -x yuv420p -F 'pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=in_range=pc:out_range=tv,format=yuv420p')
+    [ -n "$GEOMETRY" ] && args+=(-g "$GEOMETRY")
+    [ -n "$OUTPUT" ] && args+=(-o "$OUTPUT")
+    args+=(-f "$fifo")
+
+    env -u WAYLAND_SOCKET --default-signal=INT,TERM,HUP WAYLAND_DISPLAY="$RECORD_DISPLAY" wf-recorder "${args[@]}" >>"$work/wf.log" 2>&1 &
+    local child=$!
+    printf '%s' "$child" > "$work/child"
+    # `stop` may have landed between the loop test and this spawn; the
+    # pid only becomes signallable here, so check again now.
+    [ -e "$work/stop" ] && kill -INT "$child" 2>/dev/null
+    # A closed muxer means this segment is over, even if wf-recorder has
+    # hung during its disconnect cleanup. Stop also wakes this loop.
+    while alive "$child" && alive "$mux" && [ ! -e "$work/stop" ]; do sleep 0.2; done
+    finish_worker "$child"
+    rm -f "$work/child"
+
+    # Give the muxer time to drain and finalize. If wf-recorder never
+    # opened the fifo (compositor still gone) the muxer is blocked in
+    # open() with nothing to lose, so time it out.
+    local w=0
+    while alive "$mux" && [ "$w" -lt 15 ]; do sleep 0.2; w=$((w+1)); done
+    finish_worker "$mux"
+    rm -f "$fifo"
+
+    [ -e "$work/stop" ] && break
+
+    # A segment with real content means the compositor went away mid-take
+    # (theme change); an instantly-empty one means it is not back yet.
+    if [ -s "$seg" ]; then
+      consecutive_failures=0
+      n=$((n+1))
+      printf '%s\n' "$(date +%s.%N)" >> "$work/restarts"
+    else
+      rm -f "$seg"
+      consecutive_failures=$((consecutive_failures+1))
+      if [ "$consecutive_failures" -gt 100 ]; then
+        printf 'giving up: recorder failed %d times in a row\n' \
+          "$consecutive_failures" >> "$work/wf.log"
+        break
+      fi
+      sleep 0.3
+    fi
+  done
+  printf 'done\n' > "$work/finished"
+}
+
+# -------------------------------------------------------------------- start
+do_start() {
+  if pid=$(recording_pid); then
+    die "already recording (pid $pid) -> $(cat "$PATHFILE" 2>/dev/null)"
+  fi
+  local program
+  for program in wf-recorder ffmpeg ffprobe; do
+    command -v "$program" >/dev/null || die "$program is not installed"
+  done
+  if ! wayland_socket_ready; then
+    [ "$INCLUDE_OVERLAYS" -eq 0 ] || die "demo capture is unavailable on this desktop; run a ChonkStep build with demo capture support"
+    die "no unambiguous Wayland desktop; set WAYLAND_DISPLAY to the ChonkStep session"
+  fi
+
+  if [ -n "$GEOMETRY" ] && ! [[ "$GEOMETRY" =~ ^-?[0-9]+,-?[0-9]+\ +[0-9]+x[0-9]+$ ]]; then
+    # wf-recorder only *warns* on a malformed -g and records the whole
+    # screen anyway, which silently ruins a take. Refuse it here.
+    die "bad geometry: '$GEOMETRY' (expected \"x,y WxH\", e.g. \"0,0 1280x800\")"
+  fi
+  if [ -n "$AUDIO" ] && [ "$AUDIO" != "default" ]; then
+    if command -v pactl >/dev/null && ! pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qxF "$AUDIO"; then
+      say "unknown audio source: $AUDIO"
+      say "available:"; pactl list short sources 2>/dev/null | awk '{printf "  %s\n", $2}'
+      exit 1
+    fi
+  fi
+
+  mkdir -p "$OUTDIR" || die "cannot create $OUTDIR"
+  local out="${OUTFILE:-$OUTDIR/chonkstep-$(date +%Y%m%d-%H%M%S).mp4}"
+  out=$(realpath -m -- "$out") || die "cannot resolve the output path"
+  [ ! -e "$out" ] || die "output already exists: $out"
+  [ -d "$(dirname "$out")" ] || die "output directory does not exist: $(dirname "$out")"
+  local work; work=$(mktemp -d "$RUNDIR/chonkrec.XXXXXX") || die "cannot create work dir"
+  local atmp="$work/audio.m4a"
+
+  { printf 'FPS=%q\n' "$FPS"
+    printf 'GEOMETRY=%q\n' "$GEOMETRY"
+    printf 'OUTPUT=%q\n' "$OUTPUT"
+    printf 'INCLUDE_OVERLAYS=%q\n' "$INCLUDE_OVERLAYS"
+    printf 'BASE_DISPLAY=%q\n' "$BASE_DISPLAY"
+    printf 'NO_OPEN=%q\n' "$NO_OPEN"
+    printf 'OFFSET=%q\n' "$OFFSET"
+    printf 'PRESET=%q\n' "$PRESET"
+    printf 'CRF=%q\n' "$CRF"; } > "$work/params"
+
+  if [ "$DELAY" -gt 0 ]; then
+    for ((i=DELAY; i>0; i--)); do printf '\rstarting in %ds... ' "$i" >&2; sleep 1; done
+    printf '\r                    \r' >&2
+  fi
+
+  setsid "$SELF" __supervise "$work" >"$work/supervisor.log" 2>&1 9>&- &
+  local spid=$!
+  local apid=""
+  trap 'abort_start "$work" "$spid" "$apid"; exit 130' INT TERM HUP
+  if [ -n "$AUDIO" ]; then
+    local dev; dev=$([ "$AUDIO" = "default" ] && echo default || echo "$AUDIO")
+    setsid ffmpeg -hide_banner -nostdin -y -f pulse -i "$dev" \
+      -c:a aac -b:a 192k "$atmp" >"$ALOG" 2>&1 9>&- &
+    apid=$!
+  fi
+
+  # Let the first segment prove itself before claiming success.
+  local waited=0
+  while [ "$waited" -lt 25 ] && ! ls "$work"/seg-*.mp4 >/dev/null 2>&1; do
+    sleep 0.2; waited=$((waited+1))
+  done
+  if ! alive "$spid" || ! ls "$work"/seg-*.mp4 >/dev/null 2>&1; then
+    say "recording failed to start:"; tail -n 15 "$work/supervisor.log" "$work/wf.log" >&2 2>/dev/null
+    abort_start "$work" "$spid" "$apid"
+    exit 1
+  fi
+  if grep -qi 'bad geometry' "$work/wf.log" 2>/dev/null; then
+    abort_start "$work" "$spid" "$apid"
+    die "wf-recorder rejected the geometry"
+  fi
+  if [ -n "$AUDIO" ] && ! alive "$apid"; then
+    say "audio capture failed to start:"; tail -n 8 "$ALOG" >&2
+    abort_start "$work" "$spid" "$apid"
+    exit 1
+  fi
+
+  printf '%s' "$spid" > "$PIDFILE"
+  printf '%s' "$out"  > "$PATHFILE"
+  printf '%s' "$work" > "$WORKFILE"
+  if [ -n "$apid" ]; then printf '%s' "$apid" > "$APIDFILE"; else rm -f "$APIDFILE"; fi
+  trap - INT TERM HUP
+
+  local region; region=$(grep -m1 'selected region' "$work/wf.log" 2>/dev/null | sed 's/.*selected region //')
+  say "recording ${region:+[$region] }${AUDIO:+with audio }-> $out"
+  [ "$INCLUDE_OVERLAYS" -eq 0 ] || say "demo mode: includes desktop capture controls"
+  say "survives theme changes; stop with: chonkrec stop"
+}
+
+# Shared by normal stop and failed startup; never leave a failed recorder
+# running after the command has reported failure.
+stop_workers() {
+  local work=$1 spid=$2
+  touch "$work/stop"
+  local waited=0
+  while alive "$spid" && [ "$waited" -lt 100 ]; do
+    sleep 0.2; waited=$((waited+1))
+  done
+  if alive "$spid"; then
+    say "supervisor did not exit after 20s; stopping its worker group"
+    # setsid gives this take a private process group. Never search unrelated
+    # command lines for a pathname and signal other applications by accident.
+    kill -TERM -- "-$spid" 2>/dev/null
+    sleep 1
+    kill -KILL -- "-$spid" 2>/dev/null
+  fi
+}
+
+abort_start() {
+  local work=$1 spid=$2 apid=$3
+  [ -z "$apid" ] || kill -INT "$apid" 2>/dev/null
+  stop_workers "$work" "$spid"
+  wait "$spid" 2>/dev/null || true
+  [ -z "$apid" ] || finish_worker "$apid"
+  say "diagnostics retained in $work"
+}
+
+segment_paths() {
+  local path
+  for path in "$1"/seg-*.mp4; do
+    [ -f "$path" ] && printf '%s\0' "$path"
+  done | sort -zV
+}
+
+# --------------------------------------------------------------------- stop
+do_stop() {
+  local spid apid out work
+  spid=$(recording_pid) || { rm -f "$PIDFILE" "$APIDFILE" "$PATHFILE" "$WORKFILE"; die "not recording"; }
+  apid=$(cat "$APIDFILE" 2>/dev/null || true)
+  out=$(cat "$PATHFILE" 2>/dev/null)
+  work=$(cat "$WORKFILE" 2>/dev/null)
+  [ -n "$work" ] && [ -d "$work" ] || die "lost the work directory; nothing to assemble"
+  local skip_open=$NO_OPEN stop_offset=$OFFSET
+  # Generated with printf %q in this private work directory.
+  # shellcheck disable=SC1091
+  . "$work/params"
+  [ "$skip_open" -eq 0 ] || NO_OPEN=1
+  [ "$stop_offset" = 0 ] || OFFSET=$stop_offset
+
+  # Order matters: plant the flag first so the supervisor does not start
+  # a fresh segment when the current one exits.
+  touch "$work/stop"
+  [ -n "$apid" ] && kill -INT "$apid" 2>/dev/null
+
+  stop_workers "$work" "$spid"
+  [ -n "$apid" ] && finish_worker "$apid"
+  rm -f "$PIDFILE" "$APIDFILE" "$PATHFILE" "$WORKFILE"
+
+  local -a segs; mapfile -d '' -t segs < <(segment_paths "$work")
+  local nseg=${#segs[@]}
+  if [ "$nseg" -eq 0 ]; then
+    say "no video was captured -- see $work/wf.log"; exit 1
+  fi
+
+  local vjoined="$work/joined.mp4"
+  if [ "$nseg" -eq 1 ]; then
+    mv -f "${segs[0]}" "$vjoined"
+  else
+    say "joining $nseg segments (the compositor restarted $((nseg-1))x during the take)..."
+    : > "$work/list.txt"
+    local s; for s in "${segs[@]}"; do printf "file '%s'\n" "${s##*/}" >> "$work/list.txt"; done
+    if ! ffmpeg -v error -y -f concat -safe 1 -i "$work/list.txt" -c copy "$vjoined" 2>>"$work/wf.log"; then
+      say "stream-copy join failed; re-encoding instead (slower)..."
+      if ! ffmpeg -v error -y -f concat -safe 1 -i "$work/list.txt" \
+           -c:v libx264 -preset "$PRESET" -crf "$CRF" "$vjoined" 2>>"$work/wf.log"; then
+        say "could not join segments; they are kept in $work"; exit 1
+      fi
+    fi
+  fi
+
+  local atmp="$work/audio.m4a"
+  if [ -n "$apid" ] && [ -s "$atmp" ]; then
+    say "muxing audio and video..."
+    if ! ffmpeg -v error -n -i "$vjoined" -itsoffset "$OFFSET" -i "$atmp" \
+        -map 0:v -map 1:a -c copy -movflags +faststart -shortest "$out" 2>>"$ALOG"; then
+      say "mux failed; raw tracks kept in $work"; exit 1
+    fi
+  else
+    [ -n "$apid" ] && say "audio capture produced nothing (see $ALOG); keeping the video"
+    if ! ffmpeg -v error -n -i "$vjoined" -c copy -movflags +faststart "$out" 2>>"$work/wf.log"; then
+      die "could not finalize $out; video and diagnostics kept in $work"
+    fi
+  fi
+
+  [ -s "$out" ] || { say "no output file was written -- see $work/wf.log"; exit 1; }
+  local ntv; ntv=$(ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 "$out" 2>/dev/null | wc -l)
+  local dur size
+  dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$out" 2>/dev/null)
+  size=$(du -h "$out" | cut -f1)
+  if [ "$ntv" -eq 0 ]; then
+    say "WARNING: $out has NO video track (${dur%.*}s, $size) -- segments kept in $work"; exit 1
+  fi
+  rm -rf "$work"
+  say "saved $out  (${dur%.*}s, $size${nseg:+, $nseg segment$([ "$nseg" -gt 1 ] && echo s)})"
+  if [ "$nseg" -gt 1 ] && [ -n "$apid" ]; then
+    say "note: restart gaps cut video but not audio; adjust sync in Omacut"
+    say "      or choose an audio offset with -A when stopping the next take."
+  fi
+  if [ "$NO_OPEN" -eq 0 ]; then
+    if command -v omacut >/dev/null; then
+      setsid omacut "$out" </dev/null >/dev/null 2>&1 9>&- &
+    else
+      say "Omacut is not installed; the recording is saved at $out"
+    fi
+  fi
+}
+
+# Hidden: the detached supervisor re-enters here.
+if [ "${1:-}" = "__supervise" ]; then do_supervise "$2"; exit 0; fi
+
+CMD="${1:-start}"
+case "$CMD" in
+  start|stop|toggle|status|list-audio) [ $# -gt 0 ] && shift ;;
+  -*) CMD=start ;;
+  *) die "unknown command: $CMD" ;;
+esac
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -a) if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then AUDIO=$2; shift 2
+        else AUDIO=default; shift; fi ;;
+    -a*) AUDIO=${1#-a}; shift ;;
+    --audio) AUDIO=default; shift ;;
+    --audio=*) AUDIO=${1#--audio=}; shift ;;
+    -A) OFFSET=${2:?-A needs seconds}; shift 2 ;;
+    -g) GEOMETRY=${2:?-g needs "x,y WxH"}; shift 2 ;;
+    --demo|--include-overlays) INCLUDE_OVERLAYS=1; shift ;;
+    -O|--output) OUTPUT=${2:?-O needs a monitor name}; shift 2 ;;
+    --no-open) NO_OPEN=1; shift ;;
+    -r) FPS=${2:?-r needs a number}; shift 2 ;;
+    -d) DELAY=${2:?-d needs seconds}; shift 2 ;;
+    -o) OUTFILE=${2:?-o needs a path}; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+# Serialize commands, and close this descriptor in every detached child.
+# Stale PID files must never make a second start race an in-progress stop.
+[[ -n "$RUNDIR" && -d "$RUNDIR" && -O "$RUNDIR" ]] || die "XDG_RUNTIME_DIR must identify your Wayland session runtime directory"
+exec 9> "$RUNDIR/chonkrec.command.lock" || die "cannot lock recorder state"
+flock -n 9 || die "another chonkrec command is running"
+[[ "$FPS" =~ ^([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-3][0-9]|240)$ ]] || die "framerate must be an integer from 1 to 240"
+[[ "$DELAY" =~ ^(0|[1-9][0-9]{0,3})$ ]] || die "delay must be an integer from 0 to 9999"
+[[ "$OFFSET" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || die "audio offset must be a number of seconds"
+
+case "$CMD" in
+  start) do_start ;;
+  stop)  do_stop ;;
+  toggle) if recording_pid >/dev/null; then do_stop; else do_start; fi ;;
+  status)
+    if pid=$(recording_pid); then
+      w=$(cat "$WORKFILE" 2>/dev/null)
+      mapfile -d '' -t segments < <(segment_paths "$w")
+      n=${#segments[@]}
+      say "recording (pid $pid, $n segment(s)) -> $(cat "$PATHFILE" 2>/dev/null)"
+    else say "not recording"; exit 1; fi ;;
+  list-audio)
+    command -v pactl >/dev/null || die "pactl unavailable"
+    pactl list short sources 2>/dev/null | awk '{printf "  %s\n", $2}' ;;
+esac

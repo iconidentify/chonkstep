@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Capture reproducible product media from real, isolated compositor sessions.
 
-Weston -> recording ChonkStep -> demonstrated ChonkStep. The extra parent
-captures the child overlay, which user exports correctly exclude. No ambient
+Weston -> demonstrated ChonkStep -> chonkrec --demo. The recording opts into
+capture controls while user exports remain clean. No ambient
 display, clipboard, config, or session bus is targeted. See docs/product-demos.md.
 """
 import argparse
@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import select
 import shlex
 import shutil
 import signal
@@ -35,6 +36,48 @@ def wait(description, predicate, timeout=30):
             return result
         time.sleep(.02)
     raise TimeoutError(description)
+
+
+class DemoRecording:
+    """Exercise the shipped recorder, including its supervisor and finalization."""
+    def __init__(self, env, path, log):
+        self.env = {k:v for k,v in env.items() if not k.startswith('CHONKREC_')}
+        self.env.update(CHONKREC_PRESET='fast', CHONKREC_CRF='18', CHONKREC_DIR=str(path.parent))
+        self.path, self.log = path, log
+        self.active = False
+        self.pidfd = None
+
+    def command(self, *arguments):
+        with self.log.open('a') as output:
+            return subprocess.run([str(SCRIPTS/'chonkrec'), *arguments], env=self.env,
+                                  stdout=output, stderr=subprocess.STDOUT, timeout=75, check=True)
+
+    def __enter__(self):
+        self.started = time.monotonic()
+        self.command('start', '--demo', '--no-open', '-r', '30', '-o', str(self.path))
+        self.active = True
+        try:
+            pid = int((Path(self.env['XDG_RUNTIME_DIR'])/'chonkrec.pid').read_text())
+            self.pidfd = os.pidfd_open(pid)
+        except BaseException:
+            self.finish()
+            raise
+        return self
+
+    def poll(self):
+        return 1 if select.select([self.pidfd], [], [], 0)[0] else None
+
+    def finish(self):
+        if self.active:
+            self.command('stop', '--no-open')
+            self.active = False
+
+    def __exit__(self, *_):
+        try:
+            self.finish()
+        finally:
+            if self.pidfd is not None:
+                os.close(self.pidfd)
 
 
 def send(door, command):
@@ -359,6 +402,10 @@ def run(args):
     metadata = {'scenario': args.scenario+'-desktop', 'binary': b.binary_metadata(binary),
                 'backend': 'nested GL; scripted fixture clients; actual production overlay and exports',
                 'timeline': [], 'dimensions': [1920, 1080]}
+    metadata['tool_sha256'] = {
+        name:hashlib.sha256((SCRIPTS/name).read_bytes()).hexdigest()
+        for name in ('chonkrec', 'product-demo.py', 'demos/capture-desktop.py')
+    }
     with tempfile.TemporaryDirectory(prefix='chonk-demo-') as temporary, contextlib.ExitStack() as stack:
         root = Path(temporary)
         host = root/'host'
@@ -368,15 +415,9 @@ def run(args):
             '--shell=kiosk-shell.so', '--socket=wayland-demo', '--width=1920', '--height=1080',
             '--idle-time=0', '--no-config'], hostenv, output/'weston.log'))
         host_socket = b.wait_for_socket(host/'runtime', weston)
-        outer, parent, recording_env, outer_socket = boot(stack, root/'parent', host_socket, binary, output, 'parent')
-        inner, door, clients, _ = boot(stack, root/'desktop', outer_socket, binary, output, 'desktop')
-        wait('nested desktop maps', lambda: window(parent))
-        chord(parent, [29,125], 33)  # Real fullscreen action on the recording parent.
+        inner, door, clients, desktop_socket = boot(stack, root/'desktop', host_socket, binary, output, 'desktop')
+        recording_env = clients | {'WAYLAND_DISPLAY':str(desktop_socket.with_name('chonkstep-capture-'+desktop_socket.name))}
         wait('1920x1080 demo output', lambda: 'output 1920 1080' in door.query('windows', multiple=True))
-        # Park the recording parent's pointer at its lower edge. The pointer
-        # demonstrated inside the child remains part of the captured content.
-        send(parent,'motion 1919 1079')
-        assert parent.query('barrier') == 'ok'
         fixture = SCRIPTS/'demos/capture-desktop.py'
         version = metadata['binary']['version'].splitlines()[0].split()[1]
         for role, pos in [('terminal', (75,105)), ('notes',(120,575))]:
@@ -395,21 +436,20 @@ def run(args):
             dispatch(runtime,'workspace 1')
         time.sleep(1)
         raw = output/'demo.raw.mp4'
-        recorder = stack.enter_context(b.child(['wf-recorder','--no-dmabuf','-D','-r','30','-c','libx264',
-            '-p','preset=fast','-p','crf=18','-p','color_range=tv',
-            '-x','yuv420p','-F','scale=in_range=pc:out_range=tv,format=yuv420p','-f',str(raw)], recording_env, output/'recorder.log'))
-        started = time.monotonic()
+        recorder = stack.enter_context(DemoRecording(clients, raw, output/'recorder.log'))
+        metadata['recorder'] = {'command':'chonkrec start --demo', 'capture_controls':True,
+                                'connection':'same compositor; opt-in output capture'}
+        started = recorder.started
 
         def step(name, pause=1):
-            if any(p.poll() is not None for p in (inner,outer,recorder)):
+            if any(p.poll() is not None for p in (inner,recorder)):
                 raise RuntimeError('a demo compositor or recorder exited')
             metadata['timeline'].append({'seconds':round(time.monotonic()-started,3),'action':name})
             print(name, flush=True)
             time.sleep(pause)
 
         def still(name):
-            # Parent screencopy contains the nested child's capture controls.
-            subprocess.run(['grim', str(output/f'{name}.png')], env=recording_env, check=True, timeout=15)
+            subprocess.run(['grim', '-c', str(output/f'{name}.png')], env=recording_env, check=True, timeout=15)
             marker = root/'desktop/state/chonkstep/screenshot'
             pending = marker.with_suffix('.pending')
             diagnostic = output/f'{name}-diagnostic.png'
@@ -463,15 +503,11 @@ def run(args):
             metadata['automatic_review'] = {'screenshot':'imv', 'recording':'omacut',
                 'verification':'Mapped real applications received the exact published files.'}
             close_review(door, runtime, editor)
-        recorder.send_signal(signal.SIGINT)
-        recorder.wait(timeout=20)
-        if recorder.returncode != 0:
-            raise RuntimeError(f'recorder exit {recorder.returncode}')
+        recorder.finish()
         metadata['timeline'].append({'seconds':round(time.monotonic()-started,3),'action':'End'})
         (output/'world.txt').write_text('\n'.join(door.query('windows',multiple=True))+'\n')
     final = output/f'chonkstep-{args.scenario}-demo.mp4'
-    subprocess.run(['ffmpeg','-v','error','-i',str(raw),'-c','copy','-movflags','+faststart',str(final)],check=True,timeout=60)
-    raw.unlink()
+    raw.rename(final)  # chonkrec already finalizes a fast-start MP4.
     if args.scenario == 'capture':
         metadata['repaint_verification'] = verify_capture_video(final, metadata['timeline'])
         metadata['color_verification'] = verify_capture_colors(final, metadata['timeline'],

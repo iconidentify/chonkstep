@@ -133,6 +133,7 @@ package() {
   install -Dm755 target/release/chonkstep "$pkgdir/usr/bin/chonkstep"
   install -Dm755 target/release/chonkstep-wayland "$pkgdir/usr/bin/chonkstep-wayland"
   install -Dm755 scripts/chonk-get "$pkgdir/usr/bin/chonk-get"
+  install -Dm755 scripts/chonkrec "$pkgdir/usr/bin/chonkrec"
   # The wifi passphrase dialog. Nobody runs it by hand: the dock's LNK
   # panel spawns it by bare name when someone clicks a secured network
   # with no saved profile, so it has to be on PATH or that row silently

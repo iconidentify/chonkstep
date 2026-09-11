@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+#[path = "capture_tool/demo.rs"]
+mod demo;
+
 fn shortcut(session: &mut Session, number: u32) {
     session.door().key(125, true).unwrap();
     session.door().key(29, true).unwrap();

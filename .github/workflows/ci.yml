@@ -88,6 +88,7 @@ jobs:
             scripts/e2e.sh \
             scripts/install.sh \
             scripts/chonkstep-bugreport \
+            scripts/chonkrec \
             scripts/omarchy-install-desktop-chonkstep \
             scripts/omarchy-remove-desktop-chonkstep \
             scripts/test-omarchy-install.sh \
@@ -102,6 +103,7 @@ jobs:
             scripts/verify-release-assets.sh \
             scripts/e2e.sh \
             scripts/chonkstep-bugreport \
+            scripts/chonkrec \
             scripts/omarchy-install-desktop-chonkstep \
             scripts/omarchy-remove-desktop-chonkstep \
             scripts/test-omarchy-install.sh \

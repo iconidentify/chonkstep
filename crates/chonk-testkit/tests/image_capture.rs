@@ -163,8 +163,11 @@ struct Frame {
 }
 impl Client {
     fn connect(session: &Session) -> Self {
+        Self::connect_display(&session.wayland_display)
+    }
+    fn connect_display(display: &str) -> Self {
         let socket = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap())
-            .join(&session.wayland_display);
+            .join(display);
         let connection = Connection::from_socket(UnixStream::connect(socket).unwrap()).unwrap();
         let queue = connection.new_event_queue();
         connection.display().get_registry(&queue.handle(), ());
@@ -582,5 +585,58 @@ fn pending_download_does_not_block_input_and_destroyed_buffer_is_never_written()
     poll_until(EVENT, "GPU storage released", || {
         (readback::counter(&session, "active_bytes") == 0).then_some(())
     }).unwrap();
+    assert!(session.compositor_alive());
+}
+
+#[test]
+#[ignore = "needs nested Wayland, grim and a real lock client"]
+fn demo_image_capture_keeps_its_policy_and_respects_locking() {
+    let mut session = Session::boot("image-capture-demo", SessionOptions {
+        scale: Some(1.5),
+        config_extra: "show_dock = false\ninteraction_mode = 'mac'\n".into(),
+        ..Default::default()
+    }).unwrap();
+    let clean = session.screenshot("demo-clean-before").unwrap();
+    session.door().key(125, true).unwrap();
+    session.door().key(42, true).unwrap();
+    session.door().tap_key(6).unwrap();
+    session.door().key(42, false).unwrap();
+    session.door().key(125, false).unwrap();
+    session.door().barrier().unwrap();
+    let demo_display = format!("chonkstep-capture-{}", session.wayland_display);
+    let normal_display = std::mem::replace(&mut session.wayland_display, demo_display.clone());
+    let visible = session.screenshot("demo-visible-controls").unwrap();
+    session.wayland_display = normal_display;
+    assert!(visible.diff_fraction(&clean, 0) > 0.03);
+    let mut normal = Client::connect(&session);
+    let mut demo = Client::connect_display(&demo_display);
+    let (plain_session, size) = normal.session();
+    let (demo_session, demo_size) = demo.session();
+    assert_eq!(size, demo_size);
+    for _ in 0..4 {
+        let plain_frame = normal.frame(&plain_session, size);
+        let demo_frame = demo.frame(&demo_session, size);
+        normal.capture(&plain_frame);
+        demo.capture(&demo_frame);
+        plain_frame.compare(&clean);
+        demo_frame.compare(&visible);
+        plain_frame.destroy();
+        demo_frame.destroy();
+    }
+    let locker = profile_binary("chonk-lock-probe").unwrap();
+    session.launch(locker.to_str().unwrap(), &["--hold"]).unwrap();
+    poll_until(EVENT, "demo lock confirmation", || {
+        session.client_log("chonk-lock-probe").contains("locked ").then_some(())
+    }).unwrap();
+    let locked = session.screenshot("demo-locked").unwrap();
+    assert!(locked.diff_fraction(&visible, 0) > 0.5);
+    let frame = demo.frame(&demo_session, size);
+    demo.capture(&frame);
+    frame.compare(&locked);
+    frame.destroy();
+    demo_session.destroy();
+    plain_session.destroy();
+    demo.sync();
+    normal.sync();
     assert!(session.compositor_alive());
 }

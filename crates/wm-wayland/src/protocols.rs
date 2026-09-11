@@ -245,6 +245,7 @@ struct CaptureTarget {
     size: Size,
     transform: Transform,
     overlay_cursor: bool,
+    include_overlays: bool,
     texture: GlesTexture,
     damage_tracker: OutputDamageTracker,
     scene_scratch: Vec<SceneElement<GlesRenderer>>,
@@ -463,6 +464,7 @@ struct PendingCapture {
     /// Its output's transform — see [`capture_region`].
     transform: Transform,
     overlay_cursor: bool,
+    include_overlays: bool,
     /// `copy_with_damage` rather than `copy`: answer only on a pass
     /// where the scene actually changed, so a recorder polling in a
     /// tight loop does not capture the same still frame forever.
@@ -485,6 +487,7 @@ pub(crate) struct ScreencopyFrameData {
     /// in the output's *buffer* space, not its logical one.
     transform: Transform,
     overlay_cursor: bool,
+    include_overlays: bool,
     /// Set by the first `copy`/`copy_with_damage`; a second one is the
     /// protocol's `already_used` error. An atomic rather than a `Mutex`
     /// because `Dispatch` hands out only `&UserData` and this is the
@@ -1182,7 +1185,7 @@ impl GlobalDispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
     fn request(
         _state: &mut Self,
-        _client: &Client,
+        client: &Client,
         _resource: &ZwlrScreencopyManagerV1,
         request: zwlr_screencopy_manager_v1::Request,
         _data: &(),
@@ -1193,7 +1196,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
         match request {
             Request::CaptureOutput { frame, overlay_cursor, output } => {
                 let source = output_geometry(&output).map(|(rect, transform, _scale)| (rect, transform));
-                new_frame(data_init, frame, source, overlay_cursor != 0);
+                new_frame(data_init, frame, source, overlay_cursor != 0, crate::state::client_captures_overlays(client));
             }
             Request::CaptureOutputRegion { frame, overlay_cursor, output, x, y, width, height } => {
                 // Output-LOCAL coordinates, per the protocol's
@@ -1222,7 +1225,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
                     );
                     Some((intersection(requested, output_rect)?, transform))
                 });
-                new_frame(data_init, frame, source, overlay_cursor != 0);
+                new_frame(data_init, frame, source, overlay_cursor != 0, crate::state::client_captures_overlays(client));
             }
             Request::Destroy => {}
             _ => {}
@@ -1241,10 +1244,11 @@ fn new_frame(
     frame: New<ZwlrScreencopyFrameV1>,
     source: Option<(Rect, Transform)>,
     overlay_cursor: bool,
+    include_overlays: bool,
 ) {
     let (region, transform) = source.unwrap_or((Rect::default(), Transform::Normal));
     let frame =
-        data_init.init(frame, ScreencopyFrameData { region, transform, overlay_cursor, used: AtomicBool::new(false) });
+        data_init.init(frame, ScreencopyFrameData { region, transform, overlay_cursor, include_overlays, used: AtomicBool::new(false) });
     if region.size.w == 0 || region.size.h == 0 {
         // An unknown output, or a region entirely off its edge. Failing
         // now beats advertising a zero-sized buffer the client cannot
@@ -1322,6 +1326,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for Compositor {
             region: data.region,
             transform: data.transform,
             overlay_cursor: data.overlay_cursor,
+            include_overlays: data.include_overlays,
             with_damage,
             eligible: false,
         });
@@ -1379,7 +1384,7 @@ pub(crate) fn frame_presented(comp: &mut Compositor, presented: bool) {
             let output = monitors.iter().enumerate()
                 .max_by_key(|(_, monitor)| overlap_area(capture.region, monitor.geometry))
                 .map(|(index, _)| index).unwrap_or(usize::MAX);
-            let key = (capture.region, capture.transform, capture.overlay_cursor);
+            let key = (capture.region, capture.transform, capture.overlay_cursor, capture.include_overlays);
             if *selected.entry(output).or_insert(key) == key {
                 capture.eligible = true;
             }
@@ -1406,9 +1411,9 @@ pub(crate) fn frame_presented(comp: &mut Compositor, presented: bool) {
         let first = comp.protocols.captures.remove(index);
         let mut group = vec![first];
         let first = &group[0];
-        let key = (first.region, first.transform, first.overlay_cursor);
+        let key = (first.region, first.transform, first.overlay_cursor, first.include_overlays);
         group.extend(comp.protocols.captures.extract_if(.., |capture| {
-            capture.eligible && (capture.region, capture.transform, capture.overlay_cursor) == key
+            capture.eligible && (capture.region, capture.transform, capture.overlay_cursor, capture.include_overlays) == key
         }));
         // One download is the entire retained staging budget. Matching
         // consumers share its mapping rather than cloning a fullscreen image.
@@ -1542,6 +1547,7 @@ fn prepare_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) -> 
                 && target.size == target_size
                 && target.transform == first.transform
                 && target.overlay_cursor == first.overlay_cursor
+                && target.include_overlays == first.include_overlays
         });
     let renderer = graphics_renderer(graphics);
     let mut target = match cache_index {
@@ -1570,6 +1576,7 @@ fn prepare_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) -> 
                 size: target_size,
                 transform: first.transform,
                 overlay_cursor: first.overlay_cursor,
+                include_overlays: first.include_overlays,
                 texture,
                 damage_tracker: OutputDamageTracker::new(
                     SSize::<i32, Physical>::from((width, height)),
@@ -1594,6 +1601,9 @@ fn prepare_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) -> 
         cursors,
         first.region,
     );
+    if first.include_overlays {
+        crate::capture_tool::render_capture(&mut target.scene_scratch, renderer, wm.backend(), first.region, first.overlay_cursor);
+    }
     let width = target_size.w as i32;
     let height = target_size.h as i32;
     let success: Result<_, String> = (|| {
@@ -1714,6 +1724,7 @@ pub(crate) fn capture_region(
     region: Rect,
     transform: Transform,
     overlay_cursor: bool,
+    include_overlays: bool,
 ) -> Result<crate::capture::PendingImage, String> {
     let target_size = buffer_size(region.size, transform);
     if target_size.w == 0 || target_size.h == 0 {
@@ -1729,6 +1740,7 @@ pub(crate) fn capture_region(
                 && target.size == target_size
                 && target.transform == transform
                 && target.overlay_cursor == overlay_cursor
+                && target.include_overlays == include_overlays
         });
     let renderer = graphics_renderer(graphics);
     let mut target = match cache_index {
@@ -1745,6 +1757,7 @@ pub(crate) fn capture_region(
                 size: target_size,
                 transform,
                 overlay_cursor,
+                include_overlays,
                 texture,
                 damage_tracker: OutputDamageTracker::new(
                     SSize::<i32, Physical>::from((width, height)),
@@ -1769,6 +1782,9 @@ pub(crate) fn capture_region(
         cursors,
         region,
     );
+    if include_overlays {
+        crate::capture_tool::render_capture(&mut target.scene_scratch, renderer, wm.backend(), region, overlay_cursor);
+    }
     let width = target_size.w as i32;
     let height = target_size.h as i32;
     let result: Result<_, String> = (|| {
