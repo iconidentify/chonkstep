@@ -142,7 +142,7 @@ scripts/e2e.sh --headless --host-renderer gl --release --test mac_spaces
 cargo test --locked -p wm-core -p wm-config -p chonk-shell -p wm-wayland --lib
 ```
 
-The nineteen workflows cover independent Control-arrow navigation and Command-Tab,
+The twenty workflows cover independent Control-arrow navigation and Command-Tab,
 dual fullscreen with exact geometry restore and visible-Space furniture rules, live swipes with local boundary resistance, clipping plus input exclusion and
 surface output membership, native workspace groups, hotplug recovery, second-display
 Overview and grab cleanup, and persisted fullscreen/empty Spaces across reconnect.

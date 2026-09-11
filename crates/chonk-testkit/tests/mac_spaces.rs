@@ -797,6 +797,91 @@ fn desktop_thumbnails_show_real_placement_updates_moves_and_removal() {
 }
 
 #[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn title_updates_preserve_an_active_desktop_drag() {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, PropMode, WindowClass};
+    use x11rb::wrapper::ConnectionExt as _;
+    let mut s = boot("mac-spaces-title-drag");
+    s.door().motion(200.0, 400.0).unwrap();
+    dispatch(&mut s, "workspace 3");
+    dispatch(&mut s, "workspace 1");
+    let (connection, screen) = s.connect_x11().unwrap();
+    let root = connection.setup().roots[screen].root;
+    let window = connection.generate_id().unwrap();
+    connection.create_window(x11rb::COPY_DEPTH_FROM_PARENT, window, root,
+        40, 190, 300, 250, 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT,
+        &CreateWindowAux::new().background_pixel(0xd2502d)).unwrap().check().unwrap();
+    connection.change_property8(PropMode::REPLACE, window, AtomEnum::WM_NAME,
+        AtomEnum::STRING, b"Drag Before").unwrap();
+    connection.map_window(window).unwrap();
+    connection.flush().unwrap();
+    let client = s.wait_for_window("Drag Before").unwrap();
+    chord(&mut s, &[29], 103);
+    poll_until(WAIT, "Overview entry animation complete", || {
+        (s.world().ok()?.overview?.progress == 1.0).then_some(())
+    }).unwrap();
+    let world = s.world().unwrap();
+    let card = world.overview_windows.iter().find(|w| w.id == client.id).unwrap().rect;
+    let target = world.overview_spaces[1].rect;
+    let x = f64::from(card.pos.x + card.size.w as i32 / 2);
+    let y = f64::from(card.pos.y + card.size.h as i32 / 2);
+    s.door().motion(x, y).unwrap();
+    s.door().barrier().unwrap();
+    s.door().button("left", true).unwrap();
+    s.door().barrier().unwrap();
+    s.door().motion(x + 40.0, y - 20.0).unwrap();
+    poll_until(WAIT, "card picked up", || s.world().ok()?.overview_drag)
+        .unwrap_or_else(|e| panic!("{e}: card {card:?}, world {:?}", s.world().unwrap()));
+    // Browser loads and terminal commands change titles during ordinary drags.
+    // Wait for the compositor to observe the real X11 property change while
+    // the button remains held; a semantic refresh must preserve the gesture.
+    connection.change_property8(PropMode::REPLACE, window, AtomEnum::WM_NAME,
+        AtomEnum::STRING, b"Drag After").unwrap();
+    connection.flush().unwrap();
+    s.wait_for_window("Drag After").unwrap();
+    s.door().barrier().unwrap();
+    assert!(s.world().unwrap().overview_drag.is_some(), "title refresh cancelled the held drag");
+    s.door().motion(f64::from(target.pos.x + target.size.w as i32 / 2),
+        f64::from(target.pos.y + target.size.h as i32 / 2)).unwrap();
+    s.door().button("left", false).unwrap();
+    poll_until(WAIT, "renamed window dropped on Desktop 2", || {
+        json(&s, "clients").as_array()?.iter().find(|w| w["title"] == "Drag After")
+            .filter(|w| w["workspace"]["id"] == 3).map(|_| ())
+    }).unwrap();
+    let world = s.world().unwrap();
+    assert!(world.overview_space_windows.contains(&(1, client.id)));
+    assert!(!world.overview_space_windows.contains(&(0, client.id)));
+    // A real geometry change is different: the old card coordinates are no
+    // longer a valid drag contract. Consume release without moving/activating.
+    s.door().click(f64::from(target.pos.x + target.size.w as i32 / 2),
+        f64::from(target.pos.y + target.size.h as i32 / 2)).unwrap();
+    s.door().barrier().unwrap();
+    let world = s.world().unwrap();
+    let card = world.overview_windows.iter().find(|w| w.id == client.id).unwrap().rect;
+    let x = f64::from(card.pos.x + card.size.w as i32 / 2);
+    let y = f64::from(card.pos.y + card.size.h as i32 / 2);
+    s.door().motion(x, y).unwrap();
+    s.door().barrier().unwrap();
+    s.door().button("left", true).unwrap();
+    s.door().barrier().unwrap();
+    s.door().motion(x + 40.0, y - 20.0).unwrap();
+    poll_until(WAIT, "second drag picked up", || s.world().ok()?.overview_drag).unwrap();
+    dispatch(&mut s, "resizewindowpixel exact 350 280,title:^Drag After$");
+    poll_until(WAIT, "geometry change cancels the stale drag", || {
+        s.world().ok()?.overview_drag.is_none().then_some(())
+    }).unwrap();
+    let target = world.overview_spaces[0].rect;
+    s.door().motion(f64::from(target.pos.x + target.size.w as i32 / 2),
+        f64::from(target.pos.y + target.size.h as i32 / 2)).unwrap();
+    s.door().button("left", false).unwrap();
+    s.door().barrier().unwrap();
+    assert!(s.world().unwrap().overview.is_some());
+    assert!(json(&s, "clients").as_array().unwrap().iter()
+        .any(|w| w["title"] == "Drag After" && w["workspace"]["id"] == 3));
+}
+
+#[test]
 #[ignore = "scripts/e2e.sh --headless --test mac_spaces thumbnails"]
 fn desktop_thumbnails_respect_pinned_minimized_and_fullscreen_windows_per_display() {
     let mut s = boot("mac-spaces-thumbnail-lifecycle");

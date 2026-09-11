@@ -16,6 +16,7 @@ prerelease through `preview-v0.5.0`, not a claim of complete macOS compatibility
 | Open Overview with windows on several desktops | Desktop strip showed wallpaper/counts instead of the actual windows | Render shared window surfaces in desktop geometry, clipped and stacked; new native and XWayland pixel regressions |
 | Scene imports run after querying a nested EGL backbuffer age | NVIDIA recordings could retain dimmed strips on some reused buffers | Complete imports and GPU-timer setup before latching/querying the backbuffer; verify every frame during a stable capture hold |
 | X11 client sets its title before mapping and never changes it | The cached title remained empty | Initialize the title cache when creating its record; exercised by the XWayland miniature workflow |
+| A browser or terminal changes its title during an Overview drag | Semantic refresh cancelled the held gesture | Preserve the gesture and its visual when card geometry and desktop identities are unchanged; invalidate layout or target changes |
 
 The clipboard tests toggle the live profile three times and verify exact UTF-8
 text after the original owner exits. The Mac key regression also toggles eight
@@ -49,10 +50,10 @@ The patched recording passed all 45 sampled frames (maximum header variation
 one level out of 255). The runner now rejects stale, blank, truncated, and
 undecodable capture evidence. Four harness regressions protect that verification.
 
-The nineteen `mac_spaces` workflows pass against the candidate in an isolated GL
+The twenty `mac_spaces` workflows exercise the candidate in an isolated GL
 host with two real `wl_output` heads. New assertions cover window positions and
 colors on separate desktops, live repaint on a parked desktop, XWayland repaint,
-edge clipping, real pointer drag between desktops, close/removal, pinned and
+edge clipping, real pointer drag between desktops (including title updates), close/removal, pinned and
 minimized membership, fullscreen creation/removal, and stopping parked client
 callbacks when Overview closes. The pre-feature miniature regression fails on
 the earlier executable.
@@ -75,6 +76,11 @@ scripts/e2e.sh --headless --host-renderer gl
 CI explicitly installs the real-Fcitx/GTK test dependencies and Pillow for
 benchmark image verification; the first remote SDK run exposed the missing
 Pillow dependency.
+The remote Wayland run also exposed Ubuntu's Chromium user-namespace restriction:
+the Mac fixtures now use the same CI-only private-page SwANGLE launch settings as
+the existing browser tests and report early process exits immediately. Nautilus
+readiness now requires a dark fixture background plus file/text pixels; a blank
+white loading surface previously satisfied the test's brightness-only predicate.
 
 The first command runs strict Clippy, private Rustdoc, workspace and Wayland unit
 tests, and the Python harness tests. The second uses real clients and production

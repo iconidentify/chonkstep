@@ -2379,7 +2379,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         } else { wm.active_output_index() };
         let current = wm.active_workspace_on_output(output);
         let row = wm.workspace_row_on_output(output);
-        self.overview_spaces = row.iter().map(|&space| wm.workspace_id(space)).collect();
+        let spaces: Vec<_> = row.iter().map(|&space| wm.workspace_id(space)).collect();
+        if self.overview_spaces != spaces {
+            // Equal row lengths do not guarantee equal drop targets (a close
+            // and create can arrive in one batch). Preserve actual identities.
+            self.desktop.cancel_overview_pointer(wm.backend_mut(), &self.theme);
+        }
+        self.overview_spaces = spaces;
         let area = wm.monitors_ref().get(output).map(|m| m.geometry);
         let mut items: Vec<OverviewItem<B>> = wm
             .iter_clients()

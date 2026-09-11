@@ -29,7 +29,7 @@ fn browser(s: &mut Session, platform: &str, suffix: &str) -> Browser {
     std::fs::create_dir(&profile).unwrap();
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/mac-mode.html");
     let url = format!("file://{}?{suffix}", fixture.display());
-    let args = vec![
+    let mut args = vec![
         format!("--ozone-platform={platform}"),
         format!("--user-data-dir={}", profile.display()),
         format!("--app={url}"),
@@ -45,6 +45,13 @@ fn browser(s: &mut Session, platform: &str, suffix: &str) -> Browser {
         "--disable-sync".into(),
         "--password-store=basic".into(),
     ];
+    if std::env::var_os("CI").is_some() {
+        // Match the existing browser scale/popup fixtures: hosted runners
+        // deny user namespaces and have no DRM device. Only this disposable
+        // local-page browser gets these settings; local UAT keeps its sandbox.
+        args.extend(["--no-sandbox", "--use-gl=angle", "--use-angle=swiftshader"]
+            .into_iter().map(String::from));
+    }
     let args: Vec<_> = args.iter().map(String::as_str).collect();
     if platform == "x11" {
         s.launch_x11_isolated("chromium", &args).unwrap();
@@ -52,9 +59,10 @@ fn browser(s: &mut Session, platform: &str, suffix: &str) -> Browser {
         s.launch_isolated("chromium", &args).unwrap();
     }
     let mut b = poll_until(Duration::from_secs(60), "private browser page", || {
+        assert!(s.client_status("chromium").unwrap().is_none(),
+            "private browser exited before DevTools startup: {}", s.client_log("chromium"));
         Browser::connect(&profile, &url).ok()
-    })
-    .unwrap();
+    }).unwrap();
     poll_until(WAIT, "loaded Mac fixture", || {
         (b.evaluate("!!document.querySelector('#source')").ok()? == true).then_some(())
     })
@@ -852,6 +860,7 @@ fn nautilus_copies_files_using_command_shortcuts() {
             "GSETTINGS_BACKEND=memory",
             "XDG_SESSION_TYPE=wayland",
             "GTK_A11Y=none",
+            "GTK_THEME=Adwaita:dark",
             "nautilus",
             "--new-window",
             source.to_str().unwrap(),
@@ -864,10 +873,14 @@ fn nautilus_copies_files_using_command_shortcuts() {
     // sending Select All while that row is empty cannot select a future file.
     poll_until(WAIT, "Nautilus source file painted", || {
         let shot = s.screenshot("source-loaded").ok()?;
-        let ink = (60..200).flat_map(|y| (220..window.w.saturating_sub(30)).map(move |x| (x, y)))
-            .filter(|&(x, y)| shot.pixel(window.x.max(0) as u32 + x, window.y.max(0) as u32 + y)[..3]
-                .iter().all(|channel| *channel > 110)).count();
-        (ink > 100).then_some(())
+        let pixels: Vec<_> = (60..200).flat_map(|y| (220..window.w.saturating_sub(30)).map(move |x| (x, y)))
+            .map(|(x, y)| shot.pixel(window.x.max(0) as u32 + x, window.y.max(0) as u32 + y))
+            .collect();
+        let light = pixels.iter().filter(|p| p[..3].iter().all(|c| *c > 110)).count();
+        let dark = pixels.iter().filter(|p| p[..3].iter().all(|c| *c < 90)).count();
+        // A white loading surface is not a file icon. Require the dark
+        // fixture theme's background and contrasting file/text together.
+        (light > 100 && dark > pixels.len() / 2).then_some(())
     }).unwrap();
     s.door()
         .click(

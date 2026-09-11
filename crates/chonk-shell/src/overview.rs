@@ -145,7 +145,21 @@ impl<B: Backend> OverviewPanel<B> {
         workspace_windows: Vec<Vec<wm_core::OverviewThumbnail<B::WindowId, B::FrameId>>>,
         selected: usize,
     ) {
-        self.invalidate_pointer(backend);
+        let live = backend.supports_live_overview();
+        // Semantic refreshes include ordinary title updates. Keep an armed
+        // gesture only when every indexed target and its geometry are stable;
+        // topology, membership and layout changes must still consume release.
+        let preserve_pointer = self.visible && self.live && live
+            && self.geometry == primary && self.workspace == workspace
+            && self.drag_limit == Size::new(tile * 3, tile * 2)
+            && self.items.len() == items.len()
+            && self.items.iter().zip(&items).all(|(old, new)|
+                old.client == new.client && old.window == new.window
+                    && old.frame == new.frame && old.geometry == new.geometry
+                    && old.miniaturized == new.miniaturized && old.managed == new.managed);
+        if !preserve_pointer {
+            self.invalidate_pointer(backend);
+        }
         if self.window.is_some() && self.geometry != primary {
             // The monitor arrangement moved under a kept surface; a
             // stale-sized buffer would letterbox or clip the panel.
@@ -154,10 +168,12 @@ impl<B: Backend> OverviewPanel<B> {
             // surfaces.
             self.discard(backend);
         }
-        self.selected = selected.min(items.len().saturating_sub(1));
+        if !preserve_pointer || self.press.is_none() {
+            self.selected = selected.min(items.len().saturating_sub(1));
+        }
         self.items = items;
         self.workspace = workspace;
-        self.live = backend.supports_live_overview();
+        self.live = live;
         self.drag_threshold = (tile as f64 * 3.0 / 56.0).ceil().max(2.0) as i32;
         self.drag_limit = Size::new(tile * 3, tile * 2);
         let layout = if self.live {
@@ -258,6 +274,9 @@ impl<B: Backend> OverviewPanel<B> {
                         gap: layout.pad,
                     },
                 );
+                // Rebuilding the labels/miniatures replaces the backend scene.
+                // Its drag visual must follow the retained shell gesture.
+                backend.drag_live_overview(self.drag);
             }
             if !self.visible {
                 backend.map_shell_surface(window);
