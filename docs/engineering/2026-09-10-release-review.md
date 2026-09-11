@@ -81,6 +81,11 @@ the Mac fixtures now use the same CI-only private-page SwANGLE launch settings a
 the existing browser tests and report early process exits immediately. Nautilus
 readiness now requires a dark fixture background plus file/text pixels; a blank
 white loading surface previously satisfied the test's brightness-only predicate.
+Ubuntu 24.04's Nautilus 46.4 reproduced a second readiness race locally. The file
+workflow now observes the selected item, reads the actual offered file URI, and
+waits for the destination view before one Paste. Writer likewise must paint its
+fixture paragraph, not just a white loading surface, before one Copy. The exact
+copied file bytes and bidirectional Writer/browser text assertions remain intact.
 
 The first command runs strict Clippy, private Rustdoc, workspace and Wayland unit
 tests, and the Python harness tests. The second uses real clients and production

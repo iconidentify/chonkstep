@@ -12,6 +12,23 @@ const CTRL: u32 = 29;
 const SHIFT: u32 = 42;
 const CONTENT: &str = "Mac clipboard: café — 日本語 🍎\nsecond line";
 
+fn clipboard_output(s: &Session, args: &[&str]) -> Option<Vec<u8>> {
+    use std::process::{Command, Stdio};
+    let path = s.dir.join("observed-clipboard");
+    let mut child = Command::new("wl-paste").args(args)
+        .env("WAYLAND_DISPLAY", &s.wayland_display)
+        .stdout(Stdio::from(std::fs::File::create(&path).unwrap()))
+        .stderr(Stdio::null()).spawn().unwrap();
+    let status = poll_until(Duration::from_secs(2), "clipboard observation", || child.try_wait().ok().flatten());
+    if status.is_err() {
+        let _ = child.kill();
+        let _ = poll_until(Duration::from_secs(2), "clipboard reader reaped", || child.try_wait().ok().flatten());
+        return None;
+    }
+    if !status.unwrap().success() || std::fs::metadata(&path).ok()?.len() > 1024 * 1024 { return None; }
+    std::fs::read(path).ok()
+}
+
 fn chord(s: &mut Session, modifiers: &[u32], code: u32) {
     for &m in modifiers {
         s.door().key(m, true).unwrap();
@@ -889,11 +906,34 @@ fn nautilus_copies_files_using_command_shortcuts() {
         )
         .unwrap();
     chord(&mut s, &[CMD], 30);
+    poll_until(WAIT, "Nautilus selection painted", || {
+        let shot = s.screenshot("source-selected").ok()?;
+        let selected = (60..300).flat_map(|y| (220..window.w.saturating_sub(30)).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = shot.pixel(window.x.max(0) as u32 + x, window.y.max(0) as u32 + y);
+                p[2] > 100 && u16::from(p[2]) > u16::from(p[0]) + 60
+            }).count();
+        (selected > 1000).then_some(())
+    }).unwrap();
     chord(&mut s, &[CMD], 46);
+    poll_until(WAIT, "Command-C publishes the actual selected file URI", || {
+        let files = clipboard_output(&s, &["--type", "text/uri-list", "--no-newline"])?;
+        String::from_utf8(files).ok()?.contains("/source/clipboard.txt").then_some(())
+    }).unwrap();
     chord(&mut s, &[CMD], 38); // location
     type_ascii(&mut s, destination.to_str().unwrap());
     chord(&mut s, &[], 28);
     s.wait_for_window("destination").unwrap();
+    // The title changes before the destination view enables Paste. Observe
+    // its central empty-folder message, rather than sending input to a
+    // still-loading view. Adwaita:dark is fixed for both supported app versions.
+    poll_until(WAIT, "Nautilus destination view ready", || {
+        let shot = s.screenshot("destination-loaded").ok()?;
+        let ink = (200..400).flat_map(|y| (400..800).map(move |x| (x, y)))
+            .filter(|&(x,y)| shot.pixel(window.x.max(0) as u32+x,
+                window.y.max(0) as u32+y)[..3].iter().all(|c| *c > 150)).count();
+        (ink > 300).then_some(())
+    }).unwrap();
     chord(&mut s, &[CMD], 47);
     poll_until(WAIT, "Nautilus native file copy", || {
         (std::fs::read_to_string(destination.join("clipboard.txt")).ok()? == bytes).then_some(())
@@ -949,7 +989,11 @@ fn libreoffice_and_browser_exchange_document_text() {
     poll_until(Duration::from_secs(45), "Writer document painted", || {
         let shot = s.screenshot("writer-paint").ok()?;
         let mean = shot.mean_rgb(500, 300, 150, 150);
-        (mean.iter().all(|channel| *channel > 180.0)).then_some(())
+        let ink = (230..290).flat_map(|y| (300..750).map(move |x| (x, y)))
+            .filter(|&(x,y)| shot.pixel(x,y)[..3].iter().all(|c| *c < 100)).count();
+        // Writer first maps a completely blank white surface. Require the
+        // fixture paragraph as well as paper before selecting and copying it.
+        (mean.iter().all(|channel| *channel > 180.0) && ink > 100).then_some(())
     })
     .unwrap();
     s.door()
