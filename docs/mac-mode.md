@@ -186,8 +186,11 @@ Mac captures default to the XDG Desktop directory. Explicit
 `OMARCHY_SCREENSHOT_DIR` and `OMARCHY_SCREENRECORD_DIR` overrides still apply.
 Saving an image leaves the clipboard untouched. Clipboard-only capture uses a
 private, temporary runtime file removed after publication and creates no image
-in the user's capture directory. Mac capture does not automatically open a
-viewer/editor. Legacy capture behavior remains unchanged in desktop mode.
+in the user's capture directory. Saved screenshots automatically open in imv;
+finished recordings open in Omacut. This applies in both keyboard modes.
+Clipboard-only screenshots do not open a viewer. Install `imv` and `omacut`
+for automatic review; if either app is unavailable, the file remains saved
+and a notification reports the problem.
 
 Volume, brightness, keyboard-backlight, and media keys use replaceable
 `[commands]` providers named `mac-volume-*`, `mac-brightness-*`,

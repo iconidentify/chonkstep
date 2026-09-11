@@ -1,7 +1,8 @@
 # Repeatable product demos
 
 Run the actual compositor, open two real Foot terminals and a live GTK design
-board, and demonstrate window screenshots and region recording. A second
+board, and demonstrate window screenshots and region recording, including their
+automatic opening in the real imv and Omacut applications. A second
 scenario shows three Spaces, live desktop miniatures, dragging a window between
 Spaces, keyboard navigation, and entering/leaving a dedicated fullscreen Space. The fixtures
 are scripted sample content, not benchmark results. No existing desktop,
@@ -27,6 +28,7 @@ The output directory must be new. Dependencies: Weston with its GL headless
 backend and kiosk shell, Foot, grim, wf-recorder, FFmpeg/ffprobe, dbus-run-session,
 Python 3, Pillow, PyGObject, GTK 4 and the Python Cairo/GI bridge. On Debian/Ubuntu the
 Python packages are `python3-pil python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-4.0`.
+The capture scenario also requires imv and Omacut with their Wayland support.
 A headless Mesa software driver can be selected with
 `LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe`; these demos are not performance
 measurements. No root access or physical display is needed.
@@ -46,6 +48,9 @@ Outputs:
   screenshots. Corresponding `-diagnostic.png` files support visual QA.
 - `exports/`: the window screenshot and region video produced by using the
   feature itself. Keep these distinct from the walkthrough recording.
+- `screenshot-in-imv.png` and `recording-in-omacut.png`: real automatic review
+  windows. The runner verifies their exact file arguments and closes them with
+  Command-Q; stable process handles also clean them up if the demo fails.
 - `chonkstep-spaces-demo.mp4` and `spaces-{overview,design,window-moved,fullscreen,restored}.png`:
   the Spaces walkthrough and its checkpoints. These show actual client textures,
   including a GTK text editor on the third desktop.

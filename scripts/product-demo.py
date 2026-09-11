@@ -98,6 +98,42 @@ def dispatch(runtime, command):
         raise RuntimeError(f'demo command {command}: {response}')
 
 
+def review_window(stack, runtime, program, path):
+    """Find the real review app with this exact export, on our private desktop."""
+    def find():
+        for client in json.loads(ipc_request(runtime, 'j/clients')):
+            try:
+                argv = (Path('/proc')/str(client['pid'])/'cmdline').read_bytes().split(b'\0')
+                if (os.fsencode(path) in argv and argv and
+                    Path(os.fsdecode(argv[0])).name in (program, program+'-wayland')):
+                    return client
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+        return None
+    client = wait(f'{program} opens the saved file', find)
+    # Capture apps have their own process groups. Keep a stable handle so a
+    # failed demo cannot leak a viewer or accidentally signal a recycled PID.
+    fd = os.pidfd_open(client['pid'])
+    def cleanup():
+        try:
+            signal.pidfd_send_signal(fd, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        finally:
+            os.close(fd)
+    stack.callback(cleanup)
+    dispatch(runtime, 'focuswindow address:'+client['address'])
+    return client
+
+
+def close_review(door, runtime, client):
+    dispatch(runtime, 'focuswindow address:'+client['address'])
+    chord(door, [125], 16)  # Command-Q, through the production Mac profile.
+    wait('review app closes', lambda: not any(
+        row['address'] == client['address']
+        for row in json.loads(ipc_request(runtime, 'j/clients'))))
+
+
 def overview_rows(door, kind):
     return [dict(word.split('=',1) for word in shlex.split(row)[1:])
             for row in door.query('windows',multiple=True) if row.startswith(kind+' ')]
@@ -201,6 +237,11 @@ def boot(stack, root, host, binary, logs, name):
     env = environment(root, host)
     config = root/'config/chonkstep'
     config.mkdir()
+    # Fixture-only viewer sizing and title; never alter the user's imv config.
+    imv = root/'config/imv'
+    imv.mkdir()
+    (imv/'config').write_text('[options]\nwidth=900\nheight=700\n'
+        'title_text=imv — Saved screenshot\n')
     (config/'config.toml').write_text(
         "interaction_mode='mac'\nhyprland_config=false\nomarchy_shell=false\nomarchy_menu=false\n"
         "show_dock=false\nrestore_session=false\ntheme='nextstep-classic'\nscale=1\n")
@@ -306,7 +347,10 @@ def png_ready(path):
 
 def run(args):
     binary = args.binary.resolve(strict=True)
-    for command in ('weston', 'foot', 'wf-recorder', 'grim', 'ffmpeg', 'ffprobe'):
+    commands = ('weston', 'foot', 'wf-recorder', 'grim', 'ffmpeg', 'ffprobe')
+    if args.scenario == 'capture':
+        commands += ('imv', 'omacut')
+    for command in commands:
         if not shutil.which(command):
             raise RuntimeError(f'missing required demo tool: {command}')
     subprocess.run([sys.executable, '-c', "import gi, cairo; gi.require_version('Gtk','4.0'); from gi.repository import Gtk"], check=True)
@@ -353,7 +397,7 @@ def run(args):
         raw = output/'demo.raw.mp4'
         recorder = stack.enter_context(b.child(['wf-recorder','--no-dmabuf','-D','-r','30','-c','libx264',
             '-p','preset=fast','-p','crf=18','-p','color_range=tv',
-            '-x','yuv420p','-f',str(raw)], recording_env, output/'recorder.log'))
+            '-x','yuv420p','-F','scale=in_range=pc:out_range=tv,format=yuv420p','-f',str(raw)], recording_env, output/'recorder.log'))
         started = time.monotonic()
 
         def step(name, pause=1):
@@ -393,7 +437,13 @@ def run(args):
             still('capture-window-overlay')
             chord(door,[],28)
             step('Save the window screenshot',2)
-            wait('saved screenshot', lambda: list((output/'exports').glob('*.png')))
+            screenshot = wait('saved screenshot', lambda: list((output/'exports').glob('*.png')))[0]
+            runtime = clients['XDG_RUNTIME_DIR']
+            viewer = review_window(stack, runtime, 'imv', screenshot)
+            place(door, 'imv', 545, 175, runtime)
+            step('The saved screenshot opens in imv',3)
+            still('screenshot-in-imv')
+            close_review(door, runtime, viewer)
             chord(door,[125,42],6)
             chord(door,[],6) # 5: record region
             drag(door,(990,180),(1800,825),1.2)
@@ -403,7 +453,16 @@ def run(args):
             step('Record the live design board',5)
             chord(door,[125,42],6) # Capture shortcut stops an active recording.
             step('Stop recording and save',2)
-            wait('saved recording', lambda: list((output/'exports').glob('*.mp4')))
+            recording = wait('saved recording', lambda: list((output/'exports').glob('*.mp4')))[0]
+            editor = review_window(stack, runtime, 'omacut', recording)
+            place(door, 'omacut', 480, 175, runtime)
+            step('The finished recording opens in Omacut',4)
+            still('recording-in-omacut')
+            chord(door, [], 57)
+            step('Play the captured video in Omacut',3)
+            metadata['automatic_review'] = {'screenshot':'imv', 'recording':'omacut',
+                'verification':'Mapped real applications received the exact published files.'}
+            close_review(door, runtime, editor)
         recorder.send_signal(signal.SIGINT)
         recorder.wait(timeout=20)
         if recorder.returncode != 0:

@@ -52,8 +52,7 @@ enum ReviewKind {
 impl ReviewKind {
     fn program(self) -> &'static str {
         match self {
-            // Omarchy defaults PNG to imv. Respect a user's replacement too.
-            Self::Screenshot => "xdg-open",
+            Self::Screenshot => "imv",
             Self::Recording => "omacut",
         }
     }
@@ -554,14 +553,15 @@ pub(super) fn start() -> (
                         Ok(path) => {
                             // The file is synced and published: opening it
                             // need not wait for the clipboard liveness check.
+                            if destination != Destination::Clipboard {
+                                background.review(ReviewKind::Screenshot, path.clone());
+                            }
                             if destination == Destination::File {
                                 let _ = updates.try_send(Update::ScreenshotDone);
                                 background.notify_with_icon("Screenshot saved", &path.display().to_string(), NotificationIcon::Image(&path));
                                 continue;
                             }
-                            if destination == Destination::Legacy {
-                                background.review(ReviewKind::Screenshot, path.clone());
-                            } else { temporary.insert(path.clone()); }
+                            if destination == Destination::Clipboard { temporary.insert(path.clone()); }
                             if let Err(path) = clipboard.enqueue(path) {
                                 let _ = updates.try_send(Update::ScreenshotDone);
                                 if temporary.remove(&path) {
@@ -925,6 +925,9 @@ fn record(output: &str, geometry: &str, filter: &str, policy: Destination) -> Re
     // Keep the recorder's explicit signal defaults for its SIGINT stop path.
     // General child signal delivery is established by termination.rs; this
     // older recorder-specific boundary also resets ignored dispositions.
+    // wf-recorder releases disagree on automatic RGB-to-YUV range conversion.
+    // Set both the conversion and encoder metadata, including older FFmpeg.
+    let filter = format!("{filter},scale=in_range=pc:out_range=tv,format=yuv420p");
     let child = Command::new("env")
         .args(["--default-signal=INT,TERM,HUP", "wf-recorder"])
         .args([
@@ -941,9 +944,7 @@ fn record(output: &str, geometry: &str, filter: &str, policy: Destination) -> Re
             "preset=veryfast",
             "-p",
             "crf=18",
-            // RGB capture is converted to limited-range yuv420p. Match the
-            // encoder metadata; wf-recorder otherwise labels it full-range
-            // on newer FFmpeg, lifting blacks and compressing highlights.
+            // Match the explicit limited-range conversion below.
             "-p",
             "color_range=tv",
             "-r",
@@ -951,7 +952,7 @@ fn record(output: &str, geometry: &str, filter: &str, policy: Destination) -> Re
             "-x",
             "yuv420p",
             "-F",
-            filter,
+            &filter,
             "-f",
         ])
         .arg(&partial)
@@ -961,7 +962,7 @@ fn record(output: &str, geometry: &str, filter: &str, policy: Destination) -> Re
         .spawn();
     match child {
         Ok(child) => Ok(Recording {
-            review: policy == Destination::Legacy,
+            review: policy != Destination::Clipboard,
             child,
             partial,
             destination,
@@ -1086,7 +1087,7 @@ mod tests {
             // PATH belongs to each Command, never the multithreaded test process.
             // GNU env is real; both review apps are isolated argument recorders.
             symlink("/usr/bin/env", directory.join("env")).unwrap();
-            for program in ["xdg-open", "omacut"] {
+            for program in ["imv", "omacut"] {
                 let executable = directory.join(program);
                 std::fs::write(&executable, b"#!/bin/sh\nprintf '%s\\0' \"$0\" \"$@\" > \"$CAPTURE_REVIEW_LOG\"\nif [ \"$CAPTURE_REVIEW_WAIT\" = 1 ]; then exec /usr/bin/sleep 30; fi\nexit \"$CAPTURE_REVIEW_EXIT\"\n").unwrap();
                 std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
@@ -1231,7 +1232,7 @@ mod tests {
             .background
             .launch_review(ReviewKind::Screenshot, path, &mut command)
             .unwrap_err();
-        assert!(error.contains("xdg-open"));
+        assert!(error.contains("imv"));
         assert!(fixture.background.reviews.is_empty());
     }
 

@@ -105,8 +105,10 @@ not a relabeled rehearsal.
 
 Final video QA also compares decoded dark pixels with the independent screenshot.
 The old recording path changed the fixture's RGB `[240, 20, 20]` to `[226, 32, 32]`.
-The encoder now labels its limited-range YUV correctly in both the actual capture
-worker and the demo recorder. The real recording workflow checks RGB fidelity for
+The worker and demo recorder now explicitly convert RGB to limited-range YUV and
+label it correctly. Older Ubuntu wf-recorder/FFmpeg otherwise used a full-range
+conversion; its real regression failed before the explicit conversion and passed
+after. The real recording workflow checks RGB fidelity for
 both screen and area modes; the demo verifies raw and captioned video against its
 PNG. Two harness regressions reject uniformly washed-out video even when every
 frame has consistent pixels.
@@ -120,6 +122,13 @@ The failing image is rejected by this check; all nine overlay pairs in three
 consecutive corrected recordings matched exactly outside that dot.
 
 ## Limits and defaults
+
+Saved captures now open in both keyboard profiles: screenshots in imv and
+finalized recordings in Omacut. The Mac regression first reproduced the missing
+viewer, then verified exact literal file arguments, publication before launch,
+and no viewer for clipboard-only captures. Desktop-mode workflows cover launch
+failures and ensure failed saves never launch an app. The reusable demo also
+opens the actual installed applications and displays the saved PNG and MP4.
 
 The accelerated-path flags remain separate, opt-in experiments. Hardware results
 are in the [cross-GPU report](../benchmarks/cross-gpu-2026-09-10/README.md), including

@@ -478,14 +478,15 @@ fn screenshot_file_and_clipboard_destinations_are_independent() {
     let fixture_bin = root.join("config/chonkstep/bin");
     let mut paths = vec![fixture_bin.clone()];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let review_wrapper = "#!/bin/sh\npublished=missing\nif [ \"$#\" -eq 1 ] && [ -s \"$1\" ]; then published=published; fi\nprintf '%s\\0' \"${0##*/}\" \"$1\" \"$published\" >> \"$MAC_REVIEW_LOG\"\n";
     let mut s = Session::boot(
         "mac-capture",
         SessionOptions {
             config_extra: "interaction_mode = 'mac'\nhyprland_config = false\nshow_dock = false\n".into(),
             config_files: vec![
-                ("bin/xdg-open".into(), "#!/bin/sh\n: > \"$MAC_REVIEW_LOG\"\n".into()),
+                ("bin/imv".into(), review_wrapper.into()),
                 ("bin/notify-send".into(), "#!/bin/sh\nexit 0\n".into()),
-                ("bin/omacut".into(), "#!/bin/sh\n: > \"$MAC_REVIEW_LOG\"\n".into()),
+                ("bin/omacut".into(), review_wrapper.into()),
             ],
             env: vec![
                 ("OMARCHY_SCREENSHOT_DIR".into(), exports.display().to_string()),
@@ -503,7 +504,7 @@ fn screenshot_file_and_clipboard_destinations_are_independent() {
         },
     )
     .unwrap();
-    for name in ["xdg-open", "notify-send", "omacut"] {
+    for name in ["imv", "notify-send", "omacut"] {
         std::fs::set_permissions(fixture_bin.join(name), std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let mut b = browser(&mut s, "wayland", "capture");
@@ -525,6 +526,11 @@ fn screenshot_file_and_clipboard_destinations_are_independent() {
     let path = poll_until(WAIT, "Command-Shift-3 saves PNG", || files().into_iter().next()).unwrap();
     let screenshot = chonk_testkit::Screenshot::load(&path).unwrap();
     assert_eq!((screenshot.width, screenshot.height), (1280, 800));
+    let reviews = || std::fs::read(root.join("review-launched")).unwrap_or_default();
+    let mut expected_reviews = format!("imv\0{}\0published\0", path.display()).into_bytes();
+    poll_until(WAIT, "saved Mac screenshot opens in imv after publication", || {
+        (reviews() == expected_reviews).then_some(())
+    }).unwrap();
     focus(&mut s, &mut b, "target");
     chord(&mut s, &[CMD], 47);
     expect(&mut b, "target", CONTENT);
@@ -554,10 +560,7 @@ fn screenshot_file_and_clipboard_destinations_are_independent() {
     .unwrap();
     chonk_testkit::Screenshot::load(&png).unwrap();
     assert_eq!(files().len(), 1, "clipboard capture must not save a user file");
-    assert!(
-        !root.join("review-launched").exists(),
-        "Mac capture must not open a viewer"
-    );
+    assert_eq!(reviews(), expected_reviews, "clipboard-only capture must not open another viewer");
     chord(&mut s, &[CMD, SHIFT], 5);
     chord(&mut s, &[], 1);
     assert_eq!(files().len(), 1, "Escape cancels the selection");
@@ -591,7 +594,7 @@ fn screenshot_file_and_clipboard_destinations_are_independent() {
             "-of",
             "json",
         ])
-        .arg(recording)
+        .arg(&recording)
         .stdout(Stdio::from(std::fs::File::create(&probe).unwrap()))
         .spawn()
         .unwrap();
@@ -604,10 +607,10 @@ fn screenshot_file_and_clipboard_destinations_are_independent() {
     assert_eq!(info["streams"][0]["width"], 300);
     assert_eq!(info["streams"][0]["height"], 200);
     assert!(info["format"]["duration"].as_str().unwrap().parse::<f64>().unwrap() > 1.0);
-    assert!(
-        !root.join("review-launched").exists(),
-        "Mac recording must not open an editor"
-    );
+    expected_reviews.extend_from_slice(format!("omacut\0{}\0published\0", recording.display()).as_bytes());
+    poll_until(WAIT, "saved Mac recording opens in omacut after publication", || {
+        (reviews() == expected_reviews).then_some(())
+    }).unwrap();
 }
 
 #[test]
@@ -783,21 +786,28 @@ fn overlapping_navigation_both_commands_caps_lock_and_mode_rollback() {
 #[test]
 #[ignore = "scripts/e2e.sh --headless --test mac_mode"]
 fn german_and_french_layouts_use_their_own_letters_and_shifted_digits() {
+    use std::os::unix::fs::PermissionsExt;
     for (layout, z) in [("de", 21), ("fr", 17)] {
         let name = format!("mac-layout-{layout}");
         let exports = chonk_testkit::session_dir(&name).join("exports");
+        let fixture_bin = chonk_testkit::session_dir(&name).join("config/chonkstep/bin");
+        let mut paths = vec![fixture_bin.clone()];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
         let mut s = Session::boot(
             &name,
             SessionOptions {
                 config_extra: "interaction_mode='mac'\nhyprland_config=false\nshow_dock=false\n".into(),
+                config_files: vec![("bin/imv".into(), "#!/bin/sh\nexit 0\n".into())],
                 env: vec![
                     ("XKB_DEFAULT_LAYOUT".into(), layout.into()),
                     ("OMARCHY_SCREENSHOT_DIR".into(), exports.display().to_string()),
+                    ("PATH".into(), std::env::join_paths(paths).unwrap().into_string().unwrap()),
                 ],
                 ..Default::default()
             },
         )
         .unwrap();
+        std::fs::set_permissions(fixture_bin.join("imv"), std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut b = browser(&mut s, "wayland", layout);
         focus(&mut s, &mut b, "source");
         let a = if layout == "fr" { 16 } else { 30 };

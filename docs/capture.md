@@ -68,13 +68,14 @@ destinations directly. Filenames contain the date, time and a unique suffix.
 Overrides must be absolute paths.
 Existing files are never replaced; published captures have owner-only access.
 
-Every successful screenshot also offers the exact saved PNG as `image/png` on
+In desktop mode, every successful screenshot also offers the exact saved PNG as `image/png` on
 the Wayland clipboard. Saving does not depend on clipboard availability; the
 completion notification distinguishes those outcomes. Failed writes are
 reported and do not leave the input grab active. After a successful save, the
-screenshot opens in the default image viewer through `xdg-open` (imv on a
-standard Omarchy installation). Your chosen default is respected. An unavailable
-viewer does not undo the saved file or clipboard copy.
+screenshot opens directly in imv. Saved screenshots in Mac mode also open in
+imv, while leaving the clipboard unchanged. Clipboard-only Mac screenshots do
+not open a viewer. An unavailable viewer does not undo the saved file or
+clipboard copy. See [Mac mode](mac-mode.md) for its Desktop-directory default.
 
 Saved-capture notifications show the screenshot itself or a small first-frame
 preview of the recording. Video previews are generated asynchronously and kept
@@ -112,8 +113,9 @@ than silently cropped.
 
 Dependencies are included in the Arch package and source installer:
 `wl-clipboard`, `wf-recorder`, `ffmpeg`, `libnotify`, `xdg-user-dirs`, and
-`xdg-utils`. Omacut is provided by the Omarchy desktop; standalone installations
-need it installed to review recordings automatically.
+`xdg-utils`. Automatic review additionally needs `imv` for screenshots and
+`omacut` for recordings in either keyboard mode. Both are provided by the
+Omarchy desktop; standalone installations should install them separately.
 
 Review applications and notifications are launched asynchronously. At most 16
 review processes started by capture are tracked at once; further screenshots
