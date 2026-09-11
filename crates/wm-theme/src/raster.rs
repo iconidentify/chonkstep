@@ -14,7 +14,7 @@ use wm_theme_api::{
 };
 
 use crate::model::Theme;
-use crate::styles::{windowmaker, FrameStyle, UnsupportedDecorationStyle};
+use crate::styles::{system7, windowmaker, FrameStyle, UnsupportedDecorationStyle};
 pub(crate) use windowmaker::draw_button_glyph;
 
 /// The font machinery decoration text is shaped and rasterized with,
@@ -41,6 +41,7 @@ pub(crate) use windowmaker::draw_button_glyph;
 pub struct FontState {
     font_system: Rc<RefCell<cosmic_text::FontSystem>>,
     swash_cache: Rc<RefCell<GlyphCache>>,
+    system7_fallback: Rc<RefCell<system7::Fallback>>,
 }
 
 /// Read-only font/raster cache sizes for explicit diagnostics, not RSS.
@@ -67,18 +68,18 @@ const GLYPH_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const GLYPH_CACHE_ENTRIES: usize = 16 * 1024;
 const GLYPH_CACHE_CHECK_STEP: usize = 128;
 
-struct GlyphCache {
-    swash: cosmic_text::SwashCache,
+pub(crate) struct GlyphCache {
+    pub(crate) swash: cosmic_text::SwashCache,
     next_check: usize,
     observed_entries: usize,
 }
 
 impl GlyphCache {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { swash: cosmic_text::SwashCache::new(), next_check: 1, observed_entries: 0 }
     }
 
-    fn trim(&mut self) {
+    pub(crate) fn trim(&mut self) {
         let entries = self.swash.image_cache.len() + self.swash.outline_command_cache.len();
         if entries < self.observed_entries {
             // Public callers can clear Swash's maps themselves.
@@ -112,9 +113,12 @@ impl FontState {
     /// Loads the system font database. Expensive — call it once per
     /// session and clone the handle thereafter.
     pub fn new() -> Self {
+        let mut font_system = cosmic_text::FontSystem::new();
+        let system7_fallback = system7::Fallback::prepare(&mut font_system);
         Self {
-            font_system: Rc::new(RefCell::new(cosmic_text::FontSystem::new())),
+            font_system: Rc::new(RefCell::new(font_system)),
             swash_cache: Rc::new(RefCell::new(GlyphCache::new())),
+            system7_fallback: Rc::new(RefCell::new(system7_fallback)),
         }
     }
 
@@ -150,13 +154,15 @@ impl FontState {
     /// callers must not put it on an ordinary frame/input path.
     pub fn cache_statistics(&self) -> FontCacheStatistics {
         let cache = self.swash_cache.borrow();
+        let fallback = self.system7_fallback.borrow();
+        let caches = [&*cache, fallback.cache()];
         FontCacheStatistics {
             available_faces: self.font_system.borrow().db().faces().count(),
-            image_entries: cache.swash.image_cache.len(),
-            image_payload_bytes: cache.swash.image_cache.values().flatten()
+            image_entries: caches.iter().map(|cache| cache.swash.image_cache.len()).sum(),
+            image_payload_bytes: caches.iter().flat_map(|cache| cache.swash.image_cache.values().flatten())
                 .map(|image| image.data.capacity()).sum(),
-            outline_entries: cache.swash.outline_command_cache.len(),
-            outline_payload_bytes: cache.swash.outline_command_cache.values().flatten()
+            outline_entries: caches.iter().map(|cache| cache.swash.outline_command_cache.len()).sum(),
+            outline_payload_bytes: caches.iter().flat_map(|cache| cache.swash.outline_command_cache.values().flatten())
                 .map(|commands| std::mem::size_of_val(commands.as_ref())).sum(),
         }
     }
@@ -195,6 +201,7 @@ impl Default for FontState {
 pub struct RasterThemeEngine {
     theme: Theme,
     style: FrameStyle,
+    system7_roles: system7::Roles,
     fonts: FontState,
     base_scale: f32,
     scaled_themes: RefCell<HashMap<u32, Theme>>,
@@ -229,6 +236,7 @@ impl RasterThemeEngine {
             );
         }
         Self {
+            system7_roles: system7::Roles::from_theme(&theme),
             theme,
             style: FrameStyle::WindowMaker,
             fonts,
@@ -243,6 +251,13 @@ impl RasterThemeEngine {
     /// WindowMaker default and their original signatures.
     pub fn with_style(mut self, style: DecorationStyle) -> Result<Self, UnsupportedDecorationStyle> {
         self.style = FrameStyle::try_from(style)?;
+        if style == DecorationStyle::System7 {
+            let light = crate::default_theme::theme_variant(&self.theme.id, crate::model::Appearance::Light);
+            self.system7_roles = system7::Roles::from_theme(light.as_ref().unwrap_or(&self.theme));
+            if self.theme.appearance == crate::model::Appearance::Dark {
+                tracing::info!("System 7 decorations use the light palette; dark appearance remains active for other surfaces");
+            }
+        }
         self.title_cache.get_mut().clear();
         Ok(self)
     }
@@ -262,7 +277,7 @@ impl RasterThemeEngine {
     }
 
     /// A handle to this engine's font state, for building the engine
-    /// that replaces it. Cheap: two `Rc` bumps.
+    /// that replaces it. Cheap: three `Rc` bumps.
     pub fn fonts(&self) -> FontState {
         self.fonts.clone()
     }
@@ -270,7 +285,10 @@ impl RasterThemeEngine {
 
 impl ThemeEngine for RasterThemeEngine {
     fn layout(&self, request: &DecorationRequest) -> DecorationLayout {
-        match self.style { FrameStyle::WindowMaker => windowmaker::layout_decoration(&self.theme, request) }
+        match self.style {
+            FrameStyle::WindowMaker => windowmaker::layout_decoration(&self.theme, request),
+            FrameStyle::System7 => system7::layout(request, self.base_scale),
+        }
     }
 
     fn render(&self, request: &DecorationRequest, layout: &DecorationLayout) -> DecorationBuffer {
@@ -280,17 +298,18 @@ impl ThemeEngine for RasterThemeEngine {
             &mut self.fonts.swash(),
             request,
             layout,
-        ) }
+        ), FrameStyle::System7 => system7::flatten(self.render_surface(request, layout)) }
     }
 
     fn layout_at(&self, request: &DecorationRequest, scale: f32) -> DecorationLayout {
         if same_scale(scale, self.base_scale) {
             return self.layout(request);
         }
+        if matches!(self.style, FrameStyle::System7) { return system7::layout(request, scale); }
         let key = normalized_scale(scale).to_bits();
         let mut themes = self.scaled_themes.borrow_mut();
         let theme = themes.entry(key).or_insert_with(|| self.theme.scaled(scale / self.base_scale));
-        match self.style { FrameStyle::WindowMaker => windowmaker::layout_decoration(theme, request) }
+        windowmaker::layout_decoration(theme, request)
     }
 
     fn render_surface(&self, request: &DecorationRequest, layout: &DecorationLayout) -> DecorationSurface {
@@ -302,7 +321,8 @@ impl ThemeEngine for RasterThemeEngine {
             self.base_scale.to_bits(),
             request,
             layout,
-        ) }
+        ), FrameStyle::System7 => system7::render_sparse(self.system7_roles, self.base_scale,
+            &mut self.title_cache.borrow_mut(), &mut self.fonts.system7_fallback.borrow_mut(), request, layout) }
     }
 
     fn render_surface_at(
@@ -315,10 +335,14 @@ impl ThemeEngine for RasterThemeEngine {
             return self.render_surface(request, layout);
         }
         let scale = normalized_scale(scale);
+        if matches!(self.style, FrameStyle::System7) {
+            return system7::render_sparse(self.system7_roles, scale, &mut self.title_cache.borrow_mut(),
+                &mut self.fonts.system7_fallback.borrow_mut(), request, layout);
+        }
         let key = scale.to_bits();
         let mut themes = self.scaled_themes.borrow_mut();
         let theme = themes.entry(key).or_insert_with(|| self.theme.scaled(scale / self.base_scale));
-        match self.style { FrameStyle::WindowMaker => windowmaker::render_sparse_decoration(
+        windowmaker::render_sparse_decoration(
             theme,
             &mut self.fonts.font_system.borrow_mut(),
             &mut self.fonts.swash(),
@@ -326,11 +350,11 @@ impl ThemeEngine for RasterThemeEngine {
             key,
             request,
             layout,
-        ) }
+        )
     }
 }
 
-fn normalized_scale(scale: f32) -> f32 {
+pub(crate) fn normalized_scale(scale: f32) -> f32 {
     if scale.is_finite() { scale.max(0.125) } else { 1.0 }
 }
 
@@ -367,6 +391,7 @@ mod tests {
     #[test]
     fn font_statistics_observe_payload_capacity_without_triggering_eviction() {
         let fonts = FontState {
+            system7_fallback: Rc::new(RefCell::new(system7::Fallback::from_db("en-US".into(), cosmic_text::fontdb::Database::new()))),
             font_system: Rc::new(RefCell::new(cosmic_text::FontSystem::new_with_locale_and_db(
                 "en-US".into(), cosmic_text::fontdb::Database::new(),
             ))),

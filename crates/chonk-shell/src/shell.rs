@@ -2227,8 +2227,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }).map(|(_, c)| wm_core::OverviewThumbnail {
             window: c.window, frame: c.frame,
             source: if c.frame.is_some() {
-                Rect::new(Point::new(c.geometry.pos.x - c.layout.client_offset.x,
-                    c.geometry.pos.y - c.layout.client_offset.y), c.layout.frame_size)
+                c.visual_geometry()
             } else { c.geometry },
             draw_content: !c.flags.contains(ClientFlags::SHADED),
         }).collect()).collect()
@@ -2245,8 +2244,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let clients: Vec<_> = wm.iter_clients().filter(|(_, c)| c.workspace == workspace
             && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)).collect();
         let sources: Vec<_> = clients.iter().map(|(_, c)| if c.frame.is_some() {
-            Rect::new(Point::new(c.geometry.pos.x - c.layout.client_offset.x,
-                c.geometry.pos.y - c.layout.client_offset.y), c.layout.frame_size)
+            c.visual_geometry()
         } else { c.geometry }).collect();
         let sizes: Vec<_> = sources.iter().map(|r| r.size).collect();
         let mut layout = live::layout(
@@ -2401,13 +2399,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 preview: None,
                 frame: client.frame,
                 geometry: if client.frame.is_some() {
-                    Rect::new(
-                        Point::new(
-                            client.geometry.pos.x - client.layout.client_offset.x,
-                            client.geometry.pos.y - client.layout.client_offset.y,
-                        ),
-                        client.layout.frame_size,
-                    )
+                    client.visual_geometry()
                 } else {
                     client.geometry
                 },

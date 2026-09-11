@@ -291,8 +291,8 @@ impl<B: Backend> WindowManager<B> {
             let c = &self.clients[id];
             let mut rect = c.geometry;
             rect.pos = Point::new(
-                area.pos.x + c.layout.client_offset.x,
-                area.pos.y + c.layout.client_offset.y,
+                area.pos.x + c.layout.client_offset.x - c.layout.input_margin as i32,
+                area.pos.y + c.layout.client_offset.y - c.layout.input_margin as i32,
             );
             self.set_client_content_geometry(id, rect);
         } else {
@@ -340,18 +340,18 @@ impl<B: Backend> WindowManager<B> {
             return geometry;
         };
         let pos = Point::new(
-            geometry.pos.x.saturating_sub(c.layout.client_offset.x),
-            geometry.pos.y.saturating_sub(c.layout.client_offset.y),
+            geometry.pos.x.saturating_sub(c.layout.client_offset.x).saturating_add(c.layout.input_margin as i32),
+            geometry.pos.y.saturating_sub(c.layout.client_offset.y).saturating_add(c.layout.input_margin as i32),
         );
         let size = Size::new(
             geometry
                 .size
                 .w
-                .saturating_add(c.layout.frame_size.w.saturating_sub(c.geometry.size.w)),
+                .saturating_add(c.layout.visual_bounds().size.w.saturating_sub(c.geometry.size.w)),
             geometry
                 .size
                 .h
-                .saturating_add(c.layout.frame_size.h.saturating_sub(c.geometry.size.h)),
+                .saturating_add(c.layout.visual_bounds().size.h.saturating_sub(c.geometry.size.h)),
         );
         let reachable = self.backend.monitors_ref().iter().any(|m| {
             pos.x as i64 + size.w as i64 > m.geometry.pos.x as i64 + 32
@@ -363,8 +363,8 @@ impl<B: Backend> WindowManager<B> {
             let target = self.usable_area_at(pos);
             let pos = placement::clamp_to(target, size, pos);
             geometry.pos = Point::new(
-                pos.x.saturating_add(c.layout.client_offset.x),
-                pos.y.saturating_add(c.layout.client_offset.y),
+                pos.x.saturating_add(c.layout.client_offset.x).saturating_sub(c.layout.input_margin as i32),
+                pos.y.saturating_add(c.layout.client_offset.y).saturating_sub(c.layout.input_margin as i32),
             );
         }
         geometry
@@ -480,12 +480,12 @@ impl<B: Backend> WindowManager<B> {
                     Item {
                         min: Size::new(
                             ((min.w.saturating_add(
-                                layout.frame_size.w.saturating_sub(c.geometry.size.w),
+                                layout.visual_bounds().size.w.saturating_sub(c.geometry.size.w),
                             )) as f64
                                 / scale)
                                 .ceil() as u32,
                             ((min.h.saturating_add(
-                                layout.frame_size.h.saturating_sub(c.geometry.size.h),
+                                layout.visual_bounds().size.h.saturating_sub(c.geometry.size.h),
                             )) as f64
                                 / scale)
                                 .ceil() as u32,
@@ -537,12 +537,12 @@ impl<B: Backend> WindowManager<B> {
                     frame
                         .size
                         .w
-                        .saturating_sub(layout.frame_size.w.saturating_sub(c.geometry.size.w))
+                        .saturating_sub(layout.visual_bounds().size.w.saturating_sub(c.geometry.size.w))
                         .max(1),
                     frame
                         .size
                         .h
-                        .saturating_sub(layout.frame_size.h.saturating_sub(c.geometry.size.h))
+                        .saturating_sub(layout.visual_bounds().size.h.saturating_sub(c.geometry.size.h))
                         .max(1),
                 );
                 let constrained =
@@ -553,8 +553,8 @@ impl<B: Backend> WindowManager<B> {
                 );
                 let geometry = Rect {
                     pos: Point::new(
-                        frame.pos.x + layout.client_offset.x,
-                        frame.pos.y + layout.client_offset.y,
+                        frame.pos.x + layout.client_offset.x - layout.input_margin as i32,
+                        frame.pos.y + layout.client_offset.y - layout.input_margin as i32,
                     ),
                     size,
                 };

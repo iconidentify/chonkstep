@@ -125,7 +125,7 @@ pub(crate) fn update(comp: &mut Compositor, motion: SwipeMotion) {
                     })
                     .map(|c| {
                         let source = c.frame.and_then(|id| comp.wm.backend().frames.get(&id))
-                            .map_or(c.geometry, |frame| frame.geometry);
+                            .map_or(c.geometry, |frame| frame.visual_geometry());
                         let mut window = Window::snapshot(c.window, c.frame, source, comp.wm.backend());
                         window.draw_content = !c.flags.contains(ClientFlags::SHADED);
                         window.sticky = c.flags.contains(ClientFlags::STICKY);

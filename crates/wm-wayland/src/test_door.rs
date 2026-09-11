@@ -905,11 +905,12 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             ));
             let state = comp.shell.session_state();
             reply.push_str(&format!(
-                "theme id={:?} name={:?} appearance={} following={:?}\n",
+                "theme id={:?} name={:?} appearance={} following={:?} decoration_style={}\n",
                 state.base_theme.id,
                 state.base_theme.name,
                 state.appearance.name(),
                 comp.shell.following().unwrap_or(""),
+                state.decoration_style.name(),
             ));
             for (id, record) in &backend.windows {
                 // The ledger rectangle changes when the compositor sends a
@@ -932,8 +933,14 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                         )
                     })
                     .unwrap_or_default();
+                let workspace = comp.wm.client_for_window(*id).and_then(|id| comp.wm.client(id))
+                    .map_or(0, |client| client.workspace);
+                let stack_index = backend.stacking.iter().position(|entry| match entry {
+                    crate::state::StackEntry::Window(window) => window == id,
+                    crate::state::StackEntry::Frame(frame) => backend.frames.get(frame).is_some_and(|frame| frame.window == *id),
+                }).map_or(-1, |index| index as i64);
                 reply.push_str(&format!(
-                    "window id={} x={} y={} w={} h={} offset_x={} offset_y={} presented_w={} presented_h={} mapped={} app={:?} title={:?}\n",
+                    "window id={} x={} y={} w={} h={} offset_x={} offset_y={} presented_w={} presented_h={} mapped={} app={:?} title={:?} workspace={} stack_index={}\n",
                     id.0,
                     record.content.pos.x,
                     record.content.pos.y,
@@ -946,6 +953,8 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     record.mapped,
                     record.app_id.as_deref().unwrap_or(""),
                     record.title.as_deref().unwrap_or(""),
+                    workspace,
+                    stack_index,
                 ));
             }
             for (id, record) in &backend.frames {

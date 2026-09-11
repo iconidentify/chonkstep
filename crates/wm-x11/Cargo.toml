@@ -10,4 +10,7 @@ wm-core = { path = "../wm-core" }
 wm-theme-api = { path = "../wm-theme-api" }
 tracing = "0.1"
 thiserror = "2"
-x11rb = { version = "0.13", features = ["randr"] }
+x11rb = { version = "0.13", features = ["randr", "shape"] }
+
+[dev-dependencies]
+wm-theme = { path = "../wm-theme" }

@@ -136,7 +136,9 @@ jobs:
           sudo apt-get install -y xvfb xauth xterm x11-utils libx11-dev libgtk-3-bin
 
       - name: Reject oversized X11 application properties
-        run: xvfb-run -a cargo test --locked -p wm-x11 hostile_properties -- --ignored
+        run: |
+          xvfb-run -a cargo test --locked -p wm-x11 hostile_properties -- --ignored
+          xvfb-run -a cargo test --locked -p wm-x11 native_system7 -- --ignored
 
       - name: Build release binaries
         run: cargo build --release -p chonkstep
@@ -418,7 +420,7 @@ jobs:
           sudo apt-get install -y \
             libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev \
-            weston xwayland foot alacritty zenity grim wayland-utils wlr-randr wtype \
+            weston xwayland foot xterm alacritty zenity grim wayland-utils wlr-randr wtype \
             wl-clipboard wf-recorder ffmpeg libnotify-bin xdg-user-dirs xdg-utils \
             nautilus libreoffice-writer libreoffice-gtk3 \
             fcitx5 python3-gi gir1.2-gtk-4.0

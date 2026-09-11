@@ -525,9 +525,18 @@ pub(crate) struct FramePart {
 pub(crate) struct FrameRecord {
     pub window: WlWindowId,
     pub geometry: Rect,
+    pub input_margin: u32,
     pub parts: Vec<FramePart>,
     pub fill_id: smithay::backend::renderer::element::Id,
     pub mapped: bool,
+}
+
+impl FrameRecord {
+    pub(crate) fn visual_geometry(&self) -> Rect {
+        let margin = self.input_margin.min(self.geometry.size.w / 2).min(self.geometry.size.h / 2);
+        Rect::new(Point::new(self.geometry.pos.x + margin as i32, self.geometry.pos.y + margin as i32),
+            Size::new(self.geometry.size.w - margin * 2, self.geometry.size.h - margin * 2))
+    }
 }
 
 /// Ledger entry for one shell surface. `buffer: None` means "never
@@ -5336,6 +5345,7 @@ mod tests {
             frames.insert(
                 frame_id,
                 FrameRecord {
+                    input_margin: 0,
                     window,
                     geometry: Rect::default(),
                     parts: Vec::new(),

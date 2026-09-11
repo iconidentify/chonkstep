@@ -755,7 +755,7 @@ impl Session {
     /// pixels. The barrier the caller ran beforehand is what makes
     /// this a picture of a settled scene rather than a race.
     pub fn screenshot(&mut self, label: &str) -> Result<Screenshot, String> {
-        self.capture_screenshot(label, false)
+        self.capture_screenshot(label, false, None)
     }
 
     /// The same real screencopy path as [`Self::screenshot`], with the
@@ -764,16 +764,24 @@ impl Session {
     /// while cursor visibility cannot be tested through a cursorless
     /// capture by definition.
     pub fn screenshot_with_cursor(&mut self, label: &str) -> Result<Screenshot, String> {
-        self.capture_screenshot(label, true)
+        self.capture_screenshot(label, true, None)
     }
 
-    fn capture_screenshot(&mut self, label: &str, overlay_cursor: bool) -> Result<Screenshot, String> {
+    /// Capture one output at its native pixel density. A combined grim capture
+    /// resamples lower-density outputs to the highest scale, which cannot prove
+    /// pixel-exact chrome when testing a mixed-DPI desktop.
+    pub fn screenshot_output(&mut self, label: &str, output: &str) -> Result<Screenshot, String> {
+        self.capture_screenshot(label, false, Some(output))
+    }
+
+    fn capture_screenshot(&mut self, label: &str, overlay_cursor: bool, output: Option<&str>) -> Result<Screenshot, String> {
         self.screenshot_serial += 1;
         let path = self.dir.join(format!("{:02}-{label}.png", self.screenshot_serial));
         let mut command = Command::new("grim");
         if overlay_cursor {
             command.arg("-c");
         }
+        if let Some(output) = output { command.args(["-o", output]); }
         let mut grim = command
             .arg(&path)
             .env("WAYLAND_DISPLAY", &self.wayland_display)
@@ -1046,6 +1054,10 @@ pub fn profile_binary(name: &str) -> Result<PathBuf, String> {
 #[derive(Clone, Debug)]
 pub struct WindowInfo {
     pub id: u64,
+    /// Managed workspace, for lifecycle/reload assertions.
+    pub workspace: usize,
+    /// Index in the compositor's bottom-to-top stack; -1 if absent.
+    pub stack_index: i64,
     pub x: i32,
     pub y: i32,
     pub w: u32,
@@ -1108,6 +1120,8 @@ pub struct ThemeInfo {
     pub appearance: String,
     /// `"omarchy"` while the session follows Omarchy, else empty.
     pub following: String,
+    /// Selected frame recipe, independently of palette and appearance.
+    pub decoration_style: String,
 }
 
 /// One `windows` reply: the compositor's whole idea of the screen.
@@ -1852,6 +1866,7 @@ impl Door {
                     name: quoted_field(&line, "name"),
                     appearance: field::<String>(&line, "appearance=").unwrap_or_default(),
                     following: quoted_field(&line, "following"),
+                    decoration_style: field::<String>(&line, "decoration_style=").unwrap_or_else(|| "windowmaker".into()),
                 };
             } else if line.starts_with("window ") {
                 if let Some(window) = parse_window_line(&line) {
@@ -1976,6 +1991,8 @@ fn quoted_field(line: &str, key: &str) -> String {
 fn parse_window_line(line: &str) -> Option<WindowInfo> {
     Some(WindowInfo {
         id: field(line, "id=")?,
+        workspace: field(line, "workspace=").unwrap_or_default(),
+        stack_index: field(line, "stack_index=").unwrap_or(-1),
         x: field(line, "x=")?,
         y: field(line, "y=")?,
         w: field(line, "w=")?,

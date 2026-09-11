@@ -53,14 +53,14 @@ fn change_density(marker: &Path, stage: &str) {
 #[test]
 #[ignore = "requires nested Wayland"]
 fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
+    for style in wm_theme::SUPPORTED_DECORATION_STYLES {
     for scale in [1.0, 1.5, 2.0] {
         for mode in ["buffer", "viewport", "viewport-destination"] {
             let mut s = Session::boot(
-                &format!("scale-change-{scale}-{mode}"),
+                &format!("scale-change-{}-{scale}-{mode}", style.name()),
                 SessionOptions {
                     scale: Some(scale),
-                    config_extra:
-                        "show_dock = false\nomarchy_menu = false\nhyprland_config = false\n".into(),
+                    config_extra: format!("show_dock = false\nomarchy_menu = false\nhyprland_config = false\ndecoration_style = {:?}\n", style.name()),
                     env: vec![("RUST_LOG".into(), "info,wm_wayland::xdg=trace".into())],
                     ..Default::default()
                 },
@@ -135,6 +135,7 @@ fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
             .unwrap();
             assert_pixels(&mut s, changed.0, changed.1);
         }
+    }
     }
 }
 

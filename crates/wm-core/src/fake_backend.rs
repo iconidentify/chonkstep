@@ -614,6 +614,7 @@ impl ThemeEngine for FakeTheme {
     fn layout(&self, request: &DecorationRequest) -> DecorationLayout {
         let frame_size = Size::new(request.content_size.w, request.content_size.h + TITLEBAR_HEIGHT);
         DecorationLayout {
+            input_margin: 0,
             frame_size,
             client_offset: Point::new(0, TITLEBAR_HEIGHT as i32),
             titlebar_height: TITLEBAR_HEIGHT,

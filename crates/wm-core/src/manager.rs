@@ -553,7 +553,7 @@ impl<B: Backend> WindowManager<B> {
     pub fn relayout_all_clients(&mut self) {
         if self.separate_spaces() && self.monitors_ref().is_empty() { return; }
         let moving_before = self.active_move.as_ref().and_then(|drag| {
-            self.clients.get(drag.client).map(client_frame_rect)
+            self.clients.get(drag.client).map(client_input_rect)
         });
         let ids: Vec<ClientId> = self.clients.keys().collect();
         for id in ids {
@@ -587,14 +587,14 @@ impl<B: Backend> WindowManager<B> {
         }
         if let (Some(before), Some(drag)) = (moving_before, self.active_move.as_mut()) {
             if let Some(client) = self.clients.get(drag.client) {
-                let after = client_frame_rect(client);
+                let after = client_input_rect(client);
                 drag.grab_offset.x = drag.grab_offset.x.saturating_add(before.pos.x.saturating_sub(after.pos.x));
                 drag.grab_offset.y = drag.grab_offset.y.saturating_add(before.pos.y.saturating_sub(after.pos.y));
             }
         }
         if let Some(drag) = self.active_resize.as_mut() {
             if let Some(client) = self.clients.get(drag.client) {
-                drag.start_frame = client_frame_rect(client);
+                drag.start_frame = client_input_rect(client);
                 drag.start_pointer = self.last_pointer;
             }
         }
@@ -855,8 +855,8 @@ impl<B: Backend> WindowManager<B> {
             let frame_pos = placement::clamp_to(target, frame.size, frame.pos);
             let Some(client) = self.clients.get_mut(id) else { continue };
             client.geometry.pos = Point::new(
-                frame_pos.x + client.layout.client_offset.x,
-                frame_pos.y + client.layout.client_offset.y,
+                frame_pos.x + client.layout.client_offset.x - client.layout.input_margin as i32,
+                frame_pos.y + client.layout.client_offset.y - client.layout.input_margin as i32,
             );
             self.reflow_frame(id);
             tracing::info!(?id, ?departed, ?target, "rescued window from a removed monitor");
@@ -1604,7 +1604,12 @@ impl<B: Backend> WindowManager<B> {
             BackendEvent::ChromeChanged(window) => self.handle_chrome_changed(window),
             BackendEvent::SizeHintsChanged(window) => {
                 if let Some(id) = self.client_for_window(window) {
-                    self.cancel_client_layout_interaction(id);
+                    // Terminals update WM_NORMAL_HINTS while answering each
+                    // resize configure. A freeform drag reads fresh hints on
+                    // its next motion; cancelling it here stops after one cell.
+                    // Spatial layouts must still invalidate their constraint
+                    // snapshot and recompute the affected workspace.
+                    if self.is_layout_managed(id) { self.cancel_client_layout_interaction(id); }
                     self.reflow_client_workspace(id);
                 }
             }
@@ -1767,8 +1772,8 @@ impl<B: Backend> WindowManager<B> {
             &client.title,
             self.placement_area(),
             Size::new(
-                layout.frame_size.w.saturating_sub(content.size.w),
-                layout.frame_size.h.saturating_sub(content.size.h),
+                layout.visual_bounds().size.w.saturating_sub(content.size.w),
+                layout.visual_bounds().size.h.saturating_sub(content.size.h),
             ),
             content.size,
             self.ui_scale,
@@ -1812,10 +1817,10 @@ impl<B: Backend> WindowManager<B> {
                     parent_frame.pos.y + parent_frame.size.h as i32 / 2,
                 );
                 let desired = Point::new(
-                    center.x - layout.frame_size.w as i32 / 2,
-                    center.y - layout.frame_size.h as i32 / 2,
+                    center.x - layout.visual_bounds().size.w as i32 / 2,
+                    center.y - layout.visual_bounds().size.h as i32 / 2,
                 );
-                placement::clamp_to(self.usable_area_at(center), layout.frame_size, desired)
+                placement::clamp_to(self.usable_area_at(center), layout.visual_bounds().size, desired)
             })
         });
         let frame_pos = if let Some(pos) = transient_pos {
@@ -1831,13 +1836,7 @@ impl<B: Backend> WindowManager<B> {
                     c.lifecycle == Lifecycle::Normal
                         && (self.workspace_visible(c.workspace) || c.flags.contains(ClientFlags::STICKY))
                 })
-                .map(|(_, c)| Rect {
-                    pos: Point::new(
-                        c.geometry.pos.x - c.layout.client_offset.x,
-                        c.geometry.pos.y - c.layout.client_offset.y,
-                    ),
-                    size: c.layout.frame_size,
-                })
+                .map(|(_, c)| client_frame_rect(c))
                 .collect();
             let policy = if window_type == WindowType::Dialog || floated.is_some() {
                 PlacementPolicy::Center
@@ -1846,13 +1845,13 @@ impl<B: Backend> WindowManager<B> {
             };
             let cascade_step = layout.titlebar_height.max(16);
             let pos =
-                placement::place_frame(policy, workarea, layout.frame_size, &existing, self.placements, cascade_step);
+                placement::place_frame(policy, workarea, layout.visual_bounds().size, &existing, self.placements, cascade_step);
             self.placements += 1;
             pos
         };
         let anchor = Point::new(
-            frame_pos.x + layout.frame_size.w as i32 / 2,
-            frame_pos.y + layout.frame_size.h as i32 / 2,
+            frame_pos.x + layout.visual_bounds().size.w as i32 / 2,
+            frame_pos.y + layout.visual_bounds().size.h as i32 / 2,
         );
         let frame_pos = self.below_top_reservation(frame_pos, anchor);
         let provisional_frame = Rect {
@@ -1864,6 +1863,7 @@ impl<B: Backend> WindowManager<B> {
             decoration_scale = target_scale;
             layout = self.theme.layout_at(&request, decoration_scale);
         }
+        let frame_pos = Point::new(frame_pos.x - layout.input_margin as i32, frame_pos.y - layout.input_margin as i32);
         let frame_geom = Rect { pos: frame_pos, size: layout.frame_size };
         client.geometry.pos =
             Point::new(frame_geom.pos.x + layout.client_offset.x, frame_geom.pos.y + layout.client_offset.y);
@@ -2503,7 +2503,9 @@ impl<B: Backend> WindowManager<B> {
                     ),
                     size: client.layout.frame_size,
                 };
-                self.active_resize = Some(ActiveResize { client: id, edge, start_frame, start_pointer: None });
+                let start_pointer = (client.layout.input_margin > 0).then(|| Point::new(
+                    start_frame.pos.x + local.x, start_frame.pos.y + local.y));
+                self.active_resize = Some(ActiveResize { client: id, edge, start_frame, start_pointer });
                 self.begin_drag_grab();
             }
             _ => {}
@@ -2655,15 +2657,17 @@ impl<B: Backend> WindowManager<B> {
                         || other.flags.contains(ClientFlags::STICKY))
             })
             .map(|(_, other)| client_frame_rect(other));
+        let margin = client.layout.input_margin;
         let snapped = snap::snap_position_iter(
             Rect {
-                pos: raw_pos,
-                size: frame_size,
+                pos: Point::new(raw_pos.x + margin as i32, raw_pos.y + margin as i32),
+                size: Size::new(frame_size.w.saturating_sub(margin * 2), frame_size.h.saturating_sub(margin * 2)),
             },
             outputs.chain(neighbors),
             self.snap_threshold,
         );
-        let new_frame_pos = self.below_top_reservation(snapped, root);
+        let visual_pos = self.below_top_reservation(snapped, root);
+        let new_frame_pos = Point::new(visual_pos.x - margin as i32, visual_pos.y - margin as i32);
 
         if new_frame_pos == old_frame.pos {
             return;
@@ -2688,7 +2692,13 @@ impl<B: Backend> WindowManager<B> {
         self.track_window_display(client_id);
         let new_scale = self.backend.decoration_scale(Rect { pos: new_frame_pos, size: frame_size });
         if old_scale.to_bits() != new_scale.to_bits() {
+            let before = client_input_rect(&self.clients[client_id]);
             self.reflow_frame(client_id);
+            let after = client_input_rect(&self.clients[client_id]);
+            if let Some(drag) = self.active_move.as_mut().filter(|drag| drag.client == client_id) {
+                drag.grab_offset.x = drag.grab_offset.x.saturating_add(before.pos.x.saturating_sub(after.pos.x));
+                drag.grab_offset.y = drag.grab_offset.y.saturating_add(before.pos.y.saturating_sub(after.pos.y));
+            }
         }
     }
 
@@ -2900,6 +2910,7 @@ impl<B: Backend> WindowManager<B> {
             };
             client.geometry = monitor;
             client.layout = DecorationLayout {
+                input_margin: 0,
                 frame_size: monitor.size,
                 client_offset: Point::new(0, 0),
                 titlebar_height: 0,
@@ -2910,6 +2921,7 @@ impl<B: Backend> WindowManager<B> {
             let window = client.window;
             let frame = client.frame;
             if let Some(frame) = frame {
+                self.backend.set_decoration_layout(frame, &client.layout);
                 self.backend.set_frame_geometry(frame, monitor);
             }
             self.backend.position_client(window, Point::new(0, 0));
@@ -2965,12 +2977,15 @@ impl<B: Backend> WindowManager<B> {
             frame_geom.pos.x + frame_geom.size.w as i32 / 2,
             frame_geom.pos.y + frame_geom.size.h as i32 / 2,
         );
-        frame_geom.pos = self.below_top_reservation(frame_geom.pos, anchor);
+        let margin = layout.input_margin as i32;
+        let visual_pos = self.below_top_reservation(Point::new(frame_geom.pos.x + margin, frame_geom.pos.y + margin), anchor);
+        frame_geom.pos = Point::new(visual_pos.x - margin, visual_pos.y - margin);
         let window = client.window;
         let content_size = client.geometry.size;
         let frame = client.frame;
 
         if let Some(frame) = frame {
+            self.backend.set_decoration_layout(frame, &layout);
             self.backend.set_frame_geometry(frame, frame_geom);
         }
         self.backend.position_client(window, layout.client_offset);
@@ -3053,16 +3068,16 @@ impl<B: Backend> WindowManager<B> {
         // regardless of content size for this theme, so the client's own
         // currently-cached layout already tells us how much of the
         // usable area's edge-to-edge size is *not* content.
-        let overhead_w = client.layout.frame_size.w.saturating_sub(client.geometry.size.w);
-        let overhead_h = client.layout.frame_size.h.saturating_sub(client.geometry.size.h);
+        let overhead_w = client.layout.visual_bounds().size.w.saturating_sub(client.geometry.size.w);
+        let overhead_h = client.layout.visual_bounds().size.h.saturating_sub(client.geometry.size.h);
 
         if directions.contains(MaximizeDirections::HORIZONTAL) {
-            client.geometry.pos.x = usable.pos.x + client.layout.client_offset.x;
+            client.geometry.pos.x = usable.pos.x + client.layout.client_offset.x - client.layout.input_margin as i32;
             client.geometry.size.w = usable.size.w.saturating_sub(overhead_w);
             client.flags.insert(ClientFlags::MAXIMIZED_H);
         }
         if directions.contains(MaximizeDirections::VERTICAL) {
-            client.geometry.pos.y = usable.pos.y + client.layout.client_offset.y;
+            client.geometry.pos.y = usable.pos.y + client.layout.client_offset.y - client.layout.input_margin as i32;
             client.geometry.size.h = usable.size.h.saturating_sub(overhead_h);
             client.flags.insert(ClientFlags::MAXIMIZED_V);
         }
@@ -4533,6 +4548,7 @@ impl<B: Backend> WindowManager<B> {
 /// nothing.
 fn frameless_layout(content: Size) -> DecorationLayout {
     DecorationLayout {
+        input_margin: 0,
         frame_size: content,
         client_offset: Point::new(0, 0),
         titlebar_height: 0,
@@ -4622,6 +4638,10 @@ fn squared_distance_to(rect: Rect, point: Point) -> u128 {
 /// Frameless clients use a zero-offset layout, so this is also their
 /// content rectangle without a special case.
 fn client_frame_rect<B: Backend>(client: &Client<B>) -> Rect {
+    client.visual_geometry()
+}
+
+fn client_input_rect<B: Backend>(client: &Client<B>) -> Rect {
     Rect {
         pos: Point::new(
             client.geometry.pos.x - client.layout.client_offset.x,
@@ -9686,6 +9706,7 @@ mod tests {
     mod spatial;
     mod spaces;
     mod restyle;
+    mod system7;
     fn mac_windows() -> (WindowManager<FakeBackend>, [ClientId; 3]) {
         let mut backend = FakeBackend::new();
         let windows = [backend.create_window(), backend.create_window(), backend.create_window()];

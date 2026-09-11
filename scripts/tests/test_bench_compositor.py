@@ -235,6 +235,12 @@ class ArgumentTests(unittest.TestCase):
     def test_nonexecutable_path_is_rejected(self):
         self.reject("--binary", f"directory={Path(__file__).parent}")
 
+    def test_unknown_style_or_label_and_duplicate_style_assignments_are_rejected(self):
+        for value in ("system7", "missing=system7", "ok=unknown", 'ok=system7"\\nshow_dock=true'):
+            with self.subTest(value=value):
+                self.reject("--decoration-style", value)
+        self.reject("--decoration-style", "ok=system7", "--decoration-style", "ok=windowmaker")
+
     def test_socket_path_limit_is_checked_before_startup(self):
         self.reject("--output", "/tmp/" + "x" * 100)
 

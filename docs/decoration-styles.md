@@ -41,19 +41,49 @@ change Command-key translations, shortcuts or Spaces policy.
 returns an error for a reserved but unavailable style. Existing constructors keep
 their signatures and default to WindowMaker. `SUPPORTED_DECORATION_STYLES` lists
 only implemented renderers, so tests and tools never exercise a silent stand-in.
-The frame recipe lives in `wm-theme/src/styles/windowmaker.rs`; font discovery,
+The frame recipes live in `wm-theme/src/styles/windowmaker.rs` and
+`wm-theme/src/styles/system7.rs`; font discovery,
 glyph/title caches and per-scale variants stay in the shared engine.
 
 Offline inspection preserves the original positional arguments:
 
 ```sh
 cargo run -p wm-theme --example dump_decoration -- --style windowmaker 2 "Terminal" /tmp/frame
+cargo run -p wm-theme --example dump_decoration -- --style system7 2 "Terminal" /tmp/system7
 cargo run --release -p wm-theme --example performance -- --style windowmaker
 ```
 
 The [720-case compatibility oracle](../crates/wm-theme/tests/fixtures/windowmaker/README.md)
 pins pre-refactor WindowMaker geometry and every sparse pixel, with a fixed
 test-only font. Its explicit generator refuses to overwrite existing fixtures.
+
+System 7 has 84 byte-exact checks against the genuine OS-captured monochrome
+matrix at 1× and its nearest-neighbor 2× replication. Another 144 implementation
+goldens pin the documented 1.25×/1.5× rounding policy; these fractional examples
+are not historical captures. Native Wayland and XWayland tests compare the
+rendered frame with a real desktop capture, exercise both boxes, shade/unshade,
+shadow and external-ring resizing, repeated live switching, and mixed DPI.
+Native X11 wire tests verify the server's Shape regions, stacking, transparent
+input delivery and cleanup after switching back.
+
+The invisible resize margin is four logical pixels outside the visible frame.
+All eight edge/corner directions work; 28-pixel L-shaped corner grips avoid
+stealing client or button input. At 1× a 400×240 client has a 403×261 visible
+frame and a 411×269 input frame, with client offset (5,23). Shading gives a
+20-pixel visible height and a 28-pixel input height. Layout, snapping, Overview,
+workspace previews and window capture use the visible bounds. Input uses the
+larger bounds. The margin and the two unpainted shadow corners remain
+transparent on both backends, including without an X11 compositing manager.
+
+ASCII and Latin-1 titles use the embedded original atlas. Other scripts use a
+resident selection of installed fallback fonts prepared during session startup.
+Common Cyrillic, Greek, CJK, Arabic, Hebrew, Indic and other script probes choose
+available faces; new title text never opens a font file on the rendering path.
+Fallback glyphs are thresholded to the same two palette roles before scaling.
+Missing coverage produces a visible box. Installing another font requires a
+session restart to update this resident set. Fallback text is compatible, not
+pixel-exact Chicago. The offline System 7 API caps scale at 16 and client
+dimensions at 8192, matching the compositor's client-dimension safety limit.
 
 ## Performance contract
 

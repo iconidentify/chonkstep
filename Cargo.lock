@@ -3446,6 +3446,7 @@ dependencies = [
  "flate2",
  "libc",
  "serde",
+ "serde_json",
  "tiny-skia",
  "toml",
  "tracing",
@@ -3494,6 +3495,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "wm-core",
+ "wm-theme",
  "wm-theme-api",
  "x11rb",
 ]

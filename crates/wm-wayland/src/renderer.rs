@@ -419,13 +419,17 @@ pub(crate) fn build_scene_into(
             // window-sized pixel buffer supplied, but as four floats plus a
             // stable id instead of frame-width * frame-height * 4 retained
             // bytes. It is behind both the client content and sparse chrome.
+            // Fill only the client's requested interior. Filling the outer
+            // frame would turn transparent resize margins and shadow corners
+            // black underneath the correctly alpha-masked chrome bands.
+            let Some(content) = window.filter(|record| record.mapped).map(|record| record.content) else { return; };
             let geometry = SRect::<i32, Physical>::new(
                 (
-                    frame.geometry.pos.x - viewport.pos.x,
-                    frame.geometry.pos.y - viewport.pos.y,
+                    content.pos.x - viewport.pos.x,
+                    content.pos.y - viewport.pos.y,
                 )
                     .into(),
-                (frame.geometry.size.w as i32, frame.geometry.size.h as i32).into(),
+                (content.size.w as i32, content.size.h as i32).into(),
             );
             elements.push(
                 SolidColorRenderElement::new(

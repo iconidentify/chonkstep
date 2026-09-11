@@ -2176,6 +2176,7 @@ mod tests {
             (
                 frame,
                 FrameRecord {
+                    input_margin: 0,
                     window,
                     geometry: Rect::default(),
                     parts: Vec::new(),
@@ -2186,6 +2187,7 @@ mod tests {
             (
                 other_frame,
                 FrameRecord {
+                    input_margin: 0,
                     window: other,
                     geometry: Rect::default(),
                     parts: Vec::new(),
@@ -2225,6 +2227,7 @@ mod tests {
         let frames = HashMap::from([(
             frame,
             FrameRecord {
+                input_margin: 0,
                 window,
                 geometry: Rect::default(),
                 parts: Vec::new(),

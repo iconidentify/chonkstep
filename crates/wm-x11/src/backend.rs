@@ -17,6 +17,8 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE};
 
+mod frame_shape;
+use frame_shape::FrameShape;
 
 // GetProperty's length is in 32-bit words, even for 8-bit strings. Bound
 // the server reply itself: truncating after receiving it still allocates and
@@ -148,6 +150,8 @@ pub struct X11Backend {
     known_clients: HashSet<Window>,
     /// Frame XID -> client XID, populated by `create_decoration`.
     frame_to_client: HashMap<Window, Window>,
+    frame_shapes: HashMap<Window, FrameShape>,
+    ring_to_frame: HashMap<Window, Window>,
     sequences_to_ignore: BinaryHeap<Reverse<u16>>,
     /// Cached server-format pixels per painted window (frame or shell
     /// window), replayed on `Expose` without re-touching the theme
@@ -486,6 +490,8 @@ impl X11Backend {
             shutdown_emitted: false,
             known_clients: HashSet::new(),
             frame_to_client: HashMap::new(),
+            frame_shapes: HashMap::new(),
+            ring_to_frame: HashMap::new(),
             sequences_to_ignore: BinaryHeap::new(),
             painted: HashMap::new(),
             pending_shell_clicks: VecDeque::new(),
@@ -1068,6 +1074,8 @@ impl X11Backend {
         time: u32,
         state: u16,
     ) -> Option<BackendEvent<XWindow, XFrame>> {
+        let event_window = self.event_frame(event_window);
+        let child = self.event_frame(child);
         let local = Point::new(x as i32, y as i32);
 
         // A wheel reaches us as a button, so it has to be split off
@@ -1219,7 +1227,8 @@ impl X11Backend {
             }
             Event::ButtonPress(e) => self.translate_button(e.event, e.child, e.event_x, e.event_y, e.detail, true, e.time, u16::from(e.state)),
             Event::ButtonRelease(e) => self.translate_button(e.event, e.child, e.event_x, e.event_y, e.detail, false, e.time, u16::from(e.state)),
-            Event::MotionNotify(e) => {
+            Event::MotionNotify(mut e) => {
+                e.event = self.event_frame(e.event);
                 let local = Point::new(e.event_x as i32, e.event_y as i32);
                 let surface_local = if self.frame_to_client.contains_key(&e.event) {
                     Some((SurfaceRef::Frame(XFrame(e.event)), local))
@@ -1242,7 +1251,8 @@ impl X11Backend {
                 }
                 None
             }
-            Event::EnterNotify(e) => {
+            Event::EnterNotify(mut e) => {
+                e.event = self.event_frame(e.event);
                 if self.frame_to_client.contains_key(&e.event) {
                     Some(BackendEvent::PointerEnter { surface: SurfaceRef::Frame(XFrame(e.event)) })
                 } else {
@@ -2717,6 +2727,8 @@ impl Backend for X11Backend {
         let _ = self.conn.flush();
 
         self.frame_to_client.insert(frame, window.0);
+        self.frame_shapes.insert(frame, FrameShape::new(layout));
+        self.sync_frame_shape(frame);
         self.apply_opacity_rule(window.0, frame);
 
         // The chrome this frame adds, published the moment it exists
@@ -2741,6 +2753,7 @@ impl Backend for X11Backend {
     }
 
     fn destroy_decoration(&mut self, frame: Self::FrameId) {
+        self.remove_frame_shape(frame.0);
         self.frame_to_client.remove(&frame.0);
         self.painted.remove(&frame.0);
         self.frame_cursor.remove(&frame.0);
@@ -2821,6 +2834,7 @@ impl Backend for X11Backend {
         // not destroyed with it. This is the whole reason
         // `release_decoration` exists rather than defaulting to
         // `destroy_decoration` on this backend.
+        self.remove_frame_shape(frame.0);
         self.frame_to_client.remove(&frame.0);
         self.painted.remove(&frame.0);
         self.frame_cursor.remove(&frame.0);
@@ -2833,6 +2847,7 @@ impl Backend for X11Backend {
     }
 
     fn paint_decoration(&mut self, frame: Self::FrameId, surface: &wm_theme_api::DecorationSurface) {
+        self.update_frame_shape_pixels(frame.0, surface);
         let mut painted = Vec::with_capacity(surface.parts.len());
         for part in &surface.parts {
             if part.buffer.width == 0 || part.buffer.height == 0 {
@@ -2866,11 +2881,15 @@ impl Backend for X11Backend {
             tracing::warn!(?e, ?frame, "set_frame_cursor failed");
             return;
         }
+        if let Some(ring) = self.frame_shapes.get(&frame.0).and_then(|shape| shape.ring) {
+            let _ = self.conn.change_window_attributes(ring, &ChangeWindowAttributesAux::new().cursor(cursor));
+        }
         let _ = self.conn.flush();
         self.frame_cursor.insert(frame.0, edge);
     }
 
     fn set_frame_geometry(&mut self, frame: Self::FrameId, geometry: Rect) {
+        if let Some(shape) = self.frame_shapes.get_mut(&frame.0) { shape.geometry = geometry; }
         // X11's ForgetGravity can discard retained server pixels on resize.
         // Invalidate immediately, including resize-away-and-back before the
         // next coalesced paint. A position-only move preserves the cache.
@@ -2883,7 +2902,15 @@ impl Backend for X11Backend {
         if let Err(e) = self.conn.configure_window(frame.0, &aux) {
             tracing::warn!(?e, "configure_window (frame) failed");
         }
+        self.sync_frame_shape(frame.0);
         let _ = self.conn.flush();
+    }
+
+    fn set_decoration_layout(&mut self, frame: Self::FrameId, layout: &DecorationLayout) {
+        if let Some(shape) = self.frame_shapes.get_mut(&frame.0) {
+            shape.margin = layout.input_margin;
+            if layout.titlebar_height == 0 { shape.corner = 0; }
+        }
     }
 
     fn resize_client(&mut self, window: Self::WindowId, size: Size) {
@@ -2930,11 +2957,15 @@ impl Backend for X11Backend {
     }
 
     fn map_frame(&mut self, frame: Self::FrameId) {
+        if let Some(shape) = self.frame_shapes.get_mut(&frame.0) { shape.mapped = true; }
+        self.sync_frame_shape(frame.0);
         let _ = self.conn.map_window(frame.0);
         let _ = self.conn.flush();
     }
 
     fn unmap_frame(&mut self, frame: Self::FrameId) {
+        if let Some(shape) = self.frame_shapes.get_mut(&frame.0) { shape.mapped = false; }
+        self.sync_frame_shape(frame.0);
         let _ = self.conn.unmap_window(frame.0);
         let _ = self.conn.flush();
     }
@@ -2983,6 +3014,7 @@ impl Backend for X11Backend {
         let _ = self
             .conn
             .configure_window(frame.0, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        self.stack_frame_ring(frame.0);
         let _ = self.conn.flush();
     }
 
@@ -3006,6 +3038,7 @@ impl Backend for X11Backend {
                 None => ConfigureWindowAux::new().stack_mode(StackMode::BELOW),
             };
             let _ = self.conn.configure_window(frame.0, &aux);
+            self.stack_frame_ring(frame.0);
             prev = Some(frame.0);
         }
         let _ = self.conn.flush();
