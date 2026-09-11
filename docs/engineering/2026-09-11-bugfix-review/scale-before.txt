@@ -1,0 +1,8 @@
+
+thread 'mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame' (2360204) panicked at crates/chonk-testkit/tests/scale_change.rs:48:35:
+timed out after 10s waiting for frame follows new committed density: 1/buffer
+2026-09-11T06:05:00.722941Z  INFO chonkstep_wayland: chonkstep-wayland starting — the chonkstep desktop as a native Wayland compositor version="0.5.0"
+2026-09-11T06:05:00.723654Z  INFO wm_wayland::data_control: data-control advertised on both the wlr and ext interfaces
+2026-09-11T06:05:01.356359Z  INFO wm_wayland::xewmh: EWMH ready on the XWayland root display=7
+2026-09-11T06:05:01.422063Z TRACE surface_commit: wm_wayland::xdg: committed client geometry differs from desired geometry id=WlWindowId(3) committed=Size { w: 400, h: 200 } desired=Size { w: 200, h: 100 } client_behind=false echoes_ask=true staged=false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

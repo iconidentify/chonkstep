@@ -475,6 +475,11 @@ pub(crate) struct WindowRecord {
     /// spontaneous client resize) is in no ring and is adopted exactly
     /// as before.
     pub recent_asks: std::collections::VecDeque<Size>,
+    /// Physical resize echoes are valid only within one committed density.
+    /// A scale/viewport change starts a new epoch, including when returning
+    /// to a previously used scale. Otherwise an old ask can hide a genuine
+    /// client resize and leave its frame at half the rendered extent.
+    pub committed_size_scale: Option<f64>,
 }
 
 impl WindowRecord {
@@ -501,6 +506,7 @@ impl WindowRecord {
             decoration: crate::decoration::DecorationNegotiation::default(),
             content_offset: Point::new(0, 0),
             recent_asks: std::collections::VecDeque::new(),
+            committed_size_scale: None,
         }
     }
 }

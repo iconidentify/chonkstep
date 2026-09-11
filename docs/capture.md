@@ -88,12 +88,18 @@ a video icon; the saved recording and review window are unaffected.
 Select a display or an area within one display, then press Record or Enter.
 The elapsed-time indicator can be clicked to stop. The toolbar shortcut also
 stops an active recording; Super+Ctrl+Escape is the direct stop shortcut.
-The indicator never appears in the video or exported screencopy frames.
+A bright boundary and outward shadow mark the exact recording area, clipped
+to its display. The boundary lets clicks through and remains while the file
+finishes. The indicator and boundary are excluded from normal video and
+screencopy exports; an explicit `chonkrec --demo` includes them.
 Locking the session stops recording. Another recording cannot start until the
 current file has finished finalizing.
 
-Recordings are silent, 60 fps H.264 at CRF 18, using a portable software encoder
-that does not assume NVIDIA or VAAPI support. Odd selections retain their last
+Recordings are silent, 60 fps H.264 at CRF 18 with at most one second between
+keyframes, using a portable software encoder
+that does not assume NVIDIA or VAAPI support. The shorter GOP bounds seeking
+work but can increase file size substantially on mostly static desktops; see
+the [native measurement](benchmarks/capture-gop-2026-09-11/README.md). Odd selections retain their last
 row/column and are padded to even encoder dimensions. High-resolution 60 fps
 software encoding can be CPU-intensive; physical M1/Asahi performance has not
 been measured. Hardware acceleration, audio controls and window-following

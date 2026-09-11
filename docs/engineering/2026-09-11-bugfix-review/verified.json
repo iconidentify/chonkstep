@@ -1,0 +1,95 @@
+{
+  "filmstrip_colors": [
+    [
+      229,
+      85,
+      22
+    ],
+    [
+      227,
+      148,
+      21
+    ],
+    [
+      229,
+      210,
+      22
+    ],
+    [
+      126,
+      231,
+      24
+    ],
+    [
+      64,
+      230,
+      22
+    ],
+    [
+      22,
+      231,
+      104
+    ],
+    [
+      20,
+      230,
+      167
+    ],
+    [
+      24,
+      168,
+      229
+    ],
+    [
+      22,
+      106,
+      228
+    ],
+    [
+      64,
+      25,
+      230
+    ],
+    [
+      125,
+      23,
+      229
+    ],
+    [
+      231,
+      22,
+      209
+    ]
+  ],
+  "unique_filmstrip_images": 12,
+  "scrub_positions_x": [
+    420,
+    780,
+    1140,
+    1500
+  ],
+  "scrub_player_colors": [
+    [
+      234,
+      201,
+      15
+    ],
+    [
+      7,
+      199,
+      39
+    ],
+    [
+      10,
+      157,
+      235
+    ],
+    [
+      199,
+      50,
+      235
+    ]
+  ],
+  "distinct_scrubbed_pictures": 4,
+  "source": "actual Omacut 0.4.0 UI, mouse input through private ChonkStep seat, grim output captures"
+}

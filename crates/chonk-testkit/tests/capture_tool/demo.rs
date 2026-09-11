@@ -163,6 +163,12 @@ impl Recorder {
         c.env("WAYLAND_DISPLAY", &self.display)
             .env_remove("WAYLAND_SOCKET")
             .env("CHONKREC_DIR", &self.directory);
+        let fixture = self.directory.join("join-fixture-bin");
+        if fixture.is_dir() {
+            let mut paths = vec![fixture];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+            c.env("PATH", std::env::join_paths(paths).unwrap());
+        }
         c
     }
     fn stop(&mut self) {
@@ -214,7 +220,7 @@ fn chonkrec_demo_encodes_controls_and_preserves_clean_exports() {
         shot(&session, "during-demo-clean", false, false).diff_fraction(&clean, 0),
         0.0
     );
-    std::thread::sleep(Duration::from_millis(1200));
+    std::thread::sleep(Duration::from_millis(2200));
     // Plain captures request a presentation, advancing the recorder after the hold.
     shot(&session, "during-demo-visible", true, true);
     std::thread::sleep(Duration::from_millis(300));
@@ -237,6 +243,7 @@ fn chonkrec_demo_encodes_controls_and_preserves_clean_exports() {
         .unwrap()
         .success());
     let frame = Screenshot::load(&frame_path).unwrap();
+    assert_keyframe_spacing(&path);
     assert!(
         frame.diff_fraction(&expected, 20) < 0.015,
         "encoded demo matches the actual displayed controls"
@@ -257,9 +264,65 @@ fn chonkrec_demo_encodes_controls_and_preserves_clean_exports() {
 }
 
 #[test]
+#[ignore = "needs nested Wayland, real chonkrec and ffmpeg"]
+fn chonkrec_start_flushes_low_bitrate_video_before_reporting_success() {
+    let mut session = boot("chonkrec-small-fragments", 1.0);
+    let probe = chonk_testkit::profile_binary("chonk-fullscreen-probe").unwrap();
+    session.launch_isolated(probe.to_str().unwrap(), &[]).unwrap();
+    session.wait_for_window("chonk-fullscreen-probe").unwrap();
+    session.door().tap_key(33).unwrap();
+    poll_until(Duration::from_secs(10), "flat fullscreen client", || {
+        let world = session.world().ok()?;
+        let window = world.window_matching("chonk-fullscreen-probe")?;
+        (window.presented_w == world.output_w && window.presented_h == world.output_h).then_some(())
+    }).unwrap();
+    let path = session.dir.join("small-fragments.mp4");
+    let mut recorder = Recorder {
+        display: session.wayland_display.clone(), directory: session.dir.clone(), active: true,
+    };
+    assert!(finish(&mut recorder.command()
+        .args(["start", "--no-open", "-r", "1", "-o"]).arg(&path).spawn().unwrap(),
+        Duration::from_secs(20)).success());
+    // Read the still-growing file: startup promises actual video, not merely
+    // an MP4 header. At one fps these small fragments must be flushed promptly.
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+    let work = PathBuf::from(std::fs::read_to_string(runtime.join("chonkrec.work")).unwrap());
+    let packets = Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0",
+        "-read_intervals", "%+#1", "-show_entries", "packet=pts_time", "-of", "csv=p=0"])
+        .arg(work.join("seg-000.mp4")).output().unwrap();
+    assert!(packets.status.success() && !packets.stdout.is_empty());
+    std::thread::sleep(Duration::from_secs(3));
+    recorder.stop();
+    assert_keyframe_spacing(&path);
+}
+
+#[test]
 #[ignore = "needs a real nested compositor restart, chonkrec and ffmpeg"]
 fn chonkrec_demo_survives_a_compositor_restart() {
-    let mut session = boot("chonkrec-demo-restart", 1.0);
+    restart_workflow(false);
+}
+
+#[test]
+#[ignore = "needs nested Wayland, real chonkrec and ffmpeg"]
+fn chonkrec_recovery_reencode_preserves_one_second_keyframes() {
+    restart_workflow(true);
+}
+
+fn restart_workflow(force_reencode: bool) {
+    let mut session = boot(if force_reencode { "chonkrec-demo-reencode" } else { "chonkrec-demo-restart" }, 1.0);
+    if force_reencode {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = session.dir.join("join-fixture-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let wrapper = bin.join("ffmpeg");
+        std::fs::write(&wrapper, r#"#!/bin/sh
+case "$*" in
+  *"-f concat"*"-c copy"*) printf forced > "${0%/*}/fallback-used"; exit 42 ;;
+esac
+exec /usr/bin/ffmpeg "$@"
+"#).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     open_area(&mut session);
     let before = diagnostic(&mut session, "restart-visible-before");
     let path = session.dir.join("restarted-demo.mp4");
@@ -295,6 +358,10 @@ fn chonkrec_demo_survives_a_compositor_restart() {
     .unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     recorder.stop();
+    if force_reencode {
+        assert!(session.dir.join("join-fixture-bin/fallback-used").exists());
+    }
+    assert_keyframe_spacing(&path);
     assert!(Command::new("ffmpeg")
         .args(["-v", "error", "-xerror", "-i"])
         .arg(&path)

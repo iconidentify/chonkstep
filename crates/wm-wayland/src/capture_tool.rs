@@ -4,6 +4,7 @@
 
 mod chrome;
 pub(crate) mod dimming;
+mod outline;
 mod worker;
 
 use std::collections::HashSet;
@@ -63,6 +64,7 @@ pub(crate) struct Overlay {
     hint: Option<MemoryRenderBuffer>,
     camera: Option<MemoryRenderBuffer>,
     dimming: dimming::Dimming,
+    outline: Option<outline::Outline>,
     ids: [Id; 16],
     armed: Option<usize>,
     armed_window: Option<WlWindowId>,
@@ -244,6 +246,7 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
         hint: None,
         camera: None,
         dimming: dimming::Dimming::default(),
+        outline: None,
         ids: std::array::from_fn(|_| Id::new()),
         armed: None,
         armed_window: None,
@@ -365,7 +368,7 @@ fn commit(comp: &mut Compositor) {
                 quick: false,
                 badge: true,
                 monitor,
-                selection: None,
+                selection: Some(rect),
                 window: None,
                 drag: None,
                 move_selection: false,
@@ -380,6 +383,7 @@ fn commit(comp: &mut Compositor) {
                 hint: None,
                 camera: None,
                 dimming: dimming::Dimming::default(),
+                outline: Some(outline::Outline::new(rect, monitor, scale)),
                 ids: std::array::from_fn(|_| Id::new()),
                 armed: None,
                 armed_window: None,
@@ -1043,6 +1047,9 @@ pub(crate) fn render_capture(
         ) {
             elements.push(element.into());
         }
+    }
+    if let Some(outline) = &ui.outline {
+        elements.extend(outline.elements(viewport).map(Into::into));
     }
     if !ui.badge {
         let selection = ui

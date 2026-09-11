@@ -469,6 +469,7 @@ mod tests {
             label: None,
             hint: None,
             dimming: super::super::dimming::Dimming::default(),
+            outline: None,
             ids: std::array::from_fn(|_| Id::new()),
             armed: None,
             hovered: None,
@@ -517,6 +518,26 @@ mod tests {
         assert!(cache.paint(&mut ui, &fonts, 1, false));
         assert!(cache.paint(&mut ui, &fonts, 1, true));
         assert!(!cache.paint(&mut ui, &fonts, 2, true));
+    }
+
+    #[test]
+    fn warm_recording_boundary_and_finishing_badge_do_not_allocate_or_rasterize() {
+        let fonts = FontState::new();
+        let mut cache = Cache::default();
+        let mut ui = overlay();
+        ui.badge = true;
+        ui.toolbar.size = Size::new(280, 42);
+        ui.outline = Some(super::super::outline::Outline::new(ui.selection.unwrap(), ui.monitor, 1.0));
+        for finishing in [false, true] {
+            cache.paint(&mut ui, &fonts, 3, finishing);
+            let (_, allocations) = chonk_test_support::measure(|| {
+                for _ in 0..10_000 {
+                    assert!(!cache.paint(&mut ui, &fonts, 3, finishing));
+                    assert_eq!(ui.outline.as_ref().unwrap().elements(ui.monitor).count(), 16);
+                }
+            });
+            assert_eq!((allocations.calls, allocations.requested_bytes), (0, 0));
+        }
     }
 
     #[test]

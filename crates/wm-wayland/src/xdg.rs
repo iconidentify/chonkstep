@@ -1218,6 +1218,14 @@ impl Compositor {
             .get(&id)
             .map(|record| backend.window_surface_scale(record))
             .unwrap_or(1.0);
+        if has_buffer {
+            if let Some(record) = backend.windows.get_mut(&id) {
+                if record.committed_size_scale.is_some_and(|previous| previous != surface_scale) {
+                    record.recent_asks.clear();
+                }
+                record.committed_size_scale = Some(surface_scale);
+            }
+        }
         // A late buffer commit after the last output disconnects still has
         // valid geometry. Bound it by the already accepted window size while
         // headless, rather than turning the empty desktop into a 1x1 resize.
@@ -1257,6 +1265,8 @@ impl Compositor {
             // the decoration but never touches this flag.
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.mapped = false;
+                record.recent_asks.clear();
+                record.committed_size_scale = None;
             }
             backend.scene_index.mark_hidden(id);
             backend.queue(WmEvent::Unmapped(id));

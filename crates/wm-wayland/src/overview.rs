@@ -37,6 +37,24 @@ impl Label {
             buffer: import_buffer(&buffer, false),
         }
     }
+
+    fn update(&mut self, buffer: DecorationBuffer) {
+        let size = Size::new(buffer.width, buffer.height);
+        if size.w == 0 || size.h == 0 {
+            self.buffer = None;
+        } else if let Some(retained) = self.buffer.as_mut() {
+            let mut context = retained.render();
+            if self.size != size { context.resize((size.w as i32, size.h as i32)); }
+            let _: Result<(), std::convert::Infallible> = context.draw(|pixels| {
+                if pixels == buffer.pixels { return Ok(Vec::new()); }
+                pixels.copy_from_slice(&buffer.pixels);
+                Ok(vec![SRect::from_size((size.w as i32, size.h as i32).into())])
+            });
+        } else {
+            self.buffer = import_buffer(&buffer, false);
+        }
+        self.size = size;
+    }
 }
 
 pub(crate) struct Window {
@@ -90,12 +108,29 @@ impl Overview {
         scene: wm_core::OverviewScene<WlWindowId, WlFrameId>,
         backend: &WaylandBackend,
     ) -> Self {
+        Self::refresh(None, surface, scene, backend)
+    }
+
+    /// A content refresh keeps the panel's lifetime, finger position and GPU
+    /// element identities. Only a different shell surface creates a new panel.
+    pub fn refresh(
+        previous: Option<Self>,
+        surface: WlShellId,
+        scene: wm_core::OverviewScene<WlWindowId, WlFrameId>,
+        backend: &WaylandBackend,
+    ) -> Self {
+        let mut previous = previous.filter(|overview| overview.surface == surface);
+        let mut old_windows: std::collections::HashMap<_, _> = previous.as_mut()
+            .map(|o| std::mem::take(&mut o.windows)).unwrap_or_default()
+            .into_iter().map(|w| (w.window, w)).collect();
+        let mut old_spaces = previous.as_mut().map(|o| std::mem::take(&mut o.spaces))
+            .unwrap_or_default().into_iter();
         Self {
             surface,
             geometry: scene.geometry,
             selected: scene.selected,
             drag: None,
-            progress: 1.0,
+            progress: previous.as_ref().map_or(1.0, |o| o.progress),
             paint_order: {
                 let mut indices: std::collections::HashMap<_, _> = scene.windows.iter().enumerate().map(|(i, w)| (w.window, i)).collect();
                 let mut order = Vec::with_capacity(scene.windows.len());
@@ -128,14 +163,20 @@ impl Overview {
                         .filter(|r| !r.mapped)
                         .and_then(|r| r.snapshot.as_ref())
                         .and_then(|b| import_buffer(b, true));
+                    let old = old_windows.remove(&w.window);
+                    let shadow = old.as_ref().map_or_else(Id::new, |w| w.shadow.clone());
+                    let mut label = old.map(|w| w.label).unwrap_or_else(|| Label::new(DecorationBuffer {
+                        width: 0, height: 0, pixels: Vec::new(),
+                    }));
+                    label.update(w.label);
                     Window {
                         window: w.window,
                         frame: w.frame,
                         source: w.source,
                         destination: w.destination,
-                        label: Label::new(w.label),
+                        label,
                         fallback,
-                        shadow: Id::new(),
+                        shadow,
                         desktop_visible: backend.scene_index.is_presented(w.window)
                             && backend.windows.get(&w.window).is_some_and(|r| r.mapped),
                         draw_content: true,
@@ -146,11 +187,38 @@ impl Overview {
             spaces: scene
                 .spaces
                 .into_iter()
-                .map(|space| Workspace {
+                .map(|space| {
+                    // Rows have positional identities; changing their topology
+                    // still invalidates gesture ownership in validate().
+                    let mut old = old_spaces.next();
+                    let mut old_windows: std::collections::HashMap<_, _> = old.as_mut()
+                        .map(|s| std::mem::take(&mut s.windows)).unwrap_or_default()
+                        .into_iter().map(|w| (w.window, w)).collect();
+                    let background = old.as_ref().map_or_else(Id::new, |s| s.background.clone());
+                    let (label, drop_label, close) = if let Some(mut old) = old {
+                        old.label.update(space.label);
+                        old.drop_label.update(space.drop_label);
+                        let close = space.close.map(|(rect, glyph)| {
+                            let mut label = old.close.take().map(|(_, label)| label)
+                                .unwrap_or_else(|| Label::new(DecorationBuffer { width: 0, height: 0, pixels: Vec::new() }));
+                            label.update(glyph);
+                            (rect, label)
+                        });
+                        (old.label, old.drop_label, close)
+                    } else {
+                        (Label::new(space.label), Label::new(space.drop_label),
+                            space.close.map(|(rect, glyph)| (rect, Label::new(glyph))))
+                    };
+                    Workspace {
                     rect: space.rect,
                     windows: {
                         let mut windows: Vec<_> = space.windows.into_iter().map(|w| {
-                            let mut window = Window::snapshot(w.window, w.frame, w.source, backend);
+                            let mut window = old_windows.remove(&w.window)
+                                .unwrap_or_else(|| Window::snapshot(w.window, w.frame, w.source, backend));
+                            window.frame = w.frame;
+                            window.source = w.source;
+                            window.destination = w.source;
+                            window.desktop_visible = backend.windows.get(&w.window).is_some_and(|r| r.mapped);
                             window.draw_content = w.draw_content;
                             window
                         }).collect();
@@ -162,18 +230,15 @@ impl Overview {
                         windows.sort_by_key(|w| order.get(&w.window).copied().unwrap_or(usize::MAX));
                         windows
                     },
-                    label: Label::new(space.label),
-                    drop_label: Label::new(space.drop_label),
-                    close: space.close.map(|(rect, glyph)| (rect, Label::new(glyph))),
-                    background: Id::new(),
-                })
+                    label, drop_label, close, background,
+                }})
                 .collect(),
-            ring: std::array::from_fn(|_| Id::new()),
-            space_ring: std::array::from_fn(|_| Id::new()),
-            drop_ring: std::array::from_fn(|_| Id::new()),
-            drop_fill: Id::new(),
-            band: Id::new(),
-            backdrop: Id::new(),
+            ring: previous.as_ref().map_or_else(|| std::array::from_fn(|_| Id::new()), |o| o.ring.clone()),
+            space_ring: previous.as_ref().map_or_else(|| std::array::from_fn(|_| Id::new()), |o| o.space_ring.clone()),
+            drop_ring: previous.as_ref().map_or_else(|| std::array::from_fn(|_| Id::new()), |o| o.drop_ring.clone()),
+            drop_fill: previous.as_ref().map_or_else(Id::new, |o| o.drop_fill.clone()),
+            band: previous.as_ref().map_or_else(Id::new, |o| o.band.clone()),
+            backdrop: previous.as_ref().map_or_else(Id::new, |o| o.backdrop.clone()),
         }
     }
 
@@ -684,5 +749,54 @@ fn space_background_alpha(elements: &mut Vec<SceneElement<GlesRenderer>>, render
                 elements.push(element.into());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use smithay::reexports::wayland_server::Display;
+
+    fn scene(value: u8) -> wm_core::OverviewScene<WlWindowId, WlFrameId> {
+        let label = || DecorationBuffer { width: 12, height: 4, pixels: vec![value; 12 * 4 * 4] };
+        let rect = Rect::new(Point::new(10, 10), Size::new(200, 100));
+        wm_core::OverviewScene {
+            geometry: Rect::new(Point::new(0, 0), Size::new(800, 600)),
+            windows: vec![wm_core::OverviewWindow { window: WlWindowId(7), frame: None,
+                source: rect, destination: rect, label: label() }],
+            spaces: vec![wm_core::OverviewWorkspace { rect, label: label(), drop_label: label(),
+                close: Some((rect, label())), windows: vec![wm_core::OverviewThumbnail {
+                    window: WlWindowId(7), frame: None, source: rect, draw_content: true,
+                }] }],
+            workspace: 0, selected: 0, gap: 4,
+        }
+    }
+
+    #[test]
+    fn refresh_keeps_lifetime_progress_render_ids_and_updates_retained_label_pixels() {
+        let display = Display::<crate::state::Compositor>::new().unwrap();
+        let backend = WaylandBackend::new(display.handle(), Vec::new(), 1.0);
+        let mut before = Overview::new(WlShellId(3), scene(7), &backend);
+        before.progress = 0.375;
+        let ids = (before.backdrop.clone(), before.band.clone(), before.ring.clone(),
+            before.space_ring.clone(), before.drop_ring.clone(), before.drop_fill.clone(),
+            before.spaces[0].background.clone(), before.windows[0].shadow.clone(),
+            before.spaces[0].windows[0].shadow.clone());
+        // A clone shares the original storage. Observing the changed bytes
+        // through it proves refresh updated that buffer instead of replacing it.
+        let mut original_label = before.windows[0].label.buffer.as_ref().unwrap().clone();
+        let after = Overview::refresh(Some(before), WlShellId(3), scene(19), &backend);
+        assert_eq!(after.progress, 0.375);
+        assert_eq!(ids, (after.backdrop.clone(), after.band.clone(), after.ring.clone(),
+            after.space_ring.clone(), after.drop_ring.clone(), after.drop_fill.clone(),
+            after.spaces[0].background.clone(), after.windows[0].shadow.clone(),
+            after.spaces[0].windows[0].shadow.clone()));
+        let _: Result<(), std::convert::Infallible> = original_label.render().draw(|pixels| {
+            assert!(pixels.iter().all(|&p| p == 19));
+            Ok(Vec::new())
+        });
+        let new = Overview::refresh(Some(after), WlShellId(4), scene(19), &backend);
+        assert_ne!(new.token(), &ids.0, "a replacement surface has a fresh lifetime");
+        assert_eq!(new.progress, 1.0);
     }
 }

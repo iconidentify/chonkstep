@@ -1,0 +1,4 @@
+
+thread 'recording_odd_area_is_playable_and_controls_are_excluded' (2337694) panicked at crates/chonk-testkit/tests/capture_tool.rs:604:5:
+the recording boundary stays visible: [133, 129, 152, 255]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

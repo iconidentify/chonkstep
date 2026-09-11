@@ -1,0 +1,4 @@
+
+thread 'recording_odd_area_is_playable_and_controls_are_excluded' (2345307) panicked at crates/chonk-testkit/tests/capture_tool.rs:60:5:
+one keyframe per second: [0.0], duration=3.833
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

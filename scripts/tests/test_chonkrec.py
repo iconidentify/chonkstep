@@ -156,3 +156,14 @@ while True:time.sleep(.1)
         self.assertFalse((self.root/'chonkrec.pid').exists())
         for pid in map(int, (self.root/'workers').read_text().splitlines()):
             self.assertFalse(Path('/proc', str(pid)).exists(), f'worker {pid} survived interrupted startup')
+
+    def test_an_empty_muxer_file_does_not_prove_recording_started(self):
+        self.addCleanup(lambda: self.run_command('stop', '--no-open', timeout=30))
+        self.socket('wayland-1')
+        self.env['WAYLAND_DISPLAY'] = 'wayland-1'
+        self.program('wf-recorder', 'import time\ntime.sleep(2)\nraise SystemExit(7)\n')
+        self.program('ffmpeg', "import sys,time\nopen(sys.argv[-1], 'wb').close()\ntime.sleep(2)\nraise SystemExit(8)\n")
+        result = self.run_command('start', timeout=30)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn('recording failed to start', result.stderr)
+        self.assertFalse((self.root/'chonkrec.pid').exists())

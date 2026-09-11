@@ -224,12 +224,12 @@ do_supervise() {
     # closes the segment cleanly. Every fragment is self-contained, so
     # even a hard kill costs at most the last fragment.
     ffmpeg -hide_banner -nostdin -y -analyzeduration 100000 -probesize 32768 -f matroska -i "$fifo" -c copy \
-      -movflags +frag_keyframe+empty_moov+default_base_moof "$seg" \
+      -movflags +frag_keyframe+empty_moov+default_base_moof -flush_packets 1 "$seg" \
       >>"$work/mux.log" 2>&1 &
     local mux=$!
 
     local -a args=(-y --no-dmabuf --no-damage -r "$FPS" -m matroska -c libx264
-      -p "preset=$PRESET" -p "crf=$CRF" -p tune=zerolatency -p color_range=tv
+      -p "preset=$PRESET" -p "crf=$CRF" -p "g=$FPS" -p tune=zerolatency -p color_range=tv
       -x yuv420p -F "${OUTPUT_FILTER}pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=in_range=pc:out_range=tv,format=yuv420p")
     [ -n "$GEOMETRY" ] && args+=(-g "$GEOMETRY")
     [ -n "$OUTPUT" ] && args+=(-o "$OUTPUT")
@@ -339,12 +339,21 @@ do_start() {
     apid=$!
   fi
 
-  # Let the first segment prove itself before claiming success.
-  local waited=0
-  while [ "$waited" -lt 25 ] && ! ls "$work"/seg-*.mp4 >/dev/null 2>&1; do
-    sleep 0.2; waited=$((waited+1))
+  # Opening a muxer output creates a file before a single video packet exists.
+  # Require a readable packet, with bounded probing of the growing fragments,
+  # so an encoder failure cannot report a successful recording start.
+  local startup_end=$((SECONDS+10)) started=0 segment packet
+  while [ "$SECONDS" -lt "$startup_end" ] && alive "$spid"; do
+    for segment in "$work"/seg-*.mp4; do
+      [ -s "$segment" ] || continue
+      packet=$(timeout 1s ffprobe -v error -select_streams v:0 -read_intervals '%+#1' \
+        -show_entries packet=pts_time -of csv=p=0 "$segment" 2>/dev/null) || continue
+      [ -z "$packet" ] || { started=1; break; }
+    done
+    [ "$started" -eq 0 ] || break
+    sleep 0.2
   done
-  if ! alive "$spid" || ! ls "$work"/seg-*.mp4 >/dev/null 2>&1; then
+  if ! alive "$spid" || [ "$started" -eq 0 ]; then
     say "recording failed to start:"; tail -n 15 "$work/supervisor.log" "$work/wf.log" >&2 2>/dev/null
     abort_start "$work" "$spid" "$apid"
     exit 1
@@ -446,7 +455,7 @@ do_stop() {
     if ! ffmpeg -v error -y -f concat -safe 1 -i "$work/list.txt" -c copy "$vjoined" 2>>"$work/wf.log"; then
       say "stream-copy join failed; re-encoding instead (slower)..."
       if ! ffmpeg -v error -y -f concat -safe 1 -i "$work/list.txt" \
-           -c:v libx264 -preset "$PRESET" -crf "$CRF" "$vjoined" 2>>"$work/wf.log"; then
+           -c:v libx264 -preset "$PRESET" -crf "$CRF" -r "$FPS" -g "$FPS" -pix_fmt yuv420p "$vjoined" 2>>"$work/wf.log"; then
         say "could not join segments; they are kept in $work"; exit 1
       fi
     fi

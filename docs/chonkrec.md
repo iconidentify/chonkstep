@@ -32,6 +32,8 @@ chonkrec stop
 - `-g "x,y WxH"` limits recording to a numeric region in logical coordinates.
   Use even-sized regions: wf-recorder can trim an odd pixel edge before encoding.
 - `-r FPS` selects constant frame rate, from 1 to 240; the default is 30.
+  A keyframe at least every second bounds seek/decode work, including after
+  recovery re-encoding. Scene changes may insert additional keyframes.
 - `-d SECONDS` delays startup.
 - `-a [DEVICE]` records audio separately; `chonkrec list-audio` lists sources.
 - `-A SECONDS` offsets audio at finalization, for example `-A -0.3`.
@@ -42,7 +44,8 @@ chonkrec stop
   YUV for consistent colors across wf-recorder/FFmpeg versions.
 
 The recorder refuses to replace an existing output file. Startup failures retain
-diagnostics and stop their workers. Completed files contain the joined recording;
+diagnostics and stop their workers. Startup requires a readable video packet,
+so creating an empty muxer file cannot report success. Completed files contain the joined recording;
 failed joins leave the source segments available for recovery.
 
 ## Restarts and requirements
@@ -65,3 +68,15 @@ versions that otherwise record rotated or nested outputs upside down.
 
 For isolated, repeatable 1080p footage with fixture windows, captions and pixel
 verification, use the [product-demo runner](product-demos.md).
+
+## Seeking and file size
+
+Shorter keyframe intervals improve random-access latency while preserving the
+selected CRF quality. They can substantially increase file size on a detailed,
+mostly static desktop. A paired native 4K/60 test measured about +0.5% encoder
+CPU and 3.29× file size versus the former 250-frame default; this is one workload,
+not a prediction for every desktop. See the [measurement](benchmarks/capture-gop-2026-09-11/README.md).
+
+Interframes still contain the intervening pictures. Accurate seeking decodes
+from the preceding keyframe; a one-second GOP does not imply one-frame-per-second
+recording or force every editor's trims to land at one-second boundaries.

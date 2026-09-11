@@ -579,7 +579,8 @@ impl Backend for WaylandBackend {
         surface: Self::ShellId,
         scene: wm_core::OverviewScene<Self::WindowId, Self::FrameId>,
     ) {
-        self.overview = Some(crate::overview::Overview::new(surface, scene, self));
+        let previous = self.overview.take();
+        self.overview = Some(crate::overview::Overview::refresh(previous, surface, scene, self));
         self.mark_damaged();
     }
 
