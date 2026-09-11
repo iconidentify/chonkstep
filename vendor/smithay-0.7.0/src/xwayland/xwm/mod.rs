@@ -937,6 +937,17 @@ impl X11Wm {
         self.id
     }
 
+    /// Retained incoming and outgoing selection transfers across clipboard and primary.
+    ///
+    /// This read-only diagnostic includes completed entries if they have not
+    /// been removed; querying it never performs cleanup or reads payloads.
+    pub fn selection_transfer_counts(&self) -> (usize, usize) {
+        (
+            self.clipboard.incoming.len() + self.primary.incoming.len(),
+            self.clipboard.outgoing.len() + self.primary.outgoing.len(),
+        )
+    }
+
     /// Raises a window in the internal X11 state
     ///
     /// Needs to be called to match raising of windows inside the compositor to keep the stacking order

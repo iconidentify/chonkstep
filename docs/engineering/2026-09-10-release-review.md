@@ -130,6 +130,14 @@ and no viewer for clipboard-only captures. Desktop-mode workflows cover launch
 failures and ensure failed saves never launch an app. The reusable demo also
 opens the actual installed applications and displays the saved PNG and MP4.
 
+Release CI also exposed the completed-paste test's process-memory heuristic:
+5,128 KiB of anonymous growth exceeded its 4 MiB allowance. The regression now
+inspects retained XWM transfer records directly, requiring zero after 128 pastes
+while every requestor stays alive. Process memory remains recorded as diagnostic
+evidence. A held transfer must report one; a deliberately broken test executable
+that skips completed-transfer removal reports 129 and fails. The read-only
+diagnostic neither cleans up records nor exposes clipboard contents.
+
 The accelerated-path flags remain separate, opt-in experiments. Hardware results
 are in the [cross-GPU report](../benchmarks/cross-gpu-2026-09-10/README.md), including
 the Apple scanout regression and test conditions. Nested tests establish protocol,

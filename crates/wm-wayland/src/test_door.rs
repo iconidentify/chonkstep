@@ -73,6 +73,7 @@
 //! | `hyprland-sources` | replies with desired and registered Hyprland IPC calloop-source counts |
 //! | `memory-stats` | opt-in memory-profile builds only: Rust, allocator and glyph-cache counters; no payloads |
 //! | `selection-devices` | read-only retained core/primary/wlr/ext device counts, including dead resources |
+//! | `selection-transfers` | read-only retained XWM incoming/outgoing transfer counts; no cleanup or payloads |
 //! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime\|lock` from the production scene hit-test |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
 //! | `windows` | replies one line per ledger entry (see below), then `done` |
@@ -805,6 +806,16 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 "selection-devices core={} primary={} wlr={} ext={} dead={}\n",
                 counts.core, counts.primary, counts.wlr, counts.ext, counts.dead,
             ).as_bytes());
+        }
+        Some("selection-transfers") => {
+            if let Some(wm) = comp.xwayland.wm.as_ref() {
+                let (incoming, outgoing) = wm.selection_transfer_counts();
+                let _ = stream.write_all(format!(
+                    "selection-transfers incoming={incoming} outgoing={outgoing}\n"
+                ).as_bytes());
+            } else {
+                let _ = stream.write_all(b"selection-transfers unavailable\n");
+            }
         }
         #[cfg(feature = "memory-profile")]
         Some("memory-stats") => {

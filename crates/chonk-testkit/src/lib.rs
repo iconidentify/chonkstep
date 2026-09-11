@@ -1646,6 +1646,19 @@ impl Door {
         })
     }
 
+    /// Retained incoming/outgoing XWM transfers, including unremoved completed entries.
+    pub fn selection_transfers(&mut self) -> Result<(usize, usize), String> {
+        self.send("selection-transfers")?;
+        let line = self.read_line()?;
+        if !line.starts_with("selection-transfers ") {
+            return Err(format!("unexpected selection-transfers reply: {line}"));
+        }
+        Ok((
+            field(&line, "incoming=").ok_or_else(|| format!("missing incoming count: {line}"))?,
+            field(&line, "outgoing=").ok_or_else(|| format!("missing outgoing count: {line}"))?,
+        ))
+    }
+
     /// Number of protocol snapshots/synchronizations attempted so far.
     /// Unlike counting output events, this detects an expensive full diff
     /// that rebuilt state only to discover that nothing changed.
