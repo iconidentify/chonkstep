@@ -58,7 +58,9 @@ Outputs:
   in a stable selection interval for stale dimming, before a diagnostic PNG can
   force a repaint. Both raw and captioned capture videos must also match the
   independent PNG's dark RGB levels; the encoder explicitly labels limited-range
-  YUV correctly. An invalid recording fails the run. Logs and final window geometry remain alongside it.
+  YUV correctly. Complete capture-overlay PNGs are compared with independent
+  full repaints, excluding only the fixture's pulsing dot. An invalid recording
+  fails the run. Logs and final window geometry remain alongside it.
 
 The runner stops its process groups and private bus on exit, refuses to replace
 an existing artifact directory, bounds waits, and rejects missing outputs or

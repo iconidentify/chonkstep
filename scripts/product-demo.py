@@ -276,6 +276,34 @@ def verify_capture_colors(video, timeline, reference):
             'reference':reference.name,'sample_origin':[1100,400],'sample_size':[16,8]}
 
 
+def verify_capture_still(captured, reference):
+    from PIL import Image, ImageChops, ImageDraw
+    with Image.open(captured) as actual, Image.open(reference) as expected:
+        if actual.size != (1920,1080) or actual.size != expected.size:
+            raise RuntimeError('capture comparison requires matching full HD images')
+        difference = ImageChops.difference(actual.convert('RGB'),expected.convert('RGB'))
+    # This is the fixture's pulsing dot, the only content that changes between
+    # the two snapshots. Selection borders, dimming and every window remain
+    # covered by the comparison, including edges outside the video row sample.
+    animated = (1720,278,1748,311)
+    ImageDraw.Draw(difference).rectangle(animated,fill=(0,0,0))
+    delta = max(high for low,high in difference.getextrema())
+    if delta > 2:
+        raise RuntimeError(f'captured desktop differs from a full repaint by {delta} levels: {captured.name}')
+    return {'file':captured.name,'reference':reference.name,'max_channel_difference':delta,
+            'allowed_difference':2,'animated_fixture_exclusion':list(animated)}
+
+
+def png_ready(path):
+    from PIL import Image
+    try:
+        with Image.open(path) as image:
+            image.load()
+            return image.format == 'PNG' and image.size == (1920,1080)
+    except OSError:
+        return False
+
+
 def run(args):
     binary = args.binary.resolve(strict=True)
     for command in ('weston', 'foot', 'wf-recorder', 'grim', 'ffmpeg', 'ffprobe'):
@@ -343,7 +371,10 @@ def run(args):
             diagnostic = output/f'{name}-diagnostic.png'
             pending.write_text(str(diagnostic))
             pending.replace(marker)
-            wait('diagnostic screenshot', lambda: diagnostic.exists() and diagnostic.stat().st_size > 8)
+            wait('diagnostic screenshot', lambda: png_ready(diagnostic))
+            if args.scenario == 'capture' and name.startswith('capture-'):
+                metadata.setdefault('still_verification',[]).append(
+                    verify_capture_still(output/f'{name}.png',diagnostic))
 
         if args.scenario == 'spaces':
             spaces_walkthrough(door, clients, step, still, metadata)

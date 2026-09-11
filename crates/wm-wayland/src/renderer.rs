@@ -1059,6 +1059,12 @@ fn make_winit_surface_current(
     // buffer. Keep ownership in the backend; only copy its raw handles
     // to avoid overlapping renderer/surface accessor borrows.
     drop(backend.bind().map_err(|error| format!("bind: {error:?}"))?);
+    backend.renderer().with_context(|gl| {
+        // SAFETY: with_context owns this renderer's current context. Restore
+        // the default framebuffer before latching the EGL window backbuffer;
+        // captures can leave an offscreen framebuffer bound.
+        unsafe { gl.BindFramebuffer(smithay::backend::renderer::gles::ffi::FRAMEBUFFER, 0); }
+    }).map_err(|error| format!("default framebuffer: {error:?}"))?;
     let context = backend.renderer().egl_context();
     let handle = context.get_context_handle();
     let display = context.display().get_display_handle();

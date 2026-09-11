@@ -18,6 +18,7 @@ prerelease through `preview-v0.5.0`, not a claim of complete macOS compatibility
 | X11 client sets its title before mapping and never changes it | The cached title remained empty | Initialize the title cache when creating its record; exercised by the XWayland miniature workflow |
 | A browser or terminal changes its title during an Overview drag | Semantic refresh cancelled the held gesture | Preserve the gesture and its visual when card geometry and desktop identities are unchanged; invalidate layout or target changes |
 | Record RGB desktop content through newer wf-recorder/FFmpeg | Limited-range YUV was tagged full-range, lifting blacks and compressing highlights | Set the encoder's color range explicitly; real screen/region recording failed with red 226 instead of 240 before and passes the RGB-level assertion after |
+| Reuse a nested EGL window after offscreen capture | An offscreen framebuffer could still be bound when querying window buffer age; a recording retained a selection edge | Bind the default framebuffer before latching/querying the window target; three consecutive recordings passed all 135 checked frames and nine complete overlay-image comparisons |
 
 The clipboard tests toggle the live profile three times and verify exact UTF-8
 text after the original owner exits. The Mac key regression also toggles eight
@@ -109,6 +110,14 @@ worker and the demo recorder. The real recording workflow checks RGB fidelity fo
 both screen and area modes; the demo verifies raw and captioned video against its
 PNG. Two harness regressions reject uniformly washed-out video even when every
 frame has consistent pixels.
+
+A later recording retained a thin selection edge in both the parent screenshot
+and video. The nested target setup now also restores the default framebuffer
+before making the window surface current and querying its age. Incremental
+rendering remains enabled. The demo compares each complete capture-overlay PNG
+with an independent full repaint, excluding only the fixture's small pulsing dot.
+The failing image is rejected by this check; all nine overlay pairs in three
+consecutive corrected recordings matched exactly outside that dot.
 
 ## Limits and defaults
 

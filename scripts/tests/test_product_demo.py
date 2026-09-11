@@ -59,3 +59,17 @@ class RecordedPixels(unittest.TestCase):
             with patch.object(demo.subprocess, 'check_output', return_value=bytes([31,35,46])*16*8*45):
                 with self.assertRaisesRegex(RuntimeError, 'differ from the screenshot'):
                     demo.verify_capture_colors(Path('sample.mp4'), self.timeline, reference)
+
+    def test_dynamic_fixture_dot_does_not_hide_a_stale_selection_edge(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            reference = Path(temporary)/'reference.png'
+            captured = Path(temporary)/'captured.png'
+            image = Image.new('RGB', (1920,1080), (19,23,35))
+            image.save(reference)
+            image.putpixel((1734,295),(255,255,255))
+            image.save(captured)
+            self.assertEqual(demo.verify_capture_still(captured,reference)['max_channel_difference'],0)
+            image.putpixel((1568,210),(255,255,255))
+            image.save(captured)
+            with self.assertRaisesRegex(RuntimeError, 'differs from a full repaint'):
+                demo.verify_capture_still(captured,reference)
