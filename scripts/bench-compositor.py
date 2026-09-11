@@ -300,27 +300,37 @@ def scene_records(lines, kind):
 
 
 def start_decoration_clients(fixtures, directory, env, socket_path, door):
-    applications = {f"org.chonkstep.bench.{index}" for index in range(3)}
+    applications = set()
     processes = []
-    for index, application in enumerate(sorted(applications)):
+    # Map one framed client before launching the next. Concurrent startup made
+    # app.2 sometimes the middle window and sometimes the rightmost one, changing
+    # occlusion/damage during the same nominal drag workload between samples.
+    for index in range(3):
+        application = f"org.chonkstep.bench.{index}"
+        applications.add(application)
         processes.append(fixtures.enter_context(child([
             "foot", "--config=/dev/null", f"--app-id={application}",
             f"--title=Decoration benchmark {index + 1}", "--window-size-pixels=320x180",
             "sh", "-c", "printf 'Decoration benchmark\\n'; exec sleep 86400",
         ], env | {"WAYLAND_DISPLAY": str(socket_path)}, directory / f"foot-{index}.log")))
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if any(process.poll() is not None for process in processes):
-            raise RuntimeError("decoration fixture terminal exited before mapping")
-        world = door.query("windows", multiple=True)
-        windows = scene_records(world, "window")
-        mapped = {window["app"] for window in windows if window.get("mapped") == "true"}
-        frames = {frame["window"] for frame in scene_records(world, "frame") if frame.get("mapped") == "true"}
-        clients = [window for window in windows if window.get("app") in applications]
-        if applications <= mapped and len(clients) == 3 and all(window["id"] in frames for window in clients):
-            return
-        time.sleep(0.02)
-    raise TimeoutError("all three framed decoration clients must map before measuring")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if any(process.poll() is not None for process in processes):
+                raise RuntimeError("decoration fixture terminal exited before mapping")
+            world = door.query("windows", multiple=True)
+            windows = scene_records(world, "window")
+            mapped = {window["app"] for window in windows if window.get("mapped") == "true"}
+            frames = {frame["window"] for frame in scene_records(world, "frame") if frame.get("mapped") == "true"}
+            clients = [window for window in windows if window.get("app") in applications]
+            if applications <= mapped and len(clients) == len(applications) and all(window["id"] in frames for window in clients):
+                break
+            time.sleep(0.02)
+        else:
+            raise TimeoutError("each decoration client must map with its frame before launching the next")
+    ordered = sorted(clients, key=lambda window: window["app"])
+    if not (len({window["y"] for window in ordered}) == 1
+            and all(int(left["x"]) < int(right["x"]) for left, right in zip(ordered, ordered[1:]))):
+        raise RuntimeError("decoration fixture must place clients in application order on one row")
 
 
 def measure_decoration_drag(door, pid, directory, seconds):

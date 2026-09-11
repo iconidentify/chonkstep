@@ -515,6 +515,8 @@ pub(crate) struct FramePart {
     pub offset: Point,
     pub size: Size,
     pub buffer: MemoryRenderBuffer,
+    /// Every texel is opaque or fully transparent, with at least one hole.
+    pub binary_alpha: bool,
 }
 
 /// Ledger entry for one decoration frame. `parts` holds only the imported

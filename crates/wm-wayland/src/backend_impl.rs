@@ -132,6 +132,15 @@ fn update_chrome_band(memory: &mut [u8], pixels: &[u8], size: Size) -> Vec<Smith
     vec![SmithayRect::<i32, Buffer>::from_size((size.w as i32, size.h as i32).into())]
 }
 
+/// Only premultiplied zero texels can be omitted without changing a blend.
+fn has_binary_transparency(buffer: &DecorationBuffer) -> bool {
+    let mut transparent = false;
+    for pixel in buffer.pixels.as_chunks::<4>().0 {
+        match *pixel { [0, 0, 0, 0] => transparent = true, [_, _, _, 255] => {}, _ => return false }
+    }
+    transparent
+}
+
 /// Exact opaque runs, coalesced vertically. The limit bounds pathological
 /// masks; reporting no opaque region remains correct for arbitrary alpha.
 fn chrome_opaque_regions(buffer: &DecorationBuffer) -> Vec<SmithayRect<i32, Buffer>> {
@@ -1068,7 +1077,7 @@ impl Backend for WaylandBackend {
                     continue;
                 }
                 let old = previous.next();
-                let buffer = match old {
+                let (buffer, binary_alpha) = match old {
                     Some(mut old) if old.offset == part.offset && old.size == size => {
                         let pixels = &part.buffer.pixels;
                         let mut render = old.buffer.render();
@@ -1080,22 +1089,25 @@ impl Backend for WaylandBackend {
                             // allocation on an ordinary same-sized repaint.
                             opacity_changed = memory.len() != pixels.len() || (memory != pixels
                                 && memory.as_chunks::<4>().0.iter().zip(pixels.as_chunks::<4>().0)
-                                    .any(|(before, after)| (before[3] == 255) != (after[3] == 255)));
+                                    .any(|(before, after)| before[3] != after[3] || (before[3] == 0 && before != after)));
                             Ok::<_, std::convert::Infallible>(update_chrome_band(memory, pixels, size))
                         });
-                        if opacity_changed { render.update_opaque_regions(Some(chrome_opaque_regions(&part.buffer))); }
+                        if opacity_changed {
+                            render.update_opaque_regions(Some(chrome_opaque_regions(&part.buffer)));
+                            old.binary_alpha = has_binary_transparency(&part.buffer);
+                        }
                         drop(render);
-                        old.buffer
+                        (old.buffer, old.binary_alpha)
                     }
                     _ => match import_buffer(&part.buffer, false) {
                         Some(mut buffer) => {
                             buffer.render().update_opaque_regions(Some(chrome_opaque_regions(&part.buffer)));
-                            buffer
+                            (buffer, has_binary_transparency(&part.buffer))
                         }
                         None => continue,
                     },
                 };
-                imported.push(FramePart { offset: part.offset, size, buffer });
+                imported.push(FramePart { offset: part.offset, size, buffer, binary_alpha });
             }
             record.parts = imported;
             if retires_visible_chrome {
@@ -2128,6 +2140,15 @@ impl wm_theme_api::PopupHost for WaylandBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_chrome_requires_exact_zero_holes_and_fully_opaque_visible_pixels() {
+        let buffer = |pixels| DecorationBuffer { width: 2, height: 1, pixels };
+        assert!(has_binary_transparency(&buffer(vec![0, 0, 0, 0, 30, 40, 50, 255])));
+        assert!(!has_binary_transparency(&buffer(vec![1, 0, 0, 0, 30, 40, 50, 255])));
+        assert!(!has_binary_transparency(&buffer(vec![0, 0, 0, 0, 30, 40, 50, 128])));
+        assert!(!has_binary_transparency(&buffer(vec![1, 2, 3, 255, 30, 40, 50, 255])));
+    }
 
     #[test]
     fn unchanged_chrome_bands_keep_their_damage_empty() {

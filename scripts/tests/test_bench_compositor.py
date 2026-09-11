@@ -104,6 +104,42 @@ class WaylandReadinessTests(unittest.TestCase):
         self.assertEqual(stream.sent, b"j/version")
 
 
+class DecorationSceneTests(unittest.TestCase):
+    def test_each_client_and_its_frame_map_before_the_next_launch(self):
+        launched = []
+        ready = set()
+        observed = set()
+
+        @contextlib.contextmanager
+        def client(args, env, log):
+            self.assertEqual(len(ready), len(launched), "concurrent mapping races the drag target's placement")
+            application = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--app-id="))
+            launched.append(application)
+            process = mock.Mock()
+            process.poll.return_value = None
+            yield process
+
+        def world(command, multiple):
+            self.assertEqual((command, multiple), ("windows", True))
+            current = launched[-1]
+            if current in observed:
+                ready.add(current)
+            observed.add(current)
+            # Advertise the client before its frame to exercise the real map
+            # lifecycle; seeing only the toplevel is not fixture readiness.
+            return [f'window id={i} app="{app}" mapped=true x={i * 320} y=24'
+                    for i, app in enumerate(launched)] + [
+                f"frame window={i} mapped=true" for i, app in enumerate(launched) if app in ready]
+
+        door = mock.Mock()
+        door.query.side_effect = world
+        with contextlib.ExitStack() as fixtures, mock.patch.object(bench, "child", client), \
+                mock.patch.object(bench.time, "sleep"):
+            bench.start_decoration_clients(fixtures, Path("/unused"), {}, Path("/private-socket"), door)
+        self.assertEqual(launched, [f"org.chonkstep.bench.{i}" for i in range(3)])
+        self.assertEqual(ready, set(launched))
+
+
 class IsolationTests(unittest.TestCase):
     def test_profiled_binary_cannot_supply_timing_measurements(self):
         version = "chonkstep test\ndiagnostics: memory-profile (allocation counters enabled; not a timing baseline)"
