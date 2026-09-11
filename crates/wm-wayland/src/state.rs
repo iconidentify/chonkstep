@@ -74,7 +74,7 @@ use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::X11Surface;
 
 use wm_core::{Backend, BackendEvent, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, WindowManager, WindowType};
-use wm_theme::{FontState, RasterThemeEngine};
+use wm_theme::FontState;
 use wm_theme_api::{DecorationBuffer, Point, Rect, ResizeEdge, Size};
 
 use crate::input::DragGrab;
@@ -4058,7 +4058,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     chonk_shell::startup::apply_session_env(&state.session_env);
     chonk_shell::startup::clear_inherited_gtk_scale_env();
     let theme = state.theme();
-    tracing::info!(theme = %theme.id, "theme loaded");
+    tracing::info!(theme = %theme.id, decoration_style = state.decoration_style.name(), "theme loaded");
     // The font database is built out here rather than inside the engine
     // so the shell can hold on to it and build this engine's
     // replacements around the same one on every later restyle. A
@@ -4067,7 +4067,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // the display server every client is waiting on. See
     // `wm_theme::FontState`.
     let fonts = FontState::new();
-    let engine = RasterThemeEngine::with_fonts_at_scale(theme, fonts.clone(), state.scale);
+    let engine = state.decoration_engine(fonts.clone());
 
     // The outputs advertise the session's scale from here on — the only
     // way a native Wayland client ever learns this desktop is scaled

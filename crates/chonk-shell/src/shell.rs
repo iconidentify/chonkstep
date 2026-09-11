@@ -19,7 +19,7 @@ use wm_core::{
     Notification, ScrollDelta, WindowManager,
 };
 use wm_theme::cascade::MenuKey;
-use wm_theme::{FontState, RasterThemeEngine, Theme};
+use wm_theme::{FontState, Theme};
 use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 
 use crate::apps::{self, AppEntry};
@@ -1527,13 +1527,14 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let theme = next.theme();
         let scale_changed = self.desktop.set_scale(next.scale);
         let theme_changed = theme != self.theme;
+        let style_changed = next.decoration_style != self.state.decoration_style;
         let appearance_changed = next.appearance != self.state.appearance;
         let following_changed = next.following != self.state.following;
-        if scale_changed || theme_changed || appearance_changed || following_changed {
+        if scale_changed || theme_changed || style_changed || appearance_changed || following_changed {
             self.control_theme_revision = self.control_theme_revision.wrapping_add(1);
         }
         self.state = next;
-        if !scale_changed && !theme_changed {
+        if !scale_changed && !theme_changed && !style_changed {
             // Nothing that is drawn has moved. Repainting anyway would
             // be a visible flash on a reload that only rebound a key.
             return;
@@ -1562,15 +1563,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             scale = self.state.scale,
             scale_changed,
             theme_changed,
+            decoration_style = self.state.decoration_style.name(),
+            style_changed,
             "applying a new look in place"
         );
 
         // 3. The decoration engine, and with it every client's chrome.
-        wm.set_theme_engine(Box::new(RasterThemeEngine::with_fonts_at_scale(
-            self.theme.clone(),
-            self.fonts.clone(),
-            self.state.scale,
-        )));
+        wm.set_theme_engine(Box::new(self.state.decoration_engine(self.fonts.clone())));
         if scale_changed {
             // The only pixels in the session the theme engine does not
             // produce: the backend's own pointer cursors.
@@ -3599,6 +3598,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             &control::Surroundings {
                 theme: &self.theme,
                 appearance: self.state.appearance,
+                decoration_style: self.state.decoration_style,
                 scale: self.state.scale,
                 pointer_root: self.pointer_root,
                 // The *choice* to follow, not whether the palette was

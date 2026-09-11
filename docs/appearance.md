@@ -1,6 +1,6 @@
 # Light and dark: the appearance axis
 
-ChonkStep has two independent axes of taste. The **theme** decides
+ChonkStep separates palette, appearance and decoration style. The **theme** decides
 which desktop you have -- Amber Phosphor, Teal Blueprint, Ivory
 Halftone -- and the **appearance** decides which of that theme's two
 renditions you are looking at: `light` or `dark`. Every built-in theme
@@ -18,6 +18,18 @@ ground.
 Switching appearance re-resolves the current theme in its other
 rendition through the same live-apply path a theme pick takes: no
 restart, nothing closed, one repaint.
+
+## Decoration style
+
+`decoration_style = "windowmaker"` (default) or `"system7"` selects the frame's
+geometry, controls and title glyphs. The **theme** supplies the palette; the
+**appearance** selects light/dark palette variants. System 7 chrome always uses
+light roles. It does not change the session's appearance or Mac keyboard mode.
+
+The style selector is config-only: edit `config.toml`, then reload with
+`/usr/lib/chonkstep/reload.sh`. There is no style picker, request file or separate persisted
+style state. Existing windows reflow in place, including XWayland windows.
+See [Decoration styles](decoration-styles.md) for the frame and scale contracts.
 
 ## Switching
 

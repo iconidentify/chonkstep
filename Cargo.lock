@@ -3422,6 +3422,7 @@ dependencies = [
  "toml",
  "tracing",
  "wm-core",
+ "wm-theme-api",
 ]
 
 [[package]]

@@ -97,7 +97,7 @@ impl<B: Backend> WindowManager<B> {
             }
         }
         if !maximized && !c.flags.contains(ClientFlags::FULLSCREEN) {
-            self.apply_layout_geometry(id, saved, None);
+            self.apply_layout_geometry(id, saved, None, false);
         }
     }
 
@@ -375,6 +375,7 @@ impl<B: Backend> WindowManager<B> {
         id: ClientId,
         geometry: Rect,
         clip: Option<Rect>,
+        force_reflow: bool,
     ) {
         let geometry = if clip.is_none() {
             self.reachable_freeform(id, geometry)
@@ -392,6 +393,8 @@ impl<B: Backend> WindowManager<B> {
         if c.geometry != geometry {
             self.layout_statistics.geometry_changes += 1;
             c.geometry = geometry;
+            self.reflow_frame(id);
+        } else if force_reflow {
             self.reflow_frame(id);
         }
         let c = &self.clients[id];
@@ -418,6 +421,10 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub(super) fn reflow_workspace(&mut self, workspace: usize) {
+        self.reflow_workspace_with_force(workspace, false);
+    }
+
+    pub(super) fn reflow_workspace_with_force(&mut self, workspace: usize, force_reflow: bool) {
         let mode = self.workspace_layout(workspace);
         if mode == LayoutMode::Freeform {
             return;
@@ -506,7 +513,7 @@ impl<B: Backend> WindowManager<B> {
                 self.clients[id].layout_excluded = rect.is_none();
                 let Some(rect) = rect else {
                     if let Some(saved) = self.clients[id].placement.freeform {
-                        self.apply_layout_geometry(id, saved, None);
+                        self.apply_layout_geometry(id, saved, None, force_reflow);
                     }
                     continue;
                 };
@@ -554,7 +561,7 @@ impl<B: Backend> WindowManager<B> {
                 if mode == LayoutMode::Flow && c.placement.flow_width == 0 {
                     self.clients[id].placement.flow_width = rect.size.w;
                 }
-                self.apply_layout_geometry(id, geometry, Some(area));
+                self.apply_layout_geometry(id, geometry, Some(area), force_reflow);
             }
         }
         self.bump_protocol_state_revision();

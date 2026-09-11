@@ -526,6 +526,10 @@ impl<B: Backend> WindowManager<B> {
     /// scan) and this crate only knows it has a new source of layouts.
     pub fn set_theme_engine(&mut self, theme: Box<dyn ThemeEngine>) {
         self.theme = theme;
+        // A release must not activate a control whose geometry/availability
+        // belonged to the previous style.
+        self.active_button_press = None;
+        self.last_titlebar_press = None;
         for client in self.clients.values_mut() {
             client.last_decoration_request = None;
         }
@@ -543,29 +547,58 @@ impl<B: Backend> WindowManager<B> {
     /// makes a later deminiaturize exact rather than restoring a window
     /// into chrome measured for the previous theme.
     ///
-    /// A drag in flight is left alone deliberately rather than
-    /// cancelled: `ActiveMove`'s grab offset was computed against the
-    /// old layout, so a scale change landing mid-drag shifts the window
-    /// under the pointer by the difference in titlebar height. That is
-    /// a cosmetic jump in a race a user has to work to hit (a config
-    /// reload while holding a titlebar), and cancelling the drag to
-    /// avoid it would be the more surprising of the two.
+    /// Rebase an in-flight grab against the new frame after the sweep. The
+    /// next motion then starts from the current pointer/content geometry,
+    /// including the new opposite edge during a north/west resize.
     pub fn relayout_all_clients(&mut self) {
+        if self.separate_spaces() && self.monitors_ref().is_empty() { return; }
+        let moving_before = self.active_move.as_ref().and_then(|drag| {
+            self.clients.get(drag.client).map(client_frame_rect)
+        });
         let ids: Vec<ClientId> = self.clients.keys().collect();
         for id in ids {
-            let Some(client) = self.clients.get(id) else {
-                continue;
-            };
-            if client.lifecycle == Lifecycle::Withdrawn {
+            let Some(client) = self.clients.get(id) else { continue; };
+            if client.lifecycle == Lifecycle::Withdrawn || self.layout_candidate(id) {
                 continue;
             }
-            // `reflow_frame` repaints the decoration itself as part of
-            // pushing the new frame geometry, so this is one call, not
-            // two — and a fullscreen client takes its branch, which
-            // bypasses the theme entirely and is correct unchanged.
-            self.reflow_frame(id);
+            // Spatial candidates get their final content geometry and exactly
+            // one forced reflow in the workspace pass below. Maximized clients
+            // first measure the new overhead, then fit and submit only their
+            // final geometry; the old cached title height cannot size content.
+            let mut directions = MaximizeDirections::empty();
+            if !client.flags.intersects(ClientFlags::FULLSCREEN | ClientFlags::SHADED) {
+                if client.flags.contains(ClientFlags::MAXIMIZED_H) { directions |= MaximizeDirections::HORIZONTAL; }
+                if client.flags.contains(ClientFlags::MAXIMIZED_V) { directions |= MaximizeDirections::VERTICAL; }
+            }
+            if directions.is_empty() {
+                self.reflow_frame(id);
+            } else {
+                let layout = if client.chrome == ClientChrome::ClientDrawn {
+                    frameless_layout(client.geometry.size)
+                } else {
+                    self.theme.layout_at(&Self::decoration_request(client, None), self.client_decoration_scale(id))
+                };
+                self.clients[id].layout = layout;
+                self.fit_maximized(id, directions);
+            }
         }
-        self.reflow_layouts();
+        for workspace in 0..self.workspace_count {
+            self.reflow_workspace_with_force(workspace, true);
+        }
+        if let (Some(before), Some(drag)) = (moving_before, self.active_move.as_mut()) {
+            if let Some(client) = self.clients.get(drag.client) {
+                let after = client_frame_rect(client);
+                drag.grab_offset.x = drag.grab_offset.x.saturating_add(before.pos.x.saturating_sub(after.pos.x));
+                drag.grab_offset.y = drag.grab_offset.y.saturating_add(before.pos.y.saturating_sub(after.pos.y));
+            }
+        }
+        if let Some(drag) = self.active_resize.as_mut() {
+            if let Some(client) = self.clients.get(drag.client) {
+                drag.start_frame = client_frame_rect(client);
+                drag.start_pointer = self.last_pointer;
+            }
+        }
+        self.bump_protocol_state_revision();
     }
 
     /// Reserves screen space windows should not maximize into (e.g. a
@@ -9652,6 +9685,7 @@ mod tests {
     }
     mod spatial;
     mod spaces;
+    mod restyle;
     fn mac_windows() -> (WindowManager<FakeBackend>, [ClientId; 3]) {
         let mut backend = FakeBackend::new();
         let windows = [backend.create_window(), backend.create_window(), backend.create_window()];

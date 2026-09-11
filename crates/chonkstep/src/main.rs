@@ -12,7 +12,7 @@
 use std::time::{Duration, Instant};
 
 use wm_core::{Backend, BackendEvent, WindowManager};
-use wm_theme::{FontState, RasterThemeEngine};
+use wm_theme::FontState;
 use wm_x11::X11Backend;
 
 use chonk_shell::dockapp::Farewell;
@@ -160,7 +160,7 @@ fn main() {
     let screen = backend.screen_size();
 
     let theme = state.theme();
-    tracing::info!(theme = %theme.id, "theme loaded");
+    tracing::info!(theme = %theme.id, decoration_style = state.decoration_style.name(), "theme loaded");
     if let Some(opacity) = theme.terminal.opacity {
         backend.add_opacity_rule("URxvt", opacity);
     }
@@ -169,7 +169,7 @@ fn main() {
     // replacements around the same one on every later restyle — see
     // `wm_theme::FontState`.
     let fonts = FontState::new();
-    let engine = RasterThemeEngine::with_fonts_at_scale(theme, fonts.clone(), state.scale);
+    let engine = state.decoration_engine(fonts.clone());
 
     // The entire desktop shell — dock, Clip, launcher strip, menus,
     // wallpaper, the `.desktop` application index — is built here in

@@ -35,6 +35,7 @@
 //! scale = 2.0                        # optional; UI scale factor
 //! theme = "nextstep-classic"         # optional; theme name
 //! appearance = "dark"                # optional; "light" | "dark"
+//! decoration_style = "windowmaker"  # optional; "windowmaker" | "system7"
 //! placement = "smart"                # optional; "smart" | "cascade" | "center"
 //! edge_resistance = 10               # optional; px, 0 disables edge snapping
 //! terminal_font_px = 18              # optional; terminal font size at 1x
@@ -463,6 +464,8 @@ pub struct Config {
     /// lives in `wm-theme`, which this crate deliberately does not
     /// depend on.
     pub appearance: Option<String>,
+    /// Frame geometry and glyph recipe; selected only by this config file.
+    pub decoration_style: wm_theme_api::DecorationStyle,
     /// Where newly mapped windows go when the client expressed no
     /// position preference. Fed to the WM's placement engine verbatim.
     pub placement: PlacementPolicy,
@@ -683,6 +686,7 @@ impl Config {
             scale: None,
             theme: None,
             appearance: None,
+            decoration_style: wm_theme_api::DecorationStyle::WindowMaker,
             // Smart is the classic default placement, and 10px
             // matches the stock edge-resistance feel: strong enough
             // to catch a deliberate drag toward an edge, weak enough
@@ -785,6 +789,7 @@ impl Config {
             "scale",
             "theme",
             "appearance",
+            "decoration_style",
             "placement",
             "edge_resistance",
             "terminal_font_px",
@@ -1421,6 +1426,16 @@ pub fn parse_with(
                     "config: appearance must be \"light\" or \"dark\", ignoring it"
                 ),
             },
+            "decoration_style" => match value.as_str().and_then(wm_theme_api::DecorationStyle::from_name) {
+                Some(style) => config.decoration_style = style,
+                None => {
+                    let message = format!(
+                        "config: decoration_style must be \"windowmaker\" or \"system7\", keeping default (got {value})"
+                    );
+                    tracing::warn!("{message}");
+                    config.diagnostics.push(message);
+                }
+            },
             "placement" => match placement_from_value(value) {
                 Some(policy) => config.placement = policy,
                 None => tracing::warn!(
@@ -1668,6 +1683,11 @@ pub fn parse_with(
             }
             "scale" if scale_from_value(value).is_some() => Some("scale"),
             "theme" if value.is_str() => Some("theme"),
+            "decoration_style"
+                if value.as_str().and_then(wm_theme_api::DecorationStyle::from_name).is_some() =>
+            {
+                Some("decoration_style")
+            }
             "appearance"
                 if value.as_str().is_some_and(|name| {
                     matches!(name.trim().to_ascii_lowercase().as_str(), "light" | "dark")
@@ -1885,6 +1905,7 @@ pub fn effective_config_report(config: &Config) -> String {
     line("scale", format!("{:?}", config.scale));
     line("theme", format!("{:?}", config.theme));
     line("appearance", format!("{:?}", config.appearance));
+    line("decoration_style", format!("{:?}", config.decoration_style.name()));
     line("placement", format!("{:?}", config.placement));
     line("edge_resistance", config.edge_resistance.to_string());
     line("terminal_font_px", config.terminal_font_px.to_string());
@@ -2975,6 +2996,40 @@ scroll_factor = 0.4
         // The typo'd key changed nothing; the valid key still applied.
         assert!(!config.focus_follows_mouse);
         assert_eq!(config.theme.as_deref(), Some("nextstep-classic"));
+    }
+
+    #[test]
+    fn decoration_style_is_config_only_defaults_and_reports_its_effective_value() {
+        use wm_theme_api::DecorationStyle;
+        for text in ["", "theme = \"omarchy\""] {
+            assert_eq!(parse(text).unwrap().decoration_style, DecorationStyle::WindowMaker);
+        }
+        for style in [DecorationStyle::WindowMaker, DecorationStyle::System7] {
+            let config = parse(&format!("decoration_style = {:?}", style.name())).unwrap();
+            assert_eq!(config.decoration_style, style);
+            assert!(config.diagnostics.is_empty());
+            assert!(effective_config_report(&config).contains(
+                &format!("decoration_style = {:?}", style.name())));
+            assert_ne!(config.provenance["decoration_style"], "default");
+        }
+    }
+
+    #[test]
+    fn invalid_decoration_style_warns_without_discarding_any_other_setting() {
+        use wm_theme_api::DecorationStyle;
+        for value in ["42", "true", "[]", "{}", "\"typo\"", "\"\"", "\"System7\""] {
+            let config = parse(&format!(
+                "decoration_style = {value}\nfocus_follows_mouse = true\ntheme = \"omarchy\"\n[keybindings]\n\"super+t\" = \"spawn-terminal\""
+            )).unwrap();
+            assert_eq!(config.decoration_style, DecorationStyle::WindowMaker);
+            assert!(config.focus_follows_mouse);
+            assert_eq!(config.theme.as_deref(), Some("omarchy"));
+            assert_eq!(action_for(&config, "super+t"), Some(Action::SpawnTerminal));
+            assert_eq!(config.diagnostics.len(), 1);
+            assert!(config.diagnostics[0].contains("decoration_style"));
+            assert!(config.diagnostics[0].contains("windowmaker"));
+            assert!(config.diagnostics[0].contains("system7"));
+        }
     }
 
     // ---- parse: appearance --------------------------------------------

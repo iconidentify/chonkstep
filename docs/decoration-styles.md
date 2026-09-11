@@ -1,10 +1,41 @@
 # Decoration styles
 
-A **theme** selects a palette, fonts and fills; **appearance** selects its light
-or dark rendition. A **decoration style** selects the frame geometry, button
-glyphs and painting recipe. The existing chrome is called `windowmaker`.
-The System 7.5 style and its selection controls are tracked by issues #161–163;
-this foundation does not yet expose a second working renderer.
+The palette and frame recipe are independent:
+
+```toml
+theme = "nextstep-classic"         # or another palette, including "omarchy"
+appearance = "dark"                # session palette preference
+decoration_style = "system7"        # "windowmaker" by default
+```
+
+Edit `~/.config/chonkstep/config.toml` and run `/usr/lib/chonkstep/reload.sh`. The selector is
+config-only; there is no competing state file, request file or root-menu picker.
+Unknown names and non-string values produce a warning naming both accepted
+values and retain WindowMaker while the rest of the config applies.
+`--check-config` reports the diagnostic and `--print-config` prints the effective
+style. The control socket's `theme` event and the session's look-change log carry
+`decoration_style` too.
+
+WindowMaker keeps its existing frame, title and control behavior. System 7 uses
+the measured classic document-window recipe: close left, zoom right for resizable
+windows, striped active title, a one-pixel outline and offset shadow, and no
+miniaturize button. Its chrome is always light. [The reference specification](decoration-styles/system7.md)
+describes its measured pixels, original title atlas, palette roles and exact
+integer versus faithful fractional scaling. Theme following continues to supply
+the active style's palette.
+
+Reloading reflows each managed frame once through the same backend path as a
+theme change. Floating clients keep their content geometry, workspace and stack
+position. Spatial layouts recompute their available client area for the new
+chrome. An active move/resize is rebased to the new frame so the next pointer
+motion uses current offsets and opposite edges. Minimized/shaded frames are
+updated for their eventual restore; fullscreen and client-decorated windows keep
+their normal decoration exemptions.
+
+Mac keyboard behavior is a separate feature: changing decoration style does not
+change Command-key translations, shortcuts or Spaces policy.
+
+## Rendering and verification
 
 `RasterThemeEngine::with_style(DecorationStyle)` explicitly selects a renderer and
 returns an error for a reserved but unavailable style. Existing constructors keep

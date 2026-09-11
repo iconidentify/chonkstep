@@ -194,11 +194,14 @@ socket is not blind, and so it can correlate focus with a workspace.
 ### 3.5 `theme`
 
 ```json
-{"event":"theme","id":"nextstep-classic","name":"NeXTSTEP Classic","appearance":"dark","following":null}
+{"event":"theme","id":"nextstep-classic","name":"NeXTSTEP Classic","appearance":"dark","decoration_style":"windowmaker","following":null}
 ```
 
 - `id`, `name` — the active theme.
 - `appearance` — `"dark"` or `"light"`.
+- `decoration_style` — `"windowmaker"` or `"system7"`, the active frame recipe.
+  This additive field defaults to `"windowmaker"` when reading an older snapshot.
+  A config reload changing only style still publishes a new theme event.
 - `following` — `"omarchy"` when the session follows Omarchy's
   current palette (`theme = "omarchy"`, see `docs/appearance.md`),
   else `null`. It reports the choice, not the outcome: a follow whose
