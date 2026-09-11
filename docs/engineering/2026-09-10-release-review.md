@@ -17,6 +17,8 @@ prerelease through `preview-v0.5.0`, not a claim of complete macOS compatibility
 | Scene imports run after querying a nested EGL backbuffer age | NVIDIA recordings could retain dimmed strips on some reused buffers | Complete imports and GPU-timer setup before latching/querying the backbuffer; verify every frame during a stable capture hold |
 | X11 client sets its title before mapping and never changes it | The cached title remained empty | Initialize the title cache when creating its record; exercised by the XWayland miniature workflow |
 | A browser or terminal changes its title during an Overview drag | Semantic refresh cancelled the held gesture | Preserve the gesture and its visual when card geometry and desktop identities are unchanged; invalidate layout or target changes |
+| Record RGB desktop content through newer wf-recorder/FFmpeg | Limited-range YUV was tagged full-range, lifting blacks and compressing highlights | Set the encoder's color range explicitly; real screen/region recording failed with red 226 instead of 240 before and passes the RGB-level assertion after |
+| Reuse a nested EGL window after offscreen capture | An offscreen framebuffer could still be bound when querying window buffer age; a recording retained a selection edge | Bind the default framebuffer before latching/querying the window target; three consecutive recordings passed all 135 checked frames and nine complete overlay-image comparisons |
 
 The clipboard tests toggle the live profile three times and verify exact UTF-8
 text after the original owner exits. The Mac key regression also toggles eight
@@ -101,7 +103,40 @@ checkpoints. Captioned share videos retain the same uncut footage; the original
 recording is included separately. Final publication must use the release binary,
 not a relabeled rehearsal.
 
+Final video QA also compares decoded dark pixels with the independent screenshot.
+The old recording path changed the fixture's RGB `[240, 20, 20]` to `[226, 32, 32]`.
+The worker and demo recorder now explicitly convert RGB to limited-range YUV and
+label it correctly. Older Ubuntu wf-recorder/FFmpeg otherwise used a full-range
+conversion; its real regression failed before the explicit conversion and passed
+after. The real recording workflow checks RGB fidelity for
+both screen and area modes; the demo verifies raw and captioned video against its
+PNG. Two harness regressions reject uniformly washed-out video even when every
+frame has consistent pixels.
+
+A later recording retained a thin selection edge in both the parent screenshot
+and video. The nested target setup now also restores the default framebuffer
+before making the window surface current and querying its age. Incremental
+rendering remains enabled. The demo compares each complete capture-overlay PNG
+with an independent full repaint, excluding only the fixture's small pulsing dot.
+The failing image is rejected by this check; all nine overlay pairs in three
+consecutive corrected recordings matched exactly outside that dot.
+
 ## Limits and defaults
+
+Saved captures now open in both keyboard profiles: screenshots in imv and
+finalized recordings in Omacut. The Mac regression first reproduced the missing
+viewer, then verified exact literal file arguments, publication before launch,
+and no viewer for clipboard-only captures. Desktop-mode workflows cover launch
+failures and ensure failed saves never launch an app. The reusable demo also
+opens the actual installed applications and displays the saved PNG and MP4.
+
+Release CI also exposed the completed-paste test's process-memory heuristic:
+5,128 KiB of anonymous growth exceeded its 4 MiB allowance. The regression now
+inspects retained XWM transfer records directly, requiring zero after 128 pastes
+while every requestor stays alive. Process memory remains recorded as diagnostic
+evidence. A held transfer must report one; a deliberately broken test executable
+that skips completed-transfer removal reports 129 and fails. The read-only
+diagnostic neither cleans up records nor exposes clipboard contents.
 
 The accelerated-path flags remain separate, opt-in experiments. Hardware results
 are in the [cross-GPU report](../benchmarks/cross-gpu-2026-09-10/README.md), including

@@ -47,7 +47,7 @@ depends=(
   'ffmpeg'           # finalize recoverable MKV recordings as fast-start MP4
   'libnotify'        # capture completion / failure notifications
   'xdg-user-dirs'    # localized Pictures / Videos destinations
-  'xdg-utils'        # open screenshots in the configured image viewer
+  'xdg-utils'        # desktop URL and file handlers
   'bash'             # the session launcher scripts in /usr/lib/chonkstep
   'gcc-libs'
   'glibc'
@@ -66,6 +66,8 @@ depends=(
   'ttf-dejavu'
 )
 optdepends=(
+  'imv: automatically review saved screenshots'
+  'omacut: automatically review completed recordings'
   'xorg-server: the X11 session (the Wayland session needs no X server)'
   'xorg-xinit: start the X11 session with startx from a TTY'
   'picom: translucent terminals on the X11 session (the compositor composites itself)'

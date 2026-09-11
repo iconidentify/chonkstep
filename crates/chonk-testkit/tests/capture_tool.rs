@@ -66,7 +66,7 @@ fn boot(name: &str, scale: f32) -> Session {
                 "hypr/hyprland.conf".into(),
                 "bind = SUPER, F12, workspace, 1\nbind = , PRINT, exec, omarchy-capture-screenshot\n".into(),
             )],
-            config_files: ["xdg-open", "omacut"]
+            config_files: ["imv", "omacut"]
                 .into_iter()
                 .map(|program| (format!("fixture-bin/{program}"), wrapper.into()))
                 .chain(std::iter::once(("fixture-bin/notify-send".into(), notification.into())))
@@ -95,7 +95,7 @@ fn boot(name: &str, scale: f32) -> Session {
     .unwrap();
     // Session::boot recreates the session directory, so chmod must happen
     // after boot and before sending the first capture shortcut.
-    for program in ["xdg-open", "omacut", "notify-send"] {
+    for program in ["imv", "omacut", "notify-send"] {
         std::fs::set_permissions(
             fixture_bin.join(program),
             std::fs::Permissions::from_mode(0o700),
@@ -195,7 +195,7 @@ fn window_click_workflow(scale: f32, name: &str) {
     let image = Screenshot::load(&path).unwrap();
     let frame = world.frame_of(window.id).unwrap();
     assert_eq!((image.width, image.height), (frame.w, frame.h));
-    reviews_opened(&session, &[("xdg-open", &path)]);
+    reviews_opened(&session, &[("imv", &path)]);
     session.door().tap_key(30).unwrap();
     poll_until(
         Duration::from_secs(5),
@@ -343,7 +343,7 @@ fn screenshot_workflow(scale: f32, name: &str) {
     let before = session.screenshot("before").unwrap();
     shortcut(&mut session, 3);
     let path = saved(&exports, 1, "png");
-    reviews_opened(&session, &[("xdg-open", &path)]);
+    reviews_opened(&session, &[("imv", &path)]);
     assert_eq!(notification_preview(&session, &path, "Screenshot saved"), path);
     let full = Screenshot::load(&path).unwrap();
     assert_eq!((full.width, full.height), (before.width, before.height));
@@ -381,7 +381,7 @@ fn screenshot_workflow(scale: f32, name: &str) {
     session.door().button("left", false).unwrap();
     session.door().barrier().unwrap();
     let area_path = saved(&exports, 2, "png");
-    reviews_opened(&session, &[("xdg-open", &path), ("xdg-open", &area_path)]);
+    reviews_opened(&session, &[("imv", &path), ("imv", &area_path)]);
     assert_eq!(notification_preview(&session, &area_path, "Screenshot saved"), area_path);
     let area = Screenshot::load(&area_path).unwrap();
     assert_eq!(
@@ -418,9 +418,9 @@ fn screenshot_workflow(scale: f32, name: &str) {
     reviews_opened(
         &session,
         &[
-            ("xdg-open", &path),
-            ("xdg-open", &area_path),
-            ("xdg-open", &window_path),
+            ("imv", &path),
+            ("imv", &area_path),
+            ("imv", &window_path),
         ],
     );
     let shot = Screenshot::load(&window_path).unwrap();
@@ -727,6 +727,11 @@ fn recording_screen_and_area_preserve_changing_content() {
         for rgb in decoded.stdout.as_chunks::<3>().0 {
             let is_red = rgb[0] > 150 && rgb[2] < 100;
             let is_blue = rgb[2] > 150 && rgb[0] < 100;
+            if is_red || is_blue {
+                let expected: [u8; 3] = if is_red { [240, 20, 20] } else { [20, 20, 240] };
+                assert!(rgb.iter().zip(expected).all(|(actual, expected)| actual.abs_diff(expected) < 8),
+                    "recording mode {mode} preserves RGB levels: {rgb:?} vs {expected:?}");
+            }
             red |= is_red;
             blue |= is_blue;
             if is_red || is_blue {
@@ -1056,7 +1061,7 @@ fn toolbar_screen_modes_work_without_moving_off_the_toolbar_and_badge_stops() {
     assert!(preview.width <= 256 && preview.height <= 256);
     reviews_opened(
         &session,
-        &[("xdg-open", &screenshot_path), ("omacut", &path)],
+        &[("imv", &screenshot_path), ("omacut", &path)],
     );
     assert!(Command::new("ffprobe")
         .args(["-v", "error"])

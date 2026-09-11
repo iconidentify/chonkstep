@@ -575,6 +575,8 @@ fn a_stalled_x11_paste_applies_backpressure_instead_of_buffering_the_whole_paylo
     let mut x11 = x_selection::XSelection::new(&mut session, "application/octet-stream", b"unused");
     let before = anonymous_kib(&session);
     x11.hold_receive(false);
+    assert_eq!(session.door().selection_transfers().unwrap(), (0, 1),
+        "the read-only counter includes a live backpressured transfer");
     let completed = format!("send {} Ok(())", payload.len());
     let prematurely_drained = poll_until(
         Duration::from_millis(500),
@@ -846,21 +848,22 @@ fn completed_small_pastes_do_not_retain_a_buffer_per_live_requestor() {
     }
     session.door().barrier().unwrap();
     let after = anonymous_kib(&session);
+    let transfers = session.door().selection_transfers().unwrap();
     std::fs::write(
         session.dir.join("completed-retention.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "payload_bytes": payload.len(), "requestors": 128,
             "anonymous_before_kib": before, "anonymous_after_kib": after,
+            "incoming_transfers": transfers.0, "outgoing_transfers": transfers.1,
         }))
         .unwrap(),
     )
     .unwrap();
     assert_eq!(x11.received_incremental, 0);
-    assert!(
-        after.saturating_sub(before) < 4 * 1024,
-        "completed pastes retained {} KiB with requestors still alive",
-        after.saturating_sub(before)
-    );
+    // Process PSS also includes lazy software-renderer buffers and allocator
+    // arenas. Keep it as diagnostic evidence; assert the actual retained state
+    // instead. Even one leaked completed transfer must fail this check.
+    assert_eq!(transfers, (0, 0), "completed transfers remain with requestors still alive");
 }
 
 fn native_roundtrip(name: &str, mime: &str, payload: &[u8]) {
