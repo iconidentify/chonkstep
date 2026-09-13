@@ -87,7 +87,7 @@ start with `[[BATCH]]` and use `;` separators.
 | `workspaces` | One-based ids; real per-workspace monitor assignment, fullscreen state and `tiledLayout` (`freeform`, `dwindle`, `scrolling`) |
 | `clients` / `activewindow` | Live pid, class/title, position, size, workspace, monitor, XWayland, floating, pinned, fullscreen, tags, focus history and idle inhibition |
 | `activeworkspace` | Exactly the active workspace, in JSON or one plain block |
-| `cursorpos` | The live pointer as plain `X, Y` |
+| `cursorpos` | The live pointer as plain `X, Y`, or `{"x": X, "y": Y}` with `-j` |
 | `devices` | Seat keyboards and pointers; keyboards include `name`, `active_keymap`, `layout`, and `active_layout_index` |
 | `binds` | The live chonkstep keymap in Hyprland's plain bind-block format (or JSON) |
 | `getoption` | An explicitly unset `{ "option": ..., "set": false }` object. Value fields are absent so JavaScript keeps its own default instead of coercing `null` or zero. |
@@ -109,6 +109,15 @@ Plain `clients` and `activewindow` use Hyprland's tab-indented field
 blocks. In particular, the real pid lets `omarchy-cmd-terminal-cwd`
 read `/proc/<pid>/cwd`, and `at`/`size` round-trip through Omarchy's
 window-width and capture scripts.
+
+Cursor and window positions and window sizes use logical layout coordinates,
+matching xdg-output and Quickshell. Monitor origins are the advertised logical
+origins; monitor width/height remain physical mode dimensions, before rotation.
+Convert each output's local offsets with its own scale. For example, a pointer
+at physical `(1511, 523)` on a 2× output at `(0, 0)` reports `(755, 261)`.
+Classic and Lua move/resize dispatches accept those same logical units, including
+relative deltas, so saved dimensions can be passed back unchanged. ChonkStep's
+native control socket and internal rendering geometry remain in physical pixels.
 
 ## Mutations
 

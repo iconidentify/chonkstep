@@ -5,9 +5,67 @@ use chonk_hyprland_ipc::dispatch::{Action, Fullscreen, LayoutTarget};
 use chonk_hyprland_ipc::state::{Binding, Devices, Keyboard, Monitor, PointerDevice, Snapshot, Window, Workspace};
 use chonk_hyprland_ipc::Server;
 use wm_core::{Backend, BackendEvent, Lifecycle, WindowManager};
-use wm_theme_api::Point;
+use wm_theme_api::{Point, Rect, Size};
 
 use crate::state::{Compositor, ManagedSurface, WaylandBackend};
+
+/// xdg-output advertises the configured output origin unchanged, and divides
+/// its transformed extent by the output scale. Apply that same affine mapping
+/// to IPC coordinates, scaling offsets from the owning output, never the global
+/// origin or the whole desktop by one scale.
+#[derive(Clone, Copy)]
+struct OutputCoordinates {
+    origin: Point,
+    scale: f64,
+}
+
+impl OutputCoordinates {
+    fn for_output(backend: &WaylandBackend, index: usize) -> Self {
+        let origin = backend.monitors.get(index).map_or(Point::new(0, 0), |m| m.geometry.pos);
+        let scale = backend.monitor_scales.get(index).copied()
+            .filter(|scale| scale.is_finite() && *scale > 0.0).unwrap_or(1.0);
+        Self { origin, scale }
+    }
+
+    fn logical_position(self, point: Point) -> Point {
+        Point::new(
+            (self.origin.x as f64 + (point.x as f64 - self.origin.x as f64) / self.scale).floor() as i32,
+            (self.origin.y as f64 + (point.y as f64 - self.origin.y as f64) / self.scale).floor() as i32,
+        )
+    }
+
+    fn physical_position(self, point: Point) -> Point {
+        Point::new(
+            (self.origin.x as f64 + (point.x as f64 - self.origin.x as f64) * self.scale).round() as i32,
+            (self.origin.y as f64 + (point.y as f64 - self.origin.y as f64) * self.scale).round() as i32,
+        )
+    }
+
+    fn logical_size(self, size: Size) -> Size {
+        Size::new((size.w as f64 / self.scale) as u32, (size.h as f64 / self.scale) as u32)
+    }
+
+    fn physical_length(self, length: i64) -> i64 {
+        (length as f64 * self.scale).round() as i64
+    }
+}
+
+fn logical_monitor_index(backend: &WaylandBackend, point: Point) -> usize {
+    backend.monitors.iter().enumerate().map(|(index, monitor)| {
+        let coordinates = OutputCoordinates::for_output(backend, index);
+        let origin = coordinates.origin;
+        // Match xdg-output's rounded logical extent, including fractional scale.
+        let width = (monitor.geometry.size.w as f64 / coordinates.scale).round();
+        let height = (monitor.geometry.size.h as f64 / coordinates.scale).round();
+        let dx = point.x as f64 - (point.x as f64).clamp(origin.x as f64, origin.x as f64 + width.max(1.0) - 1.0);
+        let dy = point.y as f64 - (point.y as f64).clamp(origin.y as f64, origin.y as f64 + height.max(1.0) - 1.0);
+        (index, dx * dx + dy * dy)
+    }).min_by(|a, b| a.1.total_cmp(&b.1)).map_or(0, |(index, _)| index)
+}
+
+fn monitor_mode_size(size: Size, transform: i32) -> Size {
+    if transform.rem_euclid(2) == 1 { Size::new(size.h, size.w) } else { size }
+}
 
 /// Bring the server up, if the session asked for it.
 ///
@@ -100,8 +158,12 @@ fn build_snapshot(
             description: info.identity.clone().unwrap_or_else(|| info.name.clone()),
             x: info.geometry.pos.x,
             y: info.geometry.pos.y,
-            width: i32::try_from(info.geometry.size.w).unwrap_or(i32::MAX),
-            height: i32::try_from(info.geometry.size.h).unwrap_or(i32::MAX),
+            // Hyprland reports untransformed physical mode dimensions; consumers
+            // apply transform and scale to obtain xdg-output's logical extent.
+            width: i32::try_from(monitor_mode_size(info.geometry.size,
+                hardware(wm, index).map_or(0, |out| out.transform)).w).unwrap_or(i32::MAX),
+            height: i32::try_from(monitor_mode_size(info.geometry.size,
+                hardware(wm, index).map_or(0, |out| out.transform)).h).unwrap_or(i32::MAX),
             scale: wm.backend().monitor_scales.get(index).copied().unwrap_or(1.0),
             powered: hardware(wm, index).is_none_or(|out| out.powered),
             vrr_supported: hardware(wm, index).is_some_and(|out| out.vrr_supported),
@@ -179,8 +241,10 @@ fn build_snapshot(
         }
         counts[client.workspace] += 1;
 
-        let geometry = client.geometry;
-        let monitor = i32::try_from(wm.client_output_index(id)).unwrap_or(0);
+        let output_index = wm.client_output_index(id);
+        let coordinates = OutputCoordinates::for_output(wm.backend(), output_index);
+        let geometry = Rect::new(coordinates.logical_position(client.geometry.pos), coordinates.logical_size(client.geometry.size));
+        let monitor = i32::try_from(output_index).unwrap_or(0);
         workspace_monitors[client.workspace].get_or_insert(monitor);
         workspace_fullscreen[client.workspace] |=
             client.flags.contains(wm_core::ClientFlags::FULLSCREEN);
@@ -301,7 +365,10 @@ fn build_snapshot(
         cursor_position: wm
             .backend()
             .pointer_position()
-            .map(|point| (point.x, point.y)),
+            .map(|point| {
+                let point = OutputCoordinates::for_output(wm.backend(), wm.monitor_index_at(point)).logical_position(point);
+                (point.x, point.y)
+            }),
         bindings,
         config_errors: session.config_diagnostics.clone(),
         devices,
@@ -535,9 +602,26 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             Some(id) => {
                 let Some(client) = wm.client(id) else { return false };
                 let mut geometry = client.geometry;
-                geometry.pos = if relative {
-                    Point::new(geometry.pos.x.saturating_add(x), geometry.pos.y.saturating_add(y))
+                let source = OutputCoordinates::for_output(wm.backend(), wm.client_output_index(id));
+                let position = if relative {
+                    let current = source.logical_position(geometry.pos);
+                    Point::new(current.x.saturating_add(x), current.y.saturating_add(y))
                 } else { Point::new(x, y) };
+                let target = OutputCoordinates::for_output(wm.backend(), logical_monitor_index(wm.backend(), position));
+                geometry.pos = if relative && source.origin == target.origin && source.scale == target.scale {
+                    // Preserve fractional logical offsets on a relative move;
+                    // moving by zero must not round an odd physical pixel away.
+                    Point::new(
+                        (geometry.pos.x as i64 + source.physical_length(x as i64)).clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                        (geometry.pos.y as i64 + source.physical_length(y as i64)).clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                    )
+                } else { target.physical_position(position) };
+                if target.scale != source.scale {
+                    geometry.size = Size::new(
+                        (geometry.size.w as f64 / source.scale * target.scale).round() as u32,
+                        (geometry.size.h as f64 / source.scale * target.scale).round() as u32,
+                    );
+                }
                 wm.set_client_content_geometry(id, geometry);
                 true
             }
@@ -546,8 +630,11 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
         Action::ResizeWindow { window, width, height, relative } => match client_of(wm, window) {
             Some(id) => {
                 let Some(client) = wm.client(id) else { return false };
-                let width = if relative { i64::from(client.geometry.size.w) + i64::from(width) } else { i64::from(width) };
-                let height = if relative { i64::from(client.geometry.size.h) + i64::from(height) } else { i64::from(height) };
+                let coordinates = OutputCoordinates::for_output(wm.backend(), wm.client_output_index(id));
+                let width = coordinates.physical_length(i64::from(width));
+                let height = coordinates.physical_length(i64::from(height));
+                let width = if relative { i64::from(client.geometry.size.w) + width } else { width };
+                let height = if relative { i64::from(client.geometry.size.h) + height } else { height };
                 if width <= 0 || height <= 0 { return false; }
                 wm.resize_client_content(id, wm_theme_api::Size::new(width.min(u32::MAX as i64) as u32, height.min(u32::MAX as i64) as u32));
                 true
@@ -730,7 +817,24 @@ fn switch_keyboard_layout(comp: &mut Compositor, device: &str, target: LayoutTar
 
 #[cfg(test)]
 mod tests {
-    use super::keysym_name;
+    use super::{keysym_name, monitor_mode_size, OutputCoordinates};
+    use wm_theme_api::{Point, Size};
+
+    #[test]
+    fn coordinate_conversion_preserves_output_origins_and_floors_edge_pixels() {
+        let left = OutputCoordinates { origin: Point::new(-640, -120), scale: 2.0 };
+        assert_eq!(left.logical_position(Point::new(-639, -119)), Point::new(-640, -120));
+        assert_eq!(left.logical_position(Point::new(-1, 679)), Point::new(-321, 279));
+        assert_eq!(left.physical_position(Point::new(-600, -60)), Point::new(-560, 0));
+        let right = OutputCoordinates { origin: Point::new(1280, 100), scale: 1.5 };
+        assert_eq!(right.logical_position(Point::new(1283, 103)), Point::new(1282, 102));
+        assert_eq!(right.physical_position(Point::new(1282, 102)), Point::new(1283, 103));
+        assert_eq!(right.logical_size(Size::new(450, 300)), Size::new(300, 200));
+        assert_eq!(right.physical_length(-20), -30);
+        assert_eq!(monitor_mode_size(Size::new(1080, 1920), 1), Size::new(1920, 1080));
+        assert_eq!(monitor_mode_size(Size::new(1080, 1920), 3), Size::new(1920, 1080));
+        assert_eq!(monitor_mode_size(Size::new(1920, 1080), 2), Size::new(1920, 1080));
+    }
 
     /// Key names the config format documents whose keysym is above
     /// printable ASCII — precisely the set the old `format!("0x{:x}")`

@@ -154,12 +154,12 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
             }
         }
         "cursorpos" => {
-            // Plain text even under `-j`, matching Hyprland, and read by
-            // `omarchy-capture-region` as `${pos%,*}` / `${pos#*, }` —
-            // a comma AND a space, which is why the format string has
-            // both.
+            // The plain form is split on comma-space by Omarchy's capture
+            // scripts. JSON consumers (including pointer-following widgets)
+            // use Hyprland's object form instead.
             let (x, y) = snapshot.cursor_position.unwrap_or((0, 0));
-            (format!("{x}, {y}"), None)
+            (if json { serde_json::json!({"x": x, "y": y}).to_string() }
+                else { format!("{x}, {y}") }, None)
         }
         "dispatch" => {
             let outcome = dispatch::parse(&request.args, snapshot);
