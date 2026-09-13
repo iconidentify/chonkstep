@@ -96,6 +96,8 @@ pub enum Action {
     Overview,
     /// Open the desktop's root menu from a configured keybinding.
     RootMenu,
+    /// Open the desktop shortcut guide and quick reference.
+    Help,
     /// Trigger a portal-registered global shortcut identified by the
     /// Hyprland protocol's `app_id:id` key.
     GlobalShortcut(String),
@@ -258,6 +260,7 @@ fn action_from_name(name: &str) -> Option<Action> {
         "capture-stop" => Some(Action::Capture(CaptureMode::Stop)),
         "overview" => Some(Action::Overview),
         "root-menu" => Some(Action::RootMenu),
+        "help" => Some(Action::Help),
         "window-menu" => Some(Action::WindowMenu),
         "reload" => Some(Action::Reload),
         "restart" => Some(Action::Restart),

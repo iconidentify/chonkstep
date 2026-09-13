@@ -699,7 +699,11 @@ fn recording_odd_area_is_playable_and_controls_are_excluded() {
 #[test]
 #[ignore = "needs nested Wayland, wf-recorder and ffmpeg"]
 fn recording_screen_and_area_preserve_changing_content() {
-    let mut session = boot("capture-motion", 1.0);
+    for scale in [1.0, 1.5, 2.0] { recording_motion_at_scale(scale); }
+}
+
+fn recording_motion_at_scale(scale: f32) {
+    let mut session = boot(&format!("capture-motion-{scale}"), scale);
     session.launch("foot", &[
         "--title=capture-animation", "--override=locked-title=yes", "bash", "-c",
         "while true; do printf '\\033[48;2;240;20;20m\\033[2J'; sleep 0.4; printf '\\033[48;2;20;20;240m\\033[2J'; sleep 0.4; done",

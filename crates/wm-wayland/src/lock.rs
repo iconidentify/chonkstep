@@ -286,6 +286,7 @@ impl UnlockRequest {
 /// everything that makes the old desktop stop rendering or receiving
 /// input immediately.
 fn enter_lock_domain(comp: &mut Compositor) {
+    comp.shell.dismiss_help(&mut comp.wm);
     comp.mark_hyprland_state_dirty();
     comp.session_lock.mark_dirty();
     comp.idle.set_screen_saver_active(true);

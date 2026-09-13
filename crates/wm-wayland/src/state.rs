@@ -2716,8 +2716,9 @@ impl Compositor {
             };
             self.note_outcome(outcome);
         }
-        // No persistent shell widgets consume wheel events.
-        while self.wm.backend_mut().take_shell_scroll().is_some() {}
+        while let Some((surface, _, delta)) = self.wm.backend_mut().take_shell_scroll() {
+            self.shell.on_shell_scroll(&mut self.wm, surface, delta);
+        }
 
         if !self.running {
             self.sync_ipc_sources();

@@ -734,6 +734,7 @@ fn root_action_outcome(action: &RootMenuAction) -> ShellOutcome {
         RootMenuAction::SetTheme(_) => ShellOutcome::Continue,
         RootMenuAction::LaunchTerminal
         | RootMenuAction::LaunchAbout
+        | RootMenuAction::Help
         | RootMenuAction::LaunchApp(_)
         | RootMenuAction::OmarchyCommand { .. }
         | RootMenuAction::ToggleOmarchyBar
@@ -942,6 +943,8 @@ pub enum KeyResolution {
 pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     desktop: Desktop<B>,
     miniwindows: crate::miniwindows::Miniwindows<B>,
+    help: crate::help::HelpPanel<B>,
+    help_key: Option<KeyCombo>,
     apps: Vec<AppEntry>,
     /// Everything a live change can alter, as resolved — the source
     /// `theme` below is derived from, and the base every later
@@ -1196,6 +1199,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         Self {
             desktop,
             miniwindows: crate::miniwindows::Miniwindows::default(),
+            help: crate::help::HelpPanel::default(),
+            help_key: None,
             apps,
             keymap: build_keymap(&state.keybindings),
             release_keymap: state
@@ -1251,6 +1256,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     }
 
     fn apply_session_state_inner(&mut self, wm: &mut WindowManager<B>, mut next: SessionState, reload_menu: bool) {
+        self.dismiss_help(wm);
         self.miniwindows.invalidate(wm.backend_mut());
         next.decoration_style = next.base_theme.resolve_style(next.decoration_style_policy);
         if (next.interaction.spaces_mode() || next.interaction.mac_keyboard()) && !wm.backend().supports_mac_interaction() {
@@ -1585,6 +1591,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// to open during one (see `run_action`) and its grab intercepts
     /// the keys that would start one.
     pub fn keymap_action(&mut self, combo: &KeyCombo) -> Option<KeyResolution> {
+        if self.help.visible() {
+            self.help_key = Some(*combo);
+            return Some(KeyResolution::Action(Action::Help));
+        }
         if self.desktop.overview_visible() {
             // A chord arrives as modifier-down, then its actual key. Dismissing
             // on Super-down would reverse again when the O in Super+O arrives.
@@ -1676,11 +1686,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
 
     /// Resolves the release half of a `bindr`/`release = true` pair.
     pub fn keymap_release_action(&self, combo: &KeyCombo) -> Option<Action> {
+        if self.help.visible() { return None; }
         self.release_keymap.get(combo).cloned()
     }
 
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
+            Action::Help => {
+                if let Some(combo) = self.help_key.take() {
+                    self.help.key(wm.backend_mut(), &self.theme, &self.fonts, combo);
+                } else { self.open_help(wm); }
+            }
             Action::Capture(mode) => return ShellOutcome::Capture(*mode),
             Action::SpawnTerminal => {
                 let terminal = spawn_terminal(
@@ -2016,7 +2032,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// A desktop swipe can share Overview's grab, but cannot displace another
     /// modal UI or an interactive window drag.
     pub fn desktop_gesture_available(&self, wm: &WindowManager<B>) -> bool {
-        !wm.cycle_active() && !wm.interactive_drag_active() && !self.desktop.menu_visible()
+        !wm.cycle_active() && !wm.interactive_drag_active() && !self.desktop.menu_visible() && !self.help.visible()
             && !self.desktop.overview_pointer_pending()
     }
 
@@ -2355,6 +2371,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// binary's to route through [`Shell::on_shell_click`], whose
     /// launcher-release offer must still see them (see its doc).
     pub fn on_root_press(&mut self, wm: &mut WindowManager<B>, at: Point, button: MouseButton) -> ShellOutcome {
+        if self.help.visible() { self.dismiss_help(wm); return ShellOutcome::Continue; }
         // Any press on the bare desktop is a click away from an open
         // instrument panel; the press then keeps meaning what it always
         // did (a right press still opens the root menu).
@@ -2398,6 +2415,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         button: MouseButton,
         pressed: bool,
     ) -> ShellOutcome {
+        if self.help.owns(surface) {
+            if button == MouseButton::Left { self.help.click(wm.backend_mut(), &self.theme, &self.fonts, local, pressed); }
+            return ShellOutcome::Continue;
+        }
         // The modal Overview first: while it is open it covers the
         // primary monitor, so a click on its surface can mean nothing
         // else — and no strip/icon drag can be in progress under a
@@ -2436,6 +2457,26 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         ShellOutcome::Continue
     }
 
+    fn open_help(&mut self, wm: &mut WindowManager<B>) {
+        if wm.cycle_active() || wm.interactive_drag_active() { return; }
+        self.desktop.close_menu(wm.backend_mut());
+        if self.desktop.overview_visible() { self.close_overview(wm); }
+        let Some(monitor) = wm.monitors_ref().get(wm.active_output_index()) else { return; };
+        let area = wm.usable_area_at(monitor.geometry.pos);
+        self.help_key = None;
+        self.help.open(wm.backend_mut(), &self.state, area, &self.fonts);
+    }
+
+    /// Release the guide before lock, output changes, or configuration reload.
+    pub fn dismiss_help(&mut self, wm: &mut WindowManager<B>) {
+        self.help.close(wm.backend_mut());
+        self.help_key = None;
+    }
+
+    pub fn on_shell_scroll(&mut self, wm: &mut WindowManager<B>, surface: B::ShellId, delta: wm_core::ScrollDelta) {
+        if self.help.owns(surface) { self.help.wheel(wm.backend_mut(), &self.theme, &self.fonts, delta.up); }
+    }
+
     pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
         let mut fds = Vec::new();
         self.extend_extra_poll_fds(&mut fds);
@@ -2463,6 +2504,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 );
                 self.terminals.extend(terminal);
             }
+            RootMenuAction::Help => self.open_help(wm),
             RootMenuAction::LaunchAbout => {
                 let env = launch_env(&self.theme.id, Some(self.state.appearance), self.state.scale);
                 spawn::spawn_detached_with_env(&about_binary_path(), &[], &env, &[]);
@@ -3060,6 +3102,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// output being plugged in or unplugged lands the same way a plain
     /// resize does.
     pub fn on_screen_resize(&mut self, wm: &mut WindowManager<B>, size: Size) {
+        self.dismiss_help(wm);
         self.miniwindows.invalidate(wm.backend_mut());
         if self.desktop.overview_visible() { self.close_overview(wm); }
         let primary = primary_rect(&wm.monitors(), size);

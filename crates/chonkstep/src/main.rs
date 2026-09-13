@@ -388,7 +388,9 @@ fn main() {
         }
 
         // No persistent shell widgets consume wheel events.
-        while wm.backend_mut().take_shell_scroll().is_some() {}
+        while let Some((surface, _, delta)) = wm.backend_mut().take_shell_scroll() {
+            shell.on_shell_scroll(&mut wm, surface, delta);
+        }
 
         // No separate `take_shell_motion` drain here: the shell drains
         // it itself inside `on_motion` (menu hover rides the same

@@ -359,6 +359,7 @@ pub(crate) fn capture_pointer_busy(seat: &Seat<Compositor>) -> bool {
 /// not turn into a client-visible release merely because a VT switch
 /// interrupted it.
 pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
+    state.shell.dismiss_help(&mut state.wm);
     state.mac_copy_order.reset();
     crate::capture_tool::reset_input(state);
     gestures::cancel(state);

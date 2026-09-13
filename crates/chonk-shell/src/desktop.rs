@@ -21,6 +21,7 @@ pub const DESKTOP_BG_LIGHT: (u8, u8, u8) = (198, 199, 216);
 pub enum RootMenuAction {
     LaunchTerminal,
     LaunchAbout,
+    Help,
     /// An entry picked from the Applications submenu — the payload is
     /// an index into the same scanned `Vec<AppEntry>` handed to
     /// `Desktop::new` (read back through `Desktop::apps`), not a menu
@@ -104,6 +105,7 @@ pub enum MenuAction {
 const ACTION_LAUNCH_TERMINAL: u32 = 1;
 const ACTION_LAUNCH_ABOUT: u32 = 2;
 const ACTION_EXIT: u32 = 3;
+const ACTION_HELP: u32 = 5;
 /// The `Omarchy Bar` toggle — present only while this session hosts
 /// Omarchy's shell (`Desktop::set_omarchy_bar`), marked when the bar
 /// is shown.
@@ -304,6 +306,7 @@ fn root_menu_items(
                 action: ACTION_OMARCHY_BAR,
             });
         }
+        items.push(MenuItem::Action { label: "ChonkStep Help".to_string(), action: ACTION_HELP });
         items.push(MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT });
         return items;
     }
@@ -324,6 +327,7 @@ fn root_menu_items(
             action: ACTION_OMARCHY_BAR,
         });
     }
+    items.push(MenuItem::Action { label: "ChonkStep Help".to_string(), action: ACTION_HELP });
     items.push(MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT });
     items
 }
@@ -337,6 +341,7 @@ fn resolve_action(action: u32, bounds: RootMenuBounds) -> Option<RootMenuAction>
     match action {
         ACTION_LAUNCH_TERMINAL => Some(RootMenuAction::LaunchTerminal),
         ACTION_LAUNCH_ABOUT => Some(RootMenuAction::LaunchAbout),
+        ACTION_HELP => Some(RootMenuAction::Help),
         ACTION_EXIT => Some(RootMenuAction::Exit),
         ACTION_OMARCHY_BAR => Some(RootMenuAction::ToggleOmarchyBar),
         // Subtraction-then-compare rather than a `Range::contains`:
@@ -1323,7 +1328,8 @@ mod tests {
         let row = hidden.iter().position(|label| label == "  Omarchy Bar").expect("an unmarked row for a hidden bar");
         // This desk's own furniture sits after Omarchy's rows and
         // before the one row that ends the session.
-        assert_eq!(hidden[row + 1], "Exit", "and Exit closes the menu");
+        assert_eq!(hidden[row + 1], "ChonkStep Help");
+        assert_eq!(hidden[row + 2], "Exit", "and Exit closes the menu");
         assert_eq!(hidden.last().unwrap(), "Exit");
         assert!(labels(Some(BarVisibility::Shown)).contains(&"\u{2022} Omarchy Bar".to_string()), "marked when shown");
         assert!(matches!(
@@ -1611,7 +1617,7 @@ mod tests {
             None,
         );
         let labels: Vec<&str> = without.iter().map(MenuItem::label).collect();
-        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "Exit"]);
+        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "ChonkStep Help", "Exit"]);
 
         // With Omarchy present its rows are the menu, at the top level
         // rather than behind an `Omarchy` cascade.
@@ -1624,7 +1630,7 @@ mod tests {
         let labels: Vec<&str> = with.iter().map(MenuItem::label).collect();
         assert_eq!(
             labels,
-            ["Applications", "Terminal", "Style", "System", "Exit"],
+            ["Applications", "Terminal", "Style", "System", "ChonkStep Help", "Exit"],
             "Omarchy's rows are the menu; this desk folds Applications in ahead of them and its own toggles after"
         );
         assert!(
