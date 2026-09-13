@@ -22,7 +22,7 @@ use smithay::input::pointer::{
 };
 use smithay::input::{touch, Seat};
 use smithay::reexports::wayland_server::{protocol::wl_surface::WlSurface, Resource};
-use smithay::utils::{IsAlive, Logical, Point, Serial};
+use smithay::utils::{IsAlive, Logical, Point, Scale, Serial};
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::state::Compositor;
@@ -33,26 +33,27 @@ type Position = Point<f64, Logical>;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SurfaceCoordinates {
     origin: Position,
-    scale: f64,
+    scale: Scale<f64>,
 }
 
 impl SurfaceCoordinates {
-    pub(crate) fn new(origin: Position, scale: f64) -> Self {
-        let scale = valid_scale(scale);
+    pub(crate) fn new(origin: Position, scale: impl Into<Scale<f64>>) -> Self {
+        let scale = scale.into();
+        let scale = (valid_scale(scale.x), valid_scale(scale.y)).into();
         Self { origin, scale }
     }
 
-    fn from_tree(anchor: Position, found: Position, scale: f64) -> Self {
+    fn from_tree(anchor: Position, found: Position, scale: impl Into<Scale<f64>>) -> Self {
         let root = Self::new(anchor, scale);
-        Self::new(root.global(found - anchor), scale)
+        Self::new(root.global(found - anchor), root.scale)
     }
 
     pub(crate) fn local(self, global: Position) -> Position {
-        ((global.x - self.origin.x) / self.scale, (global.y - self.origin.y) / self.scale).into()
+        ((global.x - self.origin.x) / self.scale.x, (global.y - self.origin.y) / self.scale.y).into()
     }
 
     pub(crate) fn global(self, local: Position) -> Position {
-        (self.origin.x + local.x * self.scale, self.origin.y + local.y * self.scale).into()
+        (self.origin.x + local.x * self.scale.x, self.origin.y + local.y * self.scale.y).into()
     }
 
     fn seat_origin(self, global: Position) -> Position {
@@ -61,7 +62,7 @@ impl SurfaceCoordinates {
 }
 
 pub(super) fn valid_scale(scale: f64) -> f64 {
-    if scale.is_finite() && scale >= 0.125 {
+    if scale.is_finite() && scale > 0.0 {
         scale
     } else {
         1.0
@@ -84,7 +85,7 @@ impl SurfaceTarget {
         surface: WlSurface,
         anchor: Position,
         found: Position,
-        scale: f64,
+        scale: impl Into<Scale<f64>>,
         global: Position,
     ) -> (Self, Position) {
         let coordinates = SurfaceCoordinates::from_tree(anchor, found, scale);
@@ -253,9 +254,24 @@ mod tests {
 
     #[test]
     fn invalid_scales_are_an_identity_mapping() {
-        for scale in [f64::NAN, f64::INFINITY, -2.0, 0.0, 0.01] {
+        for scale in [f64::NAN, f64::INFINITY, -2.0, 0.0] {
             let coordinates = SurfaceCoordinates::new((10.0, 20.0).into(), scale);
             assert_point(coordinates.local((40.0, 60.0).into()), (30.0, 40.0).into());
+        }
+    }
+
+    #[test]
+    fn pending_resize_maps_each_axis_and_retains_drag_coordinates() {
+        for scale in [(1.3, 1.27), (0.01, 0.2), (2.0, 1.5)] {
+            let anchor: Position = (100.0, -50.0).into();
+            let coordinates = SurfaceCoordinates::from_tree(anchor, anchor + Position::from((10.0, 20.0)), scale);
+            let press = coordinates.global((25.0, 30.0).into());
+            let retained_origin = coordinates.seat_origin(press);
+            let physical = coordinates.global((210.0, 190.0).into());
+            let event = physical - retained_origin;
+            assert_point(coordinates.local(event + retained_origin), (210.0, 190.0).into());
+            assert_point(coordinates.global((0.0, 0.0).into()),
+                (anchor.x + 10.0 * scale.0, anchor.y + 20.0 * scale.1).into());
         }
     }
 

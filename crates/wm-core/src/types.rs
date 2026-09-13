@@ -308,6 +308,9 @@ pub enum BackendEvent<Win, Frame> {
     PointerEnter { surface: SurfaceRef<Win, Frame> },
     PointerLeave { surface: SurfaceRef<Win, Frame> },
     KeyPress(KeyCombo),
+    /// A native client has already committed these pixels after a configure.
+    /// Fit its frame without asking it to perform the same resize again.
+    ClientSizeCommitted { window: Win, size: Size },
     /// An EWMH `_NET_ACTIVE_WINDOW` client message: a pager, launcher,
     /// or tool (xdotool, say) asked for this window to be activated —
     /// deminiaturized/unshaded if needed, focused, and raised.

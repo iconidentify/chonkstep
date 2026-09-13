@@ -572,6 +572,17 @@ pub(crate) fn committed_content_size(
     Some(accepted)
 }
 
+/// A buffer cannot answer a resize that is staged, unacked, or not committed yet.
+pub(crate) fn resize_pending(backend: &WaylandBackend, window: WlWindowId, root: &WlSurface) -> bool {
+    backend.configure_debt.contains_key(&window)
+        || with_states(root, |states| {
+            states.data_map.get::<XdgToplevelSurfaceData>().is_some_and(|data| {
+                let data = data.lock().unwrap();
+                !data.pending_configures().is_empty() || data.current_serial != data.configure_serial
+            })
+        })
+}
+
 // -- wl_compositor -------------------------------------------------------
 
 impl CompositorHandler for Compositor {
@@ -1218,14 +1229,6 @@ impl Compositor {
             .get(&id)
             .map(|record| backend.window_surface_scale(record))
             .unwrap_or(1.0);
-        if has_buffer {
-            if let Some(record) = backend.windows.get_mut(&id) {
-                if record.committed_size_scale.is_some_and(|previous| previous != surface_scale) {
-                    record.recent_asks.clear();
-                }
-                record.committed_size_scale = Some(surface_scale);
-            }
-        }
         // A late buffer commit after the last output disconnects still has
         // valid geometry. Bound it by the already accepted window size while
         // headless, rather than turning the empty desktop into a 1x1 resize.
@@ -1265,8 +1268,6 @@ impl Compositor {
             // the decoration but never touches this flag.
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.mapped = false;
-                record.recent_asks.clear();
-                record.committed_size_scale = None;
             }
             backend.scene_index.mark_hidden(id);
             backend.queue(WmEvent::Unmapped(id));
@@ -1287,10 +1288,10 @@ impl Compositor {
             // A managed client committing a size other than the one on
             // record is the Wayland spelling of an X11 self-resize
             // ConfigureRequest (a terminal snapping to its cell grid
-            // after our configure, say) — translated to the same event
-            // so `wm-core` reflows the decoration around the client's
-            // real size. Converges: `wm-core` answers via
-            // `resize_client`, which updates the record to match.
+            // after our configure, say). Reflow the decoration around
+            // those pixels without asking the client to resize again:
+            // echoing its size back creates unnecessary configures and
+            // lets older rendered buffers perpetuate a resize loop.
             //
             // With one gate, and the gate is load-bearing: a commit is
             // only a *client-initiated* resize if the client is caught
@@ -1313,49 +1314,25 @@ impl Compositor {
             // unacked configure: an old client commit must not erase it.
             // Checking only Smithay's sent list misclassifies that window as
             // caught up and can overwrite the ask before it ever goes out.
-            let client_behind = backend.configure_debt.contains_key(&id)
-                || with_states(&root, |states| {
-                    states
-                        .data_map
-                        .get::<XdgToplevelSurfaceData>()
-                        .map(|data| !data.lock().unwrap().pending_configures().is_empty())
-                })
-                .unwrap_or(false);
+            let client_behind = resize_pending(backend, id, &root);
             if !client_behind {
                 backend.popup_parent_committed(&root);
             }
-            // A commit whose size matches anything we recently asked
-            // for is the client obeying us — possibly obeying an ask
-            // from two configures ago, because acks are immediate while
-            // commits trail rendering. Obedience, prompt or tardy, is
-            // never a resize request. See `WindowRecord::recent_asks`
-            // for the ping-pong this gate broke.
-            let echoes_ask = committed.is_some_and(|size| {
-                backend
-                    .windows
-                    .get(&id)
-                    .is_some_and(|record| record.recent_asks.contains(&size))
-            });
+            // Fit the frame to a caught-up client's actual geometry without
+            // sending another resize configure. Historical sizes alone cannot
+            // distinguish a stale buffer from a valid terminal cell-grid snap.
             if let (Some(size), Some(record)) = (committed, backend.windows.get(&id)) {
                 if size != record.content.size {
                     tracing::trace!(?id, committed = ?size, desired = ?record.content.size,
-                        client_behind, echoes_ask, staged = backend.configure_debt.contains_key(&id),
+                        client_behind, staged = backend.configure_debt.contains_key(&id),
                         "committed client geometry differs from desired geometry");
                 }
                 if record.mapped
                     && !client_behind
-                    && !echoes_ask
                     && !backend.layout_scene.transitioning(id)
                     && size != record.content.size
                 {
-                    let requested = Rect {
-                        pos: record.content.pos,
-                        size,
-                    };
-                    backend.queue(WmEvent::ConfigureRequest {
-                        window: id,
-                        requested,
-                    });
+                    backend.queue(WmEvent::ClientSizeCommitted { window: id, size });
                 }
             }
         }
@@ -1605,6 +1582,20 @@ impl WaylandBackend {
                 // client still has to hear an answer, and the answer is
                 // the state it already has.
                 let _ = toplevel.send_configure();
+            } else if !staged_configure_sent && record.mapped && !self.layout_scene.transitioning(window) {
+                // Two physical resize requests can round to the same logical
+                // configure at fractional scale. If the client already committed
+                // its answer, Smithay deduplicates this request and no new commit
+                // will arrive to fit the frame. Reuse that answer without another
+                // configure/commit round trip.
+                let root = toplevel.wl_surface();
+                if !resize_pending(self, window, root) {
+                    if let Some(size) = committed_content_size(root, self.window_surface_scale(record), self.output_size) {
+                        if size != record.content.size {
+                            self.queue(BackendEvent::ClientSizeCommitted { window, size });
+                        }
+                    }
+                }
             }
         }
     }

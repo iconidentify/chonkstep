@@ -1366,10 +1366,6 @@ fn push_window_content(
     // the top-left of a buffer that also contains a drop shadow. For a
     // client that declares no geometry this is zero and the expression
     // is the plain one it used to be. See `WindowRecord::content_offset`.
-    let origin = SPoint::<i32, Physical>::from((
-        content.pos.x - viewport.pos.x - record.content_offset.x,
-        content.pos.y - viewport.pos.y - record.content_offset.y,
-    ));
     let global_origin = Point::new(
         content.pos.x.saturating_sub(record.content_offset.x),
         content.pos.y.saturating_sub(record.content_offset.y),
@@ -1426,9 +1422,14 @@ fn push_window_content(
     let lower_border_drawn = effects.is_some_and(|effects| {
         crate::rounded::push_border(elements, renderer, shape, &effects.border_ids, effects.commit, 1.0)
     });
-    if surface_tree_reaches_viewport(&surface, global_origin, content, factor, viewport) {
+    let (presentation_origin, presentation_scale) = backend.window_presentation(record, frame.is_some());
+    let origin = SPoint::<i32, Physical>::from((
+        presentation_origin.x - viewport.pos.x,
+        presentation_origin.y - viewport.pos.y,
+    ));
+    if surface_tree_reaches_viewport(&surface, presentation_origin, content, presentation_scale, viewport) {
         let start = elements.len();
-        push_surface_tree(elements, renderer, &surface, origin, factor, 1.0, Kind::Unspecified);
+        push_surface_tree_alpha(elements, renderer, &surface, origin, presentation_scale, 1.0, Kind::Unspecified, 1.0);
         let requested = Rect::new(Point::new(content.pos.x - viewport.pos.x,
             content.pos.y - viewport.pos.y), content.size);
         let opaque = shape.is_some_and(|shape| shape.radius > 0)
