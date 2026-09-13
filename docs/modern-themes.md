@@ -1,5 +1,8 @@
 # Modern themes
 
+For period Macintosh window chrome and repeating desktop patterns, see
+[System 7 themes](system7-themes.md).
+
 Obsidian, Washi and Relay share one modern rendering recipe. Their colors,
 typography and shell metrics live in the Theme payload; the compositor does not
 branch on theme IDs. The original interactive reference is preserved separately
@@ -20,8 +23,14 @@ a separately chosen wallpaper.
 Explicit `windowmaker`, `system7` and `modern` frame selections still work;
 the Omarchy bar remains the desktop's navigation surface under each override.
 
-On an Omarchy installation, select the exported theme from Omarchy's existing
-picker. Its `chonkstep.toml` carries the complete public `Theme` at 1x, so following
+The Omarchy installer registers the built-in themes in the user's theme picker.
+ChonkStep also registers missing themes before starting Omarchy's shell on each
+login or hot restart, so package upgrades add new themes automatically. Existing
+theme directories and user customizations are preserved. To refresh an existing
+export explicitly, run `omarchy-export-themes`; `--missing` only adds new themes.
+
+Select the exported theme from Omarchy's existing picker. Its `chonkstep.toml`
+carries the complete public `Theme` at 1x, so following
 Omarchy retains the modern design under the stable `omarchy` identity. The
 descriptor owns Chonkstep's colors, appearance, fonts and geometry; the matching
 `colors.toml` and `shell.toml` own the exported application and Omarchy shell

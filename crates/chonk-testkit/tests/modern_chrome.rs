@@ -108,7 +108,7 @@ fn classic_overview_survives_modern_themes_and_switches_style_without_losing_cli
 #[ignore = "real preview navigation: scripts/e2e.sh --headless --test modern_chrome"]
 fn readable_switcher_and_minimized_previews_fit_and_restore_at_high_dpi() {
     let mut s = Session::boot("readable-previews", SessionOptions {
-        config_extra: "theme='washi'\nscale=1.5\ninteraction_mode='spaces'\nkeyboard_mode='desktop'\nhyprland_config=false\nminimized_previews=true\n[keybindings]\n'super+m'='miniaturize'\n'super+d'='show-desktop'\n".into(),
+        config_extra: "theme='washi'\nscale=1.5\ninteraction_mode='spaces'\nkeyboard_mode='desktop'\nhyprland_config=false\n[keybindings]\n'super+m'='miniaturize'\n'super+d'='show-desktop'\n".into(),
         ..Default::default()
     }).unwrap();
     let probe = profile_binary("chonk-fullscreen-probe").unwrap();

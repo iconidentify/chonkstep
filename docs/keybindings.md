@@ -20,7 +20,7 @@ The in-desktop list reflects the current session; the tables below describe
 the preset keymaps. The layout toggle enters Mosaic from Freeform and then
 alternates Mosaic and Flow. The Freeform binding returns to freely placed
 windows. Overview excludes minimized windows; restore them through their desktop
-preview tiles or the window switcher.
+preview tiles (enabled by default) or the window switcher.
 
 There are **two** keymaps. `keymap = "chonkstep"` is the default and is
 the NeXTSTEP-style `alt+shift` vocabulary the rest of this desktop was

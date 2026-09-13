@@ -24,6 +24,9 @@ pub enum Wallpaper {
     Obsidian,
     Washi,
     Relay,
+    System7Classic,
+    System7LightGray,
+    System7DarkGray,
     /// The LCOS theme's ground. Original to this project, built from
     /// the two colours LCOS's own boot splash is made of; see
     /// `scripts/gen-lcos-wallpaper.py`.
@@ -174,7 +177,7 @@ impl Wallpaper {
     /// The embedded artworks, in menu order. [`Self::Omarchy`] is not
     /// one: it has no pixels of its own.
     #[cfg(not(feature = "lcos"))]
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 14] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
         Self::TealBlueprint,
@@ -186,13 +189,16 @@ impl Wallpaper {
         Self::Obsidian,
         Self::Washi,
         Self::Relay,
+        Self::System7Classic,
+        Self::System7LightGray,
+        Self::System7DarkGray,
     ];
 
     /// The same artworks with the LCOS grounds appended. Spelled out
     /// rather than concatenated so each array's length is compile-time
     /// checked.
     #[cfg(feature = "lcos")]
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 18] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
         Self::TealBlueprint,
@@ -204,6 +210,9 @@ impl Wallpaper {
         Self::Obsidian,
         Self::Washi,
         Self::Relay,
+        Self::System7Classic,
+        Self::System7LightGray,
+        Self::System7DarkGray,
         Self::LundukeNavy,
         Self::WalnutGround,
         Self::DeskGround,
@@ -223,6 +232,9 @@ impl Wallpaper {
             Self::Obsidian => "Obsidian",
             Self::Washi => "Washi",
             Self::Relay => "Relay",
+            Self::System7Classic => "System 7 Classic",
+            Self::System7LightGray => "System 7 Light Gray",
+            Self::System7DarkGray => "System 7 Dark Gray",
             #[cfg(feature = "lcos")]
             Self::LundukeNavy => "Lunduke Navy",
             #[cfg(feature = "lcos")]
@@ -249,6 +261,9 @@ impl Wallpaper {
             Self::Obsidian => "obsidian",
             Self::Washi => "washi",
             Self::Relay => "relay",
+            Self::System7Classic => "system-7-classic-pattern",
+            Self::System7LightGray => "system-7-light-gray-pattern",
+            Self::System7DarkGray => "system-7-dark-gray-pattern",
             #[cfg(feature = "lcos")]
             Self::LundukeNavy => "lunduke-navy",
             #[cfg(feature = "lcos")]
@@ -323,11 +338,25 @@ impl Wallpaper {
         }
     }
 
+    /// QuickDraw's predefined gray, ltGray and dkGray 8x8 bit patterns.
+    /// They keep their historical black/white pixels in either appearance.
+    pub(crate) const fn pattern_rows(self) -> Option<[u8; 8]> {
+        match self {
+            Self::System7Classic => Some([0xaa, 0x55, 0xaa, 0x55, 0xaa, 0x55, 0xaa, 0x55]),
+            Self::System7LightGray => Some([0x88, 0x22, 0x88, 0x22, 0x88, 0x22, 0x88, 0x22]),
+            Self::System7DarkGray => Some([0x77, 0xdd, 0x77, 0xdd, 0x77, 0xdd, 0x77, 0xdd]),
+            _ => None,
+        }
+    }
+
     /// The quiet color at the right edge of each artwork's rendition,
     /// used as the fallback ground for the selected
     /// composition in the selected mood.
     pub const fn background_color(self, appearance: Appearance) -> (u8, u8, u8) {
         match (self, appearance) {
+            (Self::System7Classic, _) => (128,128,128),
+            (Self::System7LightGray, _) => (191,191,191),
+            (Self::System7DarkGray, _) => (64,64,64),
             (Self::Obsidian, Appearance::Dark) => (22,25,23),
             (Self::Obsidian, Appearance::Light) => (225,227,217),
             (Self::Washi, Appearance::Light) => (229,224,211),
@@ -395,7 +424,7 @@ impl Wallpaper {
             (Self::TealBlueprint, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/teal-blueprint-light.png")),
             (Self::GraphiteFold, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/graphite-fold.png")),
             (Self::GraphiteFold, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/graphite-fold-light.png")),
-            (Self::ClassicLavender | Self::Obsidian | Self::Washi | Self::Relay, _) => None,
+            (Self::ClassicLavender | Self::Obsidian | Self::Washi | Self::Relay | Self::System7Classic | Self::System7LightGray | Self::System7DarkGray, _) => None,
             (Self::JadeTerrace, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/jade-terrace.png")),
             (Self::JadeTerrace, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/jade-terrace-light.png")),
             (Self::IvoryOrb, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/ivory-orb.png")),
@@ -419,6 +448,9 @@ impl Wallpaper {
     /// artwork, and for an image that cannot be read — the caller
     /// paints [`Self::background_color`] instead.
     pub fn render(self, screen: Size, appearance: Appearance) -> Option<DecorationBuffer> {
+        if let Some(rows) = self.pattern_rows() {
+            return quickdraw_pattern(rows, screen);
+        }
         if matches!(self, Self::Obsidian | Self::Washi | Self::Relay) {
             return modern_art(self.id(), screen, appearance);
         }
@@ -447,11 +479,42 @@ impl Wallpaper {
     /// image it names laid over the screen, or Graphite Fold in
     /// `appearance` when there is no link, or no image behind it.
     fn omarchy_background(link: Option<&Path>, screen: Size, appearance: Appearance) -> Option<DecorationBuffer> {
+        let tiled = link.and_then(|path| std::fs::canonicalize(path).ok())
+            .and_then(|path| path.file_name().map(|name| name.to_string_lossy().ends_with("-pattern.png")))
+            .unwrap_or(false);
         match link.and_then(load_image) {
+            Some(source) if tiled => tile_pattern(&source, screen),
             Some(source) => Some(cover(&source, screen)),
             None => Self::GraphiteFold.render(screen, appearance),
         }
     }
+}
+
+/// Original rasterization of the documented QuickDraw bit patterns, without
+/// interpolation or a large background asset. One bit remains one pixel.
+fn quickdraw_pattern(rows: [u8; 8], screen: Size) -> Option<DecorationBuffer> {
+    let mut tile = Pixmap::new(8, 8)?;
+    for (index, pixel) in tile.data_mut().chunks_exact_mut(4).enumerate() {
+        let value = if rows[index / 8] & (0x80 >> (index % 8)) != 0 { 0 } else { 255 };
+        pixel.copy_from_slice(&[value, value, value, 255]);
+    }
+    tile_pattern(&tile, screen)
+}
+
+/// Exported *-pattern.png backgrounds repeat at native pixel size when chosen
+/// through Omarchy too. Honor the actual image pixels so custom patterns work.
+fn tile_pattern(source: &Pixmap, screen: Size) -> Option<DecorationBuffer> {
+    if screen.w == 0 || screen.h == 0 || screen.w > 16384 || screen.h > 16384 { return None; }
+    let mut pixels = vec![0; screen.w as usize * screen.h as usize * 4];
+    for y in 0..screen.h {
+        let source_row = (y % source.height()) as usize * source.width() as usize * 4;
+        for x in (0..screen.w).step_by(source.width() as usize) {
+            let count = (screen.w - x).min(source.width()) as usize * 4;
+            let offset = (y as usize * screen.w as usize + x as usize) * 4;
+            pixels[offset..offset + count].copy_from_slice(&source.data()[source_row..source_row + count]);
+        }
+    }
+    Some(DecorationBuffer { width: screen.w, height: screen.h, pixels })
 }
 
 /// Procedural reference artwork, rasterized only when wallpaper/geometry changes.
@@ -629,7 +692,7 @@ mod tests {
             let sum: u64 = buffer.pixels.as_chunks::<4>().0.iter().map(|px| (px[0] as u64 + px[1] as u64 + px[2] as u64) / 3).sum();
             (sum / (u64::from(buffer.width) * u64::from(buffer.height))) as i64
         };
-        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| !w.is_solid_colour()) {
+        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| !w.is_solid_colour() && w.pattern_rows().is_none()) {
             let light = wallpaper.render(Size::new(160, 90), Appearance::Light).unwrap();
             let dark = wallpaper.render(Size::new(160, 90), Appearance::Dark).unwrap();
             assert!(
@@ -641,7 +704,7 @@ mod tests {
             );
         }
         let lum = |(r, g, b): (u8, u8, u8)| (r as i64 + g as i64 + b as i64) / 3;
-        for wallpaper in Wallpaper::ALL {
+        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| w.pattern_rows().is_none()) {
             assert!(
                 lum(wallpaper.background_color(Appearance::Light)) > lum(wallpaper.background_color(Appearance::Dark)),
                 "{}: background colors must follow the artwork's moods",
@@ -659,6 +722,35 @@ mod tests {
         }
         assert_eq!(Wallpaper::ClassicLavender.background_color(Appearance::Dark), DESKTOP_BG);
         assert_eq!(Wallpaper::ClassicLavender.background_color(Appearance::Light), DESKTOP_BG_LIGHT);
+    }
+
+    #[test]
+    fn system7_patterns_keep_their_quickdraw_pixels_when_selected_through_omarchy() {
+        let root = tempfile::tempdir().unwrap();
+        for (wallpaper, black_pixels) in [
+            (Wallpaper::System7Classic, 32),
+            (Wallpaper::System7LightGray, 16),
+            (Wallpaper::System7DarkGray, 48),
+        ] {
+            let tile = wallpaper.render(Size::new(8, 8), Appearance::Light).unwrap();
+            assert_eq!(tile.pixels.chunks_exact(4).filter(|pixel| pixel[0] == 0).count(), black_pixels);
+            assert!(tile.pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255] || pixel == [255; 4]));
+            let source = Pixmap::from_vec(tile.pixels, IntSize::from_wh(8, 8).unwrap()).unwrap();
+            let path = root.path().join(format!("{}.png", wallpaper.id()));
+            std::fs::write(&path, source.encode_png().unwrap()).unwrap();
+            let size = Size::new(19, 17); // Partial tiles in both directions.
+            let native = wallpaper.render(size, Appearance::Light).unwrap();
+            let selected = Wallpaper::omarchy_background(Some(&path), size, Appearance::Light).unwrap();
+            assert_eq!(selected.pixels, native.pixels);
+            assert_eq!(native.pixels, wallpaper.render(size, Appearance::Dark).unwrap().pixels);
+            for y in 0..size.h {
+                for x in 0..size.w {
+                    let pixel = ((y * size.w + x) * 4) as usize;
+                    let expected = (((y % 8) * 8 + x % 8) * 4) as usize;
+                    assert_eq!(native.pixels[pixel..pixel + 4], source.data()[expected..expected + 4]);
+                }
+            }
+        }
     }
 
     #[test]

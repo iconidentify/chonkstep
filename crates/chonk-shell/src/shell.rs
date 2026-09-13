@@ -568,6 +568,13 @@ fn host_omarchy_shell(
     use crate::omarchy_shell::{self, Verdict};
     match verdict {
         Verdict::Launch(paths) => {
+            if let Some(target) = crate::omarchy_export::default_target() {
+                match crate::omarchy_export::install_missing(&target) {
+                    Ok(written) if !written.is_empty() => tracing::info!(count = written.len(), "registered ChonkStep themes in Omarchy"),
+                    Ok(_) => {},
+                    Err(error) => tracing::warn!(%error, path = %target.display(), "could not register ChonkStep themes in Omarchy"),
+                }
+            }
             let command = omarchy_shell::launch_command(paths);
             let (program, args) = crate::omarchy_menu::action_argv(&command);
             match spawn::spawn_detached_with_env(program, &args, &launch_env(theme_id, Some(appearance), scale), &[]) {

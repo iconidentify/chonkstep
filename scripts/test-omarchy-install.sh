@@ -44,6 +44,17 @@ stage_package() {
     install -m755 scripts/verify-install.sh "$root/usr/lib/chonkstep/verify-install.sh"
     install -m644 docs/config.example.toml "$root/usr/share/doc/chonkstep/config.example.toml"
 
+    # Record the user-scoped export separately from the privileged SDDM setup.
+    # The Rust exporter tests validate the actual palettes, descriptors and art.
+    cat > "$root/usr/bin/omarchy-export-themes" <<'EXPORTER'
+#!/bin/sh
+set -eu
+[ "$#" -eq 2 ] && [ "$1" = --missing ]
+mkdir -p "$2"
+printf '%s\n' "$2" > "$2/export-called"
+EXPORTER
+    chmod 755 "$root/usr/bin/omarchy-export-themes"
+
     for executable in xsession.sh chonkstep-session; do
         printf '#!/bin/sh\nexit 0\n' > "$root/usr/lib/chonkstep/$executable"
         chmod 755 "$root/usr/lib/chonkstep/$executable"
@@ -135,6 +146,8 @@ install -Dm644 /dev/null "$config_home/chonkstep/config.toml"
 printf '%s\n' 'scale = 2.0' '[keybindings]' > "$config_home/chonkstep/config.toml"
 
 CHONKSTEP_TEST_CONFIG_HOME="$config_home" scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
+grep -Fxq "$config_home/omarchy/themes" "$config_home/omarchy/themes/export-called" \
+    || fail "integration did not register themes in the invoking user's config"
 assert_file "$encrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"
 assert_file "$encrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf"
 resilience="$encrypted/etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf"
@@ -187,6 +200,8 @@ grep -qx 'desktop = "chonkstep"' "$explicit_home/chonkstep/config.toml" \
 
 fresh_home="$work/fresh-config-home"
 CHONKSTEP_TEST_CONFIG_HOME="$fresh_home" scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
+grep -Fxq "$fresh_home/omarchy/themes" "$fresh_home/omarchy/themes/export-called" \
+    || fail "fresh integration omitted theme registration"
 grep -qx 'desktop = "omarchy"' "$fresh_home/chonkstep/config.toml" \
     || fail "fresh integration did not enable the documented Omarchy preset"
 grep -q '^# Focus policy' "$fresh_home/chonkstep/config.toml" \

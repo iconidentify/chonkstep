@@ -288,6 +288,10 @@ pub struct Theme {
     /// instruments receive these with the same live ThemeChanged payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chrome: Option<crate::modern::Chrome>,
+    /// A theme's native frame recipe, carried through Omarchy's theme picker.
+    /// Absent for older themes, which retain the chrome-token-based default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_decoration_style: Option<wm_theme_api::DecorationStyle>,
     pub titlebar: TitlebarStyle,
     pub resize_bar: ResizeBarStyle,
     pub border: BorderStyle,
@@ -334,6 +338,7 @@ impl Theme {
     pub fn resolve_style(&self, style: wm_theme_api::DecorationStyle) -> wm_theme_api::DecorationStyle {
         use wm_theme_api::DecorationStyle;
         match style {
+            DecorationStyle::Auto if self.preferred_decoration_style.is_some_and(|style| style != DecorationStyle::Auto) => self.preferred_decoration_style.unwrap(),
             DecorationStyle::Auto if self.chrome.is_some() => DecorationStyle::Modern,
             DecorationStyle::Auto => DecorationStyle::WindowMaker,
             explicit => explicit,

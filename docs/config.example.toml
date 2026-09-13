@@ -34,7 +34,8 @@
 # Change keyboard_mode alone to keep Spaces and fullscreen desktops intact.
 # See docs/mac-mode.md and docs/mac-display-spaces.md.
 #
-# Optional standalone, clickable previews for minimized windows (160 logical px).
+# Clickable previews for minimized windows (160 logical px), enabled by default.
+# Set false to hide the tiles and restore minimized windows through Alt-Tab only.
 # minimized_previews = true
 #
 # PRESETS -- one line for a whole posture

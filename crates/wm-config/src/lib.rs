@@ -625,7 +625,7 @@ impl Config {
             terminal: None,
             autostart: Vec::new(),
             omarchy_menu: true,
-            minimized_previews: false,
+            minimized_previews: true,
             omarchy_shell: true,
             omarchy_bar: None,
             desktop: preset::Desktop::Chonkstep,
@@ -2373,6 +2373,14 @@ scroll_factor = 0.4
         assert_eq!(config.placement, defaults.placement);
         assert_eq!(config.edge_resistance, defaults.edge_resistance);
         assert_eq!(config.keybindings, defaults.keybindings);
+    }
+
+    #[test]
+    fn minimized_windows_have_visible_restore_tiles_unless_explicitly_disabled() {
+        for config in ["", "desktop = 'omarchy'", "theme = 'washi'", "interaction_mode = 'mac'"] {
+            assert!(parse(config).unwrap().minimized_previews, "{config}");
+        }
+        assert!(!parse("minimized_previews = false").unwrap().minimized_previews);
     }
 
     #[test]

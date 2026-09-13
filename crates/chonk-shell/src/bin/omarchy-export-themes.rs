@@ -13,18 +13,21 @@
 use std::path::PathBuf;
 
 fn main() {
-    let mut args = std::env::args_os().skip(1);
+    let mut args = std::env::args_os().skip(1).peekable();
+    let missing_only = args.peek().is_some_and(|arg| arg == "--missing");
+    if missing_only { args.next(); }
     let target = match (args.next(), args.next()) {
-        (None, _) => default_target(),
+        (None, _) => chonk_shell::omarchy_export::default_target(),
         (Some(arg), None) if arg != "-h" && arg != "--help" => Some(PathBuf::from(arg)),
         _ => {
             eprintln!(
-                "usage: omarchy-export-themes [TARGET]\n\n\
+                "usage: omarchy-export-themes [--missing] [TARGET]\n\n\
                  Writes chonkstep's built-in themes as Omarchy themes under TARGET\n\
                  (default: ~/.config/omarchy/themes), one directory per theme with a\n\
-                 colors.toml, backgrounds/ and preview.png; modern themes also provide\n\
+                 colors.toml, backgrounds/ and preview.png; modern and System 7 themes also provide\n\
                  shell.toml surface colors and a public Theme in chonkstep.toml.\n\
-                 Existing exports are refreshed."
+                 Existing exports are refreshed unless --missing is given.\n\
+                 --missing adds only themes without an existing directory."
             );
             std::process::exit(2);
         }
@@ -33,7 +36,12 @@ fn main() {
         eprintln!("omarchy-export-themes: no home directory to find ~/.config/omarchy/themes under; pass TARGET");
         std::process::exit(1);
     };
-    match chonk_shell::omarchy_export::export(&target) {
+    let result = if missing_only {
+        chonk_shell::omarchy_export::install_missing(&target)
+    } else {
+        chonk_shell::omarchy_export::export(&target)
+    };
+    match result {
         Ok(written) => {
             for dir in &written {
                 println!("{}", dir.display());
@@ -45,13 +53,4 @@ fn main() {
             std::process::exit(1);
         }
     }
-}
-
-/// Where Omarchy looks for user themes: `$XDG_CONFIG_HOME/omarchy/themes`.
-fn default_target() -> Option<PathBuf> {
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(config_home.join("omarchy").join("themes"))
 }

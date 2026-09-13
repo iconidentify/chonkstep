@@ -11,8 +11,10 @@ overview_style = "classic"          # classic (default) | cards
 
 Edit `~/.config/chonkstep/config.toml` and run `/usr/lib/chonkstep/reload.sh`. The selector is
 config-only; there is no competing state file, request file or root-menu picker.
-The default `auto` follows the theme: themes with modern chrome tokens select
-Modern, and existing palettes select WindowMaker. An explicit recipe overrides
+The default `auto` follows the theme: System 7 themes select System 7, themes
+with modern chrome tokens select Modern, and existing palettes select WindowMaker.
+System 7 Classic, Light Gray, and Dark Gray are available through the ordinary
+[theme picker](system7-themes.md). An explicit recipe overrides
 that choice across theme switches. Unknown names and non-string values produce
 a warning and retain Auto while the rest of the config applies. `--check-config`
 reports the diagnostic and `--print-config` prints the configured policy. The

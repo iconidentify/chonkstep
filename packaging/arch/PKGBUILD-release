@@ -241,6 +241,7 @@ DESKTOP
   install -Dm644 docs/hyprland-config.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/omarchy-integration.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/appearance.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/modern-themes.md docs/system7-themes.md docs/decoration-styles.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/control-socket.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/memory.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/logging.md -t "$pkgdir/usr/share/doc/$pkgname"
@@ -251,7 +252,10 @@ DESKTOP
   # ~/.config/omarchy/plugins/<id>/, so these are shipped for the user
   # to link from there rather than installed into Omarchy's tree.
   for plugin in omarchy/plugins/*/; do
-    install -Dm644 "$plugin"* -t "$pkgdir/usr/share/chonkstep/omarchy/plugins/$(basename "$plugin")"
+    for plugin_file in "$plugin"*; do
+      [ -f "$plugin_file" ] || continue
+      install -Dm644 "$plugin_file" -t "$pkgdir/usr/share/chonkstep/omarchy/plugins/$(basename "$plugin")"
+    done
   done
   install -Dm644 omarchy/README.md "$pkgdir/usr/share/doc/$pkgname/omarchy-plugins.md"
 }
