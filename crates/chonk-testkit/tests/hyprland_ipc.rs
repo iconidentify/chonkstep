@@ -753,7 +753,11 @@ fn focused_click_is_snapshot_free_and_drag_syncs_only_its_toplevel() {
 fn window_geometry_plain_fields_and_monitor_eval_are_applied_before_ok() {
     let mut session = boot("hypr-ipc-window-actions");
     let dir = socket_dir(&session);
-    session.launch("zenity", &["--question", "--title", "geometry-probe", "--text", "hold still"]).unwrap();
+    // Exact geometry needs a client that accepts resize configures. GTK's
+    // question dialog sets equal minimum/maximum sizes and can legitimately
+    // commit its original pixels after acknowledging an arbitrary resize.
+    let binary = profile_binary("chonk-fullscreen-probe").unwrap();
+    session.launch_isolated(binary.to_str().unwrap(), &["geometry-probe", "geometry-probe"]).unwrap();
     session.wait_for_window("geometry-probe").expect("window maps");
 
     let client = || {
@@ -790,7 +794,7 @@ fn window_geometry_plain_fields_and_monitor_eval_are_applied_before_ok() {
     poll_until(EVENT, "the Lua relative resize to apply", || {
         (client()["size"] == serde_json::json!([525, 330])).then_some(())
     })
-    .expect("Lua window dispatch reaches the same geometry path");
+    .unwrap_or_else(|error| panic!("{error}; final client: {}", client()));
 
     let original_w = original_size[0].as_i64().unwrap();
     let original_h = original_size[1].as_i64().unwrap();
@@ -826,6 +830,32 @@ fn window_geometry_plain_fields_and_monitor_eval_are_applied_before_ok() {
         ((json(&dir, "j/monitors")[0]["scale"].as_f64()? - 1.5).abs() < f64::EPSILON).then_some(())
     })
     .expect("monitor mutation must happen before success is observable");
+}
+
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn a_fixed_size_dialog_can_decline_an_ipc_resize_without_an_oversized_frame() {
+    let mut session = boot("hypr-ipc-fixed-dialog");
+    let dir = socket_dir(&session);
+    session.launch("zenity", &["--question", "--title", "fixed-dialog", "--text", "hold still"]).unwrap();
+    let window = session.wait_for_window("fixed-dialog").unwrap();
+    session.door().barrier().unwrap();
+    let before = session.world().unwrap();
+    let original = before.window_matching("fixed-dialog").unwrap();
+    let frame_size = before.frame_of(window.id).map(|frame| (frame.w, frame.h));
+    let requested = (original.w + 200, original.h + 100);
+    assert_eq!(
+        request(&dir, &format!("/dispatch resizeactive exact {} {}", requested.0, requested.1)).trim(),
+        "ok"
+    );
+    poll_until(EVENT, "GTK commits its fixed size and the frame fits it", || {
+        session.door().barrier().ok()?;
+        let world = session.world().ok()?;
+        let current = world.window_matching("fixed-dialog")?;
+        ((current.w, current.h) == (original.w, original.h)
+            && world.frame_of(window.id).map(|frame| (frame.w, frame.h)) == frame_size).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}; {:?}", session.world().unwrap()));
 }
 
 #[test]
