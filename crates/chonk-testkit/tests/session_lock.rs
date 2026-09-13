@@ -81,7 +81,9 @@ fn client_checkpoint(session: &Session, client: &str, checkpoint: &str) {
 #[test]
 #[ignore = "real Qt locker: scripts/e2e.sh --headless --test session_lock"]
 fn quickshell_lock_fills_the_output_at_fractional_and_integer_scales() {
-    assert!(chonk_testkit::require_client("qs"));
+    if !chonk_testkit::require_client("qs") {
+        return;
+    }
     for scale in [1.0, 1.5, 2.0] {
         let mut session = Session::boot(&format!("lock-scale-{scale}"), SessionOptions {
             scale: Some(scale), ..Default::default()

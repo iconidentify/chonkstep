@@ -203,6 +203,13 @@ const CI_CANNOT_INSTALL: &[(&str, &str)] = &[
     // for one gamma assertion. `gamma.rs`'s other tests drive the
     // protocol directly and do run.
     ("hyprsunset", "not packaged for Ubuntu; the rest of gamma.rs drives the protocol directly"),
+    // Ubuntu 24.04 has Qt 6.4; Quickshell requires Qt >= 6.6 and has no
+    // Ubuntu package. Keep the real Qt locker test on supported desktops;
+    // session_lock.rs also exercises the protocol with our own clients in CI.
+    // Remove this exception when the runner supplies a compatible Qt stack.
+    // https://packages.ubuntu.com/noble/qt6-base-dev
+    // https://github.com/quickshell-mirror/quickshell/blob/master/CMakeLists.txt
+    ("qs", "Quickshell is unavailable on Ubuntu 24.04's Qt 6.4; direct session-lock protocol tests still run"),
 ];
 
 /// Where [`require_client`] records a client it did not find, so a run
