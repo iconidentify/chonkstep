@@ -56,6 +56,7 @@ fn open_area(session: &mut Session) {
 
 fn mixed_workflow(scale: f32, name: &str, heads: bool) {
     let mut session = boot(name, scale);
+    align_capture_comparison(&mut session);
     if heads {
         session.door().virtual_outputs(true).unwrap();
     }
@@ -196,6 +197,7 @@ impl Drop for Recorder {
 #[ignore = "needs nested Wayland, real chonkrec, wf-recorder and ffmpeg"]
 fn chonkrec_demo_encodes_controls_and_preserves_clean_exports() {
     let mut session = boot("chonkrec-demo-video", 1.5);
+    align_capture_comparison(&mut session);
     let clean = session.screenshot("video-clean").unwrap();
     open_area(&mut session);
     let expected = diagnostic(&mut session, "video-visible");

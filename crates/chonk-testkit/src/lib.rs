@@ -1544,7 +1544,7 @@ impl Door {
     }
 
     pub fn set_virtual_outputs(&mut self, topology: &str) -> Result<(), String> {
-        if !matches!(topology, "split" | "single" | "compact" | "none") {
+        if !matches!(topology, "split" | "single" | "compact" | "aligned" | "none") {
             return Err("unknown virtual topology".into());
         }
         self.send(&format!("virtual-outputs {topology}"))?;

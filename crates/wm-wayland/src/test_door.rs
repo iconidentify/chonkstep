@@ -66,6 +66,7 @@
 //! | `touch cancel\|frame` | cancel the touch sequence or finish its input frame |
 //! | `key CODE press\|release` | keyboard key by *evdev* keycode (`KEY_*` from input-event-codes.h; the xkb +8 offset is applied here) |
 //! | `primary-scale FACTOR` | changes the live primary-output scale through the production IPC mutation path |
+//! | `virtual-outputs split\|single\|compact\|aligned\|none` | changes nested output topology; `aligned` gives exact logical extents at 1x, 1.5x and 2x for pixel comparisons |
 //! | `repeat` | replies with the held compositor-binding repeat count and interval, or `repeat none` |
 //! | `activation-tokens` | replies with the number of retained xdg-activation tokens |
 //! | `protocol-ledgers` | replies with retained input-method popup, idle-inhibitor object, and lock-surface counts |
@@ -496,10 +497,13 @@ fn virtual_outputs(comp: &mut Compositor, topology: &str) -> Result<(), &'static
     let sizes: Vec<Size> = match topology {
         "none" => Vec::new(),
         "compact" => vec![Size::new(400, 300)],
+        // Exact logical extents at 1x, 1.5x and 2x let pixel comparisons
+        // use grim without its aspect-ratio rounding/resampling at 1280x800.
+        "aligned" => vec![Size::new((host_size.w / 6 * 6) as u32, (host_size.h / 6 * 6) as u32)],
         "single" => vec![Size::new(host_size.w as u32, host_size.h as u32)],
         "split" => vec![Size::new((host_size.w / 2) as u32, host_size.h as u32),
             Size::new((host_size.w - host_size.w / 2) as u32, host_size.h as u32)],
-        _ => return Err("virtual-outputs wants split, single, compact or none"),
+        _ => return Err("virtual-outputs wants split, single, compact, aligned or none"),
     };
     let mut added = Vec::new();
     let mut x = 0;
@@ -543,10 +547,10 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
     match words.next() {
         Some("virtual-outputs") => {
             match (words.next(), words.next()) {
-                (Some(mode @ ("split" | "single" | "compact" | "none")), None) => {
+                (Some(mode @ ("split" | "single" | "compact" | "aligned" | "none")), None) => {
                     if let Err(error) = virtual_outputs(comp, mode) { reply_err(stream, error); }
                 }
-                _ => reply_err(stream, "virtual-outputs wants split, single, compact or none"),
+                _ => reply_err(stream, "virtual-outputs wants split, single, compact, aligned or none"),
             }
         }
         Some("primary-scale") => {
