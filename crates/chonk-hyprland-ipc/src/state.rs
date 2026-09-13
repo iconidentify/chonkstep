@@ -28,6 +28,11 @@
 //! compatible names dwindle/scrolling. Freeform reports freeform. Output
 //! ownership comes from core affinity for managed Flow windows, whose virtual
 //! geometry can extend beyond every physical output.
+//!
+//! Positions, window sizes and geometry dispatches use logical layout units.
+//! Monitor mode width/height remain physical, with scale and transform reported
+//! separately. The Wayland adapter converts at the boundary with the physical
+//! window-manager ledger; wire encoders must not apply another scale.
 
 use serde::Serialize;
 
@@ -211,7 +216,7 @@ pub struct Snapshot {
     /// place Hyprland's IPC exposes lock state and therefore the only
     /// place anything on an Omarchy machine looks for it.
     pub locked: bool,
-    /// Real root-coordinate pointer position, absent only before the
+    /// Real logical-layout pointer position, absent only before the
     /// compositor has received its first pointer motion.
     pub cursor_position: Option<(i32, i32)>,
     pub bindings: Vec<Binding>,

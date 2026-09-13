@@ -8,6 +8,8 @@ use std::{
 };
 
 fn resize(s: &mut Session, w: u32, h: u32) {
+    let scale = f64::from(s.world().unwrap().scale);
+    let (logical_w, logical_h) = ((w as f64 / scale).round() as u32, (h as f64 / scale).round() as u32);
     let socket = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap())
         .join("hypr")
         .join(s.hyprland_signature().unwrap())
@@ -20,7 +22,7 @@ fn resize(s: &mut Session, w: u32, h: u32) {
         .set_write_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     stream
-        .write_all(format!("/dispatch resizeactive exact {w} {h}").as_bytes())
+        .write_all(format!("/dispatch resizeactive exact {logical_w} {logical_h}").as_bytes())
         .unwrap();
     let mut reply = String::new();
     stream.take(1024).read_to_string(&mut reply).unwrap();
@@ -71,17 +73,20 @@ fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
             s.launch_isolated(binary.to_str().unwrap(), &[act.to_str().unwrap(), mode])
                 .unwrap();
             s.wait_for_window("scale-change-probe").unwrap();
-            resize(&mut s, 300, 160);
-            resize(&mut s, 400, 200);
-            resize(&mut s, 200, 100);
+            // Multiples of six are exact in both physical and integer IPC
+            // logical units at all three scales. The inflated sizes still
+            // coincide with earlier requests to exercise historical-size reuse.
+            resize(&mut s, 306, 162);
+            resize(&mut s, 408, 216);
+            resize(&mut s, 204, 108);
             change_density(&act, "2");
             // The fractional integer-buffer fallback is intentionally 1.5x;
             // both declarations still use the same effective output factor.
             let (w, h) = match (mode, scale == 1.5) {
-                ("viewport-destination", true) => (150, 75),
-                ("viewport-destination", false) => (200, 100),
-                (_, true) => (300, 150),
-                (_, false) => (400, 200),
+                ("viewport-destination", true) => (153, 81),
+                ("viewport-destination", false) => (204, 108),
+                (_, true) => (306, 162),
+                (_, false) => (408, 216),
             };
             poll_until(
                 Duration::from_secs(10),
@@ -99,7 +104,7 @@ fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
             poll_until(Duration::from_secs(10), "density restored", || {
                 let world = s.world().ok()?;
                 let c = world.window_matching("scale-change-probe")?;
-                (c.w == 200 && c.h == 100 && c.presented_w == 200).then_some(())
+                (c.w == 204 && c.h == 108 && c.presented_w == 204).then_some(())
             })
             .unwrap();
             change_density(&act, "2");
