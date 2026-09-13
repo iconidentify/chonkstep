@@ -21,8 +21,10 @@ restart, nothing closed, one repaint.
 
 ## Decoration style
 
-`decoration_style = "windowmaker"` (default) or `"system7"` selects the frame's
-geometry, controls and title glyphs. The **theme** supplies the palette; the
+`decoration_style = "auto"` (default) selects Modern for themes with modern chrome
+tokens and WindowMaker for existing palettes. Explicit `"windowmaker"`,
+`"system7"` or `"modern"` selects the frame's geometry, controls and title glyphs
+across theme changes. The **theme** supplies the palette and dock design; the
 **appearance** selects light/dark palette variants. System 7 chrome always uses
 light roles. It does not change the session's appearance or Mac keyboard mode.
 
@@ -58,7 +60,7 @@ submenu) is not a ninth theme but an instruction: wear whatever
 [Omarchy](https://omarchy.org) is wearing. The desktop reads the palette
 `omarchy-theme-set` leaves at
 `~/.local/state/omarchy/current/theme/colors.toml` (`$XDG_STATE_HOME`
-honoured), maps its named colours onto chonkstep's chrome, and keeps
+honoured). For a palette-only theme it maps named colours onto chonkstep's chrome and keeps
 chonkstep's geometry: the 23 px titlebar, the bevels, the dock tile,
 the fonts. For a dark palette the focused titlebar is its
 `darker_background` with `bright_foreground` as ink, the unfocused bar
@@ -74,8 +76,18 @@ alacritty template lays it (`crates/wm-theme/src/omarchy.rs` carries
 the full table). The theme is named after Omarchy's:
 `Omarchy (Tokyo Night)`.
 
-The session then watches that file about once a second and re-dresses
-when it changes, so `omarchy-theme-set catppuccin-latte` -- or a pick
+Modern themes exported by Chonkstep also contain `chonkstep.toml`, a versioned,
+data-only public `Theme` at 1x. Following them through Omarchy's picker preserves
+their complete authored geometry, fonts, colors and appearance; `auto` selects
+the modern recipe. The follower identity, display name and current wallpaper
+still come from Omarchy. Missing descriptors retain the palette-only behavior
+above; malformed, oversized or unsupported descriptors use the existing logged
+theme-load fallback.
+
+The session watches the theme name, palette and optional descriptor metadata,
+plus the current background link and image metadata, at the existing one-second
+cadence. A geometry-only descriptor edit restyles without rewriting the palette.
+Thus `omarchy-theme-set catppuccin-latte` -- or a pick
 from Omarchy's own theme menu -- restyles this desk too, live, along
 with every dockapp. Applications launched under the follow (a foot, a
 `chonk_ui` app reading `CHONKSTEP_THEME=omarchy`) read the same file
@@ -125,6 +137,19 @@ under `backgrounds/`, and a `preview.png` for Omarchy's picker -- into
 `omarchy-theme-set amber-phosphor` dresses the rest of the machine to
 match. `scripts/install.sh` runs it once so the themes are in the
 picker from the first login.
+
+Modern exports also include `shell.toml`, using Omarchy's own surface-color API
+to tint its existing bar, popups and menus. Bar layout, sizing and fonts remain
+with Omarchy. Its machine-level `~/.config/omarchy/shell.toml` overrides continue
+to take precedence over theme colors.
+
+The accompanying `chonkstep.toml` is authoritative for Chonkstep's visual theme,
+while `colors.toml` and `shell.toml` supply Omarchy applications and its shell.
+Regenerate them together from the public `Theme` when authoring changes. Editing
+only `colors.toml` does not recolor the descriptor's Chonkstep chrome. Descriptors
+are limited to 128 KiB, validate font and legacy metric bounds, and normalize
+modern geometry through the same theme API used by native and dockapp rendering.
+They contain no commands or executable hooks.
 
 The preview is *rendered*, not photographed: the theme's background
 with two of its own window frames on it, drawn through the same

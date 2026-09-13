@@ -63,4 +63,41 @@ for config in "$HOME/.config/chonkstep/config.toml" "$HOME/.config/hypr/hyprland
     fi
 done
 
+# Chromium/Edge Media SIGILL after nvidia-drm map failure is a BAR1 /
+# Wayland dma-buf class, not a compositor protocol parse. Capture the
+# aperture and the kernel signature so a report can prove it. See
+# docs/nvidia-sync.md.
+section "DRM NODES"
+if [ -d /dev/dri ]; then
+    ls -l /dev/dri >> "$report" 2>&1
+    if command -v udevadm >/dev/null 2>&1; then
+        for node in /dev/dri/card* /dev/dri/renderD*; do
+            [ -e "$node" ] || continue
+            printf '\n%s\n' "$node" >> "$report"
+            udevadm info -q property "$node" 2>/dev/null |
+                grep -E 'DEVNAME=|ID_PATH=|ID_MODEL=|DRIVER=|ID_PCI_CLASS_FROM_DATABASE=' >> "$report" || true
+        done
+    fi
+else
+    printf '/dev/dri missing\n' >> "$report"
+fi
+
+section "NVIDIA BAR1 / PROCESSES"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi -q -d MEMORY >> "$report" 2>&1 || true
+    printf '\n' >> "$report"
+    nvidia-smi >> "$report" 2>&1 || true
+else
+    printf 'nvidia-smi is not installed\n' >> "$report"
+fi
+
+section "KERNEL DMABUF / MEDIA SIGILL (this boot, last 80 matches)"
+if command -v journalctl >/dev/null 2>&1; then
+    journalctl -k -b --no-pager 2>/dev/null |
+        grep -E 'nv_drm_gem|dmaAllocMapping|NvKmsKapiMemory|mapping_reuse|trap invalid opcode|Media\[' |
+        tail -n 80 >> "$report" 2>&1 || true
+else
+    printf 'journalctl is not installed\n' >> "$report"
+fi
+
 printf 'Wrote %s; review it before sharing.\n' "$report"

@@ -276,6 +276,13 @@ impl<R: Renderer + ImportAll> WaylandSurfaceRenderElement<R> {
         self.view
     }
 
+    /// Number of retained opacity rectangles, without transforming or copying them.
+    ///
+    /// This permits conservative callers to bound the cost of `opaque_regions`.
+    pub fn opaque_region_count(&self) -> usize {
+        self.opaque_regions.len()
+    }
+
     /// Get the buffer texture
     pub fn texture(&self) -> &WaylandSurfaceTexture<R> {
         &self.texture

@@ -50,60 +50,29 @@ fn toggle_maximize(session: &mut Session) {
 
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
-fn the_dock_steps_under_a_bar_and_windows_maximize_between_them() {
+fn external_bars_are_the_only_reserved_chrome() {
     let mut session = Session::boot("layer-bar", SessionOptions { scale: Some(1.0), ..Default::default() }).unwrap();
-
-    // -- the corner, unobstructed ----------------------------------------
     let world = session.world().unwrap();
-    let home = world.dock().expect("the dock is in its corner on an empty desktop").clone();
-    assert_eq!(home.y, 0, "with no bar the dock starts at the very top");
-
-    // -- a top bar maps: the dock hangs itself under it -------------------
+    assert!(world.shells.is_empty(), "the core creates no dock or workspace surfaces");
     raise_bar(&mut session, &[&BAR.to_string()]);
-    let under = session.wait_for_dock_at(0, BAR as i32).expect("the dock should step out of the bar's reservation");
-    assert_eq!((under.x, under.w), (home.x, home.w), "a top bar moves the column down, not sideways");
-    assert_eq!(under.h, home.h, "a stack that fits below the bar keeps its height");
-
-    // -- a maximized window stops under the bar and short of the dock -----
-    session.launch("foot", &[]).unwrap();
+    wait_for_client_mapped(&session);
+    session.launch("foot", &["--config=/dev/null"]).unwrap();
     let window = session.wait_for_window("foot").unwrap();
     toggle_maximize(&mut session);
-    let frame = poll_until(Duration::from_secs(10), "the frame to reach the workarea's top edge", || {
-        let world = session.world().ok()?;
-        world.frame_of(window.id).filter(|f| f.y == BAR as i32).cloned()
-    })
-    .expect("a maximized window's frame should start exactly under the bar");
-    assert_eq!(frame.x, 0, "the workarea still begins at the left edge");
-    assert_eq!(frame.x + frame.w as i32, under.x, "and ends where the dock column begins");
-    assert_eq!(frame.y + frame.h as i32, world.output_h as i32, "a top bar leaves the bottom edge alone");
-
-    // -- the bar exits: the corner comes back, and so does the workarea ---
+    let assert_frame = |session: &mut Session, x, y, w, h| {
+        poll_until(Duration::from_secs(10), "window to follow the external reservation", || {
+            let world = session.world().ok()?;
+            world.frame_of(window.id).filter(|f| (f.x, f.y, f.w, f.h) == (x,y,w,h)).cloned()
+        }).unwrap();
+    };
+    assert_frame(&mut session, 0, BAR as i32, world.output_w, world.output_h - BAR);
     session.kill_client("chonk-fake-bar");
-    let back = session.wait_for_dock_at(0, 0).expect("the dock should return to its corner once the bar exits");
-    assert_eq!((back.x, back.w, back.h), (home.x, home.w, home.h), "the column is exactly where it started");
-    poll_until(Duration::from_secs(10), "the maximized frame to grow back to the top edge", || {
-        let world = session.world().ok()?;
-        world.frame_of(window.id).filter(|f| f.y == 0).cloned()
-    })
-    .expect("with the bar gone the maximized window should take the strip back");
-
-    // -- a right-edge panel: the dock steps left, the workarea follows ----
-    // The bar is gone, so the panel is the only reservation; and the
-    // window is still maximized, so its frame tracks the workarea live.
-    let panel = 64u32;
+    assert_frame(&mut session, 0, 0, world.output_w, world.output_h);
+    let panel = 64;
     raise_bar(&mut session, &[&panel.to_string(), "right"]);
-    let beside = session.wait_for_dock_at(panel, 0).expect("the dock should step left out of the panel's reservation");
-    assert_eq!(beside.x, home.x - panel as i32, "the column steps left by exactly the panel's width");
-    poll_until(Duration::from_secs(10), "the frame to stop short of the displaced dock", || {
-        let world = session.world().ok()?;
-        world.frame_of(window.id).filter(|f| f.x + f.w as i32 == beside.x).cloned()
-    })
-    .expect("a maximized window must end where the displaced column begins, not under it");
-
-    // -- and back once more ------------------------------------------------
+    assert_frame(&mut session, 0, 0, world.output_w - panel, world.output_h);
     session.kill_client("chonk-fake-bar");
-    let back = session.wait_for_dock_at(0, 0).expect("the dock should return to its corner once the panel exits");
-    assert_eq!(back.x, home.x);
+    assert_frame(&mut session, 0, 0, world.output_w, world.output_h);
 }
 
 /// Waits for the fake bar to report itself mapped — the line it prints

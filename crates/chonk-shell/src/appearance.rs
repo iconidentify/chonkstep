@@ -1,61 +1,3 @@
-//! The session-wide light/dark appearance: how it is resolved, how it
-//! is published, how anything else asks for a switch, and how the
-//! switch reaches applications that are not this desktop's own.
-//!
-//! # The axis
-//!
-//! `wm_theme::Appearance` is the value; every built-in theme has a
-//! rendition for each side of it (`default_theme::theme_variant`).
-//! Switching appearance re-resolves the *current* theme in its other
-//! rendition through the exact live-apply path a theme pick takes —
-//! no restart, nothing closed, one repaint.
-//!
-//! # The files (a public contract)
-//!
-//! Two files under the session state directory
-//! (`$XDG_STATE_HOME/chonkstep/`, `~/.local/state/chonkstep/` when the
-//! variable is unset) are a documented IPC surface that dockapps and
-//! scripts build against — see `docs/appearance.md`:
-//!
-//! - **`appearance`** — the current mode, published by the shell: the
-//!   literal string `light` or `dark`. Rewritten atomically
-//!   (write-to-temp, rename) so a reader can never observe a torn
-//!   value, and rewritten at startup and on every switch.
-//! - **`appearance-request`** — written by anyone who wants the mode
-//!   changed: `light`, `dark`, or `toggle`. The shell consumes it
-//!   (acts, then deletes) from its housekeeping tick, the same
-//!   poll-and-unlink pattern as the `reload`/`restart` markers in
-//!   [`crate::startup`] and on the same bounded (at most 100 ms) cadence. A request that
-//!   names the mode the session is already in is consumed and does
-//!   nothing.
-//!
-//! # Resolution
-//!
-//! At startup (and on every config reload) the mode is resolved as:
-//! the published `appearance` file, else the config's `appearance`
-//! key, else **the selected theme's own native mood**. The last layer
-//! is what makes upgrading into this axis invisible: a session that
-//! never chose a mode keeps looking exactly like the theme it wears
-//! always looked — dark for seven of the built-ins, light for Ivory
-//! Halftone. Note what the first layer implies: the published file is
-//! also the persisted choice, so after the very first session the
-//! config key only matters to a state directory that has never seen a
-//! session (the live way to change mode is the request file, not the
-//! config).
-//!
-//! # Propagation to applications
-//!
-//! The shell's own chrome, its dockapps (via the `ThemeChanged`
-//! broadcast) and its terminals (foot's `[colors-dark]`/`[colors-light]`
-//! sections plus `SIGUSR1`/`SIGUSR2`) all follow the switch through
-//! their own channels. Everything else follows through the desktop
-//! plumbing this module drives from [`propagate_to_applications`]:
-//! GSettings' `org.gnome.desktop.interface color-scheme`, which
-//! xdg-desktop-portal-gtk republishes as the
-//! `org.freedesktop.appearance color-scheme` setting modern toolkits
-//! watch, plus an adopt-if-ours nudge of the `gtk-theme` key. See
-//! `docs/appearance.md` for the honest table of what follows live and
-//! what waits for its next launch.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -116,15 +58,6 @@ fn load_published_from(path: &Path) -> Option<Appearance> {
     parsed
 }
 
-/// Publishes `mode` as the session's current appearance — the reader
-/// half of the contract dockapps poll.
-///
-/// Atomic on purpose: the value lands in a sibling temp file first and
-/// is renamed over the published path, so a reader polling at its own
-/// cadence sees the old mode or the new one, never an empty or torn
-/// file. Failure is a warning, not an error the caller must route —
-/// a session that cannot write its state dir has bigger problems, and
-/// none of them should stop the switch itself.
 pub fn publish(mode: Appearance) {
     let dir = state_dir();
     if let Err(error) = std::fs::create_dir_all(&dir) {
@@ -274,22 +207,6 @@ pub fn gtk_theme_name(mode: Appearance) -> Option<&'static str> {
     })
 }
 
-/// Tells foreign toolkits about the mode, off-thread.
-///
-/// One lazy worker serializes GSettings writes, retaining only the latest
-/// pending mode. Each helper has a deadline and bounded output; a stalled
-/// settings service cannot accumulate workers or reorder final preferences.
-///
-/// - `color-scheme` is always set (`prefer-dark`/`prefer-light`): it
-///   is a preference, not a theme name, and cannot dangle.
-/// - `gtk-theme` is nudged only when its current value is already a
-///   member of the installed pair this desktop manages: flipping
-///   `Adwaita` to `Adwaita-dark` is the mode doing its job, while
-///   overwriting a user's hand-picked `Whatever-Compact` would be
-///   theft. No pair installed, no nudge.
-/// - A missing `gsettings` binary or schema degrades with one warning
-///   and nothing else: the desktop's own chrome, terminals and
-///   dockapps have already switched by the time this runs.
 pub fn propagate_to_applications(mode: Appearance) {
     // GSettings is per-user, not per-session: a posed nested session
     // (the e2e harness, a dev screenshot run) switching its own
@@ -324,7 +241,7 @@ fn apply_to_applications(mode: Appearance) {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn().ok()?;
-        crate::widgets::sampling::wait_with_deadline(child, "gsettings", std::time::Duration::from_secs(2))
+        crate::spawn::wait_with_deadline(child, "gsettings", std::time::Duration::from_secs(2))
     };
     let set = run(&["set", GSETTINGS_SCHEMA, "color-scheme", scheme]);
     match set {
@@ -388,8 +305,6 @@ mod tests {
         assert_eq!(Request::parse("light"), Some(Request::Set(Appearance::Light)));
         assert_eq!(Request::parse("dark"), Some(Request::Set(Appearance::Dark)));
         assert_eq!(Request::parse("toggle"), Some(Request::Toggle));
-        // Trimmed and case-insensitive: the writers are shell scripts
-        // and dockapps, and `echo` appends a newline.
         assert_eq!(Request::parse("Dark\n"), Some(Request::Set(Appearance::Dark)));
         assert_eq!(Request::parse("  TOGGLE  "), Some(Request::Toggle));
         for text in ["", "  ", "dusk", "light dark", "toggle!"] {

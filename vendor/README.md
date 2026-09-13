@@ -227,3 +227,53 @@ Real protocol regressions in `keyboard_focus.rs` reproduce the first two faults.
 `selection_transfer.rs` proves adoption for native and X11 owners and cycles
 Mac mode three times. Both ownership regressions fail on the installed pre-fix
 build. The release review records before/after evidence.
+
+## Local patch: retained rounded frame effects
+
+Three read-only/storage accessors support rounded live client textures without
+an offscreen copy: inspect the element inside `RescaleRenderElement`, recover a
+texture shader override's reusable uniform vector, and map framebuffer fragment
+coordinates back to physical scene pixels. Existing rendering methods and their
+defaults are unchanged. Only bounded corner squares use the custom mask shader;
+the client interior keeps the existing texture path.
+
+`cargo test -p wm-wayland native_gles_rounded_texture_crop_relocation_and_shadow_pixels -- --ignored`
+is the explicit surfaceless GLES gate. It checks every pixel across all eight
+output transforms, nonuniform scaling, cropping and relocation, as well as the
+zero-blur shadow. Remove these accessors when an adopted Smithay version provides
+equivalent allocation-free retained shader overrides and passes that gate.
+
+`GlesFrame::with_texture_read` groups the ordinary body and masked corner draws
+under one texture read lock. It waits for upload before entering the callback
+and publishes one final read fence before unlocking, including after errors or
+unwinding. Same-texture nesting reuses the lock; another texture is rejected
+before acquiring a second lock, preventing lock inversion. Ordinary draws
+outside the scope retain their existing synchronization. The shared-context
+fallback without fence support still completes the submitted draws before
+unlocking. No per-frame allocation or client-buffer ownership change is added.
+
+The ignored native regression in `gles/read_batch_tests.rs` covers held writer
+locks, nested scopes, conflicting textures, error and unwind cleanup, and exact
+pixels with and without fence support. Because this dependency is excluded from
+the workspace, run its library test through an isolated copy of its manifest
+with `--no-default-features --features renderer_gl`; the Chonkstep native gate
+above also exercises actual mutable client textures and warm allocation bounds.
+
+`GlesRenderer::compile_custom_pixel_shader_with_vertex` adds a vertex stage to
+the existing pixel-shader constructor. It retains the same damage-instance and
+projection interface and checks required active input types before publishing
+normal and debug programs. The original constructor uses its unchanged default
+vertex stage. Immutable shadow atlases use this to compute affine nine-slice UVs
+per vertex, batching tile-clipped damage without moving that work into every
+fragment. Native interface tests cover malformed inputs and default/custom
+pixel parity; Chonkstep's strict reference gate additionally checks all output
+transforms, fractional scaling, cropping and collapsed middle slices.
+
+## Local patch: bounded inspection of retained surface opacity
+
+`src/backend/renderer/element/surface.rs` exposes `opaque_region_count()`
+without transforming or copying the retained rectangles. ChonkStep checks for
+exactly one region before using existing scaled opacity APIs to prove a modern
+client fully covers its resize fill. Complex declarations keep the fill and do
+not allocate new opacity copies. This avoids applying rounded coverage twice
+behind opaque clients while preserving transparent clients and resize gaps.

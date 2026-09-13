@@ -320,11 +320,7 @@ pub(crate) fn fit_measured_prefix(
     candidate(low)
 }
 
-/// Truncates a single-line label using the same bounded width search as
-/// instrument-panel elision, without adding an ellipsis to tiny tile labels.
-pub(crate) fn fit_text(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, text: &str, width: u32) -> String {
-    fit_measured_prefix(text, width, "", |candidate| text_width(font_system, font, candidate))
-}
+
 
 /// Shortens a single-line label to roughly what fits in `width`,
 /// preserving both meaningful ends around a middle ellipsis. This is
@@ -395,14 +391,46 @@ fn physical_snapped(
 /// Renders `text` with `font`, blending glyph coverage onto `pixmap`
 /// on one non-wrapping line within the `(x, y, w, h)` box per `align`.
 /// Glyph pixels are clipped to that box, including fallback-font ink
-/// whose bearings extend past the shaped advance. Assumes the destination
-/// pixels in that box are already fully opaque (alpha 255) — true for
-/// every caller here, since text is always drawn over an
-/// already-filled titlebar/menu/item background — which lets this treat
-/// tiny-skia's premultiplied storage as if it were straight RGBA (at
-/// alpha 255 the two are identical) instead of unpremultiplying on read.
+/// whose bearings extend past the shaped advance. This keeps legacy opaque
+/// glyph-edge semantics; use [`draw_text_transparent`] for composited labels.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_text(
+    pixmap: &mut Pixmap,
+    font_system: &mut cosmic_text::FontSystem,
+    swash_cache: &mut cosmic_text::SwashCache,
+    text: &str,
+    font: &FontSpec,
+    color: Color,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    align: TextAlign,
+) {
+    draw_text_impl::<false>(pixmap, font_system, swash_cache, text, font, color, x, y, w, h, align);
+}
+
+/// Text with true premultiplied glyph coverage for a transparent label texture.
+/// The shared shaping path keeps opaque legacy output and its cache unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_text_transparent(
+    pixmap: &mut Pixmap,
+    font_system: &mut cosmic_text::FontSystem,
+    swash_cache: &mut cosmic_text::SwashCache,
+    text: &str,
+    font: &FontSpec,
+    color: Color,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    align: TextAlign,
+) {
+    draw_text_impl::<true>(pixmap, font_system, swash_cache, text, font, color, x, y, w, h, align);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_text_impl<const TRANSPARENT: bool>(
     pixmap: &mut Pixmap,
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut cosmic_text::SwashCache,
@@ -501,7 +529,7 @@ pub fn draw_text(
             if let Some(image) = swash_cache.get_image(font_system, physical.cache_key) {
                 let img_x = physical.x + image.placement.left;
                 let img_y = physical.y - image.placement.top + run.line_y as i32;
-                blend_glyph_image(pixmap, img_x, img_y, image, color, clip);
+                blend_glyph_image::<TRANSPARENT>(pixmap, img_x, img_y, image, color, clip);
             }
         }
     }
@@ -515,7 +543,7 @@ struct TextClip {
     bottom: i64,
 }
 
-fn blend_glyph_image(
+fn blend_glyph_image<const TRANSPARENT: bool>(
     pixmap: &mut Pixmap,
     x: i32,
     y: i32,
@@ -540,7 +568,7 @@ fn blend_glyph_image(
                         continue;
                     }
                     let a = ((color.a as u32 * coverage as u32) / 255) as u8;
-                    blend_pixel(pixmap, x + col as i32, y + row as i32, color.r, color.g, color.b, a);
+                    blend_pixel::<TRANSPARENT>(pixmap, x + col as i32, y + row as i32, color.r, color.g, color.b, a);
                 }
             }
         }
@@ -552,7 +580,7 @@ fn blend_glyph_image(
                     if a == 0 {
                         continue;
                     }
-                    blend_pixel(pixmap, x + col as i32, y + row as i32, image.data[idx], image.data[idx + 1], image.data[idx + 2], a);
+                    blend_pixel::<TRANSPARENT>(pixmap, x + col as i32, y + row as i32, image.data[idx], image.data[idx + 1], image.data[idx + 2], a);
                 }
             }
         }
@@ -561,9 +589,8 @@ fn blend_glyph_image(
 }
 
 /// Alpha-blends one `(r,g,b,a)` source pixel onto `pixmap` at `(x, y)`.
-/// See `draw_text`'s doc comment for why treating the destination as
-/// straight (non-premultiplied) RGBA is valid here.
-fn blend_pixel(pixmap: &mut Pixmap, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
+/// The source is straight RGBA; the destination and result are premultiplied.
+fn blend_pixel<const TRANSPARENT: bool>(pixmap: &mut Pixmap, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
     if a == 0 || x < 0 || y < 0 {
         return;
     }
@@ -580,7 +607,8 @@ fn blend_pixel(pixmap: &mut Pixmap, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) 
     let nr = blend(r as u32, existing.red() as u32);
     let ng = blend(g as u32, existing.green() as u32);
     let nb = blend(b as u32, existing.blue() as u32);
-    if let Some(px) = PremultipliedColorU8::from_rgba(nr, ng, nb, 255) {
+    let alpha = if TRANSPARENT { a + u32::from(existing.alpha()) * inv_a / 255 } else { 255 };
+    if let Some(px) = PremultipliedColorU8::from_rgba(nr, ng, nb, alpha as u8) {
         pixels[idx] = px;
     }
 }
@@ -588,6 +616,39 @@ fn blend_pixel(pixmap: &mut Pixmap, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transparent_text_composites_like_text_drawn_on_an_opaque_surface() {
+        let (w, h) = (240, 32);
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut cache = cosmic_text::SwashCache::new();
+        let font = FontSpec { family: "Nimbus Sans".into(), size: 16.5,
+            weight: FontWeight::Normal, style: FontStyle::Normal };
+        let ink = Color::rgb(188, 58, 38);
+        let mut label = Pixmap::new(w, h).unwrap();
+        draw_text_transparent(&mut label, &mut fonts, &mut cache, "01 / Workspace 1", &font,
+            ink, 0, 0, w, h, TextAlign::Left);
+        assert!(label.pixels().iter().any(|pixel| pixel.alpha() > 0 && pixel.alpha() < 255),
+            "transparent labels retain antialiased glyph coverage");
+        for background in [Color::rgb(245, 242, 229), Color::rgb(24, 28, 34)] {
+            let mut direct = Pixmap::new(w, h).unwrap();
+            fill_rect(&mut direct, 0, 0, w, h, background);
+            draw_text(&mut direct, &mut fonts, &mut cache, "01 / Workspace 1", &font,
+                ink, 0, 0, w, h, TextAlign::Left);
+            for (source, expected) in label.pixels().iter().zip(direct.pixels()) {
+                let inv = 255 - u32::from(source.alpha());
+                for (value, bg, expected) in [
+                    (source.red(), background.r, expected.red()),
+                    (source.green(), background.g, expected.green()),
+                    (source.blue(), background.b, expected.blue()),
+                ] {
+                    let composed = u32::from(value) + u32::from(bg) * inv / 255;
+                    assert!((composed as i32 - i32::from(expected)).abs() <= 2,
+                        "transparent label edges must retain their real background");
+                }
+            }
+        }
+    }
 
     #[test]
     fn long_labels_need_a_bounded_number_of_width_measurements() {

@@ -16,9 +16,7 @@ the Omarchy plugins under `omarchy/plugins/`, which are ordinary
 [omarchy-shell](https://github.com/basecamp/omarchy) bar widgets that
 happen to read this socket instead of Hyprland's.
 
-Two invariants shape everything below, and both are inherited from the
-dockapp protocol next door (`docs/dockapp-protocol.md`), which has
-already shipped one bug of each kind:
+Two invariants shape the control protocol:
 
 1. **The shell never blocks on a client.** Every read and write on the
    shell's side is non-blocking. A client that hangs, floods, or stops
@@ -50,8 +48,7 @@ $XDG_RUNTIME_DIR/chonkstep/control-<display>.sock
 ```
 
 `<display>` is `WAYLAND_DISPLAY` if set, else `DISPLAY`, else
-`default`, passed through the same sanitisation the dockapp socket
-uses: a leading `:` is dropped, every character outside `[A-Za-z0-9_-]`
+`default`, passed through the sanitisation used by the server: a leading `:` is dropped, every character outside `[A-Za-z0-9_-]`
 becomes `_`, and the result is cut at 32 characters. So a Wayland
 session on `wayland-1` listens at `control-wayland-1.sock` and an X11
 session on `:0` at `control-0.sock`.
@@ -147,7 +144,7 @@ The facet the workspace strip is drawn from.
 - `active` — index of the current workspace.
 - `workspaces` — one entry per existing workspace, ascending by
   `index`, contiguous from 0. `windows` counts the managed clients on
-  that workspace (miniaturised ones included, dock and shell surfaces
+  that workspace (miniaturised ones included, shell surfaces
   excluded) — the number a widget dims an empty workspace on.
 
 chonkstep grows workspaces on demand (a window moved one past the end
@@ -199,7 +196,8 @@ socket is not blind, and so it can correlate focus with a workspace.
 
 - `id`, `name` — the active theme.
 - `appearance` — `"dark"` or `"light"`.
-- `decoration_style` — `"windowmaker"` or `"system7"`, the active frame recipe.
+- `decoration_style` — `"windowmaker"`, `"system7"` or `"modern"`, the active frame recipe.
+  The configuration's `"auto"` policy is resolved before this event is published.
   This additive field defaults to `"windowmaker"` when reading an older snapshot.
   A config reload changing only style still publishes a new theme event.
 - `following` — `"omarchy"` when the session follows Omarchy's

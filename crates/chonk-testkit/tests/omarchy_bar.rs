@@ -65,8 +65,7 @@ fn toggle_bar_from_menu(session: &mut Session, metrics: &MenuMetrics) {
     .expect("picking a row closes the menu");
 }
 
-/// The mean colour of the top strip, inset from the corners where the
-/// Clip and the Dock live.
+/// The mean colour of the top strip, inset from the output corners.
 fn top_strip(shot: &Screenshot) -> [f64; 3] {
     shot.mean_rgb(shot.width / 4, 4, shot.width / 2, BAR - 8)
 }
@@ -112,21 +111,19 @@ fn omarchys_bar_is_hidden_until_the_root_menu_shows_it() {
         (log.contains("hosting Omarchy's shell") && log.contains("namespace=omarchy-bar mapped=true")).then_some(())
     })
     .expect("the fake launcher should be run and its bar should map");
-    let home = session.wait_for_dock_at(0, 0).expect("a hidden bar reserves nothing, so the dock stays in its corner");
+    assert!(session.world().unwrap().shells.is_empty());
     wait_for_strip(&mut session, "hidden", false);
     assert!(!session.state_file("omarchy-bar").exists(), "no choice has been made yet, so none is stored");
 
-    // -- the menu shows it: the strip paints, the dock steps down -----------
+    // -- the menu shows it: the strip paints -----------
     toggle_bar_from_menu(&mut session, &metrics);
-    let under = session.wait_for_dock_at(0, BAR as i32).expect("the dock should follow the bar's reservation");
-    assert_eq!((under.x, under.w), (home.x, home.w), "the column moves down, not sideways");
+    assert!(session.world().unwrap().shells.iter().all(|s| !s.mapped));
     wait_for_strip(&mut session, "shown", true);
     assert_eq!(std::fs::read_to_string(session.state_file("omarchy-bar")).unwrap().trim(), "shown");
 
     // -- and hides it again: the corner comes back --------------------------
     toggle_bar_from_menu(&mut session, &metrics);
-    let back = session.wait_for_dock_at(0, 0).expect("hiding the bar gives the corner back");
-    assert_eq!((back.x, back.w, back.h), (home.x, home.w, home.h));
+    assert!(session.world().unwrap().shells.iter().all(|s| !s.mapped));
     wait_for_strip(&mut session, "hidden-again", false);
     assert_eq!(std::fs::read_to_string(session.state_file("omarchy-bar")).unwrap().trim(), "hidden");
 }

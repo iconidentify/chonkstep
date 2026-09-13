@@ -540,7 +540,7 @@ fn binds_names_every_key_rather_than_reporting_its_keysym_in_hex() {
     options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
     options.config_extra = "\n[keybindings]\n\
         \"super+space\" = \"overview\"\n\
-        \"volumeup\" = \"toggle-dock\"\n\
+        \"volumeup\" = \"toggle-maximize\"\n\
         \"super+f9\" = \"miniaturize\"\n\
         \"super+shift+backspace\" = \"close\"\n"
         .to_string();

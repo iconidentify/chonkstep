@@ -26,7 +26,7 @@ ever do disagree, the source wins.
 | `alt+shift+q`      | `close`                | Close the focused window                      |
 | `alt+shift+x`      | `toggle-maximize`      | Maximize / restore                            |
 | `alt+shift+s`      | `toggle-shade`         | Roll the window up into its titlebar          |
-| `alt+shift+m`      | `miniaturize`          | Collapse to an icon tile                      |
+| `alt+shift+m`      | `miniaturize`          | Minimize; restore through Alt-Tab                      |
 | `alt+shift+f`      | `toggle-fullscreen`    | Borderless fullscreen on / off                |
 | `alt+ctrl+right`   | `workspace-next`       | Next workspace (grows on demand)              |
 | `alt+ctrl+left`    | `workspace-prev`       | Previous workspace (stops at the first)       |
@@ -67,7 +67,7 @@ Super+Shift+digits already carries windows to desktops there. Its unmodified
 Print screenshot command opens the native area selector on Wayland. Explicit
 live Hyprland bindings and unbinds always override the new capture defaults.
 
-Every root, window, and dock-tile menu is keyboard-modal while open.
+Every root and window menu is keyboard-modal while open.
 Up/Down changes the highlighted row, Right or Enter opens a submenu,
 Left returns to its parent, Enter/Space activates an action, and Escape
 closes the chain. The root menu itself is bindable as `root-menu`; for
@@ -78,29 +78,6 @@ example:
 "control+space" = "root-menu"
 ```
 
-The Dock remains intentionally a pointer affordance rather than a
-second keyboard launcher. Its application-launching function is fully
-available from the root menu's keyboard-operable Applications cascade;
-`toggle-dock` only controls whether the pointer strip is visible.
-
-Three more verbs exist and are unbound in this keymap, because the
-NeXTSTEP vocabulary reaches workspaces by stepping through them rather
-than by number: `workspace <n>` goes to workspace *n*, and
-`workspace-carry <n>` takes the focused window there and follows it;
-`workspace-send <n>` sends it there while the desktop stays put.
-**Workspaces are numbered from 1** in this file, the way the window
-menu's `Move To` submenu numbers them and the way every other desktop
-does; 1 through 99 are accepted. Naming a workspace that does not exist
-yet creates it, along with any gap before it — the row grows on demand
-and is never destroyed, exactly as `workspace-next` grows it a step at a
-time. Bind them like anything else:
-
-```toml
-[keybindings]
-"alt+ctrl+1" = "workspace 1"
-"alt+shift+1" = "workspace-carry 1"
-"alt+ctrl+shift+1" = "workspace-send 1"
-```
 
 ## The Omarchy keymap (`keymap = "omarchy"`)
 
@@ -351,24 +328,13 @@ its titlebar back permanently instead, name it in `[decorations]
 server_side`; to keep an xdg client bare on purpose, name it in
 `client_side` — see `docs/config.example.toml`.
 
-Three more actions exist and are deliberately unbound by default —
+Two more actions exist and are deliberately unbound by default —
 give them keys in your config:
 
 | Action        | What it does                                                         |
 |---------------|----------------------------------------------------------------------|
-| `toggle-dock` | Show / hide the Dock, column and reserved strip together             |
 | `reload`      | Re-read the config file and apply all of it, live — nothing closed   |
 | `restart`     | Re-exec the on-disk binary, for picking up a new build               |
-
-`toggle-dock` is the keyboard's way to the root menu's `Dock` row.
-Hidden means hidden *and* out of the way: the column is unmapped and
-the one-tile strip it reserves goes straight back to the workarea, so
-maximized windows use the full width of the screen. The Clip, the
-launcher strip and any miniaturized window's icon tile are their own
-surfaces elsewhere on the desk and stay put. The choice is remembered
-across sessions; `show_dock = false` in the config is where a session
-that never wants a Dock starts — see
-[config.example.toml](config.example.toml).
 
 ## Fixed modal machinery (not rebindable)
 
@@ -386,15 +352,13 @@ that never wants a Dock starts — see
 ## Mouse, for completeness
 
 - Right-click the desktop: the root menu — `Terminal`, `Applications`,
-  `Theme`, `Wallpaper`, `Dock`, then `Omarchy Bar` (when the session
+  `Theme`, `Wallpaper`, then `Omarchy Bar` (when the session
   hosts Omarchy's shell) and the `Omarchy` submenu (when Omarchy is
-  installed), and `Exit`. `Dock` and `Omarchy Bar` are bulleted when
+  installed), and `Exit`. `Omarchy Bar` is bulleted when
   that column is on screen, the way the `Theme` and `Wallpaper` rows
   mark the current choice.
 - Right-click any titlebar: the window commands menu.
-- Drag a miniaturized window's icon tile onto the launcher strip to
-  pin its application; click a pin to launch or focus; drag off to
-  unpin.
+
 
 ## Rebinding
 

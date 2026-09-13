@@ -1,4 +1,4 @@
-//! Repeated real-client, Overview, dock, theme, IPC and screencopy churn.
+//! Repeated real-client, Overview, theme, IPC and screencopy churn.
 //!
 //! The normal e2e suite runs a short smoke test. For a sustained run:
 //! CHONKSTEP_SOAK_SECONDS=1200 scripts/e2e.sh --headless --release --test stability_soak
@@ -13,13 +13,11 @@ use chonk_testkit::{keys, poll_until, Session, SessionOptions, World};
 use serde_json::{json, Value};
 
 const EVENT: Duration = Duration::from_secs(15);
-const KEY_D: u32 = 32;
 
 fn config(theme: &str) -> String {
     format!(
         "omarchy_shell = false\nomarchy_menu = false\nhyprland_config = false\n\
-         restore_session = false\nshow_dock = true\nscale = 1\ntheme = {theme:?}\n\
-         [keybindings]\n\"super+d\" = \"toggle-dock\"\n"
+         restore_session = false\nscale = 1\ntheme = {theme:?}\n"
     )
 }
 
@@ -52,11 +50,6 @@ fn cycle(session: &mut Session, cycle: usize, initial_windows: usize) {
     }
     session.door().tap_key(keys::ESC).unwrap();
     wait_world(session, "Overview to close", |world| !overview_open(world));
-
-    session.door().chord(keys::LEFTMETA, KEY_D).unwrap();
-    wait_world(session, "dock to hide", |world| world.dock().is_none());
-    session.door().chord(keys::LEFTMETA, KEY_D).unwrap();
-    wait_world(session, "dock to return", |world| world.dock().is_some());
 
     // Poll through the actual Hyprland-compatible socket, not a mock.
     let signature = session.hyprland_signature().expect("Hyprland IPC enabled");
@@ -196,8 +189,7 @@ fn real_desktop_churn_keeps_resources_bounded_and_protocols_responsive() {
         .unwrap_or(0);
     assert!(seconds <= 7200, "split longer soak runs into individually bounded two-hour runs");
     let mut session = Session::boot("stability-soak", SessionOptions {
-        config_extra: "omarchy_menu = false\nhyprland_config = false\nrestore_session = false\n\
-            [keybindings]\n\"super+d\" = \"toggle-dock\"\n".into(),
+        config_extra: "omarchy_menu = false\nhyprland_config = false\nrestore_session = false\n".into(),
         scale: Some(1.0),
         env: vec![("CHONKSTEP_HYPRLAND_IPC".into(), "1".into())],
         ..Default::default()

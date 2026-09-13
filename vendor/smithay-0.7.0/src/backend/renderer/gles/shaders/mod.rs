@@ -76,7 +76,13 @@ pub unsafe fn link_program(
     frag_src: &str,
 ) -> Result<ffi::types::GLuint, GlesError> {
     let vert = compile_shader(gl, ffi::VERTEX_SHADER, vert_src)?;
-    let frag = compile_shader(gl, ffi::FRAGMENT_SHADER, frag_src)?;
+    let frag = match compile_shader(gl, ffi::FRAGMENT_SHADER, frag_src) {
+        Ok(fragment) => fragment,
+        Err(error) => {
+            gl.DeleteShader(vert);
+            return Err(error);
+        }
+    };
     let program = gl.CreateProgram();
     gl.AttachShader(program, vert);
     gl.AttachShader(program, frag);

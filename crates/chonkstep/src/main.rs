@@ -1,13 +1,3 @@
-//! The X11 chonkstep binary: a thin event-loop driver over the
-//! backend-generic desktop shell in `chonk-shell`. Everything the
-//! desktop *is* — dock, Clip, launcher strip, menus, wallpaper, theme
-//! semantics — lives in [`chonk_shell::shell::Shell`]; this binary owns
-//! only what is irreducibly process- or X11-side: startup wiring, the
-//! `poll`-driven loop with its motion coalescing, scale/theme/focus
-//! precedence (env over config), the hot-restart `exec`, and process
-//! exit. The future Wayland binary mirrors exactly this file over the
-//! same `Shell`, which is what keeps the two desktops identical by
-//! construction rather than by porting discipline.
 
 use std::time::{Duration, Instant};
 
@@ -15,7 +5,6 @@ use wm_core::{Backend, BackendEvent, WindowManager};
 use wm_theme::FontState;
 use wm_x11::X11Backend;
 
-use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::spawn;
 use chonk_shell::startup::{
@@ -171,12 +160,6 @@ fn main() {
     let fonts = FontState::new();
     let engine = state.decoration_engine(fonts.clone());
 
-    // The entire desktop shell — dock, Clip, launcher strip, menus,
-    // wallpaper, the `.desktop` application index — is built here in
-    // one step, against the mutable backend, before `WindowManager::new`
-    // takes ownership of it below. From here on the shell reaches the
-    // backend only through the `WindowManager` handed to each of its
-    // methods, which is the shape both backend binaries share.
     let mut shell = Shell::new(&mut backend, &state, fonts);
 
     // The wallpaper pixmap `Shell::new` just published (via its
@@ -246,12 +229,6 @@ fn main() {
     let mut wait_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
     let mut request_poller = SessionRequestPoller::new(Instant::now());
     loop {
-        // The cheap request first. A reload keeps every window, every
-        // client connection and every dockapp; a restart keeps the
-        // windows (via the SaveSet) but costs a process image. Checking
-        // reload first means that when both markers somehow exist, the
-        // session applies the config it was asked to apply before
-        // throwing itself away — the restart then starts from it.
         let requests = request_poller.poll(Instant::now());
         if requests.reload {
             tracing::info!("reload requested — re-reading the config and applying it in place");
@@ -274,7 +251,7 @@ fn main() {
             // out there. `Restarting` leaves them running and hands
             // their tokens forward, so they are readopted rather than
             // relaunched. See `Shell::shut_down`.
-            shell.shut_down(Farewell::Restarting);
+            shell.shut_down();
             restart_in_place();
         }
 
@@ -410,17 +387,8 @@ fn main() {
             break;
         }
 
-        // Scroll drains beside the clicks, and separately from them:
-        // X11 reports a wheel as button 4/5 press/release pairs, which
-        // the backend turns into notch counts rather than clicks (see
-        // `Backend::take_shell_scroll`), so nothing here can
-        // double-count the same physical input. Queued rather than
-        // coalesced, unlike motion, because every notch is its own
-        // command — three notches on a volume tile is three steps, and
-        // keeping only the last would swallow input the user gave.
-        while let Some((surface, local, delta)) = wm.backend_mut().take_shell_scroll() {
-            shell.on_shell_scroll(&mut wm, surface, local, delta);
-        }
+        // No persistent shell widgets consume wheel events.
+        while wm.backend_mut().take_shell_scroll().is_some() {}
 
         // No separate `take_shell_motion` drain here: the shell drains
         // it itself inside `on_motion` (menu hover rides the same
@@ -448,24 +416,6 @@ fn main() {
             publish_appearance(&mut xsettings, shell.session_state());
         }
 
-        // Blocks until the X11 socket actually has something to read,
-        // instead of a fixed sleep — the entire reason drags/resizes
-        // used to feel like they were catching up to the cursor in
-        // steps: with a flat `sleep(100ms)` here, no input got
-        // processed for up to 100ms at a time no matter how fast the
-        // pointer was moving. The shell supplies the bound: exact
-        // menu/dockapp deadlines win, with a conservative idle ceiling
-        // for sampler results and marker files. Real input wakes this
-        // immediately regardless.
-        // The X socket plus everything the shell is waiting on that
-        // the display server knows nothing about: the dockapp
-        // listener, and one fd per connected dockapp. Rebuilt every
-        // pass because the set changes as dockapps connect, die and
-        // restart — a stale fd here is at best a spurious wakeup, and
-        // at worst a wait on a descriptor this process has since reused
-        // for something else. The `Vec` lives outside the loop so the
-        // rebuild is a `clear` and some pushes rather than an
-        // allocation on every wake.
         wait_fds.clear();
         wait_fds.push(wm.backend().connection_fd());
         shell.extend_extra_poll_fds(&mut wait_fds);
@@ -480,30 +430,9 @@ fn main() {
     // the dockapps this session launched are its responsibility and
     // nothing else will collect them. Nothing is handed forward: there
     // is no incoming shell to hand it to.
-    shell.shut_down(Farewell::SessionOver);
+    shell.shut_down();
 }
 
-/// Blocks the calling thread until one of `fds` is readable or
-/// `timeout` elapses, whichever comes first — the integration pattern
-/// x11rb's own `event_loop_integration` module docs recommend for
-/// exactly this (`conn.stream().as_raw_fd()` + an external `poll`),
-/// rather than guessing at a fixed sleep duration that either wastes
-/// latency (too long) or busy-loops (too short).
-///
-/// It takes a *set* of descriptors because the X socket is no longer
-/// the only thing this session waits on: an out-of-process dock tile
-/// pushes its pixels down a Unix socket the display server knows
-/// nothing about, and a frame that arrived has to wake this loop the
-/// same way an X event does. That is the entire X11-side cost of
-/// dockapps — everything else about them is backend-generic, because a
-/// dockapp is not a display-server client at all.
-///
-/// Nothing is read here. `poll` only says *that* something is ready;
-/// which fd it was does not matter, because the loop's next pass
-/// services every dockapp regardless and each of those reads until
-/// `EAGAIN`. Skipping the readiness bookkeeping costs one wasted pass
-/// over a handful of sockets and saves this function from having to
-/// know what any of them are.
 fn wait_for_activity(fds: &[std::os::unix::io::RawFd], timeout: Duration) {
     if fds.is_empty() {
         return;
@@ -562,7 +491,7 @@ fn exit_requested(shell: &mut Shell<X11Backend>, outcome: ShellOutcome) -> bool 
             // has to let go of its dockapps first — leaving them
             // running, and handing their tokens to the process that is
             // about to replace it. See `Shell::shut_down`.
-            shell.shut_down(Farewell::Restarting);
+            shell.shut_down();
             restart_in_place()
         }
     }

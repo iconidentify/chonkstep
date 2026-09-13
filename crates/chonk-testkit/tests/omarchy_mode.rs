@@ -253,7 +253,7 @@ fn an_explicit_key_beats_the_posture_on_a_running_desk() {
     .unwrap();
 
     // The Dock is back, in its corner, reserving its strip.
-    let dock = session.wait_for_dock_at(0, 0).expect("`show_dock = true` must beat the posture's default");
+    assert!(session.world().unwrap().shells.is_empty(), "legacy show_dock cannot recreate retired chrome");
 
     // ...and so are the chonkstep chords, while the Omarchy ones are
     // gone: `keymap = "chonkstep"` took the whole table back, so
@@ -283,7 +283,6 @@ fn an_explicit_key_beats_the_posture_on_a_running_desk() {
     // The posture's other choices are untouched by those two
     // overrides: still no remembered Dock choice (the config decided),
     // and the Dock is exactly where a chonkstep desk puts it.
-    assert_eq!(dock.y, 0);
     assert!(!session.state_file("dock-visibility").exists());
 }
 

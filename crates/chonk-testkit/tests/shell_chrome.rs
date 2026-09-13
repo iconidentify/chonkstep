@@ -52,7 +52,7 @@ fn popup_pixels(session: &mut Session, popup: &ShellInfo, style: &str, scale: u3
 
 #[test]
 #[ignore = "real nested desktop: scripts/e2e.sh --headless --test shell_chrome"]
-fn menus_switcher_overview_icons_and_live_reload_follow_the_style_end_to_end() {
+fn menus_switcher_overview_minimize_and_live_reload_follow_the_style_end_to_end() {
     assert!(chonk_testkit::require_client("foot"));
     let fonts = FontState::new();
     for scale in [1, 2] {
@@ -102,22 +102,12 @@ fn menus_switcher_overview_icons_and_live_reload_follow_the_style_end_to_end() {
             let row = expected.item_rects[1];
             session.door().click((popup.x + row.pos.x + row.size.w as i32 / 2) as f64,
                 (popup.y + row.pos.y + row.size.h as i32 / 2) as f64).unwrap();
-            let icon = poll_until(WAIT, "window minimizes to its desktop icon", || {
+            poll_until(WAIT, "minimize to unmap without creating a desktop tile", || {
                 let world = session.world().ok()?;
-                if world.frame_of(ids[1])?.mapped { return None; }
-                world.shells.iter().find(|s| s.mapped && !s.above && s.w == 56 * scale && s.h == s.w).cloned()
+                (!world.frame_of(ids[1])?.mapped && world.shells.iter().all(|s| !s.mapped)).then_some(())
             }).unwrap();
-            session.door().motion(0.0, 0.0).unwrap();
-            let shot = session.screenshot(&name("minimized-icon")).unwrap();
-            let expected_icon = chrome.icon(&theme, &mut fonts.system(), &mut fonts.swash(), icon.w, "Notes", None);
-            for y in icon.h.saturating_sub(10 * scale)..icon.h { for x in 0..icon.w {
-                let pixel = &expected_icon.pixels[((y * icon.w + x) * 4) as usize..][..4];
-                let (gx, gy) = (icon.x as u32 + x, icon.y as u32 + y);
-                if pixel[3] == 0 { assert_eq!(shot.pixel(gx, gy), background.pixel(gx, gy)); }
-                else { assert_eq!(shot.pixel(gx, gy).as_slice(), pixel, "minimized caption/chrome ({x},{y})"); }
-            } }
-            session.door().click((icon.x + icon.w as i32 / 2) as f64, (icon.y + icon.h as i32 / 2) as f64).unwrap();
-            poll_until(WAIT, "icon restores the same client", || {
+            session.door().chord(56, 15).unwrap();
+            poll_until(WAIT, "Alt-Tab to restore the same client", || {
                 session.world().ok()?.frames.iter().find(|f| f.window == ids[1] && f.mapped).map(|_| ())
             }).unwrap();
 

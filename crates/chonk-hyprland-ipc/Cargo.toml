@@ -35,4 +35,4 @@ tracing = "0.1"
 # `SOCK_NONBLOCK` from `socket(2)` and `accept4(2)` rather than from a
 # later `fcntl`. Writing a second copy of that would mean maintaining a
 # second copy of its bugs.
-chonk-dock-proto = { path = "../chonk-dock-proto" }
+chonk-ipc = { path = "../chonk-ipc" }

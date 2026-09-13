@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use wm_config::Action;
 use wm_core::{
     Backend, BackendEvent, ClientFlags, ClientId, KeyCombo, Lifecycle, MaximizeDirections, MonitorInfo, MouseButton,
-    Notification, ScrollDelta, WindowManager,
+    Notification, WindowManager,
 };
 use wm_theme::cascade::MenuKey;
 use wm_theme::{FontState, Theme};
@@ -25,19 +25,15 @@ use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 use crate::apps::{self, AppEntry};
 use crate::control::{self, ControlSocket};
 use crate::desktop::{
-    Desktop, EdgeReservation, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext,
+    Desktop, EdgeReservation, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext,
 };
-use crate::dockapp::Farewell;
-use crate::launchdock::{LaunchDock, LaunchDockAction};
 use crate::overview::{OverviewHit, OverviewItem, OverviewRelease};
 use crate::session_layout::{
     relative_to_monitor, restored_geometry, restored_on_monitor, RelaunchPlan, SessionLayout,
     HomeGeometryRecord, SpatialRecord, WindowRecord,
 };
 use crate::startup::SessionState;
-use crate::widgets::DockInput;
 use crate::{spawn, theme_select, wallpaper};
-use chonk_dock_proto::wire::PanelCloseReason;
 
 /// What the binary's event loop must do after handing an event to the
 /// shell. The shell never exits or re-execs the process itself — those
@@ -381,20 +377,6 @@ fn spawn_foot(args: Vec<String>, scale: f32) -> Option<spawn::SpawnedChild> {
     spawn::spawn_supervised("foot", &arg_refs, &env, &[])
 }
 
-/// Runs one entry from `[commands]`, detached.
-///
-/// Detached rather than supervised, and that is the whole design of
-/// this verb. A supervised child is one the desktop intends to keep
-/// talking to — the terminals it retints by signal, the dockapps it
-/// restarts. A command the user named is none of those: it is a thing
-/// they asked to happen, which then belongs to them. Supervising it
-/// would mean holding a reaper thread per press for a process the
-/// desktop has no opinion about, and would make a long-lived one
-/// (`omarchy-launch-shell`, say) look like a leak.
-///
-/// The scale goes in for the same reason it does everywhere else here:
-/// a launched program that guesses its own cursor size guesses wrong on
-/// a fractional display.
 fn run_named_command(name: &str, argv: &[String], scale: f32) {
     let Some((program, args)) = argv.split_first() else {
         // `argv_from_value` rejects empty command lines, so reaching
@@ -411,20 +393,6 @@ fn run_named_command(name: &str, argv: &[String], scale: f32) {
     }
 }
 
-/// Launches one `.desktop` entry — the shared dispatch behind both the
-/// root menu's Applications submenu and the launcher dock's tiles, so
-/// the two gestures can never disagree on how an entry runs.
-/// `Terminal=true` entries run inside the themed terminal, so a TUI app
-/// gets the exact font/geometry/palette the Terminal menu item itself
-/// would. foot takes the program to exec as its trailing arguments and
-/// accepts `-e` as an explicit no-op for xterm compatibility, so the
-/// separator is kept: it costs nothing and keeps the command line
-/// readable as "terminal options, then the thing to run".
-/// An empty parsed command line — a malformed entry the scanner let
-/// through — is a logged no-op, never a panic.
-/// Returns a supervised handle when the launch went through the themed
-/// terminal (`Terminal=true`), so appearance switches can retint it —
-/// `None` for GUI launches and failures.
 fn launch_app(
     configured_terminal: Option<&[String]>,
     entry: &AppEntry,
@@ -543,36 +511,6 @@ fn omarchy_menu_for(state: &SessionState) -> Option<crate::omarchy_menu::Omarchy
     menu
 }
 
-/// The environment every detached GUI launch from the shell carries:
-/// the look this desktop is wearing, toolkit scaling, and the pointer
-/// size — all in the child's own environment rather than the
-/// session's, because any of them can change while the session runs
-/// and the process environment cannot safely be rewritten once threads
-/// exist. See `startup::xcursor_size_env`.
-///
-/// **The look first, because it is the part a chonkstep app reads.**
-/// `CHONKSTEP_THEME` / `CHONKSTEP_APPEARANCE` / `CHONKSTEP_SCALE` are
-/// the published channel by which an SDK app (`chonk_ui::active_theme`,
-/// `chonk_ui::scale`) learns what the desk looks like; with them absent
-/// it falls back to NeXTSTEP Classic at 1x, which is how a first-party
-/// dialog ends up in different clothes from the desktop that opened
-/// it. Every GUI the shell starts — the About box, an Omarchy menu
-/// action, and a window a dock instrument's panel opens — goes through
-/// here so that cannot happen in one place and not another.
-///
-/// The toolkit scale variables ride the X11 stack only — the reasoning
-/// is spelled out at length in `launch_app`, whose fixups these are.
-/// The pointer size rides both, but the *value* is per-stack: a
-/// Wayland client treats `XCURSOR_SIZE` as a logical size and
-/// multiplies the output scale in itself, so it gets the unscaled
-/// base, while an X11 client has nothing to multiply by and gets the
-/// pre-multiplied size. `xcursor_size_env` owns that rule.
-/// `appearance` is an `Option` for the same reason the dockapp launch
-/// reads it from the published state file and omits it when absent:
-/// saying nothing is better than guessing a mood, and the callers that
-/// have the live value (the desktop, which is wearing it) pass `Some`
-/// while the ones that would have to go and look pass whatever the
-/// published file says.
 pub(crate) fn launch_env(
     theme_id: &str,
     appearance: Option<wm_theme::Appearance>,
@@ -580,8 +518,6 @@ pub(crate) fn launch_env(
 ) -> Vec<(String, String)> {
     let mut env = vec![
         ("CHONKSTEP_THEME".to_string(), theme_id.to_string()),
-        // Four decimals, exactly as the dockapp launch writes it — one
-        // format for one number, so a child cannot parse two.
         ("CHONKSTEP_SCALE".to_string(), format!("{scale:.4}")),
     ];
     if let Some(appearance) = appearance {
@@ -801,38 +737,8 @@ fn root_action_outcome(action: &RootMenuAction) -> ShellOutcome {
         | RootMenuAction::LaunchApp(_)
         | RootMenuAction::OmarchyCommand { .. }
         | RootMenuAction::ToggleOmarchyBar
-        | RootMenuAction::ToggleDock
         | RootMenuAction::SetWallpaper(_) => ShellOutcome::Continue,
     }
-}
-
-/// The launcher strip's view of what is currently running: one
-/// `(WM_CLASS class, window id)` pair per managed client —
-/// `iter_clients` only ever yields live clients, so no lifecycle
-/// filtering happens here. The id crosses to the strip and back as a
-/// plain `B::WindowId`: the strip hands it straight back through
-/// `LaunchDockAction::Focus`, where the dispatch feeds it to the same
-/// `ActivateRequested` path a pager's `_NET_ACTIVE_WINDOW` message
-/// takes.
-fn running_pairs<B: Backend>(wm: &WindowManager<B>) -> Vec<(String, B::WindowId)> {
-    wm.iter_clients().map(|(_, client)| (client.class.clone(), client.window)).collect()
-}
-
-/// Exact borrowed comparison for the launcher strip's cached client
-/// identities. Window geometry and state deliberately do not enter:
-/// neither changes which pinned application's lamp is lit or which
-/// window a click focuses.
-fn running_matches_clients<B: Backend>(wm: &WindowManager<B>, running: &[(String, B::WindowId)]) -> bool {
-    let mut clients = wm.iter_clients();
-    for (class, window) in running {
-        let Some((_, client)) = clients.next() else {
-            return false;
-        };
-        if class != &client.class || *window != client.window {
-            return false;
-        }
-    }
-    clients.next().is_none()
 }
 
 /// The live client set as session-layout records — what the layout
@@ -992,13 +898,6 @@ fn layout_matches_clients<B: Backend>(wm: &WindowManager<B>, records: &[WindowRe
     clients.next().is_none()
 }
 
-/// Longest an otherwise idle backend may sleep before polling the few
-/// housekeeping inputs which have no file descriptor (sampler results,
-/// reload/appearance markers, and one-second configuration watches).
-/// Pointer, client, XWayland, control and dockapp activity wakes both
-/// backend loops immediately. Menu, dockapp and Wayland key-repeat
-/// deadlines shorten this bound independently, so 100 ms is not input
-/// or animation latency.
 const MAX_IDLE_HOUSEKEEPING: Duration = crate::startup::SESSION_REQUEST_POLL_INTERVAL;
 
 fn bounded_housekeeping_wait(now: Instant, deadline: Option<Instant>) -> Duration {
@@ -1034,16 +933,6 @@ fn primary_rect(monitors: &[MonitorInfo], screen: Size) -> Rect {
         .unwrap_or(Rect { pos: Point::new(0, 0), size: screen })
 }
 
-/// The one desktop shell, orchestrated: the Desktop (dock, Clip, root
-/// and window menus, icon tiles, wallpaper), the launcher strip, the
-/// scanned `.desktop` index, the active theme, and the configured
-/// keymap, behind the handful of entry points a backend binary's event
-/// loop drives. The fields are exactly the state the original event
-/// loop threaded between its handler functions; the methods are those
-/// handlers, verbatim in behavior.
-/// Result of resolving one intercepted key press. `Consumed` is used
-/// by modal shell UI that owns a key without running a configurable
-/// action, so the event does not leak through to the focused client.
 pub enum KeyResolution {
     Action(Action),
     Menu(MenuKey),
@@ -1052,14 +941,6 @@ pub enum KeyResolution {
 
 pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     desktop: Desktop<B>,
-    launchdock: LaunchDock<B>,
-    /// The `.desktop` application index, scanned once at startup — one
-    /// vec, three consumers that must agree on entry positions: the
-    /// desktop keeps a clone for the root menu's Applications submenu
-    /// (`RootMenuAction::LaunchApp(i)` indexes it), the launcher dock
-    /// resolves its persisted pins against it, and the launch dispatch
-    /// in `on_shell_click` indexes this copy again when either of
-    /// those fires.
     apps: Vec<AppEntry>,
     /// Everything a live change can alter, as resolved — the source
     /// `theme` below is derived from, and the base every later
@@ -1094,7 +975,6 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// Owned identities last reconciled into the launcher strip's
     /// running lamps. Most ticks prove these still match through
     /// borrowed comparisons and avoid allocating/cloning them again.
-    running_clients: Vec<(String, B::WindowId)>,
     /// The key press an open Overview session intercepted, parked
     /// between the two halves of the binaries' key protocol:
     /// [`Shell::keymap_action`] resolves a combo, [`Shell::run_action`]
@@ -1218,16 +1098,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.fonts.cache_statistics()
     }
 
-    /// Builds the whole shell against an already-connected backend:
-    /// scans applications, raises the Dock/Clip/launcher chrome,
-    /// compiles the configured keymap and takes its key grabs.
-    ///
-    /// Takes the resolved [`SessionState`] rather than a `Config` plus
-    /// a theme plus a scale, so that the values a fresh session starts
-    /// from and the values [`Shell::apply_session_state`] moves it to
-    /// are the same type, resolved by the same rules. `fonts` is the
-    /// font state the caller's decoration engine was built with — the
-    /// shell needs it to build that engine's replacements.
     pub fn new(backend: &mut B, state: &SessionState, fonts: FontState) -> Self {
         let theme = state.theme();
         let scale = state.scale;
@@ -1248,26 +1118,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             Desktop::new(backend, screen, primary, scale, &theme, state.appearance, apps.clone(), fonts.clone());
         desktop.set_chrome(backend, &theme, state.decoration_style, state.scale);
         desktop.set_omarchy_menu(omarchy_menu_for(state));
-        // The control socket, bound here — after the dock socket it
-        // sits beside, and before the first process meant to see it
-        // (the layout relaunch and autostart below; dockapp tiles,
-        // already spawned by `Desktop::new`, are deliberately kept from
-        // it — see `spawn::DOCKAPP_WITHHELD_ENV`), so
-        // `CHONKSTEP_CONTROL_SOCKET` is in every such child's environment.
-        // Binding declares the path to `spawn`, which is what puts it
-        // there; a failed bind declares nothing and the session simply
-        // has no control socket.
-        let control = ControlSocket::new(&crate::dockapp::current_display());
-        // The launcher strip below the Clip. Its tile size mirrors
-        // `Desktop::new`'s own derivation (56px at 1x, scaled, floored
-        // at 16) rather than inventing a second number: the strip's
-        // tiles must read as the same family as the Clip above them
-        // and the miniwindow icon tiles pins are dropped from.
-        // It is handed the *primary's* size rather than the screen's,
-        // so the strip's height clamp is measured against the head it
-        // sits on rather than against every head at once.
-        let launchdock =
-            LaunchDock::new(backend, &theme, primary, crate::desktop::tile_px(scale), &apps, fonts.clone());
+        let control = ControlSocket::new(&control::current_display());
 
         // Session-layout restore, opt-in and only for a genuinely new
         // session: a hot restart on the X11 stack keeps every client
@@ -1326,22 +1177,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let hosted = matches!(verdict, crate::omarchy_shell::Verdict::Launch(_));
         desktop
             .set_omarchy_bar(backend, hosted.then(|| crate::omarchy_shell::BarVisibility::resolve(state.omarchy_bar)));
-        // And this desk's own column, beside the guest's bar and for
-        // the same reason: settled before the first frame, so a session
-        // configured (or remembered) dockless never shows the Dock at
-        // all. `Desktop::new` created and mapped it a moment ago; this
-        // is where the resolved answer is applied, and the workareas
-        // the binary pushes after `Shell::new` returns are composed
-        // from `primary_workarea`, which by then already knows.
-        desktop.set_dock_visibility(backend, &theme, state.dock);
         host_omarchy_shell(&verdict, &theme.id, state.appearance, state.scale);
 
-        // Publish the resolved appearance so the contract's reader half
-        // (`$XDG_STATE_HOME/chonkstep/appearance`) is present from the
-        // session's first frame — a dockapp that polls it must never
-        // find nothing there. Publishing is not propagating: GSettings
-        // is only touched when the mode actually *changes*, so booting
-        // rewrites no one's preferences.
         crate::appearance::publish(state.appearance);
 
         // Take the configured grabs through the same delta the applier
@@ -1357,7 +1194,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
 
         Self {
             desktop,
-            launchdock,
             apps,
             keymap: build_keymap(&state.keybindings),
             release_keymap: state
@@ -1380,7 +1216,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             grabbed: to_grab,
             layout,
             restore_focus: None,
-            running_clients: Vec::new(),
             terminals,
             state: state.clone(),
             theme,
@@ -1401,31 +1236,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
     }
 
-    /// Moves this session to `next` — the one path a theme pick, a UI
-    /// scale change and a config-file reload all take.
-    ///
-    /// Ordering is load-bearing and the reason this is one function
-    /// rather than a handful the callers compose:
-    ///
-    /// 1. Policy first, unconditionally. These are plain setters with
-    ///    nothing to repaint, and they must land even when the look is
-    ///    identical — a reload that only changed `edge_resistance` has
-    ///    no theme work to do at all.
-    /// 2. Metrics next, before anything paints: `Desktop::set_scale`
-    ///    re-derives the tile edge every later step measures against.
-    /// 3. The decoration engine, which re-lays-out every managed client
-    ///    as part of the swap (`WindowManager::set_theme_engine`).
-    /// 4. The shell's own chrome, which is not drawn through that
-    ///    engine and so has to be told separately.
-    /// 5. Workareas last, because the dock's height is an input to them
-    ///    and step 4 is what settles it.
-    ///
-    /// Dockapps are deliberately absent from that list. They already
-    /// poll the tile edge, the scale and the whole theme once per
-    /// servicing pass and push a `ThemeChanged` when any of it moves,
-    /// so updating `Desktop`'s fields in step 2 *is* telling them —
-    /// later in this same servicing pass, with no call here that a fourth trigger
-    /// could forget to make.
     pub fn apply_session_state(&mut self, wm: &mut WindowManager<B>, next: SessionState) {
         self.apply_session_state_inner(wm, next, true);
     }
@@ -1438,7 +1248,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.apply_session_state_inner(wm, self.state.clone(), false);
     }
 
-    fn apply_session_state_inner(&mut self, wm: &mut WindowManager<B>, next: SessionState, reload_menu: bool) {
+    fn apply_session_state_inner(&mut self, wm: &mut WindowManager<B>, mut next: SessionState, reload_menu: bool) {
+        next.decoration_style = next.base_theme.resolve_style(next.decoration_style_policy);
         if next.interaction.mode == wm_core::InteractionMode::Mac && !wm.backend().supports_mac_interaction() {
             tracing::warn!("Mac interaction requires chonkstep-wayland (including XWayland apps); retaining working configuration");
             return;
@@ -1534,6 +1345,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         if scale_changed || theme_changed || style_changed || appearance_changed || following_changed {
             self.control_theme_revision = self.control_theme_revision.wrapping_add(1);
         }
+        if self.state.base_theme.id != next.base_theme.id {
+            self.desktop.follow_theme_wallpaper(&self.state.base_theme.wallpaper, &next.base_theme.wallpaper);
+        }
         self.state = next;
         if !scale_changed && !theme_changed && !style_changed {
             // Nothing that is drawn has moved. Repainting anyway would
@@ -1544,12 +1358,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.desktop.set_theme_id(self.theme.id.clone());
         self.desktop.set_chrome(wm.backend_mut(), &self.theme, self.state.decoration_style, self.state.scale);
         if appearance_changed {
-            // Before the relayout below repaints anything: the desktop
-            // must already know which rendition of the wallpaper to
-            // compose, and the published file must already say the new
-            // mode by the time the first repainted frame is visible
-            // (a dockapp reading it must never see the old word over
-            // the new desktop).
             self.desktop.set_appearance(self.state.appearance);
             crate::appearance::publish(self.state.appearance);
             // Running terminals follow by signal, everything foreign
@@ -1578,22 +1386,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             wm.backend_mut().set_ui_scale(self.state.scale);
         }
 
-        // 4. The shell's own chrome. Icon-tile thumbnails are gathered
-        //    before the backend is borrowed mutably — see
-        //    `Desktop::icon_clients`.
-        let previews: Vec<(ClientId, Option<DecorationBuffer>)> =
-            self.desktop.icon_clients().into_iter().map(|id| (id, wm.client_preview(id))).collect();
-        let tile = crate::desktop::tile_px(self.state.scale);
-        self.desktop.relayout(wm.backend_mut(), &self.theme, &previews);
-        self.launchdock.restyle(wm.backend_mut(), &self.theme, tile);
-        // Whether there is a Dock at all, re-resolved with everything
-        // else: a reload is how an edit to `show_dock` reaches a
-        // running session. Idempotent, so the theme picks that also
-        // come through here cost a comparison. Before the workareas
-        // below, because it is one of the two things that decide them.
-        self.desktop.set_dock_visibility(wm.backend_mut(), &self.theme, self.state.dock);
-
-        // 5. Workareas, now that the dock has settled its height.
+        // Rebuild transient navigation on demand after a style change.
+        self.desktop.relayout(wm.backend_mut());
         self.apply_workareas(wm);
     }
 
@@ -1652,15 +1446,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             return;
         }
         if self.state.following.is_some() {
-            // An Omarchy theme has exactly one rendition, and its mode
-            // is the session's appearance for as long as the session
-            // follows it (`startup::resolve_look`). Re-deriving a
-            // second mood would paint colours the theme's author never
-            // chose while every Omarchy terminal beside them kept the
-            // real ones; flipping the published mode over unchanged
-            // chrome would desynchronise dockapps and GTK from the
-            // desk. So the request is declined, out loud. Omarchy's own
-            // light/dark switch is to set a light or dark theme.
             tracing::warn!(
                 requested = mode.name(),
                 current = self.state.appearance.name(),
@@ -1770,39 +1555,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         wm.set_workareas(areas);
     }
 
-    /// Tells the Dock what another shell has claimed off the primary's
-    /// top and right edges, so it can step out of the way — the Wayland
-    /// binary calls this with the layer-shell exclusive zones before it
-    /// composes the workareas, because the answer changes what
-    /// [`Shell::workarea`] says. Returns whether anything moved; a
-    /// caller that re-pushes the same zones every dispatch pass pays
-    /// for nothing.
-    pub fn set_edge_reservation(&mut self, wm: &mut WindowManager<B>, reserved: EdgeReservation) -> bool {
-        self.desktop.set_reservation(wm.backend_mut(), &self.theme, reserved)
-    }
-
-    /// Flips the Dock's visibility and pushes the workareas that
-    /// change with it.
-    ///
-    /// The second half is the whole point. Hiding the Dock gives its
-    /// column back to the primary monitor's workarea, and a workarea
-    /// nobody re-pushes is a strip of screen no maximized window will
-    /// ever use, with nothing drawn in it to explain why — the bug this
-    /// feature is one line away from at every call site, which is why
-    /// there is exactly one call site and both halves are inside it.
-    /// `wm.set_workareas` re-derives every maximized and fullscreen
-    /// window against the new rects, so the windows already on screen
-    /// grow into the strip (or out of it) without being touched.
-    fn toggle_dock(&mut self, wm: &mut WindowManager<B>) {
-        if self.desktop.toggle_dock(wm.backend_mut(), &self.theme) {
-            self.apply_workareas(wm);
-        }
-    }
-
-    /// Whether the Dock is on screen — what the `Dock` menu row
-    /// bullets, exposed for the binary's own reporting.
-    pub fn dock_visibility(&self) -> crate::desktop::DockVisibility {
-        self.desktop.dock_visibility()
+    pub fn set_edge_reservation(&mut self, _wm: &mut WindowManager<B>, reserved: EdgeReservation) -> bool {
+        self.desktop.set_reservation(reserved)
     }
 
     /// Resolves a configured key combo to its action, for the binary's
@@ -1842,7 +1596,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     XK_RIGHT => Some(MenuKey::Right),
                     XK_RETURN | XK_KP_ENTER => Some(MenuKey::Enter),
                     0x20 => Some(MenuKey::Space),
-                    crate::desktop::PANEL_DISMISS_KEYSYM => {
+                    crate::desktop::MENU_DISMISS_KEYSYM => {
                         self.transient_escape = true;
                         None
                     }
@@ -1856,9 +1610,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // configured binding or the focused client. The shared grab is
         // held only while a menu or instrument panel is visible, and
         // `Consumed` makes that ownership explicit to both event loops.
-        if (self.desktop.instrument_panel_visible() || self.desktop.menu_visible())
+        if self.desktop.menu_visible()
             && combo.modifiers.is_empty()
-            && combo.keysym == crate::desktop::PANEL_DISMISS_KEYSYM
+            && combo.keysym == crate::desktop::MENU_DISMISS_KEYSYM
         {
             self.transient_escape = true;
             return Some(KeyResolution::Consumed);
@@ -1913,16 +1667,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.release_keymap.get(combo).cloned()
     }
 
-    /// Runs one configured keybinding action (the binary already
-    /// resolved the combo). Window-targeted actions operate on the
-    /// focused client and are silent no-ops when nothing is focused —
-    /// pressing "close" over an empty desktop should do exactly
-    /// nothing, not warn. Workspace moves guard the left edge
-    /// (workspace 0, matching the Clip's rewind arrow); the core's
-    /// workspace ceiling guards the right edge while the row grows on
-    /// demand below it. The match is deliberately exhaustive: a new
-    /// `Action` variant in `wm-config` fails compilation here instead
-    /// of silently binding to nothing.
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
             Action::Capture(mode) => return ShellOutcome::Capture(*mode),
@@ -2084,7 +1828,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                         // Escape cancels the drag first; the panel remains for
                         // another attempt. Other keys cannot activate a card or
                         // start a second modal operation under a held pointer.
-                        if key.is_some_and(|combo| combo.keysym == crate::desktop::PANEL_DISMISS_KEYSYM)
+                        if key.is_some_and(|combo| combo.keysym == crate::desktop::MENU_DISMISS_KEYSYM)
                             && !self.desktop.cancel_overview_pointer(wm.backend_mut(), &self.theme) {
                             self.close_overview(wm);
                         }
@@ -2126,21 +1870,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.carry_focused_to_workspace(wm.current_workspace() + 1);
                 }
             }
-            // Re-read the config file and apply it here and now:
-            // theme, UI scale, focus policy, placement, edge resistance
-            // and these bindings themselves, with nothing closed and
-            // nothing re-execed. A broken file at this point is not
-            // fatal and never was — `wm_config::load` warns and hands
-            // back the defaults — but note what that means for a live
-            // reload specifically: a typo does not leave the session
-            // alone, it moves the session to the defaults. That is the
-            // same thing a restart with a broken file has always done,
-            // and the warning it logs is the same one.
-            // Show or hide the Dock from the keyboard — the same
-            // choice the root menu's `Dock` row makes, through the
-            // same one method, so the two cannot disagree about
-            // whether the workareas were re-pushed.
-            Action::ToggleDock => self.toggle_dock(wm),
             Action::Reload => self.reresolve(wm),
             // Re-exec the on-disk binary. Since `Action::Reload` exists
             // this is no longer the config hot-reload gesture; it is
@@ -2173,8 +1902,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         ShellOutcome::Continue
     }
 
-    /// Drives an open root/window/dock menu and executes a fired row
-    /// through the exact same dispatch used by a pointer release.
     pub fn run_menu_key(&mut self, wm: &mut WindowManager<B>, key: MenuKey) -> ShellOutcome {
         match self.desktop.key_menu(wm.backend_mut(), &self.theme, key) {
             Some(action) => self.run_menu_action(wm, action),
@@ -2192,11 +1919,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 let outcome = root_action_outcome(&action);
                 self.run_root_menu_action(wm, action);
                 outcome
-            }
-            MenuAction::DockItem(id, action) => {
-                self.desktop
-                    .dock_item_menu_action(wm.backend_mut(), &self.theme, &id, action);
-                ShellOutcome::Continue
             }
             MenuAction::Window(client, action) => {
                 match action {
@@ -2240,7 +1962,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn desktop_gesture_overview_scene(&self, wm: &WindowManager<B>, workspace: usize,
         geometry: Rect) -> wm_core::OverviewScene<B::WindowId, B::FrameId> {
         use wm_theme::overview::live;
-        let tile = crate::desktop::tile_px(self.state.scale);
+        let tile = crate::desktop::switcher_preview_px(self.state.scale);
         let row = wm.workspace_row_on_output(wm.workspace_output_index(workspace).unwrap_or(wm.active_output_index()));
         let local = row.iter().position(|&space| space == workspace).unwrap_or(0);
         let clients: Vec<_> = wm.iter_clients().filter(|(_, c)| c.workspace == workspace
@@ -2249,13 +1971,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             c.visual_geometry()
         } else { c.geometry }).collect();
         let sizes: Vec<_> = sources.iter().map(|r| r.size).collect();
-        let mut layout = live::layout(
-            geometry.size,
-            tile,
-            &sizes,
-            row.len().max(local + 1),
-        );
-        if wm.workspace_layout(workspace) != wm_core::LayoutMode::Freeform {
+        let mut layout = if self.theme.chrome.is_some() {
+            wm_theme::overview::modern::layout_in(&self.theme,geometry,self.desktop.overview_stage(geometry),&sources,(local,row.len()))
+        } else { live::layout(geometry.size,tile,&sizes,row.len().max(local+1)) };
+        if self.theme.chrome.is_none() && wm.workspace_layout(workspace) != wm_core::LayoutMode::Freeform {
             live::preserve_arrangement(&mut layout, &sources);
         }
         let (mut fonts, mut swash) = (self.fonts.system(), self.fonts.swash());
@@ -2263,19 +1982,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let mut label = |text: &str, width, inverted| self.desktop.chrome().label(&self.theme, &mut fonts, &mut swash, text, width, label_h, inverted);
         let windows = clients.iter().zip(sources).zip(&layout.cells).map(|(((_, c), source), destination)| {
             wm_core::OverviewWindow { window: c.window, frame: c.frame, source, destination: *destination,
-                label: label(&c.title, (tile * 6).min(geometry.size.w), true) }
+                label: if self.theme.chrome.is_some(){DecorationBuffer {width:0,height:0,pixels:Vec::new()}}
+                    else{label(&c.title, (tile * 6).min(geometry.size.w), true)} }
         }).collect();
         let workspace_windows = Self::workspace_overview_windows(wm, &row);
-        let spaces = layout.strip.iter().enumerate().zip(workspace_windows).map(|((i, rect), windows)| {
-            let count = windows.len();
-            wm_core::OverviewWorkspace { rect: *rect, windows,
-                label: label(&format!("Desktop {} · {}", i + 1, count), rect.size.w, i == local),
-                drop_label: label(&format!("Move to Desktop {}", i + 1), rect.size.w, true),
-                close: layout.workspace_close_rect(i).map(|r| (r, self.desktop.chrome().workspace_close(r.size.w))) }
-        }).collect();
+        let spaces = layout.strip.iter().enumerate()
+            .zip(workspace_windows.into_iter().chain(std::iter::repeat_with(Vec::new)))
+            .map(|((i,rect),windows)| crate::overview::workspace_scene(&self.theme,Some(self.desktop.chrome()),
+                &mut fonts,&mut swash,*rect,layout.workspace_close_rect(i),i,(local,row.len()),label_h,windows)).collect();
         let selected = wm.focused_client().and_then(|focused| clients.iter().position(|(id, _)| *id == focused)).unwrap_or(0);
         wm_core::OverviewScene { geometry, windows, spaces, workspace: local, selected, gap: layout.pad,
-            chrome: self.desktop.chrome().overview_ink().map(|(ink, line)| wm_core::OverviewChrome { ink, line }) }
+            chrome: crate::overview::scene_chrome(&self.theme,Some(self.desktop.chrome()),layout.grid) }
     }
 
     /// A desktop swipe can share Overview's grab, but cannot displace another
@@ -2343,9 +2060,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // The Overview covers the monitor the panel hangs on, and its
         // modal grab would eat the panel's Escape: exactly one of the
         // two shell modes at a time.
-        if self.desktop.instrument_panel_visible() {
-            self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
-        }
         self.populate_overview(wm);
         if self.desktop.overview_visible() {
             Backend::grab_keyboard(wm.backend_mut());
@@ -2476,6 +2190,27 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         (0..wm.workspace_count()).find(|&space| &wm.workspace_id(space) == id)
     }
 
+    /// Modern cards expose a fixed minimum number of numbered destinations.
+    /// Materialize a future card only after the caller validates its gesture;
+    /// a retired identity is never interpreted as a request for a new space.
+    fn ensure_overview_space(&self, wm: &mut WindowManager<B>, local: usize) -> Option<usize> {
+        if let Some(space) = self.overview_space(wm, local) { return Some(space); }
+        if self.theme.chrome.is_none() || local < self.overview_spaces.len()
+            || local >= wm_core::MAX_WORKSPACES { return None; }
+        let needed = local + 1 - self.overview_spaces.len();
+        if needed > wm_core::MAX_WORKSPACES.saturating_sub(wm.workspace_count()) { return None; }
+        let output = self.overview_output.as_ref()
+            .and_then(|name| wm.monitors_ref().iter().position(|m| &m.name == name))
+            .unwrap_or(wm.active_output_index());
+        let row = wm.workspace_row_on_output(output);
+        if row.len() != self.overview_spaces.len() || row.iter().zip(&self.overview_spaces)
+            .any(|(&space, id)| &wm.workspace_id(space) != id) { return None; }
+        wm.select_output(output);
+        let mut destination = None;
+        for _ in 0..needed { destination = Some(wm.create_workspace()?); }
+        destination
+    }
+
     fn on_overview_click(
         &mut self,
         wm: &mut WindowManager<B>,
@@ -2483,7 +2218,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         button: MouseButton,
         pressed: bool,
     ) -> ShellOutcome {
-        let hit = self.desktop.overview_hit(local);
+        let hit = self.desktop.overview_hit(wm.backend(), local);
         if self.desktop.overview_pointer_pending() {
             if button == MouseButton::Right && pressed {
                 self.desktop.cancel_overview_pointer(wm.backend_mut(), &self.theme);
@@ -2494,13 +2229,14 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                         self.commit_overview(wm);
                     }
                     Some(OverviewRelease::Move { client, source, target })
-                        // Revalidate both identity and the displayed desktop
-                        // row. Never turn a stale drop into desktop creation.
-                        if self.overview_space(wm, target).is_some()
-                            && wm.client(client).is_some_and(|c| Some(c.workspace) == self.overview_space(wm, source)
+                        // The source must still belong to the displayed row.
+                        // Only an explicit future modern card may create a desk.
+                        if wm.client(client).is_some_and(|c| Some(c.workspace) == self.overview_space(wm, source)
                                 && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)) => {
-                            wm.move_client_to_workspace(client, self.overview_space(wm, target).unwrap());
-                            self.populate_overview(wm);
+                            if let Some(destination) = self.ensure_overview_space(wm, target) {
+                                wm.move_client_to_workspace(client, destination);
+                                self.populate_overview(wm);
+                            }
                     }
                     _ => {}
                 }
@@ -2547,6 +2283,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // of what just became visible — the panel stays up,
                 // which is the point of having the strip at all.
                 (MouseButton::Left, OverviewHit::Workspace(target)) => {
+                    if self.theme.chrome.is_some() {
+                        let destination = self.ensure_overview_space(wm,target);
+                        self.close_overview(wm);
+                        if let Some(destination) = destination { wm.switch_workspace(destination); }
+                        return ShellOutcome::Continue;
+                    }
                     if let Some(target) = self.overview_space(wm, target) {
                         wm.switch_workspace(target);
                         self.populate_overview(wm);
@@ -2586,9 +2328,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // Any press on the bare desktop is a click away from an open
         // instrument panel; the press then keeps meaning what it always
         // did (a right press still opens the root menu).
-        if self.desktop.instrument_panel_visible() {
-            self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
-        }
         if button == MouseButton::Right {
             self.desktop.open_root_menu(wm.backend_mut(), &self.theme, at);
         } else {
@@ -2644,158 +2383,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             return self.on_overview_click(wm, local, button, pressed);
         }
 
-        // The instrument panel. Clicks on its own surface go to the
-        // owning dockapp as `PanelInput` (chrome is inert); a *press*
-        // on any other shell surface is the click-away that dismisses
-        // it — and then keeps routing, so the press still does what it
-        // always did. The dock surface is exempted here because its
-        // routing owns the subtler half (the owning tile's re-click is
-        // a toggle whose press must be consumed) — see
-        // `Desktop::dock_input`.
-        if self.desktop.instrument_panel_visible() {
-            if self.desktop.instrument_panel_owns(surface) {
-                self.desktop.instrument_panel_click(&self.theme, local, button, pressed);
-                return ShellOutcome::Continue;
-            }
-            if pressed && surface != self.desktop.dock_window() {
-                self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
-            }
-        }
-
-        // A release first offers itself to an in-progress strip drag
-        // (drag-off-the-strip unpins); one that no strip drag consumes
-        // falls through to the ordinary routing below, including the
-        // strip's own click resolution when the release is on the
-        // strip.
-        if !pressed && self.launchdock.handle_release(wm.backend_mut(), &self.theme, self.pointer_root) {
-            return ShellOutcome::Continue;
-        }
-
-        // Clicks on the strip itself — mirroring how the desktop's own
-        // clip/dock surfaces are routed below. The running pairs give
-        // the click its focus-or-launch answer for the pressed tile.
-        if self.launchdock.owns_window(surface) {
-            let running = running_pairs(wm);
-            if let Some(action) = self.launchdock.handle_click(wm.backend_mut(), &self.theme, local, pressed, &running)
-            {
-                match action {
-                    LaunchDockAction::Launch(entry) => {
-                        let terminal = launch_app(
-                            self.state.terminal.as_deref(),
-                            &entry,
-                            &self.theme,
-                            self.state.terminal_font_px,
-                            terminal_screen(self),
-                        );
-                        self.terminals.extend(terminal);
-                    }
-                    // The same activate path a pager's
-                    // _NET_ACTIVE_WINDOW message rides — focuses,
-                    // raises, and switches workspace as needed, with
-                    // `wm-core` re-validating the id (a stale one is
-                    // silently nothing).
-                    LaunchDockAction::Focus(target) => wm.dispatch(BackendEvent::ActivateRequested(target)),
-                }
-            }
-            return ShellOutcome::Continue;
-        }
-
-        if surface == self.desktop.clip_window() {
-            if pressed && button == MouseButton::Left {
-                self.desktop.click_clip(local);
-            }
-            return ShellOutcome::Continue;
-        }
-
-        if surface == self.desktop.dock_window() {
-            // Middle-click-drag on a widget picks it up for reordering;
-            // see `Desktop::begin_item_drag`/`drag_item_motion`
-            // (the latter fires from `on_motion` on every pointer
-            // move, not from here). Middle stays the dock's own gesture
-            // and is never offered to a widget: a tile that could
-            // swallow it could make itself un-reorderable.
-            //
-            // Left goes to the widget as a `DockInput`, both edges of
-            // it. Widgets act on the press and ignore the release — but
-            // they are *told* about the release, because press/release
-            // is the shape the out-of-process tile protocol needs, and
-            // delivering only half of it now would bake the narrower
-            // shape into every widget written between here and there.
-            //
-            // Right opens the tile's own menu (Restart, Remove,
-            // About) and is never delivered to a tile. It was reserved
-            // before there was anything to put in it for exactly this
-            // reason: a tile that had already been given right-click
-            // could not have it taken back.
-            match button {
-                MouseButton::Middle => {
-                    if pressed {
-                        self.desktop.begin_item_drag(wm.backend_mut(), &self.theme, local);
-                    } else {
-                        self.desktop.end_item_drag(wm.backend_mut(), &self.theme);
-                    }
-                }
-                MouseButton::Left => {
-                    let input =
-                        if pressed { DockInput::Press { local, button } } else { DockInput::Release { local, button } };
-                    self.desktop.dock_input(wm.backend_mut(), &self.theme, input);
-                }
-                MouseButton::Right => {
-                    if pressed {
-                        // On press, like every other context menu in
-                        // this desktop — a menu should appear the
-                        // instant the button goes down. Only remote
-                        // tiles have one: a built-in instrument is part
-                        // of the compositor, where "Remove" would mean
-                        // editing the default column and "Restart"
-                        // would mean restarting the shell.
-                        //
-                        // A built-in that offers a panel takes the
-                        // button instead: right-click opens (and
-                        // re-click toggles) its detail panel — the
-                        // built-in counterpart of the panel a remote
-                        // tile opens for itself after a click. The
-                        // fall-through order costs nothing: a tile is
-                        // remote (menu) or built-in (panel or
-                        // nothing), never both.
-                        if !self.desktop.open_dock_item_menu(wm.backend_mut(), &self.theme, local, self.pointer_root) {
-                            self.desktop.toggle_builtin_panel(wm.backend_mut(), &self.theme, local);
-                        }
-                    }
-                }
-            }
-            return ShellOutcome::Continue;
-        }
-
-        // Every press on an icon tile arms a potential drag (see
-        // `Desktop::begin_icon_drag`); it's resolved into either a
-        // restore or a reposition on release, whichever `end_icon_drag`
-        // decides based on whether the pointer actually moved.
-        if pressed {
-            self.desktop.begin_icon_drag(wm.backend_mut(), surface, local);
-            return ShellOutcome::Continue;
-        }
-
-        if let Some(result) = self.desktop.end_icon_drag(wm.backend_mut()) {
-            match result {
-                IconDragResult::Restore(client_id) => wm.deminiaturize(client_id),
-                // Dropping a miniwindow icon over the launcher strip
-                // pins its application: the client's WM_CLASS resolves
-                // back through the `.desktop` index, and `try_pin_at`
-                // decides whether the drop actually landed on the
-                // strip's pin zone. A miss on either count — no class
-                // match, or a drop anywhere else on the desktop — is
-                // silently a plain reposition, exactly the
-                // pre-launcher behavior.
-                IconDragResult::Repositioned { client, root } => {
-                    let matched = wm.client(client).and_then(|c| apps::match_window_class(&self.apps, &c.class));
-                    if let Some(index) = matched {
-                        self.launchdock.try_pin_at(wm.backend_mut(), &self.theme, root, &self.apps[index]);
-                    }
-                }
-            }
-            return ShellOutcome::Continue;
-        }
+        if pressed { return ShellOutcome::Continue; }
 
         if let Some(action) = self
             .desktop
@@ -2807,24 +2395,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         ShellOutcome::Continue
     }
 
-    /// Every file descriptor the binary's event loop must wait on
-    /// besides its own display connection — the dockapp listener and
-    /// one per connected dockapp.
-    ///
-    /// This is the *entire* backend-specific cost of out-of-process
-    /// dock tiles, and it is deliberately shaped as a list of raw fds
-    /// rather than as anything cleverer: the X11 binary appends them to
-    /// the `pollfd` array it already builds around the X socket, and
-    /// the Wayland binary wraps each in a calloop `Generic` source.
-    /// Neither needs to know what is on the other end, because a
-    /// dockapp is not a display-server client — it is a process on a
-    /// Unix socket, and both loops already wait on those.
-    ///
-    /// Call it immediately before waiting: the set changes as dockapps
-    /// connect, die and restart, and a stale fd is at best a spurious
-    /// wakeup. Getting it wrong is bounded — both loops retain a 100 ms
-    /// maximum idle poll, so a missing fd costs a dockapp frame up to
-    /// that bound and nothing else.
     pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
         let mut fds = Vec::new();
         self.extend_extra_poll_fds(&mut fds);
@@ -2835,71 +2405,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// the caller's buffer already has enough capacity. This is the
     /// event-loop form of [`Self::extra_poll_fds`].
     pub fn extend_extra_poll_fds(&self, fds: &mut Vec<std::os::fd::RawFd>) {
-        self.desktop.extend_extra_poll_fds(fds);
         fds.extend(self.control.poll_fds());
-    }
-
-    /// A scroll over a shell surface, resolved to a dock tile the same
-    /// way a click is.
-    ///
-    /// # `delta` is a count, and it is replayed as one
-    ///
-    /// `ScrollDelta` carries whole wheel notches, and a backend may
-    /// legitimately fold several that arrived together into one entry —
-    /// `wm-wayland` accumulates a high-resolution wheel's 120ths into
-    /// detents, and a hard flick produces more than one per report. So
-    /// a delta of three means *three* steps, and it is delivered as
-    /// three `DockInput::Scroll` events rather than one carrying a 3.
-    ///
-    /// That choice costs two extra messages and buys correctness by
-    /// construction on the far side of a boundary this shell does not
-    /// control. A dockapp is third-party code; the obvious naive
-    /// implementation of its scroll handler adjusts by one step per
-    /// event and would silently swallow two notches out of three
-    /// forever, in a way neither side could see. The wire keeps a
-    /// signed `delta` so the direction travels with the event and a
-    /// future high-resolution path has somewhere to go.
-    ///
-    /// The step count is capped at
-    /// `crate::dockapp::tile::MAX_SCROLL_STEPS`,
-    /// because "replay it N times" with an unbounded N read off an
-    /// input event is a loop on the repaint thread whose length a
-    /// backend bug decides.
-    ///
-    /// Only the vertical axis is delivered. The dock is a vertical
-    /// column of square tiles and `DockInput::Scroll` carries one
-    /// delta; inventing a rule that folds `right` into it would make
-    /// two different gestures indistinguishable to every tile.
-    pub fn on_shell_scroll(
-        &mut self,
-        wm: &mut WindowManager<B>,
-        surface: B::ShellId,
-        local: Point,
-        delta: ScrollDelta,
-    ) {
-        let panel = self.desktop.instrument_panel_owns(surface);
-        if !panel && surface != self.desktop.dock_window() {
-            return;
-        }
-        let notches = delta.up;
-        if notches == 0 {
-            return;
-        }
-        let wanted = notches.unsigned_abs();
-        let steps = wanted.min(crate::dockapp::tile::MAX_SCROLL_STEPS as u32);
-        if steps < wanted {
-            tracing::warn!(notches, delivered = steps, "clamping an implausibly large scroll report");
-        }
-        let step = notches.signum();
-        for _ in 0..steps {
-            // The panel rides the same replay-as-discrete-steps rule as
-            // the dock, for the same third-party-code reason.
-            if panel {
-                self.desktop.instrument_panel_scroll(&self.theme, local, step);
-            } else {
-                self.desktop.dock_input(wm.backend_mut(), &self.theme, DockInput::Scroll { local, delta: step });
-            }
-        }
     }
 
     /// The side-effect half of a root-menu pick; its outcome half is
@@ -2917,33 +2423,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 self.terminals.extend(terminal);
             }
             RootMenuAction::LaunchAbout => {
-                // `CHONKSTEP_THEME` is the one published channel by
-                // which an SDK app learns which theme the desktop is
-                // wearing: `chonk_ui::active_theme` reads it and falls
-                // back to NeXTSTEP Classic when it is absent. Until this
-                // line existed the variable had a consumer and no
-                // producer, so `chonk-about` — the SDK's own showcase —
-                // rendered in Classic on every other theme, which is
-                // exactly the mismatch the SDK exists to prevent.
-                //
-                // Deliberately not a state-file read inside `chonk-ui`:
-                // that would duplicate `startup::resolve_look`'s
-                // precedence (env, then config, then default) in a
-                // second crate and drift from it silently. The launcher
-                // knows the live answer; it should say so.
-                //
-                // Phase 4b's dockapp launch wants the same variable, and
-                // a running dockapp additionally gets `ThemeChanged`
-                // pushed down its socket — this env var is only how a
-                // freshly-spawned one learns the theme it starts in.
-                //
-                // One env for every GUI the shell starts: `launch_env`
-                // carries the theme id, the appearance beside it (the
-                // pair `chonk_ui::active_theme` resolves to the exact
-                // rendition this desktop is wearing), the scale, and
-                // the same per-stack cursor-size rule every other
-                // launch gets — chonk-about is a native client and must
-                // not inherit the pre-multiplied process value.
                 let env = launch_env(&self.theme.id, Some(self.state.appearance), self.state.scale);
                 spawn::spawn_detached_with_env(&about_binary_path(), &[], &env, &[]);
             }
@@ -2989,12 +2468,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 }
             }
             RootMenuAction::SetWallpaper(wallpaper) => {
-                self.desktop.set_wallpaper(wm.backend_mut(), &self.theme, wallpaper);
+                self.desktop.set_wallpaper(wm.backend_mut(), wallpaper);
             }
             RootMenuAction::ToggleOmarchyBar => {
                 self.desktop.toggle_omarchy_bar(wm.backend_mut());
             }
-            RootMenuAction::ToggleDock => self.toggle_dock(wm),
             RootMenuAction::SetTheme(id) if id == wm_theme::omarchy::ID => {
                 // Following is a choice, not a theme: persist the choice
                 // and re-resolve the session through the one path, which
@@ -3050,20 +2528,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             if let Err(e) = paper.persist() {
                 tracing::warn!(?e, theme = %base.id, "failed to persist theme wallpaper");
             }
-            self.desktop.set_wallpaper(wm.backend_mut(), &self.theme, paper);
+            self.desktop.set_wallpaper(wm.backend_mut(), paper);
         }
     }
 
-    /// Feeds one (already-coalesced) pointer motion's root position to
-    /// the icon drag tracker, the dock widget drag tracker, and the
-    /// launcher strip's own drag tracker, records it into
-    /// `pointer_root` (the cell shell button handling reads back for
-    /// release decisions that need root coordinates), and drains the
-    /// backend's pending shell-surface motion into menu hover. The
-    /// binary calls this for every motion it dispatches — mid-burst,
-    /// when a non-motion event follows one, and once more after the
-    /// burst ends — so the shell sees exactly the positions `wm-core`
-    /// does.
     pub fn on_motion(&mut self, wm: &mut WindowManager<B>, root: Point) {
         self.pointer_root = root;
         if self.desktop.overview_pointer_motion(wm.backend_mut(), &self.theme, root) {
@@ -3072,18 +2540,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             while wm.backend_mut().take_shell_motion().is_some() {}
             return;
         }
-        self.desktop.drag_icon_motion(wm.backend_mut(), root);
-        self.desktop.drag_item_motion(wm.backend_mut(), &self.theme, root);
-        // Which dock tile the pointer is inside, from root coordinates
-        // rather than from the dock's own surface-local motion: only
-        // root motion reports the moment the pointer *leaves* the dock,
-        // and a tile that never receives `Leave` latches into a
-        // permanent hover state. See `Desktop::update_dock_hover`.
-        self.desktop.update_dock_hover(wm.backend_mut(), &self.theme, root);
-        // The panel's Enter/Leave, from the same root-motion stream and
-        // for the same never-latch reason.
-        self.desktop.update_panel_hover(&self.theme, root);
-        self.launchdock.handle_motion(wm.backend_mut(), &self.theme, root);
         // Menu hover rides the same cadence: every motion over a shell
         // surface also arrives as a root-relative motion event (that is
         // what got us called), so the pointer's final position is the
@@ -3113,7 +2569,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // selected card's plate onto a neighbor still selects
                 // the neighbor.
                 let local = self.desktop.overview_panel_point(surface, local);
-                if let OverviewHit::Card(index) = self.desktop.overview_hit(local) {
+                if let OverviewHit::Card(index) = self.desktop.overview_hit(wm.backend(), local) {
                     self.desktop.select_overview_card(wm.backend_mut(), &self.theme, index);
                 }
             } else {
@@ -3144,13 +2600,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     | Notification::LayoutChanged(_)
             );
         match notification {
-            Notification::Miniaturized(id, preview) => {
-                let title = wm.client(id).map(|c| c.title.clone()).unwrap_or_default();
-                self.desktop.show_icon(wm.backend_mut(), &self.theme, id, &title, preview.as_ref());
-            }
-            Notification::Deminiaturized(id) | Notification::Removed(id) => {
-                self.desktop.remove_icon_for_client(wm.backend_mut(), id);
-            }
+            Notification::Miniaturized(_) | Notification::Deminiaturized(_) | Notification::Removed(_) => {}
             // A freshly mapped window is where session restore lands:
             // the first pending record with this window's class claims
             // it (first-come-first-matched — see `session_layout`) and
@@ -3292,17 +2742,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
     }
 
-    /// One housekeeping pass, called once per event-loop iteration
-    /// (the binary bounds its event wait so this still runs regularly
-    /// with zero input activity).
-    ///
-    /// Workspace plumbing between the WM and the Clip runs first:
-    /// drain a click on the indicator into a real switch, then mirror
-    /// the authoritative state into the shared cell so the widget tick
-    /// repaints the tile exactly when it changed.
-    /// Protocol publishers observe `WindowManager`'s semantic revision;
-    /// this routine therefore does not approximate state change with an
-    /// action-shaped boolean.
     pub fn tick(&mut self, wm: &mut WindowManager<B>) {
         if let Some(spaces) = self.layout.take_restored_spaces() { wm.restore_display_spaces(spaces); }
         if let Some(modes) = self.layout.take_restored_modes() {
@@ -3383,19 +2822,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 self.config_reloaded = true;
             }
         }
-        if let Some(target) = self.desktop.take_workspace_request() {
-            let row = wm.workspace_row();
-            if let Some(&space) = row.get(target) { wm.switch_workspace(space); }
-            else if target == row.len() {
-                if let Some(space) = wm.create_workspace() { wm.switch_workspace(space); }
-            }
-        }
         self.service_control(wm);
         // The transient UI's parked Escape (see `keymap_action`) is
         // consumed here, still inside the key event's loop iteration.
         if std::mem::take(&mut self.transient_escape) {
             self.desktop.close_menu(wm.backend_mut());
-            self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
         }
         // Catch up once per completed preview batch. The backend may finish
         // bounded asynchronous downloads over several dispatch turns; unchanged
@@ -3406,7 +2837,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 self.desktop.overview_clients().into_iter().map(|client| wm.client_preview(client)).collect();
             self.desktop.update_overview_previews(wm.backend_mut(), &self.theme, previews, generation);
         }
-        let (current, count) = wm.workspace_position_count(wm.active_output_index());
         if self.desktop.overview_visible() {
             let output = self.overview_output.as_ref().and_then(|name| wm.monitors_ref().iter().position(|m| &m.name == name));
             let expected = wm.workspace_position_count(output.unwrap_or(wm.active_output_index()));
@@ -3415,18 +2845,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 self.populate_overview(wm);
             }
         }
-        self.desktop.set_workspace_display(wm.backend_mut(), &self.theme, current, count);
         self.desktop.tick_menu(wm.backend_mut(), &self.theme);
-        self.desktop.tick_items(wm.backend_mut(), &self.theme);
-        // Same cadence as the widget tick: refresh the launcher
-        // strip's running-app indicators only when either the client
-        // identities or the pin set moved. Geometry-only changes are
-        // irrelevant here, and the steady state now compares borrowed
-        // ids/classes instead of allocating and cloning them on every wake.
-        if self.launchdock.running_refresh_needed() || !running_matches_clients(wm, &self.running_clients) {
-            self.running_clients = running_pairs(wm);
-            self.launchdock.update_running(wm.backend_mut(), &self.theme, &self.running_clients);
-        }
         // The session-layout store rides the same cadence. Most ticks
         // find the exact arrangement it already holds; prove that by
         // borrowed field comparisons so those ticks can advance the
@@ -3451,36 +2870,20 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn next_housekeeping_in(&self, now: Instant) -> Duration {
         let deadline = self
             .desktop
-            .next_housekeeping_deadline(now)
+            .next_housekeeping_deadline()
             .into_iter()
             .chain(Some(self.appearance_requests.next_deadline()))
             .min();
         bounded_housekeeping_wait(now, deadline)
     }
 
-    /// Winds the session down, in the way the binary says it is ending.
-    ///
-    /// The binary calls this once it has decided to exit or re-exec,
-    /// before it does either, and the argument is the difference between
-    /// the two: [`Farewell::SessionOver`] stops every out-of-process
-    /// tile, [`Farewell::Restarting`] leaves them running and hands
-    /// their tokens to the incoming shell so they are readopted rather
-    /// than relaunched. A hot restart is the most routine thing a user
-    /// does to this desktop — every theme pick is one — which is why it
-    /// is worth having the second mode at all. See
-    /// `Desktop::shut_down_dockapps`.
-    ///
-    /// Nothing else needs winding down: sampler threads, popup
-    /// surfaces and shell surfaces all die with the process, and the
-    /// dock order was already persisted at the moment the user
-    /// committed a drag.
-    pub fn shut_down(&mut self, farewell: Farewell) {
+    /// Flush session state and close the external bar control connections.
+    pub fn shut_down(&mut self) {
         // The layout does need one thing on the way out that the
         // paragraph above says nothing else does: a window closed
         // moments before this must be forgotten *now*, not after a
         // debounce that will never elapse.
         self.layout.flush();
-        self.desktop.shut_down_dockapps(farewell);
         // Bars are told nothing but EOF, on both kinds of exit: a hot
         // restart rebinds the same path, and the spec tells a client
         // that loses the connection to reconnect and take the fresh
@@ -3615,12 +3018,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn on_screen_resize(&mut self, wm: &mut WindowManager<B>, size: Size) {
         if self.desktop.overview_visible() { self.close_overview(wm); }
         let primary = primary_rect(&wm.monitors(), size);
-        self.desktop.resize_to_screen(wm.backend_mut(), &self.theme, size, primary);
-        // The launcher strip anchors to the primary too, and unlike
-        // the dock and Clip it is not owned by `Desktop`, so it has to
-        // be told separately - otherwise it stays on the old monitor
-        // while the Clip moves to the new one.
-        self.launchdock.reposition(wm.backend_mut(), &self.theme, primary);
+        self.desktop.resize_to_screen(wm.backend_mut(), size, primary);
         self.apply_workareas(wm);
     }
 }

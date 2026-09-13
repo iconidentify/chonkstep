@@ -14,34 +14,16 @@ use wm_theme_api::{
 };
 
 use crate::model::Theme;
-use crate::styles::{system7, windowmaker, FrameStyle, UnsupportedDecorationStyle};
+use crate::styles::{modern, system7, windowmaker, FrameStyle, UnsupportedDecorationStyle};
 pub(crate) use windowmaker::draw_button_glyph;
 
-/// The font machinery decoration text is shaped and rasterized with,
-/// in a handle that is cheap to clone.
-///
-/// It exists as a separate type for one reason:
-/// `cosmic_text::FontSystem::new()` scans the system's fonts through
-/// fontconfig, which costs hundreds of milliseconds and must happen
-/// exactly once per session. Restyling is the most routine thing a
-/// user does to this desktop — every theme pick is one, and every one
-/// of them used to re-exec the process — so a live retheme builds a
-/// *new* [`RasterThemeEngine`] around the *same* font state
-/// ([`RasterThemeEngine::with_fonts`]) rather than a new engine that
-/// re-scans. That is the same argument the dockapp protocol makes for
-/// `ThemeChanged` being a message rather than a relaunch, applied to
-/// the window manager's own engine.
-///
-/// `Rc`, not `Arc`, and `RefCell`, not a lock: `ThemeEngine`'s methods
-/// take `&self` while shaping needs `&mut`, which already pins an
-/// engine to one thread — the window manager's, single-threaded by
-/// design. Sharing the state does not widen that; it only lets two
-/// engines that never coexist on separate threads hand it over.
 #[derive(Clone)]
 pub struct FontState {
     font_system: Rc<RefCell<cosmic_text::FontSystem>>,
     swash_cache: Rc<RefCell<GlyphCache>>,
     system7_fallback: Rc<RefCell<system7::Fallback>>,
+    modern_font_system: Rc<RefCell<Option<cosmic_text::FontSystem>>>,
+    modern_swash_cache: Rc<RefCell<Option<GlyphCache>>>,
 }
 
 /// Read-only font/raster cache sizes for explicit diagnostics, not RSS.
@@ -119,6 +101,8 @@ impl FontState {
             font_system: Rc::new(RefCell::new(font_system)),
             swash_cache: Rc::new(RefCell::new(GlyphCache::new())),
             system7_fallback: Rc::new(RefCell::new(system7_fallback)),
+            modern_font_system: Rc::new(RefCell::new(None)),
+            modern_swash_cache: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -143,6 +127,42 @@ impl FontState {
         self.system7_fallback.borrow_mut()
     }
 
+    /// Prepare modern assets when a theme/style is selected, before callers
+    /// borrow the public font database for rendering. Classic sessions never
+    /// parse these faces. Both databases share the embedded bytes, and the
+    /// modern database contains only the already-resident fallback selection.
+    pub(crate) fn prepare_modern(&self) {
+        let mut fonts = self.modern_font_system.borrow_mut();
+        if fonts.is_none() {
+            let mut resident = self.system7_fallback.borrow().resident_system();
+            let mut general = self.font_system.borrow_mut();
+            for bytes in [
+                include_bytes!("../assets/fonts/modern/IBMPlexMono-Regular.ttf").as_slice(),
+                include_bytes!("../assets/fonts/modern/IBMPlexSans[wdth,wght].ttf").as_slice(),
+                include_bytes!("../assets/fonts/modern/SpaceGrotesk[wght].ttf").as_slice(),
+            ] {
+                let source = cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(bytes));
+                general.db_mut().load_font_source(source.clone());
+                resident.db_mut().load_font_source(source);
+            }
+            *fonts = Some(resident);
+        }
+    }
+
+    /// Modern rendering only sees resident sources, including cold Unicode
+    /// fallback. Constructors prepare this before any live render call.
+    pub(crate) fn modern_system(&self) -> std::cell::RefMut<'_, cosmic_text::FontSystem> {
+        self.prepare_modern();
+        let fonts = self.modern_font_system.borrow_mut();
+        std::cell::RefMut::map(fonts, |fonts| fonts.as_mut().unwrap())
+    }
+
+    pub(crate) fn modern_swash(&self) -> std::cell::RefMut<'_, cosmic_text::SwashCache> {
+        let mut cache = self.modern_swash_cache.borrow_mut();
+        cache.get_or_insert_with(GlyphCache::new).trim();
+        std::cell::RefMut::map(cache, |cache| &mut cache.as_mut().unwrap().swash)
+    }
+
     /// The shared glyph raster cache, mutably — [`FontState::system`]'s
     /// companion, under the same short-loan discipline. Evicts glyph
     /// images at soft 8 MiB / 16K-entry watermarks between render calls,
@@ -159,14 +179,15 @@ impl FontState {
     pub fn cache_statistics(&self) -> FontCacheStatistics {
         let cache = self.swash_cache.borrow();
         let fallback = self.system7_fallback.borrow();
-        let caches = [&*cache, fallback.cache()];
+        let modern = self.modern_swash_cache.borrow();
+        let caches = [Some(&*cache), Some(fallback.cache()), modern.as_ref()];
         FontCacheStatistics {
             available_faces: self.font_system.borrow().db().faces().count(),
-            image_entries: caches.iter().map(|cache| cache.swash.image_cache.len()).sum(),
-            image_payload_bytes: caches.iter().flat_map(|cache| cache.swash.image_cache.values().flatten())
+            image_entries: caches.iter().flatten().map(|cache| cache.swash.image_cache.len()).sum(),
+            image_payload_bytes: caches.iter().flatten().flat_map(|cache| cache.swash.image_cache.values().flatten())
                 .map(|image| image.data.capacity()).sum(),
-            outline_entries: caches.iter().map(|cache| cache.swash.outline_command_cache.len()).sum(),
-            outline_payload_bytes: caches.iter().flat_map(|cache| cache.swash.outline_command_cache.values().flatten())
+            outline_entries: caches.iter().flatten().map(|cache| cache.swash.outline_command_cache.len()).sum(),
+            outline_payload_bytes: caches.iter().flatten().flat_map(|cache| cache.swash.outline_command_cache.values().flatten())
                 .map(|commands| std::mem::size_of_val(commands.as_ref())).sum(),
         }
     }
@@ -212,6 +233,7 @@ pub struct RasterThemeEngine {
     base_scale: f32,
     scaled_themes: RefCell<HashMap<u32, Theme>>,
     title_cache: RefCell<VecDeque<(u32, DecorationRequest, DecorationBuffer)>>,
+    modern_title_cache: RefCell<VecDeque<modern::CachedTitle>>,
 }
 
 impl RasterThemeEngine {
@@ -235,6 +257,9 @@ impl RasterThemeEngine {
     /// cached, so a mixed-DPI desk does not rescan fonts or mutate one global
     /// theme as windows cross outputs.
     pub fn with_fonts_at_scale(theme: Theme, fonts: FontState, base_scale: f32) -> Self {
+        if theme.chrome.is_some() {
+            fonts.prepare_modern();
+        }
         if !fonts.has_family(&theme.titlebar.font.family) {
             tracing::warn!(
                 family = %theme.titlebar.font.family,
@@ -251,6 +276,7 @@ impl RasterThemeEngine {
             base_scale: base_scale.max(0.125),
             scaled_themes: RefCell::new(HashMap::new()),
             title_cache: RefCell::new(VecDeque::new()),
+            modern_title_cache: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -258,6 +284,7 @@ impl RasterThemeEngine {
     /// an error, never another style's pixels. Existing constructors keep their
     /// WindowMaker default and their original signatures.
     pub fn with_style(mut self, style: DecorationStyle) -> Result<Self, UnsupportedDecorationStyle> {
+        let style = self.theme.resolve_style(style);
         self.style = FrameStyle::try_from(style)?;
         if style == DecorationStyle::System7 {
             let light = crate::default_theme::theme_variant(&self.theme.id, crate::model::Appearance::Light);
@@ -267,6 +294,12 @@ impl RasterThemeEngine {
             }
         }
         self.title_cache.get_mut().clear();
+        self.modern_title_cache.get_mut().clear();
+        self.scaled_themes.get_mut().clear();
+        if style == DecorationStyle::Modern {
+            self.fonts.prepare_modern();
+            self.theme.chrome = Some(crate::modern::Chrome::from_theme_at_scale(&self.theme, self.base_scale));
+        }
         Ok(self)
     }
 
@@ -296,6 +329,7 @@ impl ThemeEngine for RasterThemeEngine {
         match self.style {
             FrameStyle::WindowMaker => windowmaker::layout_decoration(&self.theme, request),
             FrameStyle::System7 => system7::layout(request, self.system7_metrics),
+            FrameStyle::Modern => modern::layout(&self.theme, request),
         }
     }
 
@@ -306,7 +340,7 @@ impl ThemeEngine for RasterThemeEngine {
             &mut self.fonts.swash(),
             request,
             layout,
-        ), FrameStyle::System7 => system7::flatten(self.render_surface(request, layout)) }
+        ), FrameStyle::System7 | FrameStyle::Modern => system7::flatten(self.render_surface(request, layout)) }
     }
 
     fn layout_at(&self, request: &DecorationRequest, scale: f32) -> DecorationLayout {
@@ -321,7 +355,7 @@ impl ThemeEngine for RasterThemeEngine {
         let key = normalized_scale(scale).to_bits();
         let mut themes = self.scaled_themes.borrow_mut();
         let theme = themes.entry(key).or_insert_with(|| self.theme.scaled(scale / self.base_scale));
-        windowmaker::layout_decoration(theme, request)
+        if matches!(self.style, FrameStyle::Modern) { modern::layout(theme, request) } else { windowmaker::layout_decoration(theme, request) }
     }
 
     fn render_surface(&self, request: &DecorationRequest, layout: &DecorationLayout) -> DecorationSurface {
@@ -334,7 +368,9 @@ impl ThemeEngine for RasterThemeEngine {
             request,
             layout,
         ), FrameStyle::System7 => system7::render_sparse(self.system7_roles, self.base_scale,
-            &mut self.title_cache.borrow_mut(), &mut self.fonts.system7_fallback.borrow_mut(), request, layout) }
+            &mut self.title_cache.borrow_mut(), &mut self.fonts.system7_fallback.borrow_mut(), request, layout),
+            FrameStyle::Modern => modern::render(&self.theme, &mut self.fonts.modern_system(), &mut self.fonts.modern_swash(),
+                &mut self.modern_title_cache.borrow_mut(), self.base_scale.to_bits(), request, layout) }
     }
 
     fn render_surface_at(
@@ -354,6 +390,10 @@ impl ThemeEngine for RasterThemeEngine {
         let key = scale.to_bits();
         let mut themes = self.scaled_themes.borrow_mut();
         let theme = themes.entry(key).or_insert_with(|| self.theme.scaled(scale / self.base_scale));
+        if matches!(self.style, FrameStyle::Modern) {
+            return modern::render(theme, &mut self.fonts.modern_system(), &mut self.fonts.modern_swash(),
+                &mut self.modern_title_cache.borrow_mut(), key, request, layout);
+        }
         windowmaker::render_sparse_decoration(
             theme,
             &mut self.fonts.font_system.borrow_mut(),
@@ -380,6 +420,36 @@ mod tests {
     use wm_theme_api::{ButtonKind, ButtonRuntimeState, Point, ResizeEdge, Size};
     use crate::styles::windowmaker::layout_decoration;
 
+    #[test]
+    fn modern_font_storage_is_lazy_and_does_not_change_legacy_glyph_caches() {
+        let fonts = FontState::new();
+        let legacy = RasterThemeEngine::with_fonts(crate::default_theme::nextstep_classic(), fonts.clone());
+        let request = DecorationRequest { content_size: Size::new(640, 480), title: "Resident fonts".into(),
+            focused: true, resizable: true, buttons: Vec::new() };
+        let layout = legacy.layout(&request);
+        legacy.render_surface(&request, &layout);
+        assert!(fonts.modern_font_system.borrow().is_none());
+        assert!(fonts.modern_swash_cache.borrow().is_none());
+        let legacy_entries = fonts.swash_cache.borrow().swash.image_cache.len();
+        let available_faces = fonts.font_system.borrow().db().faces().count();
+        let modern = RasterThemeEngine::with_fonts(crate::default_theme::nextstep_classic(), fonts.clone())
+            .with_style(DecorationStyle::Modern).unwrap();
+        // Selection prepares the assets before the first draw; duplicate
+        // selection/retheme never reparses or adds another set of faces.
+        assert!(fonts.modern_font_system.borrow().is_some());
+        let modern_faces = fonts.font_system.borrow().db().faces().count();
+        assert_eq!(modern_faces, available_faces + 3);
+        fonts.prepare_modern();
+        assert_eq!(fonts.font_system.borrow().db().faces().count(), modern_faces);
+        let layout = modern.layout(&request);
+        modern.render_surface(&request, &layout);
+        assert!(fonts.modern_swash_cache.borrow().is_some());
+        assert_eq!(fonts.swash_cache.borrow().swash.image_cache.len(), legacy_entries);
+        assert_eq!(fonts.font_system.borrow().db().faces().count(), modern_faces);
+        assert!(fonts.modern_system().db().faces().all(|face|
+            !matches!(face.source, cosmic_text::fontdb::Source::File(_))));
+    }
+
     fn glyph_key(glyph: u16) -> cosmic_text::CacheKey {
         cosmic_text::CacheKey::new(
             cosmic_text::fontdb::ID::dummy(), glyph, 16.0, (0.0, 0.0),
@@ -403,6 +473,8 @@ mod tests {
     #[test]
     fn font_statistics_observe_payload_capacity_without_triggering_eviction() {
         let fonts = FontState {
+            modern_font_system: Rc::new(RefCell::new(None)),
+            modern_swash_cache: Rc::new(RefCell::new(None)),
             system7_fallback: Rc::new(RefCell::new(system7::Fallback::from_db("en-US".into(), cosmic_text::fontdb::Database::new()))),
             font_system: Rc::new(RefCell::new(cosmic_text::FontSystem::new_with_locale_and_db(
                 "en-US".into(), cosmic_text::fontdb::Database::new(),

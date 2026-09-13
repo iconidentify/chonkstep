@@ -90,7 +90,7 @@ use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRende
 use smithay::backend::renderer::element::{Kind, RenderElementStates};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData};
-use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
+use smithay::backend::renderer::Color32F;
 use smithay::desktop::utils::{
     bbox_from_surface_tree, send_frames_surface_tree, take_presentation_feedback_surface_tree,
     surface_presentation_feedback_flags_from_states, surface_primary_scanout_output,
@@ -114,28 +114,37 @@ render_elements! {
     /// `Element`/`RenderElement` plumbing for the enum so a single
     /// `Vec` can carry client surfaces, decoration/wallpaper/cursor
     /// buffers, and solid fills through one `render_output` call.
-    pub SceneElement<R> where R: ImportAll + ImportMem;
-    Surface = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
-    Memory = MemoryRenderBufferRenderElement<R>,
-    BinaryMemory = crate::binary_alpha::BinaryAlpha<MemoryRenderBufferRenderElement<R>>,
-    ScaledMemory = RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
+    pub SceneElement<=GlesRenderer>;
+    Surface = RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
+    Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
+    BinaryMemory = crate::binary_alpha::BinaryAlpha<MemoryRenderBufferRenderElement<GlesRenderer>>,
+    ScaledMemory = RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
     Solid = SolidColorRenderElement,
+    Shadow = crate::frame_effects::ShadowElement,
+    RoundedSurface = crate::rounded::Rounded<RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
+    RoundedSolid = crate::rounded::Rounded<SolidColorRenderElement>,
     CaptureDimming = crate::capture_tool::dimming::DimmingElement,
-    CroppedSurface = CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<R>>>,
-    CroppedMemory = CropRenderElement<MemoryRenderBufferRenderElement<R>>,
-    CroppedBinaryMemory = CropRenderElement<crate::binary_alpha::BinaryAlpha<MemoryRenderBufferRenderElement<R>>>,
-    CroppedScaledMemory = CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<R>>>,
+    CroppedSurface = CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
+    CroppedMemory = CropRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
+    CroppedBinaryMemory = CropRenderElement<crate::binary_alpha::BinaryAlpha<MemoryRenderBufferRenderElement<GlesRenderer>>>,
+    CroppedScaledMemory = CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>>,
     CroppedSolid = CropRenderElement<SolidColorRenderElement>,
-    DisplaySurface = CropRenderElement<CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<R>>>>,
-    DisplayMemory = CropRenderElement<CropRenderElement<MemoryRenderBufferRenderElement<R>>>,
-    DisplayBinaryMemory = CropRenderElement<CropRenderElement<crate::binary_alpha::BinaryAlpha<MemoryRenderBufferRenderElement<R>>>>,
-    DisplayScaledMemory = CropRenderElement<CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<R>>>>,
+    CroppedShadow = CropRenderElement<crate::frame_effects::ShadowElement>,
+    CroppedRoundedSurface = CropRenderElement<crate::rounded::Rounded<RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>>,
+    CroppedRoundedSolid = CropRenderElement<crate::rounded::Rounded<SolidColorRenderElement>>,
+    DisplaySurface = CropRenderElement<CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>>,
+    DisplayMemory = CropRenderElement<CropRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>>,
+    DisplayBinaryMemory = CropRenderElement<CropRenderElement<crate::binary_alpha::BinaryAlpha<MemoryRenderBufferRenderElement<GlesRenderer>>>>,
+    DisplayScaledMemory = CropRenderElement<CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>>>,
     DisplaySolid = CropRenderElement<CropRenderElement<SolidColorRenderElement>>,
+    DisplayShadow = CropRenderElement<CropRenderElement<crate::frame_effects::ShadowElement>>,
+    DisplayRoundedSurface = CropRenderElement<CropRenderElement<crate::rounded::Rounded<RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>>>,
+    DisplayRoundedSolid = CropRenderElement<CropRenderElement<crate::rounded::Rounded<SolidColorRenderElement>>>,
 }
 
 /// Clip a just-appended plane in place. Stable IDs and retained vector capacity
 /// survive the transform; no intermediate scene vector or texture is created.
-pub(crate) fn clip_plane(elements: &mut Vec<SceneElement<GlesRenderer>>, start: usize,
+pub(crate) fn clip_plane(elements: &mut Vec<SceneElement>, start: usize,
     rect: Rect, id: &smithay::backend::renderer::element::Id) {
     let crop = SRect::new((rect.pos.x, rect.pos.y).into(), (rect.size.w as i32, rect.size.h as i32).into());
     let empty = SolidColorRenderElement::new(id.clone(), SRect::from_size((0, 0).into()),
@@ -153,11 +162,17 @@ pub(crate) fn clip_plane(elements: &mut Vec<SceneElement<GlesRenderer>>, start: 
             SceneElement::BinaryMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::ScaledMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::Solid(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::RoundedSurface(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::RoundedSolid(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::CroppedRoundedSurface(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::CroppedRoundedSolid(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::Shadow(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::CroppedSurface(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::CroppedMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::CroppedBinaryMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::CroppedScaledMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             SceneElement::CroppedSolid(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::CroppedShadow(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
             other => Some(other),
         }
         };
@@ -191,7 +206,7 @@ pub(crate) fn build_scene(
     cursor_status: &CursorImageStatus,
     cursors: &crate::state::CursorSet,
     viewport: Rect,
-) -> (Vec<SceneElement<GlesRenderer>>, Color32F) {
+) -> (Vec<SceneElement>, Color32F) {
     let mut elements = Vec::new();
     let clear_color = build_scene_into(
         &mut elements,
@@ -209,7 +224,7 @@ pub(crate) fn build_scene(
 /// allocation across frames. On-screen rendering uses one instance per
 /// output; one-shot offscreen consumers use [`build_scene`] instead.
 pub(crate) fn build_scene_into(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     backend: &WaylandBackend,
     renderer: &mut GlesRenderer,
     pointer_location: SPoint<f64, smithay::utils::Logical>,
@@ -299,7 +314,7 @@ pub(crate) fn build_scene_into(
                 push_shell_elements(elements, renderer, record, viewport);
             }
         }
-        let furniture_alpha = (1.0 - overview.progress.clamp(0.0, 1.0)) as f32;
+        let furniture_alpha = if overview.has_workspace_cards() { 1.0 } else { (1.0 - overview.progress.clamp(0.0, 1.0)) as f32 };
         push_furniture(elements, renderer, backend, viewport, furniture_alpha, true);
         crate::overview::render(elements, renderer, backend, overview, viewport);
         push_furniture(elements, renderer, backend, viewport, furniture_alpha, false);
@@ -347,7 +362,7 @@ pub(crate) fn build_scene_into(
     for window in backend.scene_index.unmanaged() {
         if let Some(record) = backend.windows.get(&window).filter(|record| record.mapped) {
             let start = elements.len();
-            push_window_content(elements, renderer, backend, record.content, record, viewport);
+            push_window_content(elements, renderer, backend, record.content, record, viewport, None);
             if let Some(name) = backend.space_output_for(record) {
                 if let Some(monitor) = backend.monitors.iter().find(|m| m.name == name) {
                     let mut rect = monitor.geometry;
@@ -378,7 +393,7 @@ pub(crate) fn build_scene_into(
                 return;
             };
             if record.mapped && backend.scene_index.is_presented(*id) {
-                push_window_content(elements, renderer, backend, record.content, record, viewport);
+                push_window_content(elements, renderer, backend, record.content, record, viewport, None);
             }
         }
         if let StackEntry::Frame(id) = entry {
@@ -394,12 +409,13 @@ pub(crate) fn build_scene_into(
             // shaded window keeps its frame mapped with the
             // content unmapped (`set_client_mapped(false)`), which
             // falls out naturally here.
-            if let Some(record) = window {
-                if record.mapped {
-                    push_window_content(elements, renderer, backend, record.content, record, viewport);
-                }
-            }
+            let content_draw = window.filter(|record| record.mapped).map(|record| {
+                push_window_content(elements, renderer, backend, record.content, record, viewport, Some(frame))
+            }).unwrap_or_default();
+            let opaque_client = content_draw.opaque_client;
             if overlap_area(frame.geometry, viewport) == 0 {
+                crate::frame_effects::push_shadow(elements, renderer, frame.effects.as_ref(), frame.geometry.pos,
+                    viewport.pos, Point::new(0,0), 1.0, 1.0, 1.0);
                 return;
             }
             for part in &frame.parts {
@@ -422,6 +438,18 @@ pub(crate) fn build_scene_into(
                     Err(error) => tracing::warn!(?error, "failed to import a decoration buffer"),
                 }
             }
+            let solid_start = elements.len();
+            for solid in &frame.solids {
+                let mut rect = solid.solid.rect;
+                rect.pos.x += frame.geometry.pos.x - viewport.pos.x;
+                rect.pos.y += frame.geometry.pos.y - viewport.pos.y;
+                elements.push(solid.element(rect, 1.0).into());
+            }
+            let shape = crate::rounded::translated_shape(frame.effects.as_ref().and_then(|e|e.shape),
+                frame.geometry.pos, viewport.pos, Point::new(0,0), 1.0, 1.0);
+            crate::rounded::mask_frame_solids(elements, solid_start, renderer, shape, content_draw.lower_border_drawn);
+            crate::frame_effects::push_shadow(elements, renderer, frame.effects.as_ref(), frame.geometry.pos,
+                viewport.pos, Point::new(0,0), 1.0, 1.0, 1.0);
             // Preserve the opaque mid-resize/unshade gap that the former
             // window-sized pixel buffer supplied, but as four floats plus a
             // stable id instead of frame-width * frame-height * 4 retained
@@ -429,6 +457,9 @@ pub(crate) fn build_scene_into(
             // Fill only the client's requested interior. Filling the outer
             // frame would turn transparent resize margins and shadow corners
             // black underneath the correctly alpha-masked chrome bands.
+            // An opaque modern client already supplies the requested interior.
+            // A second rounded black fill would apply corner coverage twice.
+            if opaque_client { return; }
             let Some(content) = window.filter(|record| record.mapped).map(|record| record.content) else { return; };
             let geometry = SRect::<i32, Physical>::new(
                 (
@@ -438,6 +469,7 @@ pub(crate) fn build_scene_into(
                     .into(),
                 (content.size.w as i32, content.size.h as i32).into(),
             );
+            let fill_start = elements.len();
             elements.push(
                 SolidColorRenderElement::new(
                     frame.fill_id.clone(),
@@ -448,6 +480,7 @@ pub(crate) fn build_scene_into(
                 )
                 .into(),
             );
+            crate::rounded::mask_plane(elements, fill_start, renderer, shape, true);
         }
             })();
         let window = match entry {
@@ -485,7 +518,7 @@ pub(crate) fn build_scene_into(
 }
 
 pub(crate) fn push_background(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     viewport: Rect,
@@ -1121,7 +1154,7 @@ pub(crate) fn log_damage(age: usize, damage: Option<&[SRect<i32, Physical>]>) {
 /// they go through [`push_surface_tree`] like every other, or a 2x
 /// client's bar would land at half size.
 fn push_ime_popups(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     viewport: Rect,
@@ -1164,7 +1197,7 @@ fn push_ime_popups(
 }
 
 fn push_layer_band(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     band: WlrLayer,
@@ -1172,7 +1205,7 @@ fn push_layer_band(
 ) {
     push_layer_band_alpha(elements, renderer, backend, band, viewport, 1.0);
 }
-fn push_layer_band_alpha(elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+fn push_layer_band_alpha(elements: &mut Vec<SceneElement>, renderer: &mut GlesRenderer,
     backend: &WaylandBackend, band: WlrLayer, viewport: Rect, alpha: f32) {
     for record in backend.layers.iter().rev() {
         if record.layer != band || !backend.layer_presented(record) {
@@ -1226,14 +1259,14 @@ fn push_layer_band_alpha(elements: &mut Vec<SceneElement<GlesRenderer>>, rendere
 /// been painted — the same visual the X11 backend gets from a fresh
 /// window's background pixel before the first blit.
 fn push_shell_elements(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     record: &crate::state::ShellRecord,
     viewport: Rect,
 ) {
     push_shell_elements_alpha(elements, renderer, record, viewport, 1.0);
 }
-fn push_shell_elements_alpha(elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+fn push_shell_elements_alpha(elements: &mut Vec<SceneElement>, renderer: &mut GlesRenderer,
     record: &crate::state::ShellRecord, viewport: Rect, alpha: f32) {
     if overlap_area(record.geometry, viewport) == 0 {
         return;
@@ -1287,7 +1320,7 @@ fn push_shell_elements_alpha(elements: &mut Vec<SceneElement<GlesRenderer>>, ren
     }
 }
 
-pub(crate) fn push_furniture(elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+pub(crate) fn push_furniture(elements: &mut Vec<SceneElement>, renderer: &mut GlesRenderer,
     backend: &WaylandBackend, viewport: Rect, alpha: f32, above: bool) {
     if alpha <= 0.0 || fullscreen_occludes_desktop_bands(backend, viewport) { return; }
     for id in backend.shell_stacking.iter().rev() {
@@ -1310,19 +1343,26 @@ pub(crate) fn push_furniture(elements: &mut Vec<SceneElement<GlesRenderer>>, ren
 /// 2x works in its own logical pixels while this ledger is in physical
 /// ones, so everything it reports is its buffer scale times smaller
 /// than what is drawn.
+#[derive(Default)]
+struct ContentDraw {
+    opaque_client: bool,
+    lower_border_drawn: bool,
+}
+
 fn push_window_content(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     content: Rect,
     record: &crate::state::WindowRecord,
     viewport: Rect,
-) {
+    frame: Option<&crate::state::FrameRecord>,
+) -> ContentDraw {
     if !record.surface.alive() {
-        return;
+        return ContentDraw::default();
     }
     let Some(surface) = record.surface.wl_surface() else {
-        return;
+        return ContentDraw::default();
     };
     // Drawn up and to the left by the client's own window-geometry
     // offset, so that the *window* lands at `content.pos` rather than
@@ -1383,9 +1423,23 @@ fn push_window_content(
         ));
         push_surface_tree(elements, renderer, popup_surface, location, popup_factor, 1.0, Kind::Unspecified);
     }
+    let effects = frame.and_then(|frame|frame.effects.as_ref());
+    let shape = crate::rounded::translated_shape(effects.and_then(|e|e.shape),
+        frame.map_or(Point::new(0,0),|frame|frame.geometry.pos), viewport.pos, Point::new(0,0), 1.0, 1.0);
+    let lower_border_drawn = effects.is_some_and(|effects| {
+        crate::rounded::push_border(elements, renderer, shape, &effects.border_ids, effects.commit, 1.0)
+    });
     if surface_tree_reaches_viewport(&surface, global_origin, content, factor, viewport) {
+        let start = elements.len();
         push_surface_tree(elements, renderer, &surface, origin, factor, 1.0, Kind::Unspecified);
+        let requested = Rect::new(Point::new(content.pos.x - viewport.pos.x,
+            content.pos.y - viewport.pos.y), content.size);
+        let opaque = shape.is_some_and(|shape| shape.radius > 0)
+            && crate::rounded::opaque_client_covers(&elements[start..], requested);
+        crate::rounded::mask_plane(elements, start, renderer, shape, true);
+        return ContentDraw { opaque_client: opaque, lower_border_drawn };
     }
+    ContentDraw { opaque_client: false, lower_border_drawn }
 }
 
 /// Whether a surface tree contributes pixels to this output/capture.
@@ -1455,7 +1509,7 @@ pub(crate) fn surface_tree_reaches_viewport(
 /// either way, and no toolkit this desktop runs mixes scales within
 /// one window.
 pub(crate) fn push_surface_tree(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
     location: SPoint<i32, Physical>,
@@ -1468,7 +1522,7 @@ pub(crate) fn push_surface_tree(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_surface_tree_alpha(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
     location: SPoint<i32, Physical>,
@@ -1629,7 +1683,7 @@ fn return_walk_stack(mut stack: Vec<TreeStep>) {
 /// worth it for a nested dev backend, and clients that care set
 /// surface cursors.
 pub(crate) fn push_cursor_elements(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     location: SPoint<f64, smithay::utils::Logical>,

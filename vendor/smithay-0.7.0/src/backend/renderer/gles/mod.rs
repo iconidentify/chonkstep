@@ -14,7 +14,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicPtr, Ordering},
         mpsc::{channel, Receiver, Sender},
-        Arc, Mutex, RwLock, RwLockWriteGuard,
+        Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
 };
 use tracing::{debug, error, info, info_span, instrument, span, span::EnteredSpan, trace, warn, Level};
@@ -24,6 +24,8 @@ mod error;
 pub mod format;
 mod shaders;
 mod texture;
+#[cfg(test)]
+mod read_batch_tests;
 mod uniform;
 mod version;
 
@@ -332,9 +334,30 @@ pub struct GlesFrame<'frame, 'buffer> {
     transform: Transform,
     size: Size<i32, Physical>,
     tex_program_override: Option<(GlesTexProgram, Vec<Uniform<'static>>)>,
+    // Allocation identity of the texture whose read lock is held by a scope.
+    texture_read_batch: Option<usize>,
     finished: AtomicBool,
 
     span: EnteredSpan,
+}
+
+struct TextureReadBatch<'scope, 'texture, 'frame, 'buffer> {
+    frame: &'scope mut GlesFrame<'frame, 'buffer>,
+    sync: RwLockReadGuard<'texture, texture::TextureSync>,
+}
+
+impl Drop for TextureReadBatch<'_, '_, '_, '_> {
+    fn drop(&mut self) {
+        // The read lock remains held until the final fence covers every draw,
+        // including draws submitted before a returned error or panic unwind.
+        self.frame.texture_read_batch = None;
+        let renderer = &self.frame.renderer;
+        if renderer.capabilities.contains(&Capability::Fencing) {
+            self.sync.update_read(&renderer.gl);
+        } else if renderer.egl.is_shared() {
+            unsafe { renderer.gl.Finish() };
+        }
+    }
 }
 
 impl fmt::Debug for GlesFrame<'_, '_> {
@@ -1842,14 +1865,145 @@ impl GlesRenderer {
         src: impl AsRef<str>,
         additional_uniforms: &[UniformName<'_>],
     ) -> Result<GlesPixelProgram, GlesError> {
+        self.compile_custom_pixel_shader_with_vertex(shaders::VERTEX_SHADER, src, additional_uniforms)
+    }
+
+    /// Compile a pixel shader with a custom vertex stage.
+    ///
+    /// The fragment source follows [`Self::compile_custom_pixel_shader`]. The vertex
+    /// source must include its own `#version 100` directive and expose active
+    /// `vert: vec2`, `vert_position: vec4` attributes and a `matrix: mat3` uniform.
+    /// `vert` is a unit-rectangle vertex; `vert_position` is the damage rectangle's
+    /// destination-local position and size, in physical pixels. Apply `matrix` to
+    /// that local position to obtain clip coordinates. Optional `tex_matrix: mat3`
+    /// has the same meaning as in the default vertex stage.
+    ///
+    /// Both normal and debug programs are checked before publication. This changes
+    /// only program construction; drawing uses the existing pixel-shader path.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if an additional uniform name contains a NUL byte.
+    pub fn compile_custom_pixel_shader_with_vertex(
+        &mut self,
+        vertex: impl AsRef<str>,
+        src: impl AsRef<str>,
+        additional_uniforms: &[UniformName<'_>],
+    ) -> Result<GlesPixelProgram, GlesError> {
+        // Validate names before creating GL objects, including on the panic path.
+        for uniform in additional_uniforms {
+            assert!(
+                !uniform.name.as_bytes().contains(&0),
+                "Interior null in name"
+            );
+        }
         unsafe {
             self.egl.make_current()?;
         }
 
         let shader = format!("#version 100\n{}", src.as_ref());
-        let program = unsafe { link_program(&self.gl, shaders::VERTEX_SHADER, &shader)? };
-        let debug_shader = format!("#version 100\n#define {}\n{}", shaders::DEBUG_FLAGS, src.as_ref());
-        let debug_program = unsafe { link_program(&self.gl, shaders::VERTEX_SHADER, &debug_shader)? };
+        let program = unsafe { link_program(&self.gl, vertex.as_ref(), &shader)? };
+        let debug_shader = format!(
+            "#version 100\n#define {}\n{}",
+            shaders::DEBUG_FLAGS,
+            src.as_ref()
+        );
+        let debug_program = match unsafe { link_program(&self.gl, vertex.as_ref(), &debug_shader) }
+        {
+            Ok(program) => program,
+            Err(error) => {
+                unsafe { self.gl.DeleteProgram(program) };
+                return Err(error);
+            }
+        };
+
+        // GL may optimize unused bindings away. Reject absent or differently typed
+        // required inputs rather than passing an invalid attribute index to a draw.
+        let validate = |program| -> Result<(), GlesError> {
+            for (is_uniform, bindings) in [
+                (
+                    false,
+                    &[
+                        ("vert", ffi::FLOAT_VEC2),
+                        ("vert_position", ffi::FLOAT_VEC4),
+                    ][..],
+                ),
+                (true, &[("matrix", ffi::FLOAT_MAT3)][..]),
+            ] {
+                let mut count = 0;
+                let mut max_length = 0;
+                unsafe {
+                    self.gl.GetProgramiv(
+                        program,
+                        if is_uniform {
+                            ffi::ACTIVE_UNIFORMS
+                        } else {
+                            ffi::ACTIVE_ATTRIBUTES
+                        },
+                        &mut count,
+                    );
+                    self.gl.GetProgramiv(
+                        program,
+                        if is_uniform {
+                            ffi::ACTIVE_UNIFORM_MAX_LENGTH
+                        } else {
+                            ffi::ACTIVE_ATTRIBUTE_MAX_LENGTH
+                        },
+                        &mut max_length,
+                    );
+                }
+                let mut name = vec![0u8; max_length.max(1) as usize];
+                for &(required_name, required_type) in bindings {
+                    let mut found = false;
+                    for index in 0..count as u32 {
+                        let mut length = 0;
+                        let mut size = 0;
+                        let mut type_ = 0;
+                        unsafe {
+                            if is_uniform {
+                                self.gl.GetActiveUniform(
+                                    program,
+                                    index,
+                                    name.len() as i32,
+                                    &mut length,
+                                    &mut size,
+                                    &mut type_,
+                                    name.as_mut_ptr().cast(),
+                                );
+                            } else {
+                                self.gl.GetActiveAttrib(
+                                    program,
+                                    index,
+                                    name.len() as i32,
+                                    &mut length,
+                                    &mut size,
+                                    &mut type_,
+                                    name.as_mut_ptr().cast(),
+                                );
+                            }
+                        }
+                        if name[..length as usize] == *required_name.as_bytes()
+                            && size == 1
+                            && type_ == required_type
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return Err(GlesError::InvalidPixelShaderInterface(required_name));
+                    }
+                }
+            }
+            Ok(())
+        };
+        if let Err(error) = validate(program).and_then(|()| validate(debug_program)) {
+            unsafe {
+                self.gl.DeleteProgram(program);
+                self.gl.DeleteProgram(debug_program);
+            }
+            return Err(error);
+        }
 
         let vert = c"vert";
         let vert_position = c"vert_position";
@@ -1866,9 +2020,10 @@ impl GlesRenderer {
                     uniform_matrix: self
                         .gl
                         .GetUniformLocation(program, matrix.as_ptr() as *const ffi::types::GLchar),
-                    uniform_tex_matrix: self
-                        .gl
-                        .GetUniformLocation(program, tex_matrix.as_ptr() as *const ffi::types::GLchar),
+                    uniform_tex_matrix: self.gl.GetUniformLocation(
+                        program,
+                        tex_matrix.as_ptr() as *const ffi::types::GLchar,
+                    ),
                     uniform_alpha: self
                         .gl
                         .GetUniformLocation(program, alpha.as_ptr() as *const ffi::types::GLchar),
@@ -1878,16 +2033,19 @@ impl GlesRenderer {
                     attrib_vert: self
                         .gl
                         .GetAttribLocation(program, vert.as_ptr() as *const ffi::types::GLchar),
-                    attrib_position: self
-                        .gl
-                        .GetAttribLocation(program, vert_position.as_ptr() as *const ffi::types::GLchar),
+                    attrib_position: self.gl.GetAttribLocation(
+                        program,
+                        vert_position.as_ptr() as *const ffi::types::GLchar,
+                    ),
                     additional_uniforms: additional_uniforms
                         .iter()
                         .map(|uniform| {
-                            let name = CString::new(uniform.name.as_bytes()).expect("Interior null in name");
-                            let location = self
-                                .gl
-                                .GetUniformLocation(program, name.as_ptr() as *const ffi::types::GLchar);
+                            let name = CString::new(uniform.name.as_bytes())
+                                .expect("Interior null in name");
+                            let location = self.gl.GetUniformLocation(
+                                program,
+                                name.as_ptr() as *const ffi::types::GLchar,
+                            );
                             (
                                 uniform.name.clone().into_owned(),
                                 UniformDesc {
@@ -1900,21 +2058,26 @@ impl GlesRenderer {
                 },
                 debug: GlesPixelProgramInternal {
                     program: debug_program,
-                    uniform_matrix: self
-                        .gl
-                        .GetUniformLocation(debug_program, matrix.as_ptr() as *const ffi::types::GLchar),
-                    uniform_tex_matrix: self
-                        .gl
-                        .GetUniformLocation(debug_program, tex_matrix.as_ptr() as *const ffi::types::GLchar),
-                    uniform_alpha: self
-                        .gl
-                        .GetUniformLocation(debug_program, alpha.as_ptr() as *const ffi::types::GLchar),
-                    uniform_size: self
-                        .gl
-                        .GetUniformLocation(debug_program, size.as_ptr() as *const ffi::types::GLchar),
-                    attrib_vert: self
-                        .gl
-                        .GetAttribLocation(debug_program, vert.as_ptr() as *const ffi::types::GLchar),
+                    uniform_matrix: self.gl.GetUniformLocation(
+                        debug_program,
+                        matrix.as_ptr() as *const ffi::types::GLchar,
+                    ),
+                    uniform_tex_matrix: self.gl.GetUniformLocation(
+                        debug_program,
+                        tex_matrix.as_ptr() as *const ffi::types::GLchar,
+                    ),
+                    uniform_alpha: self.gl.GetUniformLocation(
+                        debug_program,
+                        alpha.as_ptr() as *const ffi::types::GLchar,
+                    ),
+                    uniform_size: self.gl.GetUniformLocation(
+                        debug_program,
+                        size.as_ptr() as *const ffi::types::GLchar,
+                    ),
+                    attrib_vert: self.gl.GetAttribLocation(
+                        debug_program,
+                        vert.as_ptr() as *const ffi::types::GLchar,
+                    ),
                     attrib_position: self.gl.GetAttribLocation(
                         debug_program,
                         vert_position.as_ptr() as *const ffi::types::GLchar,
@@ -1922,7 +2085,8 @@ impl GlesRenderer {
                     additional_uniforms: additional_uniforms
                         .iter()
                         .map(|uniform| {
-                            let name = CString::new(uniform.name.as_bytes()).expect("Interior null in name");
+                            let name = CString::new(uniform.name.as_bytes())
+                                .expect("Interior null in name");
                             let location = self.gl.GetUniformLocation(
                                 debug_program,
                                 name.as_ptr() as *const ffi::types::GLchar,
@@ -1944,7 +2108,6 @@ impl GlesRenderer {
             })))
         }
     }
-
     /// Compile a custom texture shader for rendering with [`GlesFrame::render_texture`] or [`GlesFrame::render_texture_from_to`].
     ///
     /// They need to handle the following #define variants:
@@ -2098,6 +2261,7 @@ impl Renderer for GlesRenderer {
             transform,
             size: output_size,
             tex_program_override: None,
+            texture_read_batch: None,
             finished: AtomicBool::new(false),
 
             span,
@@ -2342,6 +2506,37 @@ impl GlesFrame<'_, '_> {
         Ok(SyncPoint::signaled())
     }
 
+    /// Sample one texture through several draw calls under a single read lock.
+    ///
+    /// Upload synchronization happens before the callback. A final read fence
+    /// covers all matching draws before the lock is released, including when
+    /// the callback returns an error or unwinds. Nested scopes for the same
+    /// texture reuse the outer scope without recursively acquiring its lock.
+    /// Sampling another texture returns [`GlesError::TextureReadBatchConflict`]
+    /// before acquiring another lock, preventing mixed-texture lock inversion.
+    ///
+    /// The texture must be valid for this renderer, as with ordinary texture
+    /// drawing. This scope does not permit modifying the sampled texture.
+    pub fn with_texture_read<T>(
+        &mut self,
+        texture: &GlesTexture,
+        draw: impl FnOnce(&mut Self) -> Result<T, GlesError>,
+    ) -> Result<T, GlesError> {
+        let identity = Arc::as_ptr(&texture.0) as usize;
+        if let Some(active) = self.texture_read_batch {
+            return if active == identity {
+                draw(self)
+            } else {
+                Err(GlesError::TextureReadBatchConflict)
+            };
+        }
+        let sync = texture.0.sync.read().unwrap();
+        sync.wait_for_upload(&self.renderer.gl);
+        self.texture_read_batch = Some(identity);
+        let batch = TextureReadBatch { frame: self, sync };
+        draw(&mut *batch.frame)
+    }
+
     /// Overrides the default texture shader used, if none is specified.
     ///
     /// This affects calls to [`Frame::render_texture_at`] or [`Frame::render_texture_from_to`] as well as
@@ -2359,6 +2554,26 @@ impl GlesFrame<'_, '_> {
     /// Resets a texture shader override previously set by [`GlesFrame::override_default_tex_program`].
     pub fn clear_tex_program_override(&mut self) {
         self.tex_program_override = None;
+    }
+
+    /// Remove an override while returning its storage to a retained caller.
+    /// This is equivalent to `clear_tex_program_override`, without dropping
+    /// a reusable uniform vector after every masked surface draw.
+    pub fn take_tex_program_override(&mut self) -> Option<(GlesTexProgram, Vec<Uniform<'static>>)> {
+        self.tex_program_override.take()
+    }
+
+    /// Affine rows mapping `gl_FragCoord.xy` back to the physical scene pixels
+    /// accepted by frame drawing methods. This includes output rotation and
+    /// the EGL framebuffer reflection, without exposing renderer internals.
+    pub fn framebuffer_to_physical(&self) -> [[f32; 3]; 2] {
+        let inverse = self.current_projection.invert().expect("nonzero render target projection");
+        let size = self.transform.transform_size(self.size);
+        let (x, y) = (2.0 / size.w as f32, 2.0 / size.h as f32);
+        [
+            [inverse[0][0] * x, inverse[1][0] * y, inverse[2][0] - inverse[0][0] - inverse[1][0]],
+            [inverse[0][1] * x, inverse[1][1] * y, inverse[2][1] - inverse[0][1] - inverse[1][1]],
+        ]
     }
 
     /// Draw a solid color to the current target at the specified destination with the specified color.
@@ -2635,6 +2850,10 @@ impl GlesFrame<'_, '_> {
         program: Option<&GlesTexProgram>,
         additional_uniforms: &[Uniform<'_>],
     ) -> Result<(), GlesError> {
+        let identity = Arc::as_ptr(&tex.0) as usize;
+        if self.texture_read_batch.is_some_and(|active| active != identity) {
+            return Err(GlesError::TextureReadBatchConflict);
+        }
         // prepare the vertices
         self.renderer.vertices.clear();
         let damage_len = if let Some(instances) = instances {
@@ -2698,9 +2917,12 @@ impl GlesFrame<'_, '_> {
 
         // render
         let gl = &self.renderer.gl;
-        let sync_lock = tex.0.sync.read().unwrap();
+        let sync_lock = (self.texture_read_batch != Some(identity))
+            .then(|| tex.0.sync.read().unwrap());
         unsafe {
-            sync_lock.wait_for_upload(gl);
+            if let Some(sync_lock) = &sync_lock {
+                sync_lock.wait_for_upload(gl);
+            }
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(target, tex.0.texture);
             gl.TexParameteri(
@@ -2781,11 +3003,13 @@ impl GlesFrame<'_, '_> {
             gl.DisableVertexAttribArray(program.attrib_vert as u32);
             gl.DisableVertexAttribArray(program.attrib_vert_position as u32);
 
-            if self.renderer.capabilities.contains(&Capability::Fencing) {
-                sync_lock.update_read(gl);
-            } else if self.renderer.egl.is_shared() {
-                gl.Finish();
-            };
+            if let Some(sync_lock) = &sync_lock {
+                if self.renderer.capabilities.contains(&Capability::Fencing) {
+                    sync_lock.update_read(gl);
+                } else if self.renderer.egl.is_shared() {
+                    gl.Finish();
+                }
+            }
         }
 
         Ok(())

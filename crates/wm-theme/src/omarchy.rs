@@ -7,13 +7,20 @@
 //! config from templates over them. chonkstep describes a theme as a
 //! fully specified `Theme` — fills, bevels, menu palette, terminal
 //! palette, chrome geometry. This module is the mapping between the
-//! two vocabularies, in both directions, and it is written so that
-//! **chonkstep keeps its identity**: an Omarchy palette changes what
+//! two vocabularies, in both directions. A palette-only theme keeps
+//! **chonkstep's classic identity**: an Omarchy palette changes what
 //! colour the chrome is, never what the chrome *is*. The result goes
 //! through the same `build_chrome` recipe every built-in uses (23px
 //! titlebar, flush full-height buttons, 8px resize bar with 28px grips,
 //! 1px border, the double-raised NeXT relief), so hit-testing and
 //! layout are identical to every other theme; only the dress changes.
+//!
+//! Exported modern themes additionally carry a versioned, data-only
+//! `chonkstep.toml` containing the public [`Theme`] at 1x. That descriptor
+//! is authoritative for Chonkstep's authored colors, fonts, appearance
+//! and geometry; `colors.toml` remains Omarchy's application palette.
+//! Regenerate both from the same theme when editing it. The follower's
+//! identity, display name and current wallpaper always remain Omarchy's.
 //!
 //! # Reading a palette
 //!
@@ -135,10 +142,11 @@
 //! round-trips exactly, which the tests pin.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::de::{Deserializer, Error as _};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::default_theme::{build_chrome, ChromeSpec};
 use crate::model::{Appearance, Bevel, BevelStyle, Color, Fill, TerminalPalette, Theme};
@@ -159,6 +167,84 @@ pub const WALLPAPER: &str = "omarchy";
 /// The percentage the terminal is painted at, matching Omarchy's own
 /// `0.985` active-window opacity rule.
 const TERMINAL_OPACITY: u8 = 98;
+
+/// Optional public-theme descriptor accompanying modern Omarchy exports.
+pub const DESCRIPTOR_FILE: &str = "chonkstep.toml";
+const DESCRIPTOR_VERSION: u32 = 1;
+const MAX_DESCRIPTOR_BYTES: u64 = 128 * 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeDescriptor {
+    version: u32,
+    theme: Theme,
+}
+
+/// Serialize a modern theme at its authored 1x scale. Classic exports omit
+/// the descriptor and retain Omarchy's existing palette-only contract.
+pub fn descriptor_from_theme(theme: &Theme) -> Result<Option<String>, String> {
+    if theme.chrome.is_none() {
+        return Ok(None);
+    }
+    let theme = normalize_descriptor_theme(theme.clone())?;
+    let data = toml::to_string(&ThemeDescriptor { version: DESCRIPTOR_VERSION, theme })
+        .map_err(|error| error.to_string())?;
+    let text = format!("# Public Chonkstep Theme at 1x. Generated with colors.toml and shell.toml.\n# This descriptor owns Chonkstep colors, fonts and geometry; no executable hooks.\n{data}");
+    if text.len() as u64 > MAX_DESCRIPTOR_BYTES {
+        return Err("Chonkstep theme descriptor exceeds 128 KiB".into());
+    }
+    Ok(Some(text))
+}
+
+fn normalize_descriptor_theme(theme: Theme) -> Result<Theme, String> {
+    if theme.chrome.is_none() {
+        return Err("Chonkstep theme descriptor requires modern chrome tokens".into());
+    }
+    for font in [&theme.titlebar.font, &theme.menu.title_font, &theme.menu.item_font] {
+        if font.family.is_empty() || font.family.len() > 512 || !font.size.is_finite() || !(1.0..=128.0).contains(&font.size) {
+            return Err("Chonkstep theme descriptor has an invalid font (family 1–512 bytes, size 1–128px)".into());
+        }
+    }
+    // The semantic metrics normalize through the public API. These older
+    // Theme fields remain usable by explicit frame overrides and instruments,
+    // so bound them too rather than admitting enormous legacy layouts.
+    if theme.titlebar.height > 512 || theme.titlebar.button_margin > 128
+        || theme.titlebar.buttons.len() > 16 || theme.titlebar.buttons.iter().any(|button| button.size > 256 || button.bevel.width > 32)
+        || theme.resize_bar.height > 128 || theme.resize_bar.corner_width > 512
+        || theme.border.width > 32 || theme.menu.item_height == 0 || theme.menu.item_height > 256
+        || [theme.titlebar.bevel.width, theme.resize_bar.bevel.width, theme.menu.bevel.width, theme.tile.bevel.width].iter().any(|width| *width > 32)
+        || theme.terminal.opacity.is_some_and(|opacity| opacity > 100)
+    {
+        return Err("Chonkstep theme descriptor has out-of-range legacy metrics".into());
+    }
+    Ok(theme.normalized_chrome())
+}
+
+fn load_descriptor(path: &Path) -> Result<Option<Theme>, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !metadata.is_file() || metadata.len() > MAX_DESCRIPTOR_BYTES {
+        return Err("Chonkstep theme descriptor must be a regular file of at most 128 KiB".into());
+    }
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let opened = file.metadata().map_err(|error| error.to_string())?;
+    if !opened.is_file() || opened.len() > MAX_DESCRIPTOR_BYTES {
+        return Err("Chonkstep theme descriptor must be a regular file of at most 128 KiB".into());
+    }
+    let mut text = String::new();
+    file.take(MAX_DESCRIPTOR_BYTES + 1).read_to_string(&mut text).map_err(|error| error.to_string())?;
+    if text.len() as u64 > MAX_DESCRIPTOR_BYTES {
+        return Err("Chonkstep theme descriptor exceeds 128 KiB".into());
+    }
+    let descriptor: ThemeDescriptor = toml::from_str(&text).map_err(|error| error.to_string())?;
+    if descriptor.version != DESCRIPTOR_VERSION {
+        return Err(format!("unsupported Chonkstep theme descriptor version {}", descriptor.version));
+    }
+    normalize_descriptor_theme(descriptor.theme).map(Some)
+}
 
 /// An Omarchy palette with every semantic key resolved — the file's
 /// own values where it had them, `omarchy-theme-color`'s derivations
@@ -550,6 +636,9 @@ pub fn title_case(theme_dir_name: &str) -> String {
 /// | `bright_foreground`    | ANSI slot 15                                     |
 /// | hues, `bright_*`       | ANSI slots 1–6, 9–14                             |
 /// | `orange`, `brown`      | derived the way Omarchy derives them (no chrome counterpart) |
+///
+/// Modern semantic `chrome.accent`, `chrome.selection` and `chrome.muted`
+/// take precedence over their legacy frame-derived counterparts above.
 pub fn palette_from_theme(theme: &Theme) -> OmarchyPalette {
     let solid = |fill: &Fill| match fill {
         Fill::Solid(c) => *c,
@@ -564,9 +653,9 @@ pub fn palette_from_theme(theme: &Theme) -> OmarchyPalette {
     let orange = t.ansi[3];
     OmarchyPalette {
         mode: theme.appearance,
-        accent: solid(&theme.menu.highlight_background),
-        selection: solid(&theme.titlebar.inactive),
-        muted: t.ansi[8],
+        accent: theme.chrome.map_or_else(||solid(&theme.menu.highlight_background),|chrome|chrome.accent),
+        selection: theme.chrome.map_or_else(||solid(&theme.titlebar.inactive),|chrome|chrome.selection),
+        muted: theme.chrome.map_or(t.ansi[8],|chrome|chrome.muted),
         background: t.bg,
         // A light theme's darker steps are its bevel shadow; a dark
         // theme's darkest step is its ink-black focus bar.
@@ -651,7 +740,7 @@ pub fn is_available() -> bool {
     current_colors_path().is_some_and(|path| path.is_file())
 }
 
-/// Reads Omarchy's current palette and builds the theme it prescribes,
+/// Reads Omarchy's current palette and optional public-theme descriptor,
 /// named after the current theme. `Err` carries a log-ready reason:
 /// no state directory, no file, or a file that does not parse.
 pub fn load_current() -> Result<Theme, String> {
@@ -668,7 +757,16 @@ pub fn load_from_dir(current: &Path) -> Result<Theme, String> {
         .ok()
         .map(|text| title_case(&text))
         .unwrap_or_default();
-    Ok(theme_from_palette(&palette, &name))
+    let inherited = theme_from_palette(&palette, &name);
+    let descriptor_path = current.join("theme").join(DESCRIPTOR_FILE);
+    let Some(mut authored) = load_descriptor(&descriptor_path)
+        .map_err(|error| format!("{}: {error}", descriptor_path.display()))? else {
+        return Ok(inherited);
+    };
+    authored.id = inherited.id;
+    authored.name = inherited.name;
+    authored.wallpaper = inherited.wallpaper;
+    Ok(authored)
 }
 
 #[cfg(test)]
@@ -1030,7 +1128,11 @@ color15 = "#efefef"
             assert_eq!(terminal.ansi[8..16], want.ansi[8..16], "{}: bright slots", theme.id);
             assert_eq!(terminal.ansi[0], want.bg, "{}", theme.id);
             assert_eq!(terminal.ansi[7], want.fg, "{}", theme.id);
-            assert_eq!(back.accent, solid(&theme.menu.highlight_background), "{}", theme.id);
+            if let Some(chrome)=theme.chrome {
+                assert_eq!((back.accent,back.selection,back.muted),(chrome.accent,chrome.selection,chrome.muted),"{}",theme.id);
+            } else {
+                assert_eq!(back.accent, solid(&theme.menu.highlight_background), "{}", theme.id);
+            }
             // Omarchy's 25 canonical colour keys, plus mode, and nothing else.
             assert_eq!(text.lines().filter(|l| l.contains('=')).count(), 26, "{}", theme.id);
         }
@@ -1100,6 +1202,81 @@ color15 = "#efefef"
         assert_eq!(theme.name, "Omarchy (Tokyo Night)");
         std::fs::write(dir.join("theme/colors.toml"), "not = [toml").unwrap();
         assert!(load_from_dir(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modern_descriptor_roundtrip_is_data_driven_and_retains_follower_identity() {
+        let dir = std::env::temp_dir().join(format!("chonk-omarchy-descriptor-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("theme")).unwrap();
+        std::fs::write(dir.join("theme.name"),"bespoke-paper\n").unwrap();
+        for id in ["obsidian", "washi", "relay"] {
+            for appearance in [Appearance::Dark, Appearance::Light] {
+                let mut authored = crate::default_theme::theme_variant(id,appearance).unwrap();
+                authored.id = "unknown-future-design".into();
+                authored.name = "A locally authored design".into();
+                let chrome = authored.chrome.as_mut().unwrap();
+                chrome.frame.radius = 13;
+                chrome.frame.padding = 47;
+                chrome.accent = Color::rgb(12,34,56);
+                authored.menu.item_font.family = "A user font".into();
+                // Deliberately different palette: the optional descriptor is
+                // authoritative for Chonkstep's complete authored visual theme.
+                std::fs::write(dir.join("theme/colors.toml"),TOKYO_NIGHT).unwrap();
+                let text = descriptor_from_theme(&authored).unwrap().unwrap();
+                std::fs::write(dir.join("theme").join(DESCRIPTOR_FILE),text).unwrap();
+                let loaded = load_from_dir(&dir).unwrap();
+                assert_eq!(loaded.id,ID);
+                assert_eq!(loaded.name,"Omarchy (Bespoke Paper)");
+                assert_eq!(loaded.wallpaper,WALLPAPER);
+                authored.id = loaded.id.clone();authored.name = loaded.name.clone();authored.wallpaper = loaded.wallpaper.clone();
+                assert_eq!(loaded,authored);
+                assert_eq!(loaded.resolve_style(wm_theme_api::DecorationStyle::Auto),wm_theme_api::DecorationStyle::Modern);
+                assert_eq!(loaded.resolve_style(wm_theme_api::DecorationStyle::System7),wm_theme_api::DecorationStyle::System7);
+            }
+        }
+        std::fs::remove_file(dir.join("theme").join(DESCRIPTOR_FILE)).unwrap();
+        let palette = OmarchyPalette::parse(TOKYO_NIGHT).unwrap();
+        assert_eq!(load_from_dir(&dir).unwrap(),theme_from_palette(&palette,"Bespoke Paper"));
+        assert!(descriptor_from_theme(&crate::default_theme::nextstep_classic()).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modern_descriptor_is_bounded_normalized_and_rejects_invalid_data() {
+        let dir = std::env::temp_dir().join(format!("chonk-omarchy-descriptor-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("theme")).unwrap();
+        std::fs::write(dir.join("theme/colors.toml"),TOKYO_NIGHT).unwrap();
+        let path = dir.join("theme").join(DESCRIPTOR_FILE);
+        let mut authored = crate::default_theme::theme_variant("obsidian",Appearance::Dark).unwrap();
+        authored.chrome.as_mut().unwrap().frame.radius = u16::MAX;
+        authored.chrome.as_mut().unwrap().frame.padding = u16::MAX;
+        let text = toml::to_string(&ThemeDescriptor {version:1,theme:authored.clone()}).unwrap();
+        std::fs::write(&path,&text).unwrap();
+        assert_eq!(load_from_dir(&dir).unwrap().chrome,authored.normalized_chrome().chrome);
+        for invalid in [
+            "invalid = [toml".to_string(),
+            text.replacen("version = 1","version = 99",1),
+            " ".repeat(MAX_DESCRIPTOR_BYTES as usize + 1),
+        ] {
+            std::fs::write(&path,invalid).unwrap();
+            assert!(load_from_dir(&dir).unwrap_err().contains(DESCRIPTOR_FILE));
+        }
+        let modern = crate::default_theme::theme_variant("relay",Appearance::Light).unwrap();
+        for invalid_size in [f32::NAN,f32::INFINITY,0.0,129.0] {
+            let mut invalid = modern.clone();invalid.menu.item_font.size=invalid_size;
+            let text=toml::to_string(&ThemeDescriptor {version:1,theme:invalid}).unwrap();
+            std::fs::write(&path,text).unwrap();
+            assert!(load_from_dir(&dir).unwrap_err().contains("invalid font"));
+        }
+        let mut invalid = modern.clone();invalid.titlebar.buttons.resize(17,invalid.titlebar.buttons[0].clone());
+        std::fs::write(&path,toml::to_string(&ThemeDescriptor {version:1,theme:invalid}).unwrap()).unwrap();
+        assert!(load_from_dir(&dir).unwrap_err().contains("legacy metrics"));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(load_from_dir(&dir).unwrap_err().contains("regular file"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

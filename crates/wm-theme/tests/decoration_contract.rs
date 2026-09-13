@@ -97,6 +97,16 @@ fn every_frame_state_retains_only_nonoverlapping_perimeter_bands() {
                                     assert_eq!(part.buffer.pixels.len(), part.buffer.width as usize * part.buffer.height as usize * 4);
                                     regions.push(rect);
                                 }
+                                for solid in &surface.solids {
+                                    let r = solid.rect;
+                                    let rect = (i64::from(r.pos.x), i64::from(r.pos.y),
+                                        i64::from(r.pos.x) + i64::from(r.size.w), i64::from(r.pos.y) + i64::from(r.size.h));
+                                    assert!(rect.0 >= 0 && rect.1 >= 0 && rect.2 <= i64::from(layout.frame_size.w)
+                                        && rect.3 <= i64::from(layout.frame_size.h));
+                                    assert!(!overlaps(rect, content), "solid chrome intersects the client");
+                                    assert!(regions.iter().all(|&other| !overlaps(rect, other)), "solid/raster chrome overlaps");
+                                    regions.push(rect);
+                                }
                                 let perimeter = 2 * (layout.frame_size.w as usize + layout.frame_size.h as usize);
                                 let largest_band = layout.client_offset.y.max(1) as usize;
                                 assert!(surface.retained_bytes() <= perimeter * largest_band * 4);

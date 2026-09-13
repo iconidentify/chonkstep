@@ -9,6 +9,13 @@ pub(crate) struct Fallback { fonts: FontSystem, cache: GlyphCache }
 impl Fallback {
     pub(crate) fn cache(&self) -> &GlyphCache { &self.cache }
 
+    /// A separate shaper over the same resident font bytes. Modern text keeps
+    /// antialiasing and its own cache; cloning these selected face records never
+    /// scans installed fonts or opens a new source during a live theme change.
+    pub(crate) fn resident_system(&self) -> FontSystem {
+        FontSystem::new_with_locale_and_db(self.fonts.locale().to_owned(), self.fonts.db().clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn from_db(locale: String, db: cosmic_text::fontdb::Database) -> Self {
         Self::prepare(&mut FontSystem::new_with_locale_and_db(locale, db))

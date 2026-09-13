@@ -935,7 +935,7 @@ pub(crate) fn deadline(comp: &Compositor) -> Option<Instant> {
 /// Display overlay. Stable geometry keeps selection damage sparse; no
 /// monitor-sized CPU images are allocated while the pointer moves.
 pub(crate) fn render(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     viewport: Rect,
@@ -946,7 +946,7 @@ pub(crate) fn render(
 /// Also used by demo output captures. Cursor inclusion remains a separate
 /// protocol choice, including the compositor-owned camera and crosshair.
 pub(crate) fn render_capture(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     viewport: Rect,

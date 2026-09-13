@@ -25,7 +25,6 @@ tempfile = "3"
 # wire protocol directly through the reference crate rather than
 # through an SDK — the probe is scripted test apparatus, and the fewer
 # layers between the test and the bytes, the more the test says.
-chonk-dock-proto = { path = "../chonk-dock-proto" }
 # The layer-shell e2e drives a real bar against the nested shell the
 # same way: `src/bin/chonk-fake-bar.rs` is a wlr-layer-shell client
 # that claims an edge and holds it. Both crates are already in the

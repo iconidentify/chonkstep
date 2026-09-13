@@ -312,7 +312,7 @@ pub(crate) fn deadline(comp: &Compositor) -> Option<Instant> {
 }
 
 pub(crate) fn render_window(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     entry: &StackEntry,
@@ -377,7 +377,7 @@ pub(crate) fn render_window(
 }
 
 pub(crate) fn render_feedback(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     viewport: Rect,

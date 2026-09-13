@@ -1,63 +1,12 @@
-//! Minimal reusable GUI toolkit for chonkstep apps.
-//!
-//! Two shapes of app live here, sharing one visual vocabulary:
-//!
-//! - An [`App`] is a regular, independent X11 client — chonkstep
-//!   decorates its window automatically, the same as any other window —
-//!   but it draws its *content* with the same `wm-theme` paint
-//!   primitives (flat/gradient fills, the chisel bevel, themed text)
-//!   the desktop shell itself uses for the dock and root menu, via the
-//!   re-exported [`paint`] module and [`nextstep_theme`]. That's the
-//!   whole point of the SDK: app content and window chrome come from
-//!   the same visual vocabulary instead of an app inventing its own.
-//! - A [`dockapp`] is a separate process that owns one dock tile. It
-//!   opens no display connection at all; it pushes finished tile pixels
-//!   to the shell over a private socket, and the shell blits them
-//!   exactly as it blits a built-in instrument.
-//!
-//! The [`App`] side is a deliberately small first cut: one fixed-size
-//! window, a single redraw callback, and click notification — no layout
-//! engine or widget tree yet. Enough to prove real apps can inherit the
-//! look and feel; a fuller widget toolkit is future work.
-//!
-//! # SDK surface
-//!
-//! Everything re-exported here is public API with a compatibility
-//! obligation; `wm-theme`'s other modules are not, and `raster` is
-//! already private. Concretely:
-//!
-//! - [`model`] — the `Theme` data model.
-//! - [`paint`] — the low-level drawing primitives (fills, bevels,
-//!   themed text).
-//! - [`tile`] — the common square-tile platform (face, relief,
-//!   luminance-picked ink, sunken wells). Every dock item, every
-//!   miniaturized-window icon and every third-party tile is built on
-//!   it, which is why the whole desktop reads as one family.
-//! - [`panel`] — the instrument kit one level up from `tile`: a
-//!   theme-reactive LED screen with seven-segment digits, meters and
-//!   history matrices, plus `render_dead_tile` for a tile with nothing
-//!   to say. This is what a dockapp actually draws on.
-//! - [`tiny_skia`] — the pixel buffer type both callbacks work in.
-//! - [`clock`] — the analog clock face, re-exported because
-//!   `examples/chonk-dockclock`, the conformance dockapp, has to be
-//!   buildable against this crate alone; a "public SDK" the reference
-//!   example cannot use is not one.
 
 #[cfg(feature = "x11")]
 mod app;
-pub mod dockapp;
 
 #[cfg(feature = "x11")]
 pub use app::App;
 
-pub use wm_theme::{clock, default_theme::nextstep_classic as nextstep_theme, model, paint, panel, tile};
+pub use wm_theme::{default_theme::nextstep_classic as nextstep_theme, model, paint, tile};
 
-/// The pixel buffer type the whole SDK is written in terms of —
-/// [`App::run`]'s and [`dockapp::Handlers::draw`]'s callbacks both hand
-/// one out. Re-exported rather than left as an implicit dependency
-/// because a consumer that had to add its own `tiny-skia` line would be
-/// one Cargo resolution away from a `Pixmap` that is not *this*
-/// `Pixmap`, and the resulting type error names two identical paths.
 pub use tiny_skia;
 
 /// Reads the same `CHONKSTEP_SCALE` env var chonkstep itself reads (see

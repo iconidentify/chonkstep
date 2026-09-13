@@ -4,7 +4,7 @@
 
 use crate::backend_impl::import_buffer;
 use crate::renderer::{push_surface_tree_alpha, SceneElement};
-use crate::state::{RootBackground, WaylandBackend, WlFrameId, WlShellId, WlWindowId};
+use crate::state::{FrameSolid, RootBackground, WaylandBackend, WlFrameId, WlShellId, WlWindowId};
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
@@ -29,6 +29,38 @@ pub(crate) struct Workspace {
     drop_label: Label,
     close: Option<(Rect, Label)>,
     background: Id,
+    status: Label,
+    card: Option<Card>,
+    preview_source: Rect,
+}
+
+struct Card {
+    parts: Vec<(Point, Label)>,
+    solids: Vec<FrameSolid>,
+    empty: [FrameSolid; 2],
+}
+
+impl Card {
+    fn refresh(previous: Option<Self>, surface: wm_theme_api::DecorationSurface, metrics:wm_theme_api::OverviewMetrics, empty:[u8;3]) -> Self {
+        let preview=metrics.preview(Rect::new(Point::new(0,0),surface.frame_size));
+        let edge=u32::from(metrics.header).min(preview.size.w).min(preview.size.h);
+        let line=u32::from(metrics.border).max(1).min(edge);
+        let (x,y)=(preview.pos.x+preview.size.w as i32/2,preview.pos.y+preview.size.h as i32/2);
+        let marks=[wm_theme_api::DecorationSolid {rect:Rect::new(Point::new(x-edge as i32/2,y-line as i32/2),Size::new(edge,line)),rgb:empty},
+            wm_theme_api::DecorationSolid {rect:Rect::new(Point::new(x-line as i32/2,y-edge as i32/2),Size::new(line,edge)),rgb:empty}];
+        let mut previous=previous.unwrap_or_else(||Self {parts:Vec::new(),solids:Vec::new(),empty:marks.map(FrameSolid::new)});
+        for (old,mark) in previous.empty.iter_mut().zip(marks) {old.update(mark);}
+        let mut parts=std::mem::take(&mut previous.parts).into_iter();
+        let mut solids=std::mem::take(&mut previous.solids).into_iter();
+        Self {parts:surface.parts.into_iter().map(|part| {
+                let mut label=parts.next().map(|(_,label)|label).unwrap_or_else(|| Label::new(DecorationBuffer {width:0,height:0,pixels:Vec::new()}));
+                label.update(part.buffer); (part.offset,label)
+            }).collect(),
+            solids:surface.solids.into_iter().map(|solid| {
+                if let Some(mut old)=solids.next() {old.update(solid);old}else{FrameSolid::new(solid)}
+            }).collect(),empty:previous.empty}
+    }
+    fn bytes(&self)->usize {self.parts.iter().map(|(_,p)|p.size.w as usize*p.size.h as usize*4).sum()}
 }
 impl Label {
     fn new(buffer: DecorationBuffer) -> Self {
@@ -101,9 +133,14 @@ pub(crate) struct Overview {
     drop_fill: Id,
     band: Id,
     backdrop: Id,
+    card_background: Option<FrameSolid>,
+    card_windows: std::collections::HashSet<WlWindowId>,
 }
 
 impl Overview {
+    pub(crate) fn paint_order(&self) -> &[usize] { &self.paint_order }
+
+    pub fn has_workspace_cards(&self) -> bool { self.chrome.and_then(|chrome|chrome.cards).is_some() }
     pub fn token(&self) -> &Id { &self.backdrop }
     pub fn new(
         surface: WlShellId,
@@ -127,6 +164,10 @@ impl Overview {
             .into_iter().map(|w| (w.window, w)).collect();
         let mut old_spaces = previous.as_mut().map(|o| std::mem::take(&mut o.spaces))
             .unwrap_or_default().into_iter();
+        let card_background=scene.chrome.and_then(|chrome|chrome.cards).map(|cards| {
+            let solid=wm_theme_api::DecorationSolid {rect:cards.bounds,rgb:cards.background};
+            if let Some(mut old)=previous.as_mut().and_then(|o|o.card_background.take()) {old.update(solid);old}else{FrameSolid::new(solid)}
+        });
         Self {
             surface,
             geometry: scene.geometry,
@@ -151,6 +192,10 @@ impl Overview {
             workspace: scene.workspace,
             gap: scene.gap,
             chrome: scene.chrome,
+            card_background,
+            card_windows: if scene.chrome.is_some_and(|chrome|chrome.cards.is_some()) {
+                scene.windows.iter().map(|window|window.window).collect()
+            }else{Default::default()},
             preview_windows: scene.windows.iter().map(|w| w.window)
                 .chain(scene.spaces.iter().flat_map(|s| s.windows.iter().map(|w| w.window))).collect(),
             windows: scene
@@ -197,6 +242,14 @@ impl Overview {
                     // Rows have positional identities; changing their topology
                     // still invalidates gesture ownership in validate().
                     let mut old = old_spaces.next();
+                    let preview_source=wm_theme_api::overview_source_bounds(scene.geometry,space.windows.iter().map(|window|window.source));
+                    let style=scene.chrome.and_then(|chrome|chrome.cards);
+                    let card=space.card.map(|surface|Card::refresh(old.as_mut().and_then(|space|space.card.take()),surface,
+                        style.map_or_else(Default::default,|style|style.metrics),style.map_or([96,96,96],|style|style.empty)));
+                    let mut status=old.as_mut().map(|space|std::mem::replace(&mut space.status,
+                        Label::new(DecorationBuffer {width:0,height:0,pixels:Vec::new()})))
+                        .unwrap_or_else(||Label::new(DecorationBuffer {width:0,height:0,pixels:Vec::new()}));
+                    status.update(space.status.unwrap_or(DecorationBuffer {width:0,height:0,pixels:Vec::new()}));
                     let mut old_windows: std::collections::HashMap<_, _> = old.as_mut()
                         .map(|s| std::mem::take(&mut s.windows)).unwrap_or_default()
                         .into_iter().map(|w| (w.window, w)).collect();
@@ -236,7 +289,7 @@ impl Overview {
                         windows.sort_by_key(|w| order.get(&w.window).copied().unwrap_or(usize::MAX));
                         windows
                     },
-                    label, drop_label, close, background,
+                    label, drop_label, close, background, status, card, preview_source,
                 }})
                 .collect(),
             ring: previous.as_ref().map_or_else(|| std::array::from_fn(|_| Id::new()), |o| o.ring.clone()),
@@ -270,9 +323,10 @@ impl Overview {
             .map(|w| &w.label)
             .chain(self.spaces.iter().map(|space| &space.label))
             .chain(self.spaces.iter().map(|space| &space.drop_label))
+            .chain(self.spaces.iter().map(|space| &space.status))
             .chain(self.spaces.iter().filter_map(|space| space.close.as_ref().map(|(_, glyph)| glyph)))
             .map(|l| l.size.w as usize * l.size.h as usize * 4)
-            .sum()
+            .sum::<usize>() + self.spaces.iter().filter_map(|space|space.card.as_ref()).map(Card::bytes).sum::<usize>()
     }
 
     /// Ordinary output frames take the short scene path. A capture spanning
@@ -284,7 +338,7 @@ impl Overview {
     }
 }
 
-pub(crate) fn render_backdrop(elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+pub(crate) fn render_backdrop(elements: &mut Vec<SceneElement>, renderer: &mut GlesRenderer,
     backend: &WaylandBackend, overview: &Overview, viewport: Rect) {
     space_background(elements, renderer, backend, overview.geometry,
         Rect::new(Point::new(overview.geometry.pos.x - viewport.pos.x, overview.geometry.pos.y - viewport.pos.y), overview.geometry.size),
@@ -299,7 +353,7 @@ fn overlaps(a: Rect, b: Rect) -> bool {
 }
 
 pub(crate) fn solid(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     id: &Id,
     rect: Rect,
     color: Color32F,
@@ -322,7 +376,21 @@ pub(crate) fn solid(
     );
 }
 
-fn outline(elements: &mut Vec<SceneElement<GlesRenderer>>, ids: &[Id; 4], rect: Rect, edge: u32, color: Color32F) {
+/// Round shared endpoints for every modern primitive. Independently rounded
+/// band widths can otherwise leave a one-pixel seam at fractional Overview zoom.
+pub(crate) fn scaled_chrome_rect(local: Rect, frame: Point, source: Point, destination: Point, sx: f64, sy: f64) -> Rect {
+    if !sx.is_finite() || !sy.is_finite() || sx<=0.0 || sy<=0.0 {return Rect::default();}
+    let x = f64::from(frame.x) + f64::from(local.pos.x) - f64::from(source.x);
+    let y = f64::from(frame.y) + f64::from(local.pos.y) - f64::from(source.y);
+    let left = (f64::from(destination.x)+(x*sx).round()) as i32;
+    let top = (f64::from(destination.y)+(y*sy).round()) as i32;
+    let right = (f64::from(destination.x)+((x+f64::from(local.size.w))*sx).round()) as i32;
+    let bottom = (f64::from(destination.y)+((y+f64::from(local.size.h))*sy).round()) as i32;
+    Rect::new(Point::new(left,top), Size::new((i64::from(right)-i64::from(left)).clamp(0,32768) as u32,
+        (i64::from(bottom)-i64::from(top)).clamp(0,32768) as u32))
+}
+
+fn outline(elements: &mut Vec<SceneElement>, ids: &[Id; 4], rect: Rect, edge: u32, color: Color32F) {
     let x = rect.pos.x - edge as i32;
     let y = rect.pos.y - edge as i32;
     for (id, r) in ids.iter().zip([
@@ -342,7 +410,7 @@ fn outline(elements: &mut Vec<SceneElement<GlesRenderer>>, ids: &[Id; 4], rect: 
 }
 
 fn label(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     label: &Label,
     rect: Rect,
@@ -368,12 +436,16 @@ fn label(
 }
 
 pub(crate) fn render(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     overview: &Overview,
     viewport: Rect,
 ) {
+    if let Some(cards)=overview.chrome.and_then(|chrome|chrome.cards) {
+        render_cards(elements,renderer,backend,overview,viewport,cards);
+        return;
+    }
     let offset = Point::new(
         overview.geometry.pos.x - viewport.pos.x,
         overview.geometry.pos.y - viewport.pos.y,
@@ -485,6 +557,87 @@ pub(crate) fn render(
     }
 }
 
+fn label_at(elements:&mut Vec<SceneElement>,renderer:&mut GlesRenderer,label:&Label,at:Point,alpha:f32) {
+    if let Some(buffer)=&label.buffer {
+        if let Ok(element)=MemoryRenderBufferRenderElement::from_buffer(renderer,(f64::from(at.x),f64::from(at.y)),
+            buffer,Some(alpha),None,None,Kind::Unspecified) {elements.push(element.into());}
+    }
+}
+
+fn render_cards(elements:&mut Vec<SceneElement>,renderer:&mut GlesRenderer,backend:&WaylandBackend,
+    overview:&Overview,viewport:Rect,cards:wm_core::OverviewCards) {
+    let offset=Point::new(overview.geometry.pos.x-viewport.pos.x,overview.geometry.pos.y-viewport.pos.y);
+    let local=|rect:Rect|Rect::new(Point::new(rect.pos.x+offset.x,rect.pos.y+offset.y),rect.size);
+    let progress=overview.progress;
+    let alpha=progress.clamp(0.0,1.0) as f32;
+    let chrome=overview.chrome.unwrap();
+    let edge=chrome.line.clamp(1,64);
+    let ink=Color32F::new(f32::from(chrome.ink[0])/255.0*alpha,f32::from(chrome.ink[1])/255.0*alpha,
+        f32::from(chrome.ink[2])/255.0*alpha,alpha);
+    if let Some(drag)=overview.drag {
+        if let Some(window)=overview.windows.get(drag.index) {
+            let rect=local(drag.destination);
+            outline(elements,&overview.ring,rect,edge,ink);
+            render_window(elements,renderer,backend,window,rect,0.82);
+        }
+    }
+    // Current-workspace windows move directly from their desktop positions to
+    // the card. The same destinations drive hit tests and drag initiation.
+    if let Some(space)=overview.spaces.get(overview.workspace) {
+        let preview=local(cards.metrics.preview(space.rect));
+        let clip=interpolate(Rect::new(offset,overview.geometry.size),preview,progress);
+        for &index in &overview.paint_order {
+            if overview.drag.is_some_and(|drag|drag.index==index) {continue;}
+            let window=&overview.windows[index];
+            let rect=interpolate(Rect::new(Point::new(window.source.pos.x-viewport.pos.x,window.source.pos.y-viewport.pos.y),
+                window.source.size),local(window.destination),progress);
+            let start=elements.len();
+            if index==overview.selected {outline(elements,&overview.ring,rect,edge,ink);}
+            render_window(elements,renderer,backend,window,rect,if window.desktop_visible {1.0}else{alpha});
+            crate::renderer::clip_plane(elements,start,clip,&space.background);
+        }
+    }
+    for (index,space) in overview.spaces.iter().enumerate() {
+        let rect=local(space.rect);
+        if rect.size.w==0 || rect.size.h==0 {continue;}
+        let preview=local(cards.metrics.preview(space.rect));
+        let pad=u32::from(cards.metrics.padding).min(rect.size.w/4).min(rect.size.h/4);
+        let start=elements.len();
+        let targeted=overview.drag.is_some_and(|drag|drag.workspace==Some(index));
+        label_at(elements,renderer,if targeted{&space.drop_label}else{&space.label},
+            Point::new(rect.pos.x+pad as i32,rect.pos.y+pad as i32),alpha);
+        label_at(elements,renderer,&space.status,Point::new(rect.pos.x+pad as i32,
+            rect.pos.y+rect.size.h.saturating_sub(pad+space.status.size.h) as i32),alpha);
+        for window in &space.windows {
+            if index==overview.workspace && overview.card_windows.contains(&window.window) {continue;}
+            let Some(record)=backend.windows.get(&window.window) else {continue;};
+            let source=window.frame.and_then(|id|backend.frames.get(&id)).map_or(record.content,|frame|frame.visual_geometry());
+            let destination=wm_theme_api::overview_thumbnail(source,space.preview_source,preview);
+            let before=elements.len();
+            render_window_scaled(elements,renderer,backend,window,destination,alpha,false,None,Some(source));
+            crate::renderer::clip_plane(elements,before,preview,&space.background);
+        }
+        if let Some(card)=&space.card {
+            if space.windows.is_empty() && !(index==overview.workspace && !overview.windows.is_empty()) {
+                for mark in &card.empty {
+                    let r=mark.solid.rect;
+                    elements.push(mark.element(Rect::new(Point::new(rect.pos.x+r.pos.x,rect.pos.y+r.pos.y),r.size),alpha).into());
+                }
+            }
+            for (at,label) in &card.parts {
+                label_at(elements,renderer,label,Point::new(rect.pos.x+at.x,rect.pos.y+at.y),alpha);
+            }
+            for solid in &card.solids {
+                let r=solid.solid.rect;
+                elements.push(solid.element(Rect::new(Point::new(rect.pos.x+r.pos.x,rect.pos.y+r.pos.y),r.size),alpha).into());
+            }
+        }
+        crate::renderer::clip_plane(elements,start,rect,&space.background);
+        if targeted {outline(elements,&overview.drop_ring,rect,edge,ink);}
+    }
+    if let Some(background)=&overview.card_background {elements.push(background.element(local(background.solid.rect),alpha).into());}
+}
+
 pub(crate) fn thumbnail_rect(source: Rect, desktop: Rect, thumbnail: Rect) -> Rect {
     let scale = (thumbnail.size.w as f64 / desktop.size.w.max(1) as f64)
         .min(thumbnail.size.h as f64 / desktop.size.h.max(1) as f64);
@@ -504,7 +657,7 @@ pub(crate) fn interpolate(source: Rect, target: Rect, progress: f64) -> Rect {
 }
 
 pub(crate) fn render_window(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     window: &Window,
@@ -525,7 +678,7 @@ pub(crate) fn render_window(
 }
 
 pub(crate) fn render_layout_window(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     window: &Window,
@@ -537,7 +690,7 @@ pub(crate) fn render_layout_window(
 
 #[allow(clippy::too_many_arguments)]
 fn render_window_scaled(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     window: &Window,
@@ -570,6 +723,17 @@ fn render_window_scaled(
     } else {
         scale
     };
+    let frame = window.frame.and_then(|f|backend.frames.get(&f));
+    let effects = frame.and_then(|f|f.effects.as_ref());
+    let shape = crate::rounded::translated_shape(effects.and_then(|e|e.shape),
+        frame.map_or(Point::new(0,0),|f|f.geometry.pos),source.pos,destination.pos,sx,sy);
+    let requested = Rect::new(Point::new(
+        destination.pos.x + ((record.content.pos.x - source.pos.x) as f64 * sx).round() as i32,
+        destination.pos.y + ((record.content.pos.y - source.pos.y) as f64 * sy).round() as i32),
+        Size::new((record.content.size.w as f64 * sx).round() as u32,
+            (record.content.size.h as f64 * sy).round() as u32));
+    let mut opaque_client = false;
+    let mut lower_border_drawn = false;
     let before = elements.len();
     if let Some(surface) = record.surface.wl_surface().filter(|_| window.draw_content) {
         let origin = SPoint::<i32, Physical>::from((
@@ -619,15 +783,24 @@ fn render_window_scaled(
         if viewport.is_none_or(|v| crate::renderer::surface_tree_reaches_viewport(
             &surface, Point::new(origin.x, origin.y), destination, surface_scale, v,
         )) {
+            lower_border_drawn = effects.is_some_and(|effects| crate::rounded::push_border(elements,renderer,shape,&effects.border_ids,effects.commit,alpha));
+            let content_start=elements.len();
             push_surface_tree_alpha(
                 elements, renderer, &surface, origin, surface_scale, 1.0, Kind::Unspecified, alpha,
             );
+            opaque_client = shape.is_some_and(|shape| shape.radius > 0)
+                && crate::rounded::opaque_client_covers(&elements[content_start..], requested);
+            crate::rounded::mask_plane(elements,content_start,renderer,shape,true);
         }
     }
     // Offscreen Flow cells still get the exact surface-tree check above: a
     // subsurface or popup may extend into view. Their chrome and fallback
     // cannot, so skip their imports and element construction entirely.
     if viewport.is_some_and(|v| destination.intersection(v).is_none()) {
+        if let Some(frame)=frame {
+            crate::frame_effects::push_shadow(elements,renderer,frame.effects.as_ref(),frame.geometry.pos,
+                source.pos,destination.pos,sx,sy,alpha);
+        }
         return;
     }
     if let Some(buffer) = window
@@ -662,6 +835,17 @@ fn render_window_scaled(
     }
     if let Some(frame) = window.frame.and_then(|f| backend.frames.get(&f)) {
         for part in &frame.parts {
+            if !frame.solids.is_empty() {
+                let rect = scaled_chrome_rect(Rect::new(part.offset, part.size), frame.geometry.pos, source.pos,
+                    destination.pos, sx, sy);
+                if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(renderer,
+                    (rect.pos.x as f64, rect.pos.y as f64), &part.buffer, Some(alpha),
+                    Some(smithay::utils::Rectangle::from_size((part.size.w as f64, part.size.h as f64).into())),
+                    Some((rect.size.w as i32, rect.size.h as i32).into()), Kind::Unspecified) {
+                    elements.push(element.into());
+                }
+                continue;
+            }
             let origin = SPoint::<i32, Physical>::from((
                 destination.pos.x
                     + ((frame.geometry.pos.x + part.offset.x - source.pos.x) as f64 * sx)
@@ -689,19 +873,25 @@ fn render_window_scaled(
                 );
             }
         }
-        if let Some(record) = backend.windows.get(&window.window).filter(|record| record.mapped) {
-            let content = Rect::new(Point::new(
-                destination.pos.x + ((record.content.pos.x - source.pos.x) as f64 * sx).round() as i32,
-                destination.pos.y + ((record.content.pos.y - source.pos.y) as f64 * sy).round() as i32),
-                Size::new((record.content.size.w as f64 * sx).round() as u32,
-                    (record.content.size.h as f64 * sy).round() as u32));
-            solid(elements, &frame.fill_id, content, Color32F::new(0.0, 0.0, 0.0, alpha));
+        let solid_start=elements.len();
+        for solid in &frame.solids {
+            let rect = scaled_chrome_rect(solid.solid.rect, frame.geometry.pos, source.pos,
+                destination.pos, sx, sy);
+            elements.push(solid.element(rect, alpha).into());
+        }
+        crate::rounded::mask_frame_solids(elements,solid_start,renderer,shape,lower_border_drawn);
+        crate::frame_effects::push_shadow(elements, renderer, frame.effects.as_ref(), frame.geometry.pos,
+            source.pos, destination.pos, sx, sy, alpha);
+        if record.mapped && !opaque_client {
+            let fill_start=elements.len();
+            solid(elements, &frame.fill_id, requested, Color32F::new(0.0, 0.0, 0.0, alpha));
+            crate::rounded::mask_plane(elements,fill_start,renderer,shape,true);
         }
     }
 }
 
 pub(crate) fn space_background(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     source: Rect,
@@ -711,7 +901,7 @@ pub(crate) fn space_background(
     space_background_alpha(elements, renderer, backend, source, destination, id, 1.0);
 }
 #[allow(clippy::too_many_arguments)]
-fn space_background_alpha(elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+fn space_background_alpha(elements: &mut Vec<SceneElement>, renderer: &mut GlesRenderer,
     backend: &WaylandBackend, source: Rect, destination: Rect, id: &Id, alpha: f32) {
     let scale = destination.size.w as f64 / source.size.w.max(1) as f64;
     for record in backend.layers.iter().rev().filter(|r| {
@@ -779,6 +969,7 @@ mod refresh_tests {
             windows: vec![wm_core::OverviewWindow { window: WlWindowId(7), frame: None,
                 source: rect, destination: rect, label: label() }],
             spaces: vec![wm_core::OverviewWorkspace { rect, label: label(), drop_label: label(),
+                card: None, status: None,
                 close: Some((rect, label())), windows: vec![wm_core::OverviewThumbnail {
                     window: WlWindowId(7), frame: None, source: rect, draw_content: true,
                 }] }],
@@ -819,7 +1010,7 @@ mod refresh_tests {
         let display = Display::<crate::state::Compositor>::new().unwrap();
         let backend = WaylandBackend::new(display.handle(), Vec::new(), 1.0);
         let mut initial = scene(7);
-        initial.chrome = Some(wm_core::OverviewChrome { ink: [0, 0, 0], line: 2 });
+        initial.chrome = Some(wm_core::OverviewChrome { ink: [0, 0, 0], line: 2, cards: None });
         let mut overview = Overview::new(WlShellId(3), initial, &backend);
         let border = overview.windows[0].border.clone().unwrap();
         let pixels = overview.label_bytes();
@@ -842,5 +1033,37 @@ mod refresh_tests {
             assert!(pixels.iter().all(|&p| p == 19), "semantic refresh updates retained caption storage");
             Ok(Vec::new())
         });
+    }
+
+    #[test]
+    fn modern_cards_retain_corner_textures_solid_ids_and_status_storage_on_refresh() {
+        let display=Display::<crate::state::Compositor>::new().unwrap();
+        let backend=WaylandBackend::new(display.handle(),Vec::new(),1.0);
+        let themed=|appearance| {
+            let theme=wm_theme::modern::theme("relay",appearance).unwrap();
+            let tokens=theme.chrome.unwrap();
+            let mut scene=scene(7);
+            scene.chrome=Some(wm_core::OverviewChrome {ink:[tokens.accent.r,tokens.accent.g,tokens.accent.b],line:1,
+                cards:Some(wm_core::OverviewCards {metrics:tokens.overview,bounds:scene.spaces[0].rect,
+                    background:[tokens.background.r,tokens.background.g,tokens.background.b],empty:[tokens.line.r,tokens.line.g,tokens.line.b]})});
+            scene.spaces[0].card=Some(wm_theme::overview::modern::card_surface(&theme,scene.spaces[0].rect.size));
+            scene.spaces[0].status=Some(DecorationBuffer {width:12,height:4,pixels:vec![31;12*4*4]});
+            scene
+        };
+        let first=Overview::new(WlShellId(3),themed(wm_theme::Appearance::Dark),&backend);
+        let card=first.spaces[0].card.as_ref().unwrap();
+        let ids:Vec<_>=card.solids.iter().map(|solid|solid.id.clone()).collect();
+        let backdrop=first.card_background.as_ref().unwrap().id.clone();
+        let mut retained=card.parts[0].1.buffer.as_ref().unwrap().clone();
+        let mut next=themed(wm_theme::Appearance::Light);
+        let expected=next.spaces[0].card.as_ref().unwrap().parts[0].buffer.pixels.clone();
+        next.spaces[0].status.as_mut().unwrap().pixels.fill(63);
+        let mut status=first.spaces[0].status.buffer.as_ref().unwrap().clone();
+        let next=Overview::refresh(Some(first),WlShellId(3),next,&backend);
+        assert_eq!(next.card_background.as_ref().unwrap().id,backdrop);
+        assert_eq!(next.spaces[0].card.as_ref().unwrap().solids.iter().map(|solid|solid.id.clone()).collect::<Vec<_>>(),ids);
+        let _:Result<(),std::convert::Infallible>=retained.render().draw(|pixels| {assert_eq!(pixels,expected.as_slice());Ok(Vec::new())});
+        let _:Result<(),std::convert::Infallible>=status.render().draw(|pixels| {assert!(pixels.iter().all(|v|*v==63));Ok(Vec::new())});
+        assert!(next.card_windows.contains(&WlWindowId(7)));
     }
 }

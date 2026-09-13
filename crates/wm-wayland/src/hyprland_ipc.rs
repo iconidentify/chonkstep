@@ -1,39 +1,3 @@
-//! Hosting the Hyprland IPC server inside the compositor.
-//!
-//! The protocol itself lives in `chonk-hyprland-ipc`, which knows
-//! nothing about `wm-core` and can therefore be tested without booting
-//! a window manager. This module is the other half: it reads the live
-//! [`WindowManager`] into a `Snapshot`, applies the actions the
-//! protocol decoded, and owns the sockets' place in the event loop.
-//!
-//! # Why the state is read fresh every time
-//!
-//! Everything served comes from `wm.iter_clients()` and
-//! `wm.monitors()` at the moment of the request. There is no cache and
-//! no shadow copy, because a cache is a thing that can be wrong and the
-//! entire value of this server is that its answers are true — a bar
-//! drawn from a stale window list is worse than no bar, since it is
-//! confidently wrong rather than obviously absent.
-//!
-//! The one piece of retained state is the event differ's previous
-//! snapshot, and that is a change *detector*, not a cache: nothing is
-//! ever served from it. It is the same role `ControlSocket::note` plays
-//! for chonkstep's own control socket.
-//!
-//! # Why this lives on the compositor's thread
-//!
-//! `sync_hyprland_sources` registers the sockets' file descriptors with
-//! calloop using an empty callback, exactly as `sync_dock_sources` does
-//! for the dockapp and control sockets. The callback's only job is to
-//! end the `dispatch` wait; the servicing then happens in the ordinary
-//! tick, where a `&mut Compositor` is already in hand.
-//!
-//! No thread, no channel, no mutex — and therefore no way for a client
-//! to hold a lock the repaint thread wants. Every read and write on the
-//! server's side is non-blocking by construction, so a wedged client
-//! costs a bounded number of bytes per tick and nothing else. This is
-//! the pattern `docs/control-socket.md` established and the one
-//! `clippy.toml`'s incident report exists to protect.
 
 use smithay::input::keyboard::{xkb, Keysym, Layout};
 

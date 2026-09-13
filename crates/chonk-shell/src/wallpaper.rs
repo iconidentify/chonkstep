@@ -21,6 +21,9 @@ pub enum Wallpaper {
     JadeTerrace,
     IvoryOrb,
     IndigoWaves,
+    Obsidian,
+    Washi,
+    Relay,
     /// The LCOS theme's ground. Original to this project, built from
     /// the two colours LCOS's own boot splash is made of; see
     /// `scripts/gen-lcos-wallpaper.py`.
@@ -53,17 +56,6 @@ pub enum Wallpaper {
     /// when the link is missing or the file will not decode, Graphite
     /// Fold stands in — the neutral artwork, in the current mood.
     Omarchy,
-    /// One of the host distribution's own backgrounds, discovered at
-    /// runtime under `/usr/share/backgrounds/<ID>/` and addressed by
-    /// slot. Not in [`Self::ALL`]: like [`Self::Omarchy`] it has no
-    /// pixels of its own and is only offered where the files exist.
-    ///
-    /// Read rather than embedded, deliberately. LCOS ships four of
-    /// these and they are Lunduke's artwork; shipping copies inside
-    /// this binary would redistribute them, which is the same reason
-    /// `lunduke-navy` is original work and the dock mark is read from
-    /// `/usr/share/pixmaps`. Showing a picture already installed on the
-    /// user's own machine carries no such question.
     HostArt(u8),
 }
 
@@ -182,7 +174,7 @@ impl Wallpaper {
     /// The embedded artworks, in menu order. [`Self::Omarchy`] is not
     /// one: it has no pixels of its own.
     #[cfg(not(feature = "lcos"))]
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
         Self::TealBlueprint,
@@ -191,13 +183,16 @@ impl Wallpaper {
         Self::JadeTerrace,
         Self::IvoryOrb,
         Self::IndigoWaves,
+        Self::Obsidian,
+        Self::Washi,
+        Self::Relay,
     ];
 
     /// The same artworks with the LCOS grounds appended. Spelled out
     /// rather than concatenated so each array's length is compile-time
     /// checked.
     #[cfg(feature = "lcos")]
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 15] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
         Self::TealBlueprint,
@@ -206,6 +201,9 @@ impl Wallpaper {
         Self::JadeTerrace,
         Self::IvoryOrb,
         Self::IndigoWaves,
+        Self::Obsidian,
+        Self::Washi,
+        Self::Relay,
         Self::LundukeNavy,
         Self::WalnutGround,
         Self::DeskGround,
@@ -222,6 +220,9 @@ impl Wallpaper {
             Self::JadeTerrace => "Jade Terrace",
             Self::IvoryOrb => "Ivory Orb",
             Self::IndigoWaves => "Indigo Waves",
+            Self::Obsidian => "Obsidian",
+            Self::Washi => "Washi",
+            Self::Relay => "Relay",
             #[cfg(feature = "lcos")]
             Self::LundukeNavy => "Lunduke Navy",
             #[cfg(feature = "lcos")]
@@ -245,6 +246,9 @@ impl Wallpaper {
             Self::JadeTerrace => "jade-terrace",
             Self::IvoryOrb => "ivory-orb",
             Self::IndigoWaves => "indigo-waves",
+            Self::Obsidian => "obsidian",
+            Self::Washi => "washi",
+            Self::Relay => "relay",
             #[cfg(feature = "lcos")]
             Self::LundukeNavy => "lunduke-navy",
             #[cfg(feature = "lcos")]
@@ -264,6 +268,16 @@ impl Wallpaper {
             .chain([Self::Omarchy])
             .chain((0..host_art().len() as u8).map(Self::HostArt))
             .find(|wallpaper| wallpaper.id() == id)
+    }
+
+    /// Follow a changed theme while the desktop still wears its previous
+    /// default artwork. A separately chosen wallpaper remains the user's.
+    pub(crate) fn following_theme(self, previous: &str, next: &str) -> Self {
+        if Self::from_id(previous) == Some(self) {
+            Self::from_id(next).unwrap_or(self)
+        } else {
+            self
+        }
     }
 
     /// Restores the last menu selection; with none — a first launch, or
@@ -293,7 +307,7 @@ impl Wallpaper {
 
     /// True for the artworks that are a colour rather than a picture:
     /// [`Self::render`] returns `None` for these and the caller paints
-    /// [`Self::dock_color`] across the whole desk instead.
+    /// [`Self::background_color`] across the whole desk instead.
     ///
     /// A property rather than a list of names repeated at each use, so
     /// adding another solid ground does not mean hunting down every
@@ -310,10 +324,16 @@ impl Wallpaper {
     }
 
     /// The quiet color at the right edge of each artwork's rendition,
-    /// used behind the dock so the sidebar belongs to the selected
+    /// used as the fallback ground for the selected
     /// composition in the selected mood.
-    pub const fn dock_color(self, appearance: Appearance) -> (u8, u8, u8) {
+    pub const fn background_color(self, appearance: Appearance) -> (u8, u8, u8) {
         match (self, appearance) {
+            (Self::Obsidian, Appearance::Dark) => (22,25,23),
+            (Self::Obsidian, Appearance::Light) => (225,227,217),
+            (Self::Washi, Appearance::Light) => (229,224,211),
+            (Self::Washi, Appearance::Dark) => (36,36,30),
+            (Self::Relay, Appearance::Dark) => (16,20,34),
+            (Self::Relay, Appearance::Light) => (223,229,244),
             (Self::LavenderGrid, Appearance::Dark) => (129, 130, 153),
             (Self::LavenderGrid, Appearance::Light) => (198, 199, 216),
             (Self::AmberTerminal, Appearance::Dark) => (12, 11, 9),
@@ -349,14 +369,14 @@ impl Wallpaper {
             (Self::OakGround, Appearance::Light) => (214, 198, 178),
             (Self::IndigoWaves, Appearance::Light) => (226, 228, 236),
             // The floor under Omarchy's picture is Graphite Fold's:
-            // this colour is the ground the dock's X11 window shows
+            // this color is the fallback desktop ground
             // before its first paint and the root's colour when the
             // image cannot be shown, and both are the neutral artwork's.
-            (Self::Omarchy, appearance) => Self::GraphiteFold.dock_color(appearance),
+            (Self::Omarchy, appearance) => Self::GraphiteFold.background_color(appearance),
             // Same neutral floor as Omarchy's, and for the same reason:
             // the picture is the host's and its edge colour is unknown
             // until it is decoded.
-            (Self::HostArt(_), appearance) => Self::GraphiteFold.dock_color(appearance),
+            (Self::HostArt(_), appearance) => Self::GraphiteFold.background_color(appearance),
         }
     }
 
@@ -375,7 +395,7 @@ impl Wallpaper {
             (Self::TealBlueprint, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/teal-blueprint-light.png")),
             (Self::GraphiteFold, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/graphite-fold.png")),
             (Self::GraphiteFold, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/graphite-fold-light.png")),
-            (Self::ClassicLavender, _) => None,
+            (Self::ClassicLavender | Self::Obsidian | Self::Washi | Self::Relay, _) => None,
             (Self::JadeTerrace, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/jade-terrace.png")),
             (Self::JadeTerrace, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/jade-terrace-light.png")),
             (Self::IvoryOrb, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/ivory-orb.png")),
@@ -397,8 +417,11 @@ impl Wallpaper {
     /// `appearance` to cover `screen`, cropping equally from opposite
     /// edges when its aspect ratio differs. `None` for the solid-colour
     /// artwork, and for an image that cannot be read — the caller
-    /// paints [`Self::dock_color`] instead.
+    /// paints [`Self::background_color`] instead.
     pub fn render(self, screen: Size, appearance: Appearance) -> Option<DecorationBuffer> {
+        if matches!(self, Self::Obsidian | Self::Washi | Self::Relay) {
+            return modern_art(self.id(), screen, appearance);
+        }
         if let Self::HostArt(slot) = self {
             let path = host_art().get(slot as usize).map(|(path, _, _)| path.clone());
             return match path.as_deref().and_then(load_image) {
@@ -429,6 +452,68 @@ impl Wallpaper {
             None => Self::GraphiteFold.render(screen, appearance),
         }
     }
+}
+
+/// Procedural reference artwork, rasterized only when wallpaper/geometry changes.
+fn modern_art(id: &str, screen: Size, appearance: Appearance) -> Option<DecorationBuffer> {
+    use tiny_skia::{FillRule, Paint, PathBuilder, Stroke};
+    let theme = wm_theme::modern::theme(id, appearance)?;
+    let chrome = theme.chrome?;
+    if screen.w == 0 || screen.h == 0 || screen.w > 16384 || screen.h > 16384 { return None; }
+    let mut image = Pixmap::new(screen.w, screen.h)?;
+    image.fill(tiny_skia::Color::from_rgba8(chrome.background.r, chrome.background.g, chrome.background.b, 255));
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(chrome.line.r, chrome.line.g, chrome.line.b, 59);
+    // Fixed pixel pitch matches the reference and stays subtle on wide desks.
+    if id != "washi" {
+        for y in (8..screen.h).step_by(16) {
+            for x in (8..screen.w).step_by(16) {
+                if let Some(rect) = tiny_skia::Rect::from_xywh(x as f32, y as f32, 1.0, 1.0) {
+                    image.fill_rect(rect, &paint, Transform::identity(), None);
+                }
+            }
+        }
+    } else {
+        paint.set_color_rgba8(chrome.muted.r, chrome.muted.g, chrome.muted.b, 12);
+        for y in (5..screen.h).step_by(6) {
+            image.fill_rect(tiny_skia::Rect::from_xywh(0.0,y as f32,screen.w as f32,1.0)?, &paint, Transform::identity(), None);
+        }
+    }
+    let scale = (screen.h as f32 / 522.0).max(0.25);
+    let mut path = PathBuilder::new();
+    if id == "washi" {
+        path.push_circle(screen.w as f32 - 65.0*scale, 375.0*scale, 195.0*scale);
+        paint.set_color_rgba8(chrome.accent.r, chrome.accent.g, chrome.accent.b, 204);
+        image.fill_path(&path.finish()?, &paint, FillRule::Winding, Transform::identity(), None);
+        let mut rules = PathBuilder::new();
+        for i in 0..10 {
+            let y = (230.0 + i as f32 *14.0)*scale;
+            rules.move_to(0.0,y+screen.w as f32*0.22);
+            rules.line_to(screen.w as f32,y-screen.w as f32*0.22);
+        }
+        paint.set_color_rgba8(chrome.muted.r, chrome.muted.g, chrome.muted.b, 68);
+        image.stroke_path(&rules.finish()?, &paint, &Stroke::default(), Transform::identity(), None);
+    } else {
+        paint.set_color_rgba8(chrome.line.r, chrome.line.g, chrome.line.b, if id=="relay" {153} else {84});
+        for extra in [0.0,29.0,69.0,121.0] {
+            let mut path=PathBuilder::new();
+            if id=="relay" {
+                let cx=screen.w as f32-80.0*scale;
+                let cy=screen.h as f32*0.77;
+                let rx=(380.0+extra)*scale;
+                let ry=(130.0+extra)*scale;
+                for n in 0..=160 {
+                    let a=n as f32/160.0*std::f32::consts::TAU;
+                    let (x,y)=(a.cos()*rx,a.sin()*ry);
+                    let (x,y)=(cx+x*0.819+y*0.574,cy-x*0.574+y*0.819);
+                    if n==0 {path.move_to(x,y)} else {path.line_to(x,y)}
+                }
+                path.close();
+            } else {path.push_circle(screen.w as f32-230.0*scale,380.0*scale,(330.0+extra)*scale);}
+            image.stroke_path(&path.finish()?,&paint,&Stroke::default(),Transform::identity(),None);
+        }
+    }
+    Some(DecorationBuffer {width:screen.w,height:screen.h,pixels:image.take()})
 }
 
 /// Reads and decodes an image file in any format the decoder was built
@@ -500,6 +585,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn theme_reload_follows_default_artwork_and_preserves_a_separate_choice() {
+        let paper = Wallpaper::Obsidian.following_theme("obsidian", "washi");
+        assert_eq!(paper, Wallpaper::Washi);
+        assert_eq!(paper.following_theme("washi", "relay"), Wallpaper::Relay);
+        assert_eq!(Wallpaper::TealBlueprint.following_theme("obsidian", "relay"), Wallpaper::TealBlueprint);
+        assert_eq!(Wallpaper::Obsidian.following_theme("obsidian", "missing-artwork"), Wallpaper::Obsidian);
+    }
+
+    #[test]
     fn the_faster_embedded_png_path_preserves_every_bundled_pixel() {
         for appearance in [Appearance::Light, Appearance::Dark] {
             for wallpaper in Wallpaper::ALL {
@@ -549,8 +643,8 @@ mod tests {
         let lum = |(r, g, b): (u8, u8, u8)| (r as i64 + g as i64 + b as i64) / 3;
         for wallpaper in Wallpaper::ALL {
             assert!(
-                lum(wallpaper.dock_color(Appearance::Light)) > lum(wallpaper.dock_color(Appearance::Dark)),
-                "{}: dock colors must follow the artwork's moods",
+                lum(wallpaper.background_color(Appearance::Light)) > lum(wallpaper.background_color(Appearance::Dark)),
+                "{}: background colors must follow the artwork's moods",
                 wallpaper.id()
             );
         }
@@ -563,8 +657,8 @@ mod tests {
                 .render(Size::new(320, 180), appearance)
                 .is_none());
         }
-        assert_eq!(Wallpaper::ClassicLavender.dock_color(Appearance::Dark), DESKTOP_BG);
-        assert_eq!(Wallpaper::ClassicLavender.dock_color(Appearance::Light), DESKTOP_BG_LIGHT);
+        assert_eq!(Wallpaper::ClassicLavender.background_color(Appearance::Dark), DESKTOP_BG);
+        assert_eq!(Wallpaper::ClassicLavender.background_color(Appearance::Light), DESKTOP_BG_LIGHT);
     }
 
     #[test]

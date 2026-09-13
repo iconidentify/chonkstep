@@ -44,6 +44,30 @@ struct PaintedPart {
     uploaded: bool,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct PaintedSolid {
+    solid: wm_theme_api::DecorationSolid,
+    surface_size: Size,
+    uploaded: bool,
+}
+
+fn solid_needs_upload(previous: Option<&PaintedSolid>, next: &PaintedSolid) -> bool {
+    previous != Some(next)
+}
+
+fn fill_solid(conn: &RustConnection, drawable: Drawable, gc: Gcontext, alpha: u32,
+    solid: wm_theme_api::DecorationSolid) -> Result<(), ConnectionError> {
+    let [r,g,b] = solid.rgb;
+    let foreground=alpha|(u32::from(r)<<16)|(u32::from(g)<<8)|u32::from(b);
+    let rect=solid.rect;
+    let rectangle=Rectangle {x:rect.pos.x.clamp(i16::MIN as i32,i16::MAX as i32) as i16,
+        y:rect.pos.y.clamp(i16::MIN as i32,i16::MAX as i32) as i16,
+        width:rect.size.w.min(u16::MAX as u32) as u16,height:rect.size.h.min(u16::MAX as u32) as u16};
+    conn.change_gc(gc,&ChangeGCAux::new().foreground(foreground))?;
+    conn.poly_fill_rectangle(drawable,gc,&[rectangle])?;
+    Ok(())
+}
+
 fn chrome_band_needs_upload(previous: Option<&PaintedPart>, next: &PaintedPart) -> bool {
     previous != Some(next)
 }
@@ -152,12 +176,14 @@ pub struct X11Backend {
     frame_to_client: HashMap<Window, Window>,
     frame_shapes: HashMap<Window, FrameShape>,
     shell_shapes: HashMap<Window, (Size, u32)>,
+    shell_alpha_shapes: HashMap<Window, Vec<Rectangle>>,
     ring_to_frame: HashMap<Window, Window>,
     sequences_to_ignore: BinaryHeap<Reverse<u16>>,
     /// Cached server-format pixels per painted window (frame or shell
     /// window), replayed on `Expose` without re-touching the theme
     /// engine or re-converting byte order.
     painted: HashMap<Window, Vec<PaintedPart>>,
+    painted_solids: HashMap<Window, Vec<PaintedSolid>>,
     /// Button press/release events on windows we don't recognize as a
     /// client/frame (root, dock, menu popups...) — the desktop shell in
     /// `chonkstep` drains these separately from `poll_event`, since
@@ -493,9 +519,11 @@ impl X11Backend {
             frame_to_client: HashMap::new(),
             frame_shapes: HashMap::new(),
             shell_shapes: HashMap::new(),
+            shell_alpha_shapes: HashMap::new(),
             ring_to_frame: HashMap::new(),
             sequences_to_ignore: BinaryHeap::new(),
             painted: HashMap::new(),
+            painted_solids: HashMap::new(),
             pending_shell_clicks: VecDeque::new(),
             pending_shell_motion: None,
             pending_shell_scrolls: VecDeque::new(),
@@ -537,28 +565,6 @@ impl X11Backend {
         self.pending_screen_resize.take()
     }
 
-    /// Re-rasterizes the pointer cursors after the session's UI scale
-    /// changed under it. They are the only pixels on the desktop the
-    /// theme engine does not produce (see `create_scaled_cursor` for
-    /// why this WM draws its own pointers at all), so nothing else in
-    /// the live-restyle path touches them: without this, a rescale left
-    /// the pointer at whatever size the session was *started* at while
-    /// every other piece of chrome around it changed size, which is the
-    /// precise mismatch that got the X core cursor font thrown out in
-    /// the first place.
-    ///
-    /// Cheap when the scale did not actually move, because the shell
-    /// applies a whole look at once and will happily hand back the
-    /// scale it already had. Compared with `to_bits` rather than `==`:
-    /// a NaN that reached here would compare unequal to itself and
-    /// rebuild five cursors on every apply forever, the same
-    /// non-reflexive-float trap `usable_scale` guards in `chonk-shell`'s
-    /// dockapp host.
-    ///
-    /// Degrades rather than fails, like the rest of this backend: a
-    /// server that will not give us a new set leaves the session
-    /// running on the set it has — wrongly sized, entirely usable —
-    /// which beats losing the desktop over a pointer.
     pub fn set_ui_scale(&mut self, scale: f32) {
         if self.cursors.scale.to_bits() == scale.to_bits() {
             return;
@@ -810,7 +816,9 @@ impl X11Backend {
     /// leak invisible-but-still-alive X11 windows.
     pub fn destroy_shell_window(&mut self, win: Window) -> Result<(), X11BackendError> {
         self.shell_shapes.remove(&win);
+        self.shell_alpha_shapes.remove(&win);
         self.painted.remove(&win);
+        self.painted_solids.remove(&win);
         self.conn.destroy_window(win)?;
         self.conn.flush()?;
         Ok(())
@@ -1249,8 +1257,12 @@ impl X11Backend {
                         for part in parts {
                             let _ = self.put_image_rows_at(e.window, part.w, part.h, &part.data, part.x, part.y);
                         }
-                        let _ = self.conn.flush();
                     }
+                    if let Some(solids)=self.painted_solids.get(&e.window) {
+                        let (gc,alpha)=self.argb.as_ref().map_or((self.gc,0),|argb|(argb.gc,0xff000000));
+                        for part in solids { let _=fill_solid(&self.conn,e.window,gc,alpha,part.solid); }
+                    }
+                    let _ = self.conn.flush();
                 }
                 None
             }
@@ -2759,6 +2771,7 @@ impl Backend for X11Backend {
         self.remove_frame_shape(frame.0);
         self.frame_to_client.remove(&frame.0);
         self.painted.remove(&frame.0);
+        self.painted_solids.remove(&frame.0);
         self.frame_cursor.remove(&frame.0);
         let _ = self.conn.destroy_window(frame.0);
         let _ = self.conn.flush();
@@ -2840,6 +2853,7 @@ impl Backend for X11Backend {
         self.remove_frame_shape(frame.0);
         self.frame_to_client.remove(&frame.0);
         self.painted.remove(&frame.0);
+        self.painted_solids.remove(&frame.0);
         self.frame_cursor.remove(&frame.0);
         let _ = self.conn.destroy_window(frame.0);
         // No chrome around this window any more, said out loud — see
@@ -2872,6 +2886,22 @@ impl Backend for X11Backend {
             painted.push(next);
         }
         self.painted.insert(frame.0, painted);
+        if surface.solids.is_empty() {
+            self.painted_solids.remove(&frame.0);
+        } else {
+            let (gc,alpha)=self.argb.as_ref().map_or((self.gc,0),|argb|(argb.gc,0xff000000));
+            let previous = self.painted_solids.entry(frame.0).or_default();
+            previous.truncate(surface.solids.len());
+            for (index, solid) in surface.solids.iter().enumerate() {
+                let mut next = PaintedSolid { solid: *solid, surface_size: surface.frame_size, uploaded: true };
+                if solid_needs_upload(previous.get(index), &next) {
+                    // Match the destination's depth, and write opaque alpha
+                    // into ARGB frames. Root-depth GCs produce BadMatch here.
+                    next.uploaded=fill_solid(&self.conn,frame.0,gc,alpha,*solid).is_ok();
+                }
+                if let Some(old) = previous.get_mut(index) { *old = next; } else { previous.push(next); }
+            }
+        }
         let _ = self.conn.flush();
     }
 
@@ -2897,6 +2927,10 @@ impl Backend for X11Backend {
         // Invalidate immediately, including resize-away-and-back before the
         // next coalesced paint. A position-only move preserves the cache.
         invalidate_resized_chrome(&mut self.painted, frame.0, geometry.size);
+        if self.painted_solids.get(&frame.0).and_then(|parts| parts.first())
+            .is_some_and(|part| part.surface_size != geometry.size) {
+            self.painted_solids.remove(&frame.0);
+        }
         let aux = ConfigureWindowAux::new()
             .x(geometry.pos.x)
             .y(geometry.pos.y)
@@ -2912,7 +2946,17 @@ impl Backend for X11Backend {
     fn set_decoration_layout(&mut self, frame: Self::FrameId, layout: &DecorationLayout) {
         if let Some(shape) = self.frame_shapes.get_mut(&frame.0) {
             shape.margin = layout.input_margin;
-            if layout.titlebar_height == 0 { shape.corner = 0; }
+            if layout.titlebar_height == 0 { shape.corner = 0; shape.clear_modern(); }
+        }
+        if layout.titlebar_height == 0 && layout.input_margin == 0 && layout.client_offset == Point::new(0, 0) {
+            let raster = self.painted.remove(&frame.0).is_some();
+            let solids = self.painted_solids.remove(&frame.0).is_some();
+            if raster || solids {
+                // Fullscreen skips painting; expose must not replay old chrome
+                // beneath a transparent client. Restore repaints through the
+                // ordinary decoration path after its nonzero layout returns.
+                let _ = self.conn.clear_area(false, frame.0, 0, 0, 0, 0);
+            }
         }
     }
 
@@ -3435,6 +3479,22 @@ impl wm_theme_api::PopupHost for X11Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solid_chrome_repaints_color_geometry_and_failed_requests_only() {
+        let part = PaintedSolid { solid: wm_theme_api::DecorationSolid {
+            rect:Rect::new(Point::new(1,2),Size::new(100,2)),rgb:[11,22,33]},
+            surface_size:Size::new(100,200),uploaded:true };
+        assert!(!solid_needs_upload(Some(&part),&part));
+        let mut changed=part.clone(); changed.solid.rgb[0]+=1;
+        assert!(solid_needs_upload(Some(&part),&changed));
+        changed=part.clone(); changed.solid.rect.pos.x+=1;
+        assert!(solid_needs_upload(Some(&part),&changed));
+        changed=part.clone(); changed.surface_size.h+=1;
+        assert!(solid_needs_upload(Some(&part),&changed));
+        changed=part.clone(); changed.uploaded=false;
+        assert!(solid_needs_upload(Some(&changed),&part));
+    }
 
     #[test]
     fn unchanged_chrome_skips_uploads_but_geometry_and_pixels_invalidate_it() {

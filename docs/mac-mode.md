@@ -57,7 +57,6 @@ Wayland session through XWayland.
 | Control-Command-F | Enter or leave a dedicated fullscreen desktop; restore geometry and remove the empty desktop on exit |
 | Command-F3 or F11 | Show Desktop; repeat to restore the previously visible windows |
 | Command-Space | ChonkStep application/root menu |
-| Command-Option-D | Show or hide the Dock |
 | Control-Command-Q | Lock through the configured `lock_command`, or the `mac-lock` provider |
 
 Applications are grouped by app ID / WM_CLASS, including later identity updates,

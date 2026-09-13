@@ -25,7 +25,6 @@ impl UiChrome {
         Self { style, roles: Roles::from_theme(light.as_ref().unwrap_or(theme)), metrics: Metrics::new(scale), fonts }
     }
 
-    pub fn style(&self) -> DecorationStyle { self.style }
 
     /// Flat native Overview outline ink and one logical pixel, already scaled.
     /// `None` preserves the existing WindowMaker compositor treatment.

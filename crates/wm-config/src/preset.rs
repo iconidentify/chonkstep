@@ -85,14 +85,8 @@ use crate::{parse_key, Action, Config};
 /// established that idiom.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Desktop {
-    /// A whole chonkstep desktop: its Dock in the corner, its own
-    /// theme, Omarchy's bar off unless asked for. The default, and
-    /// exactly what every existing config file already means.
     #[default]
     Chonkstep,
-    /// Omarchy's desktop, with chonkstep doing the window management:
-    /// no Dock, Omarchy's bar hosted and shown, its theme followed, its
-    /// menu and pickers under the mouse and the keyboard.
     Omarchy,
 }
 
@@ -182,7 +176,7 @@ pub fn base(table: &toml::Table) -> Config {
     apply_desktop(&mut config, desktop);
     apply_keymap(&mut config, keymap);
     if desktop == Desktop::Omarchy {
-        for key in ["show_dock", "omarchy_bar", "theme"] {
+        for key in ["omarchy_bar", "theme"] {
             config
                 .provenance
                 .insert(key.into(), "desktop preset (omarchy)".into());
@@ -252,14 +246,6 @@ pub fn apply_desktop(config: &mut Config, desktop: Desktop) {
         // The built-in defaults already *are* the chonkstep posture.
         Desktop::Chonkstep => {}
         Desktop::Omarchy => {
-            // One desk, one set of furniture. Omarchy's bar is at the
-            // top and this desk's Dock would be a second instrument
-            // strip in the corner beside it, duplicating its clock,
-            // its volume and its network readout.
-            config.show_dock = false;
-            // ...and the guest's bar, which chonkstep otherwise hosts
-            // but keeps off the screen until asked. Here it is the
-            // furniture, so it is shown.
             config.omarchy_bar = Some(true);
             // Follow Omarchy's theme rather than wearing a built-in:
             // the point of the posture is that this desk looks like the
@@ -386,7 +372,6 @@ pub const MAC_BINDINGS: &[(&str, &str)] = &[
     ("audionext", "run mac-media-next"),
     ("audioprev", "run mac-media-prev"),
     ("cmd+space", "root-menu"),
-    ("cmd+opt+d", "toggle-dock"),
 ];
 
 /// Native service providers can be replaced individually through `[commands]`.
@@ -581,9 +566,6 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+ctrl+alt+b", "run omarchy-show-battery"),
     ("super+ctrl+alt+w", "run omarchy-show-weather"),
     ("super+shift+ctrl+a", "run omarchy-agent"),
-    // The bar's panels, by name. These are the rows chonkstep's own
-    // Dock instruments duplicate — which is exactly why the posture
-    // hides the Dock and keeps these.
     ("super+ctrl+a", "run omarchy-panel-audio"),
     ("super+ctrl+b", "run omarchy-panel-bluetooth"),
     ("super+ctrl+w", "run omarchy-panel-network"),
@@ -1020,7 +1002,6 @@ mod tests {
     fn the_omarchy_desktop_preset_resolves_to_the_documented_defaults() {
         let config = parse("desktop = \"omarchy\"").expect("the preset must parse");
         assert_eq!(config.desktop, Desktop::Omarchy);
-        assert!(!config.show_dock, "the Dock steps aside for Omarchy's bar");
         assert_eq!(
             config.omarchy_bar,
             Some(true),
@@ -1053,7 +1034,6 @@ mod tests {
         for text in ["", "desktop = \"chonkstep\"", "keymap = \"chonkstep\""] {
             let config = parse(text).unwrap();
             let default = Config::default_config();
-            assert!(config.show_dock, "text {text:?}");
             assert_eq!(config.omarchy_bar, None, "text {text:?}");
             assert_eq!(config.theme, None, "text {text:?}");
             assert_eq!(config.keybindings, default.keybindings, "text {text:?}");
@@ -1065,8 +1045,7 @@ mod tests {
     /// Omarchy posture touches, overridden one at a time.
     #[test]
     fn an_explicit_setting_always_beats_a_preset_default() {
-        let config = parse("desktop = \"omarchy\"\nshow_dock = true").unwrap();
-        assert!(config.show_dock, "the user asked for the Dock back");
+        let _config = parse("desktop = \"omarchy\"\nshow_dock = true").unwrap();
 
         let config = parse("desktop = \"omarchy\"\nomarchy_bar = false").unwrap();
         assert_eq!(config.omarchy_bar, Some(false));
@@ -1090,17 +1069,12 @@ mod tests {
         assert_eq!(config.keybindings, Config::default_config().keybindings);
         assert!(config.commands.is_empty(), "and its commands go with it");
         // ...while the rest of the posture stays.
-        assert!(!config.show_dock);
 
         // And the keymap without the posture.
         let config = parse("keymap = \"omarchy\"").unwrap();
         assert_eq!(
             (config.desktop, config.keymap),
             (Desktop::Chonkstep, Keymap::Omarchy)
-        );
-        assert!(
-            config.show_dock,
-            "the keymap says nothing about the furniture"
         );
         assert_eq!(config.keybindings.len(), OMARCHY_BINDINGS.len());
     }
@@ -1143,7 +1117,6 @@ mod tests {
         for text in ["desktop = \"omarhcy\"", "desktop = true", "desktop = \"\""] {
             let config = parse(text).unwrap();
             assert_eq!(config.desktop, Desktop::Chonkstep, "text {text:?}");
-            assert!(config.show_dock, "text {text:?}");
         }
         for text in ["keymap = \"hyprland\"", "keymap = 3"] {
             let config = parse(text).unwrap();

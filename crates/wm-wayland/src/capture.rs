@@ -322,6 +322,8 @@ pub(crate) fn graphics_renderer(graphics: &mut Graphics) -> &mut GlesRenderer {
 /// A user screenshot is lossless device pixels, without the pointer or capture
 /// controls. Window capture renders that surface and its own chrome in isolation
 /// so overlapping applications cannot appear in the saved window image.
+/// Isolated capture has no resize-gap fill; opaque client corners therefore
+/// receive their rounded coverage once, as in the ordinary/scaled scene.
 pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window: Option<WlWindowId>) -> Option<PendingImage> {
     if comp.wm.backend().locked || viewport.size.w == 0 || viewport.size.h == 0 { return None; }
     let Compositor { wm, graphics, pointer_location, cursors, .. } = comp;
@@ -331,9 +333,17 @@ pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window:
         let record = backend.windows.get(&window).filter(|r| r.mapped)?;
         let surface = record.surface.wl_surface()?;
         let mut elements = Vec::new();
+        let frame = backend.frames.values().find(|f|f.window==window && f.mapped);
+        let effects = frame.and_then(|f|f.effects.as_ref());
+        let shape = crate::rounded::translated_shape(effects.and_then(|e|e.shape),
+            frame.map_or(Point::new(0,0),|f|f.geometry.pos), viewport.pos, Point::new(0,0), 1.0, 1.0);
+        let lower_border_drawn = effects.is_some_and(|effects| crate::rounded::push_border(&mut elements,renderer,shape,&effects.border_ids,effects.commit,1.0));
+        let content_start=elements.len();
         crate::renderer::push_surface_tree(&mut elements, renderer, &surface,
-            (record.content.pos.x - viewport.pos.x, record.content.pos.y - viewport.pos.y).into(),
+            (record.content.pos.x - viewport.pos.x - record.content_offset.x,
+                record.content.pos.y - viewport.pos.y - record.content_offset.y).into(),
             backend.window_surface_scale(record), 1.0, Kind::Unspecified);
+        crate::rounded::mask_plane(&mut elements,content_start,renderer,shape,true);
         for frame in backend.frames.values().filter(|f| f.window == window && f.mapped) {
             for part in &frame.parts {
                 if let Ok(element) = smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement::from_buffer(
@@ -341,6 +351,16 @@ pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window:
                         (frame.geometry.pos.y + part.offset.y - viewport.pos.y) as f64),
                     &part.buffer, None, None, None, Kind::Unspecified) { elements.push(element.into()); }
             }
+            let solid_start=elements.len();
+            for solid in &frame.solids {
+                let mut rect = solid.solid.rect;
+                rect.pos.x += frame.geometry.pos.x - viewport.pos.x;
+                rect.pos.y += frame.geometry.pos.y - viewport.pos.y;
+                elements.push(solid.element(rect, 1.0).into());
+            }
+            crate::rounded::mask_frame_solids(&mut elements,solid_start,renderer,shape,lower_border_drawn);
+            crate::frame_effects::push_shadow(&mut elements, renderer, frame.effects.as_ref(), frame.geometry.pos,
+                viewport.pos, Point::new(0,0), 1.0, 1.0, 1.0);
         }
         (elements, Color32F::new(0.0, 0.0, 0.0, 0.0))
     } else {
@@ -479,7 +499,7 @@ fn snapshot_window(
     // per-surface buffer-scale correction, which is what keeps a 2x
     // client's thumbnail filling the content-rect-shaped target
     // instead of its top-left quarter.
-    let mut elements: Vec<SceneElement<GlesRenderer>> = Vec::new();
+    let mut elements: Vec<SceneElement> = Vec::new();
     crate::renderer::push_surface_tree(
         &mut elements,
         renderer,
@@ -578,7 +598,7 @@ impl PendingImage {
 
 fn render_offscreen_pending(
     renderer: &mut GlesRenderer,
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     size: Size,
     scale: f64,
     clear_color: Color32F,

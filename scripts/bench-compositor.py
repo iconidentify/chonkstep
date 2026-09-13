@@ -236,7 +236,6 @@ def measure(args, binary, label, host_socket, directory):
     config_text = (
         'omarchy_shell = false\nomarchy_menu = false\nhyprland_config = false\n'
         'theme = "nextstep-classic"\nscale = 1\nrestore_session = false\n'
-        f'show_dock = {str(args.dock).lower()}\n'
         f'decoration_style = "{args.decoration_styles.get(label, "windowmaker")}"\n'
     )
     (config / "config.toml").write_text(config_text)
@@ -382,7 +381,6 @@ def main():
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--idle-seconds", type=float, default=10)
     parser.add_argument("--settle-seconds", type=float, default=3)
-    parser.add_argument("--dock", action="store_true")
     parser.add_argument("--decoration-workload", action="store_true",
                         help="Map three real terminals; measure loaded idle and a 125 Hz titlebar drag")
     parser.add_argument("--decoration-style", action="append", default=[], metavar="LABEL=STYLE",
@@ -447,7 +445,7 @@ def main():
         "host_renderer": args.host_renderer,
         "host_shader_cache": "private per experiment; reused by that experiment's host",
         "page_cache": "warm/uncontrolled; no system cache dropping",
-        "dock": args.dock, "runs_per_binary": args.runs,
+        "runs_per_binary": args.runs,
         "decoration_workload": args.decoration_workload,
         "decoration_styles": {label: args.decoration_styles.get(label, "windowmaker") for label, _ in binaries},
         "drag_seconds": args.drag_seconds if args.decoration_workload else None,

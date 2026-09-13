@@ -21,6 +21,38 @@ fn styled_label(chrome: Option<&wm_theme::UiChrome>, inverted: bool, theme: &The
     }
 }
 
+pub(crate) fn scene_chrome(theme: &Theme, chrome: Option<&wm_theme::UiChrome>, bounds: Rect) -> Option<wm_core::OverviewChrome> {
+    chrome.and_then(|chrome| chrome.overview_ink()).map(|(ink,line)| wm_core::OverviewChrome {
+        ink,line,cards:theme.chrome.map(|chrome| wm_core::OverviewCards {metrics:chrome.overview,bounds,
+            background:[chrome.background.r,chrome.background.g,chrome.background.b],
+            empty:[chrome.line.r,chrome.line.g,chrome.line.b]}),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn workspace_scene<W,F>(theme:&Theme, chrome:Option<&wm_theme::UiChrome>,
+    fonts:&mut cosmic_text::FontSystem, cache:&mut cosmic_text::SwashCache,
+    rect:Rect, close:Option<Rect>, index:usize, workspace:(usize,usize), label_h:u32,
+    windows:Vec<wm_core::OverviewThumbnail<W,F>>) -> wm_core::OverviewWorkspace<W,F> {
+    if let Some(tokens)=theme.chrome {
+        let metrics=tokens.overview;
+        let width=rect.size.w.saturating_sub(u32::from(metrics.padding)*2);
+        let title=format!("{:02} / Workspace {}",index+1,index+1);
+        let status=if index>=workspace.1 {"Create workspace".into()} else if windows.is_empty(){"Empty workspace".into()}
+            else {format!("{} window{}",windows.len(),if windows.len()==1 {""}else{"s"})};
+        return wm_core::OverviewWorkspace {rect,windows,
+            label:ov::modern::label(theme,fonts,cache,&title,width,u32::from(metrics.header),true),
+            drop_label:ov::modern::label(theme,fonts,cache,"Move window here",width,u32::from(metrics.header),true),
+            status:Some(ov::modern::label(theme,fonts,cache,&status,width,u32::from(metrics.footer),false)),
+            card:Some(ov::modern::card_surface(theme,rect.size)),close:None};
+    }
+    wm_core::OverviewWorkspace {rect,
+        label:styled_label(chrome,index==workspace.0,theme,fonts,cache,&format!("Desktop {} · {}",index+1,windows.len()),rect.size.w,label_h),
+        drop_label:styled_label(chrome,true,theme,fonts,cache,&format!("Move to Desktop {}",index+1),rect.size.w,label_h),
+        close:close.map(|rect|(rect,chrome.map_or_else(||ov::workspace_close_glyph(rect.size.w),|chrome|chrome.workspace_close(rect.size.w)))),
+        windows,card:None,status:None}
+}
+
 /// One window's stored session entry. `window` rides along so a
 /// commit can take the public `ActivateRequested` path (which speaks
 /// backend window ids), and `client` so window-menu and deminiaturize
@@ -98,6 +130,7 @@ pub struct OverviewPanel<B: Backend> {
     /// The geometry the surfaces were created for; a differing primary
     /// rect on the next show recreates them.
     geometry: Rect,
+    stage: Rect,
     items: Vec<OverviewItem<B>>,
     selected: usize,
     layout: Option<OverviewLayout>,
@@ -110,6 +143,7 @@ pub struct OverviewPanel<B: Backend> {
     awaiting_previews: bool,
     preview_generation: u64,
     live: bool,
+    cards: bool,
     press: Option<CardPress>,
     drag: Option<OverviewDrag>,
     drag_threshold: i32,
@@ -123,6 +157,7 @@ impl<B: Backend> Default for OverviewPanel<B> {
             chrome: None,
             selection: None,
             geometry: Rect::default(),
+            stage: Rect::default(),
             items: Vec::new(),
             selected: 0,
             layout: None,
@@ -131,6 +166,7 @@ impl<B: Backend> Default for OverviewPanel<B> {
             awaiting_previews: false,
             preview_generation: 0,
             live: false,
+            cards: false,
             press: None,
             drag: None,
             drag_threshold: 3,
@@ -144,7 +180,7 @@ impl<B: Backend> OverviewPanel<B> {
 
 
     /// Opens (or, while already open, re-populates) the panel over
-    /// `primary` with a fresh entry set. `tile` is the Clip/dock tile
+    /// `primary` with a fresh entry set. `tile` is the window-preview cell
     /// edge, which sizes the workspace strip and derives the gutters.
     #[allow(clippy::too_many_arguments)]
     pub fn show(
@@ -154,6 +190,7 @@ impl<B: Backend> OverviewPanel<B> {
         font_system: &mut cosmic_text::FontSystem,
         swash_cache: &mut cosmic_text::SwashCache,
         primary: Rect,
+        stage: Rect,
         tile: u32,
         items: Vec<OverviewItem<B>>,
         workspace: (usize, usize),
@@ -165,7 +202,7 @@ impl<B: Backend> OverviewPanel<B> {
         // gesture only when every indexed target and its geometry are stable;
         // topology, membership and layout changes must still consume release.
         let preserve_pointer = self.visible && self.live && live
-            && self.geometry == primary && self.workspace == workspace
+            && self.geometry == primary && self.stage == stage && self.workspace == workspace
             && self.drag_limit == Size::new(tile * 3, tile * 2)
             && self.items.len() == items.len()
             && self.items.iter().zip(&items).all(|(old, new)|
@@ -187,11 +224,16 @@ impl<B: Backend> OverviewPanel<B> {
             self.selected = selected.min(items.len().saturating_sub(1));
         }
         self.items = items;
+        self.stage = stage;
         self.workspace = workspace;
         self.live = live;
+        self.cards = theme.chrome.is_some();
         self.drag_threshold = (tile as f64 * 3.0 / 56.0).ceil().max(2.0) as i32;
         self.drag_limit = Size::new(tile * 3, tile * 2);
-        let layout = if self.live {
+        let layout = if self.cards {
+            let sources:Vec<_>=self.items.iter().map(|item|item.geometry).collect();
+            ov::modern::layout_in(theme,primary,stage,&sources,workspace)
+        } else if self.live {
             let sizes: Vec<_> = self.items.iter().map(|item| item.geometry.size).collect();
             let mut layout = ov::live::layout(primary.size, tile, &sizes, workspace.1);
             if self.items.iter().any(|i| i.managed) {
@@ -246,38 +288,23 @@ impl<B: Backend> OverviewPanel<B> {
                         frame: item.frame,
                         source: item.geometry,
                         destination: *cell,
-                        label: styled_label(self.chrome.as_ref(), true,
+                        label: if self.cards {DecorationBuffer {width:0,height:0,pixels:Vec::new()}} else {styled_label(self.chrome.as_ref(), true,
                             theme,
                             font_system,
                             swash_cache,
                             &item.title,
                             (tile * 6).min(primary.size.w),
                             label_h,
-                        ),
+                        )},
                     })
                     .collect();
                 let spaces = layout
                     .strip
                     .iter()
                     .enumerate()
-                    .zip(workspace_windows)
-                    .map(|((i, rect), windows)| wm_core::OverviewWorkspace {
-                            rect: *rect,
-                            label: styled_label(self.chrome.as_ref(), i == workspace.0,
-                                theme,
-                                font_system,
-                                swash_cache,
-                                &format!("Desktop {} · {}", i + 1, windows.len()),
-                                rect.size.w,
-                                label_h,
-                            ),
-                            drop_label: styled_label(self.chrome.as_ref(), true, theme, font_system, swash_cache,
-                                &format!("Move to Desktop {}", i + 1), rect.size.w, label_h),
-                            windows,
-                            close: layout.workspace_close_rect(i)
-                                .map(|rect| (rect, self.chrome.as_ref().map_or_else(
-                                    || ov::workspace_close_glyph(rect.size.w), |chrome| chrome.workspace_close(rect.size.w)))),
-                    })
+                    .zip(workspace_windows.into_iter().chain(std::iter::repeat_with(Vec::new)))
+                    .map(|((i, rect), windows)| workspace_scene(theme,self.chrome.as_ref(),font_system,swash_cache,
+                        *rect,layout.workspace_close_rect(i),i,workspace,label_h,windows))
                     .collect();
                 backend.show_live_overview(
                     window,
@@ -288,8 +315,7 @@ impl<B: Backend> OverviewPanel<B> {
                         workspace: workspace.0,
                         selected: self.selected,
                         gap: layout.pad,
-                        chrome: self.chrome.as_ref().and_then(|chrome| chrome.overview_ink())
-                            .map(|(ink, line)| wm_core::OverviewChrome { ink, line }),
+                        chrome: scene_chrome(theme,self.chrome.as_ref(),layout.grid),
                     },
                 );
                 // Rebuilding the labels/miniatures replaces the backend scene.
@@ -459,14 +485,25 @@ impl<B: Backend> OverviewPanel<B> {
     }
 
     /// What a panel-local point is over.
-    pub fn hit(&self, local: Point) -> OverviewHit {
+    pub fn hit(&self, backend: &B, local: Point) -> OverviewHit {
         let Some(layout) = self.layout.as_ref() else {
             return OverviewHit::Background;
         };
-        if let Some(index) = layout.workspace_close_at(local) {
-            return OverviewHit::CloseWorkspace(index);
+        if !self.cards {
+            if let Some(index) = layout.workspace_close_at(local) {
+                return OverviewHit::CloseWorkspace(index);
+            }
         }
-        if let Some(index) = layout.cell_at(local) {
+        let cell = if self.cards && self.live {
+            backend.live_overview_paint_order().map_or_else(||layout.cell_at(local), |order|
+                order.iter().copied().find(|&index| layout.cells.get(index).is_some_and(|cell|cell.contains(local))))
+        } else if self.cards {
+            // The raster fallback paints entries back-to-front, then puts its
+            // selected preview on a separate surface above the whole panel.
+            if layout.cells.get(self.selected).is_some_and(|cell|cell.contains(local)) { Some(self.selected) }
+            else { layout.cells.iter().rposition(|cell|cell.contains(local)) }
+        } else { layout.cell_at(local) };
+        if let Some(index) = cell {
             return OverviewHit::Card(index);
         }
         if let Some(index) = layout.workspace_at(local) {
@@ -599,7 +636,7 @@ impl<B: Backend> OverviewPanel<B> {
         else if press.dragging {
             self.drag.and_then(|d| d.workspace).map_or(OverviewRelease::Cancelled, |target|
                 OverviewRelease::Move { client: press.client, source: press.workspace, target })
-        } else if self.hit(local) == OverviewHit::Card(press.index) {
+        } else if self.hit(backend, local) == OverviewHit::Card(press.index) {
             OverviewRelease::Click(press.index)
         } else { OverviewRelease::Cancelled };
         self.end_pointer(backend);
@@ -716,6 +753,29 @@ impl<B: Backend> OverviewPanel<B> {
 #[cfg(test)]
 mod drag_tests {
     use super::*;
+    #[test]
+    fn modern_raster_hit_order_matches_its_preview_and_selection_surfaces() {
+        use wm_core::fake_backend::FakeBackend;
+        let backend = FakeBackend::new();
+        let overlap = Rect::new(Point::new(10, 10), Size::new(100, 100));
+        let mut panel = OverviewPanel::<FakeBackend> {
+            cards: true,
+            selected: 2,
+            layout: Some(OverviewLayout { panel: Size::new(800, 600), header_h: 0, pad: 8,
+                cols: 2, cells: vec![overlap, overlap,
+                    Rect::new(Point::new(300, 10), Size::new(100, 100))],
+                strip: Vec::new(), grid: Rect::default() }),
+            ..Default::default()
+        };
+        let at = Point::new(20, 20);
+        assert_eq!(panel.hit(&backend, at), OverviewHit::Card(1));
+        panel.selected = 0;
+        assert_eq!(panel.hit(&backend, at), OverviewHit::Card(0));
+        panel.cards = false;
+        panel.selected = 2;
+        assert_eq!(panel.hit(&backend, at), OverviewHit::Card(0), "classic hit order is unchanged");
+    }
+
     #[test]
     fn later_asynchronous_preview_batches_remain_visible_until_panel_closes() {
         use wm_core::fake_backend::FakeBackend;

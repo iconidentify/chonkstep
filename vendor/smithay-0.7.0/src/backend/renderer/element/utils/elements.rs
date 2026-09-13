@@ -18,6 +18,9 @@ pub struct RescaleRenderElement<E> {
 }
 
 impl<E: Element> RescaleRenderElement<E> {
+    /// Inspect the retained element without changing its scale or identity.
+    pub fn element(&self) -> &E { &self.element }
+
     /// Create a new re-scale element for an existing element
     ///
     /// The origin can be used to scale the element geometry relative to a [`Point`].

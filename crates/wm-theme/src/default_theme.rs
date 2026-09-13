@@ -20,7 +20,7 @@ fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
 /// struct just to list them. `registry_matches_choices` pins this to
 /// `all_themes()`.
 #[cfg(not(feature = "lcos"))]
-pub const CHOICES: [(&str, &str); 8] = [
+pub const CHOICES: [(&str, &str); 11] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
@@ -29,6 +29,9 @@ pub const CHOICES: [(&str, &str); 8] = [
     ("jade-lacquer", "Jade Lacquer"),
     ("ivory-halftone", "Ivory Halftone"),
     ("indigo-filament", "Indigo Filament"),
+    ("obsidian", "Obsidian"),
+    ("washi", "Washi"),
+    ("relay", "Relay"),
 ];
 
 /// The same list with the LCOS themes appended. Written out rather than
@@ -36,7 +39,7 @@ pub const CHOICES: [(&str, &str); 8] = [
 /// must stay in step, and `every_choice_resolves` fails loudly if they
 /// do not.
 #[cfg(feature = "lcos")]
-pub const CHOICES: [(&str, &str); 12] = [
+pub const CHOICES: [(&str, &str); 15] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
@@ -45,6 +48,9 @@ pub const CHOICES: [(&str, &str); 12] = [
     ("jade-lacquer", "Jade Lacquer"),
     ("ivory-halftone", "Ivory Halftone"),
     ("indigo-filament", "Indigo Filament"),
+    ("obsidian", "Obsidian"),
+    ("washi", "Washi"),
+    ("relay", "Relay"),
     ("lcos", "LCOS"),
     ("lunduke-walnut", "Lunduke Walnut"),
     ("lunduke-desk", "Lunduke Desk"),
@@ -68,6 +74,9 @@ pub fn all_themes() -> Vec<Theme> {
         jade_lacquer(),
         ivory_halftone(),
         indigo_filament(),
+        crate::modern::theme("obsidian", Appearance::Dark).unwrap(),
+        crate::modern::theme("washi", Appearance::Light).unwrap(),
+        crate::modern::theme("relay", Appearance::Dark).unwrap(),
         #[cfg(feature = "lcos")]
         lcos(),
         #[cfg(feature = "lcos")]
@@ -113,6 +122,7 @@ pub fn native_appearance(id: &str) -> Option<Appearance> {
 /// menu palette, terminal scheme, and which rendition of the wallpaper
 /// artwork the shell composes underneath.
 pub fn theme_variant(id: &str, appearance: Appearance) -> Option<Theme> {
+    if let Some(theme) = crate::modern::theme(id, appearance) { return Some(theme); }
     let theme = match (id, appearance) {
         ("nextstep-classic", Appearance::Dark) => nextstep_classic(),
         ("nextstep-classic", Appearance::Light) => nextstep_classic_light(),
@@ -186,6 +196,7 @@ pub fn nextstep_classic() -> Theme {
     };
 
     Theme {
+        chrome: None,
         id: "nextstep-classic".to_string(),
         name: "NeXTSTEP Classic".to_string(),
         appearance: Appearance::Dark,
@@ -349,6 +360,7 @@ pub(crate) fn build_chrome(spec: ChromeSpec) -> Theme {
         style: FontStyle::Normal,
     };
     Theme {
+        chrome: None,
         id: spec.id,
         name: spec.name,
         appearance: spec.appearance,
@@ -1784,9 +1796,9 @@ mod tests {
     /// flagship's chrome geometry so hit-testing, button placement,
     /// and resize zones behave identically across all of them.
     #[test]
-    fn all_themes_share_the_flagship_chrome_geometry() {
+    fn legacy_themes_share_the_flagship_chrome_geometry() {
         let flagship = nextstep_classic();
-        for theme in all_themes() {
+        for theme in all_themes().into_iter().filter(|theme| theme.chrome.is_none()) {
             assert_eq!(theme.titlebar.height, flagship.titlebar.height, "{}", theme.id);
             assert_eq!(theme.titlebar.button_margin, flagship.titlebar.button_margin, "{}", theme.id);
             assert_eq!(theme.resize_bar.height, flagship.resize_bar.height, "{}", theme.id);
@@ -1866,7 +1878,7 @@ mod tests {
     fn both_renditions_share_the_flagship_chrome_geometry() {
         let flagship = nextstep_classic();
         for appearance in [Appearance::Light, Appearance::Dark] {
-            for theme in all_themes_in(appearance) {
+            for theme in all_themes_in(appearance).into_iter().filter(|theme| theme.chrome.is_none()) {
                 assert_eq!(theme.titlebar.height, flagship.titlebar.height, "{}", theme.id);
                 assert_eq!(theme.titlebar.button_margin, flagship.titlebar.button_margin, "{}", theme.id);
                 assert_eq!(theme.resize_bar.height, flagship.resize_bar.height, "{}", theme.id);
@@ -1883,7 +1895,7 @@ mod tests {
     #[test]
     fn native_renditions_are_what_each_theme_originally_shipped_as() {
         for (id, _) in CHOICES {
-            let expected = if id == "ivory-halftone" { Appearance::Light } else { Appearance::Dark };
+            let expected = if matches!(id,"ivory-halftone" | "washi") { Appearance::Light } else { Appearance::Dark };
             assert_eq!(native_appearance(id), Some(expected), "{id}");
             let by_id = theme_by_id(id).unwrap();
             assert_eq!(by_id.appearance, expected, "{id}");
@@ -1900,7 +1912,7 @@ mod tests {
     /// inverts its focus bar is a desk where focus stops being legible.
     #[test]
     fn every_rendition_carries_its_mood_and_keeps_focus_ink() {
-        for theme in all_themes_in(Appearance::Light) {
+        for theme in all_themes_in(Appearance::Light).into_iter().filter(|theme|theme.chrome.is_none()) {
             let id = &theme.id;
             assert!(lum(theme.terminal.bg) > 200, "{id}: light terminal is paper");
             assert!(lum(theme.terminal.fg) < 100, "{id}: on which the text is ink");
@@ -1910,7 +1922,7 @@ mod tests {
             assert!(lum(solid(&theme.titlebar.active)) < 64, "{id}: the focused bar stays ink");
             assert!(lum(theme.titlebar.text_color_active) > 150, "{id}: with a pale title");
         }
-        for theme in all_themes_in(Appearance::Dark) {
+        for theme in all_themes_in(Appearance::Dark).into_iter().filter(|theme|theme.chrome.is_none()) {
             let id = &theme.id;
             assert!(lum(theme.terminal.bg) < 100, "{id}: dark terminal is dark");
             assert!(lum(theme.terminal.fg) > 120, "{id}: with light text");

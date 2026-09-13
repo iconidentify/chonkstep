@@ -22,6 +22,11 @@ use crate::paint;
 /// Paints a tile face (fill + relief) over `size` x `size` at
 /// `(x, y)`. The base every tile-shaped surface starts from.
 pub fn draw_tile_base(pixmap: &mut Pixmap, x: i32, y: i32, size: u32, theme: &Theme) {
+    if let Some(chrome) = theme.chrome {
+        crate::modern::surface(pixmap, wm_theme_api::Rect::new(wm_theme_api::Point::new(x,y),wm_theme_api::Size::new(size,size)),
+            u32::from(chrome.frame.radius),chrome.raised,chrome.line,u32::from(chrome.frame.border.max(1)));
+        return;
+    }
     paint::fill_area(pixmap, x, y, size, size, &theme.tile.fill);
     let t = theme.tile.bevel.width.max(1) as u32;
     paint::draw_raised2_bevel(pixmap, x, y, size, size, t);
@@ -39,6 +44,7 @@ pub fn render_tile_base(theme: &Theme, size: u32) -> Option<Pixmap> {
 /// panel, a live window preview, a graph) reads as set into the tile
 /// rather than stickered onto it.
 pub fn draw_tile_well(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, theme: &Theme) {
+    if let Some(chrome) = theme.chrome { paint::fill_rect(pixmap,x,y,w,h,chrome.surface); return; }
     let t = theme.tile.bevel.width.max(1) as u32;
     paint::op_rect(pixmap, x, y, w, h, -24);
     paint::draw_sunken_bevel(pixmap, x, y, w, h, t);
@@ -50,6 +56,7 @@ pub fn draw_tile_well(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, theme
 /// the family consistent; widgets needing emphasis can still reach
 /// for theme accent colors deliberately.
 pub fn tile_ink(theme: &Theme) -> Color {
+    if let Some(chrome) = theme.chrome { return chrome.text; }
     let c = match &theme.tile.fill {
         Fill::Solid(c) => *c,
         Fill::Gradient(g) => Color::rgb(
@@ -69,6 +76,7 @@ pub fn tile_ink(theme: &Theme) -> Color {
 /// A secondary, receding ink — for sublabels and inactive marks —
 /// derived from [`tile_ink`] by pulling it toward the face.
 pub fn tile_ink_dim(theme: &Theme) -> Color {
+    if let Some(chrome) = theme.chrome { return chrome.muted; }
     let ink = tile_ink(theme);
     if ink.r > 0x80 {
         Color::rgb(0xA0, 0xA0, 0xA0)

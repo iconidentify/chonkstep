@@ -10,7 +10,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
-use wm_theme::{instrument_panel, overview, DecorationStyle, RasterThemeEngine, SUPPORTED_DECORATION_STYLES};
+use wm_theme::{overview, DecorationStyle, RasterThemeEngine, SUPPORTED_DECORATION_STYLES};
 use wm_theme_api::{DecorationRequest, Size, ThemeEngine};
 
 struct CountingAllocator;
@@ -79,6 +79,18 @@ fn digest(bytes: &[u8]) -> u64 {
     })
 }
 
+fn surface_digest(surface: &wm_theme_api::DecorationSurface) -> u64 {
+    let mut hash = surface.parts.iter().fold(0, |hash, part| hash ^ digest(&part.buffer.pixels));
+    // Preserve legacy checksums while covering the new non-raster pixels too.
+    for solid in &surface.solids {
+        for value in [solid.rect.pos.x as u32, solid.rect.pos.y as u32, solid.rect.size.w,
+            solid.rect.size.h, u32::from_le_bytes([solid.rgb[0], solid.rgb[1], solid.rgb[2], 255])] {
+            hash = (hash ^ u64::from(value)).wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
 fn measure<T>(name: &str, iterations: usize, mut work: impl FnMut() -> T, fingerprint: impl Fn(&T) -> u64) {
     measure_with_metadata(name, iterations, &mut work, fingerprint, "");
 }
@@ -116,6 +128,8 @@ fn measure_with_metadata<T>(
 fn main() {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     let mut style = DecorationStyle::WindowMaker;
+    let mut theme_name = "nextstep-classic";
+    let mut appearance = wm_theme::Appearance::Dark;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -129,27 +143,41 @@ fn main() {
                 };
                 style = selected;
             }
+            "--theme" => {
+                index += 1;
+                theme_name = arguments.get(index).map(String::as_str).unwrap_or("");
+            }
+            "--appearance" => {
+                index += 1;
+                appearance = match arguments.get(index).map(String::as_str) {
+                    Some("dark") => wm_theme::Appearance::Dark,
+                    Some("light") => wm_theme::Appearance::Light,
+                    _ => { eprintln!("--appearance requires dark or light"); std::process::exit(2); }
+                };
+            }
             "--glyph-churn" | "--decoration-matrix" | "--shell-chrome" => {}
             argument => {
-                eprintln!("unknown argument {argument:?}; use --style windowmaker, --decoration-matrix, --shell-chrome or --glyph-churn");
+                eprintln!("unknown argument {argument:?}; use --style windowmaker, --theme nextstep-classic, --appearance dark, --decoration-matrix, --shell-chrome or --glyph-churn");
                 std::process::exit(2);
             }
         }
         index += 1;
     }
+    let Some(theme) = wm_theme::default_theme::theme_variant(theme_name, appearance) else {
+        eprintln!("unknown theme {theme_name:?}"); std::process::exit(2);
+    };
     if arguments.iter().any(|argument| argument == "--glyph-churn") {
         glyph_churn();
         return;
     }
     if arguments.iter().any(|argument| argument == "--shell-chrome") {
-        shell_chrome(style);
+        shell_chrome(style, &theme);
         return;
     }
-    decoration_matrix(style);
+    decoration_matrix(style, &theme);
     if arguments.iter().any(|argument| argument == "--decoration-matrix") {
         return;
     }
-    let theme = wm_theme::default_theme::nextstep_classic();
     let engine = RasterThemeEngine::new(theme.clone()).with_style(style).unwrap();
     let request = DecorationRequest {
         content_size: Size::new(1600, 1000), title: "Terminal — compositor performance".into(),
@@ -159,10 +187,7 @@ fn main() {
     measure("decoration-1600x1000", 100, || engine.render(&request, &layout), |output| digest(&output.pixels));
     measure("sparse-decoration-1600x1000", 1000,
         || engine.render_surface(&request, &layout),
-        |output| output.parts.iter().fold(0, |hash, part| hash ^ digest(&part.buffer.pixels)));
-    measure("clock-224", 1000, || wm_theme::clock::render_clock_tile(&theme, 224, 10, 9, 30),
-        |output| digest(&output.pixels));
-
+        surface_digest);
     let mut fonts = cosmic_text::FontSystem::new();
     let mut swash = cosmic_text::SwashCache::new();
     let overview_layout = overview::layout(Size::new(1920, 1080), 56, overview::header_height(&theme), 0, 4);
@@ -170,27 +195,19 @@ fn main() {
         || overview::render_overview(&theme, &mut fonts, &mut swash, &[], (0, 4), &overview_layout),
         |output| digest(&output.pixels));
 
-    let style = instrument_panel::PanelStyle::new(&theme);
-    let font = style.typeface(instrument_panel::TypeRole::Row, 28);
-    for (length, iterations) in [(64, 100), (1024, 5), (4096, 1)] {
-        let text = "Peripheral ".repeat(length / 11 + 1);
-        let text = &text[..length];
-        measure(&format!("panel-label-{length}"), iterations,
-            || instrument_panel::fit_type(&mut fonts, &font, text, 160),
-            |output| digest(output.as_bytes()));
-    }
+
 }
 
 /// Event-time shell raster costs. These calls happen on open/semantic changes;
 /// native Overview frames reuse their outputs instead of invoking them again.
-fn shell_chrome(style: DecorationStyle) {
+fn shell_chrome(style: DecorationStyle, selected_theme: &wm_theme::Theme) {
     let fonts = wm_theme::FontState::new();
     let items = [wm_theme::menu::MenuItem::Action { label: "Terminal".into(), action: 1 },
         wm_theme::menu::MenuItem::Submenu { label: "Applications".into(), items: Vec::new() }];
     let entries = [wm_theme::switcher::SwitcherEntry { title: "Terminal".into(), preview: None },
         wm_theme::switcher::SwitcherEntry { title: "Notes".into(), preview: None }];
     for scale in [1.0, 2.0] {
-        let theme = wm_theme::default_theme::nextstep_classic().scaled(scale);
+        let theme = selected_theme.scaled(scale);
         let chrome = wm_theme::UiChrome::new(&theme, fonts.clone(), style, scale);
         let (mut fs, mut sc) = (fonts.system(), fonts.swash());
         let metadata = format!(",\"style\":\"{}\",\"scale\":{scale}", style.name());
@@ -213,8 +230,7 @@ fn shell_chrome(style: DecorationStyle) {
 /// A cold render misses the engine's title cache, while font discovery, glyph
 /// warming, engine construction and per-scale setup remain outside the interval.
 /// The warm case calls the actual owned-buffer API: its copies/allocations count.
-fn decoration_matrix(style: DecorationStyle) {
-    let theme = wm_theme::default_theme::nextstep_classic();
+fn decoration_matrix(style: DecorationStyle, theme: &wm_theme::Theme) {
     let fonts = wm_theme::FontState::new();
     for size in [Size::new(800, 600), Size::new(1280, 800), Size::new(2560, 1600)] {
         for scale in [1.0, 2.0] {
@@ -233,9 +249,8 @@ fn decoration_matrix(style: DecorationStyle) {
                 ",\"style\":\"{}\",\"width\":{},\"height\":{},\"scale\":{scale},\"retained_bytes\":{retained}",
                 style.name(), size.w, size.h,
             );
-            let fingerprint = |surface: &wm_theme_api::DecorationSurface| {
-                surface.parts.iter().fold(0, |hash, part| hash ^ digest(&part.buffer.pixels))
-            };
+            let metadata = format!("{metadata},\"theme\":\"{}\",\"appearance\":\"{}\"", theme.id, theme.appearance.name());
+            let fingerprint = surface_digest;
             measure_with_metadata("layout", 100_000,
                 || engine.layout_at(black_box(&request), scale),
                 |layout| u64::from(layout.frame_size.w) << 32 | u64::from(layout.frame_size.h),

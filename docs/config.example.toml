@@ -14,7 +14,7 @@
 # scripts/reload.sh, or bind the "reload" action to a key (see below).
 # A reload re-reads this file and applies all of it -- theme, scale,
 # focus, placement, edge resistance, terminal font size, and these
-# bindings -- keeping every window, client connection and dockapp.
+# bindings -- keeping every window, client connection.
 #
 # scripts/restart.sh still exists and is a different thing: it re-execs
 # the on-disk binary, which is how you pick up a NEW BUILD. Use it after
@@ -51,7 +51,7 @@
 # key it sets is overridden simply by writing that key out -- the
 # ordinary TOML rule, with no precedence order to learn. What it sets:
 #
-#   show_dock    = false          keymap        = "omarchy"
+#   keymap        = "omarchy"
 #   omarchy_bar  = true           omarchy_menu  = true
 #   theme        = "omarchy"      omarchy_shell = true
 #   lock_command = "omarchy-system-lock"
@@ -177,7 +177,7 @@
 #scroll_factor = 0.4
 
 # UI scale factor for HiDPI displays: multiplies every pixel dimension
-# in the window chrome, dock, cursors, and terminal font as one system.
+# in the window chrome, cursors, and terminal font as one system.
 # The CHONKSTEP_SCALE environment variable, when set to a valid value,
 # wins over this. When neither is set, Wayland automatically selects a
 # per-output scale from physical DPI (and recognizes high-resolution internal
@@ -205,7 +205,7 @@
 # or "omarchy", which is not a theme of its own but an instruction:
 # follow Omarchy. The desktop reads the palette Omarchy is currently
 # wearing (~/.local/state/omarchy/current/theme/colors.toml, the file
-# `omarchy-theme-set` maintains) and dresses in it -- chrome, dock,
+# `omarchy-theme-set` maintains) and dresses in it -- chrome,
 # menus, terminal palette -- keeping chonkstep's own geometry. It keeps
 # watching that file, so `omarchy-theme-set catppuccin-latte` re-dresses
 # this desk within a second, light or dark as the palette says. With
@@ -216,8 +216,8 @@
 # wins over this value on every later startup -- the menu is the more
 # recent gesture; this line is only the starting point. An unknown id
 # is warned about and ignored. Picking one from the menu applies it
-# immediately, in place: the chrome, the dock, the menus, the wallpaper
-# and every dockapp restyle without the session restarting. Terminals
+# immediately, in place: the chrome, the menus, the wallpaper
+# restyle without the session restarting. Terminals
 # already open keep the palette they were launched with.
 #theme = "nextstep-classic"
 
@@ -250,11 +250,12 @@
 #appearance = "dark"
 
 # Frame geometry and glyphs, independent of the palette and Mac keyboard mode.
-# Exact spellings: "windowmaker" (default) or "system7". Config-only selector: edit
-# this line, then run /usr/lib/chonkstep/reload.sh. Both backends and XWayland update in place.
+# Exact spellings: "auto" (default), "windowmaker", "system7", or "modern".
+# Auto follows the theme's recipe; an explicit value overrides window frames.
+# Edit this line, then run /usr/lib/chonkstep/reload.sh. Both backends and XWayland update in place.
 # System 7 chrome is always light, including when appearance is dark.
 # See docs/decoration-styles.md for capture references and scaling policy.
-#decoration_style = "windowmaker"
+#decoration_style = "auto"
 
 # Where a newly mapped window goes when the application itself asked
 # for no particular position (an explicit position, like a terminal's
@@ -307,37 +308,6 @@
 # applications you did not just ask for is something to opt into.
 #restore_session = true
 
-# Whether this desk wears its Dock: the instrument column in the
-# top-right corner -- the identity tile, the six instruments and the
-# clock -- together with the one-tile strip of screen it reserves, so a
-# maximized window stops at its edge instead of sliding underneath.
-#
-# On by default: the Dock is what a chonkstep desk is. Set it to false
-# for the other configuration chonkstep is built for -- its window
-# management and its chrome under ANOTHER shell's bar and pickers,
-# Omarchy's especially, with no second piece of furniture in the
-# corner. Hidden means hidden AND out of the way: the column is
-# unmapped and its strip goes back to the workarea in the same breath,
-# so windows use the full width of the screen.
-#
-# The Clip in the bottom-right corner hides with the Dock. The
-# launcher strip down the left edge reserves nothing and stays where
-# it is; a miniaturized window's icon tile sits on the desk along
-# the bottom edge, not in the Dock, so miniaturizing still works and
-# double-clicking a tile still restores. Built-in instruments retain
-# their state but pause sampling while hidden, then refresh when shown.
-# History graphs do not collect hidden samples; the first fresh counter
-# rate after reopening covers the interval since its last visible reading.
-# A dockapp is told to stop sampling and drawing until the column returns.
-#
-# This is the starting point, not the last word: the root menu's "Dock"
-# row (right-click the desktop) and the "toggle-dock" action both
-# remember your choice in chonkstep's own state, and a remembered
-# choice wins over this key -- the same precedence the theme menu's
-# choice has over `theme` above. To go back to letting this key decide,
-# delete $XDG_STATE_HOME/chonkstep/dock-visibility.
-#show_dock = true
-
 # Omarchy's own command menu, hosted as the `Omarchy` submenu of the
 # root menu (right-click the desktop): Learn, Trigger, Style, Setup,
 # Install, Remove, Update, About, System -- every entry Omarchy's shell
@@ -386,7 +356,7 @@
 # running -- keeps its clock, keeps its state -- and takes no space,
 # no clicks and no pixels.
 #
-# Like `show_dock`, this is the starting point and not the last word:
+# This is the starting point and not the last word:
 # the root menu's "Omarchy Bar" row remembers your choice in
 # chonkstep's own state (never in Omarchy's -- a preference about this
 # desk should not follow you into a Hyprland session), and a
@@ -511,7 +481,7 @@
 #   toggle-fullscreen, focus-left, focus-right, focus-up, focus-down,
 #   workspace-next, workspace-prev,
 #   workspace-carry-next, workspace-carry-prev, overview, window-menu,
-#   toggle-dock, reload, restart, none
+#   reload, restart, none
 #
 # ...plus four actions that take an argument:
 #
@@ -536,20 +506,13 @@
 # on the seventh of seven. That is not a special case for this verb --
 # chonkstep's workspaces have always grown on demand and are never
 # destroyed, which is exactly what "workspace-next" does off the end of
-# the row. The Clip, the pager and any bar draw whatever the row grew
+# the row. The Overview and Omarchy bar show whichever workspaces were added
 # to.
 #
 # "reload" re-reads this file and applies it in place; "restart"
 # re-execs the on-disk binary to pick up a new build. See the note at
 # the top of this file for which one you want.
 #
-# "toggle-dock" shows or hides the Dock, exactly as the root menu's
-# "Dock" row does -- the column and the strip of screen it reserves,
-# both together. Unbound by default; give it a key if you switch back
-# and forth. See `show_dock` above for what a hidden Dock leaves
-# behind, and where the choice is remembered.
-#
-#   "super+d" = "toggle-dock"        # for instance
 #
 # Window-targeted actions (close, toggle-maximize, toggle-shade,
 # miniaturize, toggle-fullscreen, focus-left/right/up/down, window-menu)

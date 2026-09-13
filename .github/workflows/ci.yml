@@ -37,7 +37,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  sdk:
+  agent-and-harness:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -46,24 +46,14 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Run the Python SDK tests
-        run: python3 -m unittest discover bindings/python/tests
+      - name: Run the Omarchy agent plugin tests
+        run: python3 -m unittest discover omarchy/plugins/chonkstep.agents/tests
 
       - name: Install image verification dependency
         run: python3 -m pip install Pillow==12.3.0
 
       - name: Run benchmark and preflight harness regression tests
         run: scripts/check.sh harness
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: bindings/go/chonkdock/go.mod
-          # This module has no external dependencies and therefore no go.sum.
-          cache: false
-
-      - name: Run the Go SDK tests
-        working-directory: bindings/go/chonkdock
-        run: go test ./...
 
   omarchy-install:
     runs-on: ubuntu-latest
@@ -509,29 +499,6 @@ jobs:
             libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev
 
-      # Every warning, the incident's blocking-call lints, and documented
-      # safety contracts are denied across every crate with no exemptions.
-      # `--no-deps` keeps clippy off crates.io dependencies, whose source
-      # nobody here can fix; `--workspace` makes every member a primary
-      # package so all of them are still linted.
-      #
-      # `disallowed_types` joined `disallowed_methods` here when
-      # `crates/chonk-instruments` gained a `clippy.toml` of its own.
-      # Both flags are needed and neither is redundant: the workspace
-      # file bans blocking *methods* (`Command::output` and friends),
-      # while the instruments file additionally bans whole *types*
-      # (`std::process::Command`, `std::fs::File`) — a widget has no
-      # business constructing either, whatever it then calls on it. A
-      # `clippy.toml` only declares; the deny flag is what makes the
-      # declaration bite, so a ban with no matching flag here is a
-      # comment.
-      #
-      # Note also that clippy resolves `clippy.toml` from the crate
-      # directory upward and stops at the first hit, so a per-crate file
-      # *replaces* the workspace one rather than extending it. That is
-      # why `chonk-instruments/clippy.toml` repeats the workspace's
-      # three bans verbatim; if you add a ban to the root file, add it
-      # there too or that crate quietly loses it.
       - name: Deny clippy warnings workspace-wide
         # Shared with local preflight: do not replace this with a weaker
         # `-D warnings` invocation that omits the opt-in safety/blocking lints.

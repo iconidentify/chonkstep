@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "chonkstep.agents",
+  "name": "Agent Sessions",
+  "version": "1.0.0",
+  "author": "chonkstep",
+  "license": "GPL-3.0-only",
+  "description": "Live agent sessions, activity, and terminal navigation in the Omarchy bar.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "Widget.qml"},
+  "barWidget": {
+    "displayName": "Agent Sessions",
+    "description": "Codex, Claude Code, OpenCode, and connected T3 sessions.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "schema": []
+  }
+}

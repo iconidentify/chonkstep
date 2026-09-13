@@ -75,4 +75,4 @@ performance-after --shell-chrome --style system7
 - [All 700 existing-workload records](existing.jsonl)
 - [All 112 shell-workload records](shell-chrome.jsonl)
 - [Machine, order and binary SHA-256](metadata.json)
-- [Desktop screenshots at 1× and 2×](../../../../site/shots/shell-chrome/README.md)
+- [Desktop screenshots at 1× and 2×](../desktop-reference/shell-chrome/README.md)

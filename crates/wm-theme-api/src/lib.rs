@@ -6,13 +6,19 @@
 //! that produces it.
 
 mod decoration;
+mod chrome;
+mod effects;
 mod geometry;
+mod overview;
 mod popup;
 
 pub use decoration::{
     ButtonKind, ButtonRuntimeState, DecorationBuffer, DecorationLayout, DecorationPart,
-    DecorationRequest, DecorationStyle, DecorationSurface, ResizeEdge, ThemeEngine,
+    DecorationRequest, DecorationSolid, DecorationStyle, DecorationSurface, ResizeEdge, ThemeEngine,
 };
+pub use chrome::FrameMetrics;
+pub use effects::{DecorationShadow, DecorationShape};
+pub use overview::{OverviewGrid, OverviewMetrics, overview_thumbnail, overview_source_bounds};
 pub use geometry::{
     clamp_client_size, client_size_limit, subsurface_link_exceeds_depth, Point, Rect, Size,
     MAX_CLIENT_WINDOW_DIMENSION, MAX_SUBSURFACE_DEPTH,

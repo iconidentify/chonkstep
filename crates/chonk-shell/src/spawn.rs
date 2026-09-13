@@ -1,5 +1,6 @@
 //! Launches apps from the root menu as detached child processes.
 
+use std::time::Duration;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -11,56 +12,12 @@ pub fn spawn_detached(program: &str, args: &[&str]) -> Option<u32> {
     spawn_detached_with_env(program, args, &[], &[])
 }
 
-/// The variables that must be *removed* from a dockapp's environment,
-/// and the reason the removal is mandatory rather than tidy.
-///
-/// The dockapp boundary's headline claim is that a dockapp holds no
-/// display connection, so `wl_shm`, `zwlr_screencopy_v1` and
-/// `zwlr_foreign_toplevel_management_v1` (`wm-wayland/src/protocols.rs`)
-/// are *unreachable* rather than merely denied — a stronger guarantee
-/// than Wayland's own, because there is no object to ask.
-///
-/// That claim is false by default. Nothing stops the dockapp *process*
-/// from opening `$WAYLAND_DISPLAY` or `$DISPLAY` itself: it inherits
-/// the environment (this function does not clear it, and
-/// `wm-wayland/src/state.rs` deliberately sets both for children so
-/// that ordinary launched apps work). A dockapp that connected on its
-/// own would get everything a normal client gets — screen capture, the
-/// window list, the clipboard — while presenting as a tile.
-///
-/// Unsetting both is what turns "a dockapp is granted nothing extra"
-/// into "a dockapp is granted strictly less than a normal app". It is a
-/// hurdle, not a cage — a determined program can guess `:0` or
-/// enumerate `$XDG_RUNTIME_DIR/wayland-*` — and the SDK documentation
-/// says so plainly. What it buys is that reaching a display server
-/// becomes a deliberate, auditable act by the dockapp rather than
-/// something it gets for free by calling a toolkit's `init()`.
-pub const DISPLAY_SERVER_ENV: [&str; 2] = ["WAYLAND_DISPLAY", "DISPLAY"];
 
 /// The variable every process the shell launches finds the control
 /// socket (`docs/control-socket.md` §1.1) under.
 pub const CONTROL_SOCKET_ENV: &str = "CHONKSTEP_CONTROL_SOCKET";
 
-/// Process-private compositor controls that must stop at the
-/// application boundary.
-///
-/// These are backend/debug selectors, restart/session markers, and
-/// test seams.  They are meaningful to the compositor (or its session
-/// wrapper), but never to an application it launches.  More
-/// importantly, a desktop shell may legitimately run
-/// `dbus-update-activation-environment --all`; letting one of these
-/// through would copy it into the persistent systemd/D-Bus activation
-/// environment and poison the next login.  A nested test did exactly
-/// that with `CHONKSTEP_BACKEND=winit` and
-/// `CHONKSTEP_NO_APPEARANCE_PROPAGATION=1`, after which an SDDM session
-/// inherited test behavior.
-///
-/// This is deliberately an allow-by-purpose list rather than every
-/// `CHONKSTEP_*` variable.  `CHONKSTEP_SCALE`, `CHONKSTEP_THEME`,
-/// `CHONKSTEP_APPEARANCE`, and `CHONKSTEP_CONTROL_SOCKET` are public
-/// child-facing integration variables.  Dock socket/token variables
-/// are passed only to their designated dockapp.
-const INTERNAL_ENV: [&str; 23] = [
+const INTERNAL_ENV: [&str; 22] = [
     "CHONKSTEP_BACKEND",
     "CHONKSTEP_DAMAGE_LOG",
     "CHONKSTEP_DRM_DEVICE",
@@ -77,7 +34,6 @@ const INTERNAL_ENV: [&str; 23] = [
     "CHONKSTEP_STRICT_BUFFER_RELEASE",
     "CHONKSTEP_TEST_CONFIG_HOME",
     "CHONKSTEP_TEST_GAMMA_SIZE",
-    "CHONKSTEP_TEST_PANEL_TILE",
     "CHONKSTEP_TEST_RECOVERY_SHELL",
     "CHONKSTEP_TEST_RUST_LOG",
     "CHONKSTEP_TEST_SOCKET",
@@ -86,14 +42,6 @@ const INTERNAL_ENV: [&str; 23] = [
     "_CHONKSTEP_UWSM",
 ];
 
-/// What a dockapp is launched *without*: the display servers, and the
-/// control socket. The socket is not a display connection, but it
-/// answers "which windows exist, what is focused" and switches
-/// workspaces — the window list is one of the things
-/// [`DISPLAY_SERVER_ENV`] exists to keep out of a tile's reach, so
-/// handing it the same list by another route would undo the hurdle.
-/// A dockapp that wants any of it should be an application instead.
-pub const DOCKAPP_WITHHELD_ENV: [&str; 3] = ["WAYLAND_DISPLAY", "DISPLAY", CONTROL_SOCKET_ENV];
 
 /// Where the control socket was bound, once it has been. `None` until
 /// `control::ControlSocket::new` says, and forever in a session whose
@@ -101,42 +49,12 @@ pub const DOCKAPP_WITHHELD_ENV: [&str; 3] = ["WAYLAND_DISPLAY", "DISPLAY", CONTR
 /// listening on.
 static CONTROL_SOCKET: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// Makes the control socket's path part of the environment of every
-/// process this shell launches from now on.
-///
-/// Why a process-global read at spawn time, and not `std::env::set_var`
-/// once at bind time: by the time `Shell::new` binds the socket, the
-/// dock's sampler threads are already running `Command::output()`,
-/// which walks `environ` — and `setenv` racing a reader of `environ` is
-/// a use-after-free the Rust standard library documents as such (the
-/// `XCURSOR_SIZE` export in `startup.rs` is safe only because it runs
-/// before any thread exists). Injecting at `apply_env` instead
-/// touches only the `Command` being built, needs no unsafety, reaches
-/// every launch path the shell has — autostart, `[commands]`, menus,
-/// terminals, session-layout relaunches — because they all go through
-/// that one function, and is checkable with `Command::get_envs`. A hot
-/// restart is a fresh process that binds and declares again, so the
-/// once-only cell is never stale.
 pub fn declare_control_socket(path: std::path::PathBuf) {
     // The socket is bound once per process; a second declaration would
     // be a second bind, which `StreamListener::bind` already refuses.
     let _ = CONTROL_SOCKET.set(path);
 }
 
-/// Same as [`spawn_detached`], with extra environment variables set on
-/// top of whatever chonkstep's own process already has (which the child
-/// inherits regardless — `Command` doesn't clear the parent environment
-/// unless asked to). Exists for [`chromium_scale_args`]/[`gtk_qt_scale_env`]:
-/// a third-party binary chonkstep doesn't control needs to be *told*
-/// about the desktop's scale through whatever convention its own
-/// toolkit understands, since it has no way to ask chonkstep for one.
-///
-/// Compositor-private variables are always removed at this boundary.
-/// `unset` names any additional variables to *remove* from the child's
-/// environment. It exists for dockapps, which must be launched with
-/// [`DOCKAPP_WITHHELD_ENV`] cleared — see [`DISPLAY_SERVER_ENV`] for
-/// why that is a requirement of the design rather than a precaution.
-/// Pass `&[]` when there are no additional removals.
 pub fn spawn_detached_with_env(
     program: &str,
     args: &[&str],
@@ -196,33 +114,11 @@ pub struct ExitReport {
 }
 
 impl ExitReport {
-    /// Whether the child *chose* to end. Everything else — a non-zero
-    /// code, any signal at all — is a crash for the purposes of a
-    /// dockapp's `restart = "on-crash"` policy.
     pub fn is_success(self) -> bool {
         self.code == Some(0) && self.signal.is_none()
     }
 }
 
-/// A child the caller intends to outlive, and to ask about later.
-///
-/// # Why this exists beside `spawn_detached_with_env`
-///
-/// That function reaps its child on a dedicated thread and throws the
-/// status away, which is exactly right for a launched application: the
-/// shell has no opinion about how a text editor exits. A dockapp is
-/// different. `restart = "on-crash"` has to distinguish a tile that
-/// finished (a battery instrument on a desktop with no battery, exiting
-/// zero) from one that died, and that distinction is *only* in the exit
-/// status.
-///
-/// So the reaper thread stays — it is the thing that must never run on
-/// the compositor's repaint thread — and it now writes what it learned
-/// into a shared cell before it ends. The shell polls that cell from
-/// its event loop and never waits for anything. This is the second of
-/// the three crash signals in the dockapp design; the first is the
-/// socket EOF, which is instant and definitive, and this one answers
-/// the follow-up question of *how*.
 pub struct SpawnedChild {
     pid: u32,
     /// `Some` once the reaper thread has seen the child exit. Written
@@ -246,27 +142,6 @@ impl SpawnedChild {
         self.exit.lock().ok().and_then(|report| *report)
     }
 
-    /// Asks the child to leave.
-    ///
-    /// Called when the shell has decided this process is no longer the
-    /// tile's — its socket closed while it kept running, or the user
-    /// removed the tile. Without it a dockapp that closes its socket
-    /// and keeps going would be joined by its own replacement, and the
-    /// user would pay for both forever.
-    ///
-    /// `SIGTERM`, not `SIGKILL`: a dockapp is a normal process of the
-    /// user's, and one that wants to flush something on the way out
-    /// should get to. There is deliberately no follow-up `SIGKILL`
-    /// timer — that would need a timer, a second signal path and a
-    /// policy about how long is long enough, to solve a problem
-    /// ("a dockapp that ignores SIGTERM") that no shipped dockapp has
-    /// and that the crash-loop cutoff already bounds the damage of.
-    ///
-    /// The pid race is real and is bounded by the reaper thread: this
-    /// process reaps its own children, so a pid it spawned cannot be
-    /// recycled by the kernel until that thread's `wait` has collected
-    /// it — and once it has, `exited()` is `Some` and callers do not
-    /// reach here.
     pub fn terminate(&self) {
         if self.exited().is_some() {
             return;
@@ -300,15 +175,6 @@ impl SpawnedChild {
     }
 }
 
-/// Like [`spawn_detached_with_env`], but the caller keeps a handle that
-/// reports how the child ended.
-///
-/// The reaping thread is the same deliberate design as the one in
-/// `spawn_detached_with_env`, for the same reason: globally ignoring
-/// `SIGCHLD` would make the kernel auto-reap every child and break the
-/// `Command::output()` the sampler workers depend on. One thread per
-/// dockapp, bounded by the number of registered dockapps, and the only
-/// thing a never-returning `wait` can hold up is that thread.
 pub fn spawn_supervised(program: &str, args: &[&str], env: &[(String, String)], unset: &[&str]) -> Option<SpawnedChild> {
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -355,11 +221,8 @@ pub fn spawn_supervised(program: &str, args: &[&str], env: &[(String, String)], 
 ///
 /// Removals are applied after additions on purpose: if a caller ever
 /// passes the same key in both lists, "remove it" is the safer reading
-/// of an ambiguous instruction, and for [`DISPLAY_SERVER_ENV`] and
-/// [`INTERNAL_ENV`] it is the only acceptable one.
+/// of an ambiguous instruction, and for [`INTERNAL_ENV`] it is required.
 fn apply_env(command: &mut Command, env: &[(String, String)], unset: &[&str]) {
-    // First, so a caller's own `env` can override it and a caller's
-    // `unset` can withhold it (as a dockapp's does).
     if let Some(path) = CONTROL_SOCKET.get() {
         command.env(CONTROL_SOCKET_ENV, path);
     }
@@ -634,6 +497,131 @@ pub fn gtk_qt_scale_env(scale: f32) -> Vec<(String, String)> {
     ]
 }
 
+const SAMPLE_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+pub(crate) fn wait_with_deadline(mut child: std::process::Child, program: &str, deadline: Duration) -> Option<String> {
+    use std::io::{ErrorKind, Read};
+    use std::os::fd::AsRawFd;
+
+    let start = std::time::Instant::now();
+    let mut pipe = child.stdout.take();
+    if let Some(pipe) = &pipe {
+        let fd = pipe.as_raw_fd();
+        // SAFETY: ChildStdout owns this live descriptor for both calls.
+        // Preserve its existing flags and change only the read endpoint.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        let nonblocking = flags >= 0 && {
+            // SAFETY: the same ChildStdout still owns fd; the valid retrieved
+            // flags are preserved while enabling nonblocking reads.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) >= 0 }
+        };
+        if !nonblocking {
+            tracing::warn!(program, error = ?std::io::Error::last_os_error(), "could not make sampler output nonblocking");
+            reap_failed_command(&mut child);
+            return None;
+        }
+    }
+    let mut output = Vec::new();
+    let mut exited = false;
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        if start.elapsed() >= deadline {
+            if !exited {
+                reap_failed_command(&mut child);
+            }
+            tracing::warn!(program, ?deadline, "command or its output exceeded the deadline");
+            return None;
+        }
+        if let Some(reader) = &mut pipe {
+            let mut eof = false;
+            // A continuously writing tool must yield to deadline and
+            // exit checks. Four reads cap work per pass at 64 KiB.
+            for _ in 0..4 {
+                match reader.read(&mut buffer) {
+                    Ok(0) => {
+                        eof = true;
+                        break;
+                    }
+                    Ok(count) if count > SAMPLE_OUTPUT_LIMIT.saturating_sub(output.len()) => {
+                        tracing::warn!(program, limit = SAMPLE_OUTPUT_LIMIT, "sampler output exceeded its size limit");
+                        if !exited {
+                            reap_failed_command(&mut child);
+                        }
+                        return None;
+                    }
+                    Ok(count) => {
+                        let needed = output.len() + count;
+                        if needed > output.capacity() {
+                            // Geometric growth without letting Vec's
+                            // final doubling exceed the output budget.
+                            let capacity = output.capacity().saturating_mul(2).max(needed).min(SAMPLE_OUTPUT_LIMIT);
+                            output.reserve_exact(capacity - output.len());
+                        }
+                        output.extend_from_slice(&buffer[..count]);
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        tracing::warn!(?error, program, "could not read sampler output");
+                        if !exited {
+                            reap_failed_command(&mut child);
+                        }
+                        return None;
+                    }
+                }
+            }
+            if eof {
+                pipe = None;
+            }
+        }
+        if !exited {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return None;
+                    }
+                    exited = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(?error, program, "could not wait on a command");
+                    reap_failed_command(&mut child);
+                    return None;
+                }
+            }
+        }
+        if exited && pipe.is_none() && start.elapsed() < deadline {
+            return String::from_utf8(output).ok();
+        }
+        let pause = deadline.saturating_sub(start.elapsed()).min(Duration::from_millis(20));
+        if let Some(pipe) = &pipe {
+            let mut poll = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: poll points to one initialized descriptor owned by
+            // `pipe`, which stays alive until the bounded call returns.
+            let ready = unsafe { libc::poll(&mut poll, 1, pause.as_millis().max(1) as libc::c_int) };
+            if ready < 0 && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+                tracing::warn!(program, error = ?std::io::Error::last_os_error(), "could not poll sampler output");
+                if !exited {
+                    reap_failed_command(&mut child);
+                }
+                return None;
+            }
+        } else {
+            // Effects discard stdout, and a command may close stdout
+            // before exiting. Either still needs its exit status.
+            std::thread::sleep(pause);
+        }
+    }
+}
+
+fn reap_failed_command(child: &mut std::process::Child) {
+    // This function runs only on the sampler/effect worker. Kill before
+    // waiting so an overrun cannot keep running; wait consumes its exit
+    // status instead of leaking a zombie on each sampling interval.
+    let _ = child.kill();
+    #[allow(clippy::disallowed_methods)]
+    let _ = child.wait();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,30 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dockapps_launch_environment_has_no_display_server_in_it() {
-        // The mandatory mitigation, asserted rather than trusted: a
-        // dockapp that inherited WAYLAND_DISPLAY or DISPLAY could open
-        // a display connection and help itself to screen capture, the
-        // window list and the clipboard while presenting as a tile.
-        let mut command = Command::new("/bin/true");
-        apply_env(
-            &mut command,
-            &[("CHONKSTEP_DOCK_SOCKET".to_string(), "/run/user/1000/chonkstep/dock-1.sock".to_string())],
-            &DISPLAY_SERVER_ENV,
-        );
-        let envs: Vec<_> = command.get_envs().collect();
-        for variable in DISPLAY_SERVER_ENV {
-            let entry = envs.iter().find(|(key, _)| *key == std::ffi::OsStr::new(variable));
-            assert_eq!(entry.map(|(_, value)| *value), Some(None), "{variable} must be removed, not merely left unset");
-        }
-        assert!(
-            envs.iter().any(|(key, value)| *key == std::ffi::OsStr::new("CHONKSTEP_DOCK_SOCKET") && value.is_some()),
-            "the variables the dockapp actually needs still arrive"
-        );
-    }
-
-    #[test]
-    fn removal_wins_over_an_accidental_set_of_the_same_variable() {
+fn removal_wins_over_an_accidental_set_of_the_same_variable() {
         // An ambiguous instruction about DISPLAY has exactly one safe
         // reading.
         let mut command = Command::new("/bin/true");
@@ -687,28 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_control_socket_reaches_every_launch_but_a_dockapps() {
-        // The route `declare_control_socket` documents, asserted on the
-        // `Command` rather than on a spawned process: the cell is
-        // process-global, so this is the one test in the binary that
-        // sets it, and it sets it to a path no other test looks for.
-        declare_control_socket(std::path::PathBuf::from("/run/user/1000/chonkstep/control-test.sock"));
-        let mut launch = Command::new("/bin/true");
-        apply_env(&mut launch, &[], &[]);
-        let exported = launch.get_envs().find(|(key, _)| *key == std::ffi::OsStr::new(CONTROL_SOCKET_ENV));
-        assert_eq!(
-            exported.and_then(|(_, value)| value),
-            Some(std::ffi::OsStr::new("/run/user/1000/chonkstep/control-test.sock")),
-            "an ordinary launch inherits the control socket"
-        );
-        let mut dockapp = Command::new("/bin/true");
-        apply_env(&mut dockapp, &[], &DOCKAPP_WITHHELD_ENV);
-        let withheld = dockapp.get_envs().find(|(key, _)| *key == std::ffi::OsStr::new(CONTROL_SOCKET_ENV));
-        assert_eq!(withheld.map(|(_, value)| value), Some(None), "a dockapp has it removed, not merely unset");
-    }
-
-    #[test]
-    fn ordinary_launches_keep_public_environment_but_drop_internal_controls() {
+fn ordinary_launches_keep_public_environment_but_drop_internal_controls() {
         // The public toolkit values supplied by a caller still win,
         // while private controls are removals even with no
         // caller-specific `unset` list.

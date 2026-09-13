@@ -1,79 +1,9 @@
-//! The control socket: the shell's state, narrated to whoever asks.
-//!
-//! A third-party bar — the Quickshell one Omarchy ships, a Waybar, a
-//! `socat` in a terminal — connects to
-//! `$XDG_RUNTIME_DIR/chonkstep/control-<display>.sock`, is handed the
-//! whole state of the desktop as a handful of JSON lines, and is then
-//! told each time one of those lines would read differently. It may
-//! send two requests back: "say it all again" and "switch to that
-//! workspace". That is the entire protocol, and `docs/control-socket.md`
-//! is its normative text: the wire format lives there, not here, and a
-//! disagreement between this file and that document is a bug in this
-//! file (the document's own preamble points back here for the
-//! implementation, not for the contract). A bar author should read the
-//! document and never need this module; it is written so the examples
-//! in the document are exactly what a client sees.
-//!
-//! # Two invariants
-//!
-//! **The shell never blocks on a client.** Every socket the shell holds
-//! is `O_NONBLOCK` from the syscall that created it (`accept4`, see
-//! `chonk_dock_proto::transport`), every read and write is a single
-//! non-blocking pass, all readers share one rotating aggregate budget,
-//! and no more than [`MAX_CLIENTS`] are retained. A client that stops
-//! reading is disconnected when the shell's buffer for it crosses
-//! `OUTBOUND_CAP` rather than being waited for. This is the same rule
-//! the dockapp host lives by, for the same reason: a bar that hangs
-//! must cost the user that bar, never the desktop.
-//!
-//! A client that shuts down only its writing side has said its last
-//! request, not goodbye. `printf '{"request":"snapshot"}' | socat -
-//! UNIX-CONNECT:…` does exactly that the instant the pipe drains, and
-//! still expects to read the answer; so does a watcher run with its
-//! stdin on `/dev/null`. Such a client keeps receiving — its answers,
-//! and every event after — until the peer has closed both directions,
-//! which the kernel reports as `POLLHUP` and the shell checks for
-//! rather than inferring from a zero-length read.
-//!
-//! **A client is never told anything twice for no reason.** Each facet
-//! of the state — workspaces, outputs, focus, theme — is serialised once
-//! per change and sent only when it differs from what was last sent
-//! (the `ThemeBroadcast::refresh` shape from the dockapp host). A bar
-//! that redraws on every event is therefore cheap by construction, and
-//! the socket is silent on a quiet desktop. The one deliberate
-//! exception is a `focus-workspace` request naming the workspace the
-//! desktop is already on: the spec promises every request an answer,
-//! so that client — and only that client — gets the `workspaces` line
-//! again as its acknowledgement.
-//!
-//! # Deliberately absent
-//!
-//! No window list (`wlr-foreign-toplevel-management` already is one),
-//! no keyboard layout, no subscribe verb, no authentication token. The
-//! socket is reachable only by the session's own user — a 0700
-//! directory, a 0600 socket, and an `SO_PEERCRED` check on accept that
-//! restates the same fact — and everything it offers, that user's
-//! keyboard already does. There is no configuration key for it either:
-//! like the dock socket, it is always on, because a bar that has to be
-//! told the socket exists cannot tell the user how to turn it on.
-//!
-//! # Where it sits in the shell
-//!
-//! Bound once in `Shell::new`, right after the dockapp host and before
-//! the first process meant to see it, so `CHONKSTEP_CONTROL_SOCKET` is
-//! in the environment of every autostart entry, `[commands]` launch and
-//! menu launch (see `spawn::declare_control_socket` for the route;
-//! dockapp tiles are spawned earlier and kept from it on purpose,
-//! `spawn::DOCKAPP_WITHHELD_ENV`).
-//! Serviced once per `Shell::tick`: accept, read, answer, publish. A
-//! bind failure is a warning and a session without a control socket,
-//! never a session that failed to start.
 
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
-use chonk_dock_proto::transport::{self, Stream, StreamListener};
+use chonk_ipc::{self as transport, Stream, StreamListener};
 use serde::{Deserialize, Serialize};
 use wm_core::{Backend, Lifecycle, WindowManager};
 use wm_theme::{Appearance, Theme};
@@ -289,13 +219,6 @@ pub(crate) struct Surroundings<'a> {
     pub following: Option<String>,
 }
 
-/// Reads the four facets out of the live desktop.
-///
-/// `windows` counts every client the core manages, miniaturised ones
-/// included — a window in the Dock is still on its workspace — and
-/// withdrawn ones excluded, because a withdrawn client is a table entry
-/// for a window that is no longer on any screen. Dock and shell
-/// surfaces are not clients at all, so they need no excluding.
 pub(crate) fn snapshot<B: Backend>(wm: &WindowManager<B>, surroundings: &Surroundings<'_>) -> Snapshot {
     let mut workspaces: Vec<WorkspaceEntry> =
         (0..wm.workspace_count()).map(|index| WorkspaceEntry { index, windows: 0 }).collect();
@@ -710,10 +633,6 @@ pub(crate) struct ControlSocket {
 }
 
 impl ControlSocket {
-    /// Binds `control-<display>.sock` beside the dock socket and makes
-    /// the path known to every process the shell will launch. Failure
-    /// is a warning and an unbound socket, never an error: a desktop
-    /// without a bar's socket is still a desktop.
     pub(crate) fn new(display: &str) -> Self {
         let socket_path = match transport::control_socket_path(display) {
             Ok(path) => path,
@@ -837,10 +756,6 @@ impl ControlSocket {
         loop {
             match listener.accept() {
                 Ok(Some(stream)) => {
-                    // Restating what the 0700 directory already
-                    // enforces, exactly as the dock host does: a
-                    // socket that answers only to its own user should
-                    // check, not assume.
                     match stream.peer_is_this_user() {
                         Ok(true) => {}
                         Ok(false) => {
@@ -883,7 +798,7 @@ impl ControlSocket {
         }
     }
 
-    #[cfg(test)]
+#[cfg(test)]
     fn client_count(&self) -> usize {
         self.clients.len()
     }
@@ -986,9 +901,6 @@ impl ControlSocket {
         changed
     }
 
-    /// The fds the event loop should wake on, so a request is answered
-    /// on arrival rather than on the next bounded housekeeping poll. Like
-    /// the dock's, missing one costs latency, not correctness.
     pub(crate) fn poll_fds(&self) -> impl Iterator<Item = RawFd> + '_ {
         self.listener.iter().map(|l| l.as_raw_fd()).chain(self.clients.iter().map(|c| c.stream.as_raw_fd()))
     }
@@ -1005,6 +917,13 @@ impl ControlSocket {
     }
 }
 
+/// Stable display identity for the external bar control socket.
+pub(crate) fn current_display() -> String {
+    std::env::var("WAYLAND_DISPLAY")
+        .or_else(|_| std::env::var("DISPLAY"))
+        .unwrap_or_else(|_| "default".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,9 +936,6 @@ mod tests {
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    /// A private scratch directory with a socket path inside it, gone
-    /// when the test is — the dockapp host's helper, kept local so the
-    /// two modules' tests stay independent.
     struct Scratch(PathBuf);
 
     impl Scratch {

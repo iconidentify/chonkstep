@@ -1,81 +1,3 @@
-//! The two sockets, and the table that answers requests.
-//!
-//! # Transport
-//!
-//! Hyprland's IPC is two Unix sockets in one directory:
-//!
-//! ```text
-//! $XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock   requests
-//! $XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock  events
-//! ```
-//!
-//! They behave differently and it is worth being precise about how,
-//! because the difference drives the whole design:
-//!
-//! - `.socket.sock` is **one connection, one request, one response,
-//!   close**. There is no framing, no length header, no newline. The
-//!   client writes its request, the server writes the answer and hangs
-//!   up, and the client reads to EOF. A server that keeps the
-//!   connection open leaves `hyprctl` blocked in `read()` forever.
-//! - `.socket2.sock` is **write-only, line-oriented, and unbounded in
-//!   time**. The client connects and never writes; the server streams
-//!   `EVENT>>DATA\n` until one side goes away.
-//!
-//! # The compositor never blocks on a client
-//!
-//! This is the invariant `docs/control-socket.md` inherits from the
-//! dockapp protocol, and it is inherited again here unchanged, for the
-//! same reason: this codebase has already shipped the bug. The
-//! `clippy.toml` at the workspace root exists because a wifi tile ran a
-//! blocking `nmcli` on the repaint thread and froze the desktop for 3.6
-//! seconds at a time, and the failure was reported as a display-driver
-//! stall. A socket that a hostile or merely wedged client can stall is
-//! the same bug with a better disguise.
-//!
-//! So, exactly as in `chonk-shell/src/control.rs`:
-//!
-//! - Every fd is non-blocking **by construction** — `SOCK_NONBLOCK` at
-//!   `socket(2)` and `accept4(2)`, never an `fcntl` afterwards, so
-//!   there is no window in which a blocking fd exists.
-//! - Reads share one aggregate budget per pass, so 64 flooding clients
-//!   cost the same bounded number of bytes per tick as one.
-//! - Writes are attempted once and judged afterwards: a client whose
-//!   unsent backlog exceeds [`OUTBOUND_CAP`] has stopped reading, and is
-//!   disconnected rather than waited for.
-//! - Nothing here ever calls `poll` with a timeout, sleeps, or joins.
-//!
-//! # Security posture
-//!
-//! **This socket accepts commands, and it is not authenticated.**
-//! That is the same choice `docs/control-socket.md` §1.2 makes, and it
-//! rests on the same argument: everything this socket offers — switch
-//! workspace, focus a window, close a window, run a command —
-//! *the user's own keyboard already offers*. A token would not withhold
-//! any capability from an attacker who can reach the socket, because
-//! anything that can reach it is already running as this user inside
-//! this session, and can simply synthesise the keystroke instead. What
-//! a token would reliably do is stop the real `hyprctl` from working,
-//! which is the entire point of the exercise.
-//!
-//! The access control is therefore positional, and layered three deep:
-//!
-//! 1. `$XDG_RUNTIME_DIR` is per-user and 0700, and the `hypr/`
-//!    directory beneath it is created 0700 or verified to be. There is
-//!    **no `/tmp` fallback** — Quickshell will look in `/tmp/hypr/` if
-//!    the runtime dir is missing, and we deliberately decline to put a
-//!    command-accepting socket in a world-writable directory where any
-//!    local process can win a create race for the name.
-//! 2. The socket itself is `chmod` 0600 after `bind`, because `bind`
-//!    applies the umask and the umask is not ours to trust.
-//! 3. `SO_PEERCRED` on accept, which restates rather than enforces:
-//!    a socket that answers only to its own user should check, not
-//!    assume.
-//!
-//! It is gated by one environment variable, `CHONKSTEP_HYPRLAND_IPC`
-//! — see [`Server::enabled`] — and that gate is the honest answer to
-//! "how do I turn it off", because impersonating another compositor is
-//! a bigger claim than serving one's own control socket and a user is
-//! entitled to decline it.
 
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
@@ -87,7 +9,7 @@ use crate::event::{Differ, Event};
 use crate::request::{self, Request};
 use crate::state::Snapshot;
 
-use chonk_dock_proto::transport::{Stream, StreamListener};
+use chonk_ipc::{Stream, StreamListener};
 
 /// Longest backlog held for a client that has stopped reading.
 ///

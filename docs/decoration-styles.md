@@ -5,16 +5,18 @@ The palette and frame recipe are independent:
 ```toml
 theme = "nextstep-classic"         # or another palette, including "omarchy"
 appearance = "dark"                # session palette preference
-decoration_style = "system7"        # "windowmaker" by default
+decoration_style = "auto"           # auto | windowmaker | system7 | modern
 ```
 
 Edit `~/.config/chonkstep/config.toml` and run `/usr/lib/chonkstep/reload.sh`. The selector is
 config-only; there is no competing state file, request file or root-menu picker.
-Unknown names and non-string values produce a warning naming both accepted
-values and retain WindowMaker while the rest of the config applies.
-`--check-config` reports the diagnostic and `--print-config` prints the effective
-style. The control socket's `theme` event and the session's look-change log carry
-`decoration_style` too.
+The default `auto` follows the theme: themes with modern chrome tokens select
+Modern, and existing palettes select WindowMaker. An explicit recipe overrides
+that choice across theme switches. Unknown names and non-string values produce
+a warning and retain Auto while the rest of the config applies. `--check-config`
+reports the diagnostic and `--print-config` prints the configured policy. The
+control socket's `theme` event and the session's look-change log carry the
+resolved `decoration_style`, never `auto`.
 
 WindowMaker keeps its existing frame, title and control behavior. System 7 uses
 the measured classic document-window recipe: close left, zoom right for resizable
@@ -53,11 +55,12 @@ Native X11 uses the raster fallback. Both backends preserve the flat panels'
 transparent shadow corners; X11 installs and caches a matching Shape region,
 then restores the server's default shape when a surface returns to WindowMaker.
 
-The dock platform, dock instruments and their instrument panels, launchers,
-and the standalone workspace Clip remain WindowMaker. They are NeXT desktop
-furniture rather than window-derived surfaces. `omarchy-export-themes` also
-keeps its sample frames in WindowMaker: those previews compare palette colors
-and do not read a running session's decoration-style setting. Capture overlays
+The dock, instruments and workspace furniture follow the theme's shell tokens
+independently of this frame override. For example, `system7` with Obsidian keeps
+Obsidian's modern rail; `modern` with a legacy palette imports its colors for the
+frame while preserving that theme's existing dock design. `omarchy-export-themes`
+resolves sample frames through `auto`, showing each theme's default recipe
+without reading a running session's decoration-style setting. Capture overlays
 and other independent tools retain their own existing interfaces.
 
 The public `wm_theme::UiChrome` handle shares the session's resident `FontState`;
@@ -67,7 +70,7 @@ The [120-case shell oracle](../crates/wm-theme/tests/fixtures/shell-chrome/READM
 covers both styles at 1×, 1.5× and 2× in two palettes. Its generator also compares
 each WindowMaker result to the original public renderer. Reproduce actual
 desktop interactions and captures with `scripts/e2e.sh --headless --test shell_chrome`.
-The [shell gallery](../site/shots/shell-chrome/README.md) shows each surface in
+The historical [shell gallery](benchmarks/decoration-styles-2026-09-11/desktop-reference/shell-chrome/README.md) shows each surface in
 both styles at 1× and 2×. The [release measurements](benchmarks/decoration-styles-2026-09-11/shell-chrome/README.md)
 include the unchanged surrounding workloads and the event-time shell raster costs.
 
@@ -136,8 +139,8 @@ its test oracle at 2× is exact nearest-neighbor replication of the 1× pixels.
 
 | Live ChonkStep | Historical reference |
 | --- | --- |
-| [![System 7 frame at 1×](../site/shots/system7-1x.png)](../site/shots/system7-1x.png) | [![System 7.5 reference](decoration-styles/system7/reference/1bit/zoom-short-active.png)](decoration-styles/system7/reference/1bit/zoom-short-active.png) |
-| [![System 7 frame at 2×](../site/shots/system7-2x.png)](../site/shots/system7-2x.png) | The same 1× reference replicated exactly at 2×; no additional historical capture is implied. |
+| [![System 7 frame at 1×](benchmarks/decoration-styles-2026-09-11/desktop-reference/system7-1x.png)](benchmarks/decoration-styles-2026-09-11/desktop-reference/system7-1x.png) | [![System 7.5 reference](decoration-styles/system7/reference/1bit/zoom-short-active.png)](decoration-styles/system7/reference/1bit/zoom-short-active.png) |
+| [![System 7 frame at 2×](benchmarks/decoration-styles-2026-09-11/desktop-reference/system7-2x.png)](benchmarks/decoration-styles-2026-09-11/desktop-reference/system7-2x.png) | The same 1× reference replicated exactly at 2×; no additional historical capture is implied. |
 
 Reproduce the client scenes, pixel assertions and captures with
 `scripts/e2e.sh --headless --test system7`. The terminal text is fixture content,

@@ -1,14 +1,3 @@
-//! The X11 window half of the SDK: one fixed-size window, one redraw
-//! callback, one click callback.
-//!
-//! Split out of `lib.rs` and put behind the default-on `x11` feature so
-//! that a *dockapp* — which by design never opens a display connection
-//! at all (see [`crate::dockapp`]) — does not link `x11rb`. That is not
-//! a build-time nicety: "this process holds no `wl_display` and no X
-//! connection, so screen capture and the window list are unreachable
-//! rather than merely denied" is the dockapp security story, and a
-//! binary that does not even contain the client library is the most
-//! direct evidence of it available.
 
 use tiny_skia::Pixmap;
 use x11rb::connection::{Connection, RequestConnection};

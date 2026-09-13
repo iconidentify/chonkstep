@@ -1,24 +1,9 @@
 [workspace]
 resolver = "2"
-# `examples/*` holds runnable reference programs that are real
-# workspace members rather than `cargo --example` targets: a dockapp is
-# a separate *binary* the dock launches, so it has to build, link and
-# ship like one. `chonk-dockclock` in particular is a conformance test —
-# see its module doc — and it only tests anything if CI builds it.
-members = ["crates/*", "examples/*"]
-# A dockapp does not have to be Rust — the socket protocol is
-# language-agnostic — and `chonk-switch` is Python. Excluded so the
-# `examples/*` member glob above doesn't demand a Cargo.toml of it.
-# `layer-role-repro` is a Wayland *client*, and the only one in the
-# tree: it exists to prove a compositor bug from the outside, so it
-# links `wayland-client` — a dependency nothing else here wants, and
-# one the workspace should not acquire for a single diagnostic.
-# Excluded for that reason rather than for `chonk-switch`'s; see its
-# own README for what it reproduces and how to run it.
-exclude = ["examples/chonk-switch", "examples/layer-role-repro", "vendor/smithay-0.7.0"]
+members = ["crates/*"]
+exclude = ["examples/chonk-agents", "examples/layer-role-repro", "vendor/smithay-0.7.0"]
 
-# Minimal, checksum-pinned 0.7 backport; see vendor/README.md. Keep framework
-# upgrades separate from fixes to the shipping compositor's input contracts.
+# Checksum-pinned Smithay backport; see vendor/README.md.
 [patch.crates-io]
 smithay = { path = "vendor/smithay-0.7.0" }
 

@@ -325,11 +325,6 @@ pub struct SessionOptions {
     /// contents)` — how a restore test plants the previous session's
     /// layout for the fresh compositor to find.
     pub state_files: Vec<(String, String)>,
-    /// Files seeded into the isolated `config/chonkstep/` directory
-    /// before boot, as `(relative path, contents)` — parent directories
-    /// created as needed. How the instrument-panel e2e registers a
-    /// dockapp (`dockapps/probe.dockapp`) with the fresh shell, which
-    /// scans that directory at startup.
     pub config_files: Vec<(String, String)>,
     /// Extra environment for the compositor process, as `(name,
     /// value)` — how a test points the shell at something it discovers
@@ -1259,7 +1254,7 @@ impl World {
 /// this desk's own tree, which is the only place its theme and
 /// wallpaper rows appear.
 pub const ROOT_MENU_ROWS: &[&str] =
-    &["Terminal", "Applications", "Theme", "Wallpaper", "Dock", "Omarchy Bar", "Exit"];
+    &["Terminal", "Applications", "Theme", "Wallpaper", "Omarchy Bar", "Exit"];
 
 /// Which rows a session's root menu carries.
 ///
@@ -1293,7 +1288,6 @@ impl RootMenu {
         }
         let mut rows = vec!["Applications", "Terminal"];
         rows.extend_from_slice(self.omarchy_rows);
-        rows.push("Dock");
         if self.omarchy_bar {
             rows.push("Omarchy Bar");
         }
@@ -2216,14 +2210,12 @@ mod tests {
         // No Omarchy definition: this desk's own tree, which is the
         // only place Theme and Wallpaper appear.
         let plain = RootMenu::default();
-        assert_eq!(plain.rows(), ["Terminal", "Applications", "Theme", "Wallpaper", "Dock", "Exit"]);
-        assert_eq!(plain.row_of("Dock"), Some(4));
-        assert_eq!(plain.row_of("Exit"), Some(5));
+        assert_eq!(plain.rows(), ["Terminal", "Applications", "Theme", "Wallpaper", "Exit"]);
+        assert_eq!(plain.row_of("Exit"), Some(4));
         assert_eq!(plain.row_of("Omarchy Bar"), None);
         let hosted = RootMenu { omarchy_bar: true, omarchy_rows: &[] };
-        assert_eq!(hosted.row_count(), 7);
-        assert_eq!(hosted.row_of("Dock"), Some(4), "this desk's own column, then the guest's bar");
-        assert_eq!(hosted.row_of("Omarchy Bar"), Some(5));
+        assert_eq!(hosted.row_count(), 6);
+        assert_eq!(hosted.row_of("Omarchy Bar"), Some(4));
 
         // With one, Omarchy's rows *are* the menu: Applications ahead
         // of them because Omarchy's own launcher row is skipped, this
@@ -2231,11 +2223,11 @@ mod tests {
         let full = RootMenu { omarchy_bar: true, omarchy_rows: &["Style", "System"] };
         assert_eq!(
             full.rows(),
-            ["Applications", "Terminal", "Style", "System", "Dock", "Omarchy Bar", "Exit"]
+            ["Applications", "Terminal", "Style", "System", "Omarchy Bar", "Exit"]
         );
         assert_eq!(full.row_of("Omarchy"), None, "the menu is Omarchy's; it does not contain one");
         assert_eq!(full.row_of("Theme"), None, "one theme system: Omarchy's Style row owns it");
-        assert_eq!(full.row_of("Exit"), Some(6));
+        assert_eq!(full.row_of("Exit"), Some(5));
     }
 
     #[test]

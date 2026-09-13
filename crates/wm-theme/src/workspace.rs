@@ -30,34 +30,7 @@ fn clip_metrics(size: u32) -> (i32, i32, i32) {
     (pt, tp, arrow)
 }
 
-/// Which Clip zone a tile-local point falls in — the classic diagonal
-/// corner test, verbatim but scaled: the top-right triangle advances,
-/// the bottom-left one rewinds, the rest of the tile is inert (the
-/// stock Clip's body is for dragging and menus, not switching).
-pub fn clip_hit(size: u32, x: i32, y: i32) -> ClipZone {
-    let s = size as i32;
-    if x < 0 || y < 0 || x >= s || y >= s {
-        return ClipZone::Body;
-    }
-    let pt = ((23 * s) / 64) + (2 * s) / 64;
-    if y <= pt - (s - 1 - x) {
-        ClipZone::Forward
-    } else if x <= pt - (s - 1 - y) {
-        ClipZone::Rewind
-    } else {
-        ClipZone::Body
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClipZone {
-    Forward,
-    Rewind,
-    Body,
-}
-
-/// Renders the Clip tile. `current` is 0-based; the number drawn is
-/// 1-based, the way workspaces are classically named.
+/// Numbered workspace card used only inside the modal Overview.
 pub fn render_clip_tile(
     theme: &Theme,
     font_system: &mut cosmic_text::FontSystem,
@@ -206,16 +179,5 @@ mod tests {
         assert_ne!(render(0, 3, 64).pixels, render(1, 3, 64).pixels);
     }
 
-    /// The classic diagonal corner zones: the extreme corners resolve
-    /// to the arrows, the middle of the tile to the body.
-    #[test]
-    fn hit_zones_match_the_classic_corner_geometry() {
-        assert_eq!(clip_hit(64, 62, 2), ClipZone::Forward);
-        assert_eq!(clip_hit(64, 2, 62), ClipZone::Rewind);
-        assert_eq!(clip_hit(64, 32, 32), ClipZone::Body);
-        assert_eq!(clip_hit(64, -1, 5), ClipZone::Body);
-        // Scaled tile keeps the same proportional zones.
-        assert_eq!(clip_hit(112, 108, 4), ClipZone::Forward);
-        assert_eq!(clip_hit(112, 4, 108), ClipZone::Rewind);
-    }
+
 }

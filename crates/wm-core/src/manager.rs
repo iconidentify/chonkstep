@@ -55,6 +55,24 @@ const XK_ALT_R: u32 = 0xffea;
 /// backend mid-teardown ever reach it.
 const NO_MONITOR_FALLBACK: Rect = Rect { pos: Point::new(0, 0), size: Size::new(800, 600) };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TitleMetrics {
+    client_offset: Point,
+    input_margin: u32,
+    title_height: u32,
+}
+
+impl TitleMetrics {
+    fn of(layout: &DecorationLayout) -> Self {
+        Self { client_offset: layout.client_offset, input_margin: layout.input_margin, title_height: layout.titlebar_height }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RestoreKind { Maximized, Fullscreen }
+
+enum ReflowReason { Geometry, Restyle, Restore(Option<TitleMetrics>) }
+
 /// The modifier the move/resize drag gesture rides on when nothing
 /// configures one: Alt, as Window Maker has bound it since 1997. The
 /// config file's `drag_modifier` overrides it, and `wm-config` carries
@@ -107,26 +125,16 @@ struct ActiveButtonPress {
     kind: ButtonKind,
 }
 
-/// A state change the desktop shell needs to react to but that `wm-core`
-/// itself has no opinion on (icon tiles for miniaturized windows are a
-/// desktop-shell concern, same as the dock/root menu). Drained via
-/// `WindowManager::take_notification`, mirroring the `Backend`-side
-/// shell-click/screen-resize side channels in `wm-x11`. No longer `Copy`
-/// since `Miniaturized` carries an owned pixel buffer.
+/// A state change consumed by desktop menus, Overview and IPC publication.
+/// Notifications contain client identities, never minimized-window images.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notification {
     LayoutChanged(crate::LayoutMode),
-    /// A client was iconified — the shell should show an icon tile for
-    /// it (clicking the tile should call `WindowManager::deminiaturize`).
-    /// The `Option<DecorationBuffer>` is a snapshot of the window's
-    /// content taken right before it unmapped (`None` if the capture
-    /// failed) — see `Backend::capture_window_image`.
-    Miniaturized(ClientId, Option<DecorationBuffer>),
-    /// A client was restored from its icon — the shell should remove
-    /// the tile.
+    /// A client was minimized without capturing its pixels.
+    Miniaturized(ClientId),
+    /// A minimized client was restored.
     Deminiaturized(ClientId),
-    /// A client was closed/destroyed — the shell should remove any icon
-    /// tile it had (covers closing a window while it's miniaturized).
+    /// A client was closed or destroyed.
     Removed(ClientId),
     /// The Alt-Tab switcher session started or its selection moved —
     /// the shell should (re)draw the switch panel from
@@ -325,6 +333,10 @@ pub struct WindowManager<B: Backend> {
     /// back to the *maximized* rect, and reusing maximize's slot would
     /// either clobber its own pre-maximize snapshot or restore too far.
     fullscreen_restore: HashMap<ClientId, Rect>,
+    /// Geometry snapshots keep the title metrics they were captured under.
+    /// A later restyle may require rescuing their restored title, while a
+    /// same-chrome restore preserves deliberate overlap exactly.
+    restore_title_metrics: HashMap<(ClientId, RestoreKind), TitleMetrics>,
     /// Chrome invalidated by an interactive drag. Drains once at the render
     /// boundary, not once per input event.
     pending_decorations: HashSet<ClientId>,
@@ -409,6 +421,7 @@ impl<B: Backend> WindowManager<B> {
             managed_order: Vec::new(),
             focus_history: Vec::new(),
             fullscreen_restore: HashMap::new(),
+            restore_title_metrics: HashMap::new(),
             pending_decorations: HashSet::new(),
         }
     }
@@ -571,15 +584,15 @@ impl<B: Backend> WindowManager<B> {
                 if client.flags.contains(ClientFlags::MAXIMIZED_V) { directions |= MaximizeDirections::VERTICAL; }
             }
             if directions.is_empty() {
-                self.reflow_frame(id);
+                self.reflow_frame_internal(id, ReflowReason::Restyle);
             } else {
                 let layout = if client.chrome == ClientChrome::ClientDrawn {
                     frameless_layout(client.geometry.size)
                 } else {
                     self.theme.layout_at(&Self::decoration_request(client, None), self.client_decoration_scale(id))
                 };
-                self.clients[id].layout = layout;
-                self.fit_maximized(id, directions);
+                let changed = client.layout != layout;
+                self.refit_maximized_chrome(id, layout, directions, changed);
             }
         }
         for workspace in 0..self.workspace_count {
@@ -932,10 +945,7 @@ impl<B: Backend> WindowManager<B> {
         self.current_workspace
     }
 
-    /// Iterates every managed client — the shell reads this for
-    /// cross-client concerns wm-core has no opinion on (the launcher
-    /// dock's running-app indicators match `Client::class` against
-    /// `.desktop` entries).
+    /// Iterates managed clients for menus, navigation and IPC snapshots.
     pub fn iter_clients(&self) -> impl Iterator<Item = (ClientId, &Client<B>)> {
         self.clients.iter()
     }
@@ -1104,16 +1114,32 @@ impl<B: Backend> WindowManager<B> {
     /// mean to go, and leaving it unreachable would be a worse bug than
     /// the one this fixes.
     fn focus_order(&self) -> Vec<ClientId> {
+        self.ordered_clients(|id| self.is_focusable(id))
+    }
+
+    /// Minimized windows remain selectable, but cannot gain focus until
+    /// the user commits the switch. Automatic focus succession still skips them.
+    fn is_switchable(&self, id: ClientId) -> bool {
+        if self.mac_client_hidden(id)
+            || (self.separate_spaces() && self.monitors_ref().is_empty()) { return false; }
+        self.clients.get(id).is_some_and(|client| {
+            matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
+                && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
+                && !client.flags.contains(ClientFlags::NO_FOCUS)
+        })
+    }
+
+    fn ordered_clients(&self, eligible: impl Fn(ClientId) -> bool) -> Vec<ClientId> {
         let mut seen = HashSet::with_capacity(self.focus_history.len());
         let mut order = Vec::with_capacity(self.clients.len());
         for &id in self.focus_history.iter().rev() {
             seen.insert(id);
-            if self.is_focusable(id) {
+            if eligible(id) {
                 order.push(id);
             }
         }
         for id in self.clients.keys() {
-            if seen.insert(id) && self.is_focusable(id) {
+            if seen.insert(id) && eligible(id) {
                 order.push(id);
             }
         }
@@ -1326,11 +1352,8 @@ impl<B: Backend> WindowManager<B> {
     /// to [`MAX_WORKSPACES`]. Every *mapped* client not on
     /// the target workspace gets its frame unmapped; every mapped
     /// client that IS on it gets remapped. Miniaturized/withdrawn
-    /// clients are left alone entirely — their icon tile (a
-    /// desktop-shell concern, not `wm-core`'s) stays visible regardless
-    /// of workspace, a deliberately simpler choice than the classic
-    /// opt-out-able per-workspace icon hiding. A no-op if already on
-    /// `workspace` or if the index is out of range.
+    /// clients remain unmapped. A no-op if already on `workspace` or if
+    /// the index is out of range.
     pub fn switch_workspace(&mut self, workspace: usize) {
         if workspace >= MAX_WORKSPACES {
             return;
@@ -1623,7 +1646,7 @@ impl<B: Backend> WindowManager<B> {
             BackendEvent::ResizeRequest { window, edge } => self.handle_resize_request(window, edge),
             // Routed through the very same miniaturize the titlebar
             // button runs, so the client's own button and ours are one
-            // behavior: frame unmapped, icon tile shown, the whole
+            // behavior: frame unmapped, minimized state published, the whole
             // NeXTSTEP gesture rather than a taskbar-shaped hiding.
             BackendEvent::MinimizeRequest(window) => {
                 if let Some(&id) = self.window_index.get(&window) {
@@ -2076,6 +2099,8 @@ impl<B: Backend> WindowManager<B> {
             layout.order.retain(|&other| other != id);
         }
         self.fullscreen_restore.remove(&id);
+        self.restore_title_metrics.remove(&(id, RestoreKind::Maximized));
+        self.restore_title_metrics.remove(&(id, RestoreKind::Fullscreen));
         if let Some(state) = self.display_spaces.as_mut() { state.home_geometry.remove(&id); }
         self.idle_inhibit_clients.remove(&id);
         if let Some(client) = self.clients.remove(id) {
@@ -2886,6 +2911,10 @@ impl<B: Backend> WindowManager<B> {
     /// backend. Shared tail of any operation that changes a client's
     /// content size in place (`ConfigureRequest`, maximize, unmaximize).
     fn reflow_frame(&mut self, id: ClientId) {
+        self.reflow_frame_internal(id, ReflowReason::Geometry);
+    }
+
+    fn reflow_frame_internal(&mut self, id: ClientId, reason: ReflowReason) {
         // Parked clients have no physical frame to fit. In particular, do not
         // clamp their retained size against the 1x1 headless screen fallback.
         if self.separate_spaces() && self.monitors_ref().is_empty() { return; }
@@ -2956,6 +2985,19 @@ impl<B: Backend> WindowManager<B> {
         let request = Self::decoration_request(client, None);
         let scale = self.client_decoration_scale(id);
         let layout = self.theme.layout_at(&request, scale);
+        if matches!(reason, ReflowReason::Restore(Some(saved)) if saved != TitleMetrics::of(&layout)) {
+            let mut directions = MaximizeDirections::empty();
+            directions.set(MaximizeDirections::HORIZONTAL, client.flags.contains(ClientFlags::MAXIMIZED_H));
+            directions.set(MaximizeDirections::VERTICAL, client.flags.contains(ClientFlags::MAXIMIZED_V));
+            if !directions.is_empty() {
+                // Fullscreen may have hidden a maximized frame throughout a
+                // scale change. Refit its locked axes with the new overhead
+                // before the single configure, retaining free-axis size and
+                // the original pre-maximize restore rectangle.
+                self.refit_maximized_chrome(id, layout, directions, true);
+                return;
+            }
+        }
         // Shaded windows show only the titlebar — the frame's *visible*
         // height is overridden to `shaded_frame_height`, but the client's
         // own content geometry (and everything the theme computed from
@@ -2978,7 +3020,21 @@ impl<B: Backend> WindowManager<B> {
             frame_geom.pos.y + frame_geom.size.h as i32 / 2,
         );
         let margin = layout.input_margin as i32;
-        let visual_pos = self.below_top_reservation(Point::new(frame_geom.pos.x + margin, frame_geom.pos.y + margin), anchor);
+        let mut visual_pos = self.below_top_reservation(Point::new(frame_geom.pos.x + margin, frame_geom.pos.y + margin), anchor);
+        let rescue_title = match reason {
+            ReflowReason::Geometry => false,
+            ReflowReason::Restyle => client.layout != layout,
+            ReflowReason::Restore(saved) => saved.is_some_and(|saved| saved != TitleMetrics::of(&layout)),
+        };
+        if rescue_title && layout.titlebar_height > 0 {
+            // Keep the client anchor whenever the replacement title remains
+            // reachable. A larger scale/title can otherwise put every control
+            // above the output while leaving the client perfectly visible.
+            // Only the title must fit: a long client body may still extend
+            // below the workarea, and ordinary user moves retain their policy.
+            let title = Size::new(layout.visual_bounds().size.w, layout.titlebar_height);
+            visual_pos = placement::clamp_to(self.usable_area_at(anchor), title, visual_pos);
+        }
         frame_geom.pos = Point::new(visual_pos.x - margin, visual_pos.y - margin);
         let window = client.window;
         let content_size = client.geometry.size;
@@ -3019,6 +3075,24 @@ impl<B: Backend> WindowManager<B> {
         tracing::info!(?id, ?directions, "maximized");
     }
 
+    /// Measure new chrome before maximizing, rescuing only an unlocked axis.
+    /// Shared by live restyle and a changed-chrome fullscreen restoration.
+    fn refit_maximized_chrome(&mut self, id: ClientId, layout: DecorationLayout, directions: MaximizeDirections, rescue_title: bool) {
+        let mut content_pos = self.clients[id].geometry.pos;
+        if rescue_title && layout.titlebar_height > 0 {
+            let visual = Point::new(content_pos.x - layout.client_offset.x + layout.input_margin as i32,
+                content_pos.y - layout.client_offset.y + layout.input_margin as i32);
+            let anchor = self.client_frame_center(id).unwrap_or(content_pos);
+            let rescued = placement::clamp_to(self.usable_area_at(anchor),
+                Size::new(layout.visual_bounds().size.w, layout.titlebar_height), visual);
+            if !directions.contains(MaximizeDirections::HORIZONTAL) { content_pos.x += rescued.x - visual.x; }
+            if !directions.contains(MaximizeDirections::VERTICAL) { content_pos.y += rescued.y - visual.y; }
+        }
+        self.clients[id].geometry.pos = content_pos;
+        self.clients[id].layout = layout;
+        self.fit_maximized(id, directions);
+    }
+
     /// `maximize` without the announcement — shared with the workarea
     /// refit, where one bar coming up would otherwise log a maximize
     /// per window as if the user had asked for each.
@@ -3028,6 +3102,8 @@ impl<B: Backend> WindowManager<B> {
             // chrome and workarea geometry from that state, then keep the
             // visible presentation fullscreen. The backend coalesces these
             // staged sizes into the operation's final configure.
+            let saved_title = self.restore_title_metrics.get(&(id, RestoreKind::Fullscreen)).copied();
+            let had_restore = self.clients[id].restore_geometry.is_some();
             let client = &mut self.clients[id];
             client.flags.remove(ClientFlags::FULLSCREEN);
             if let Some(saved) = self.fullscreen_restore.get(&id) {
@@ -3035,7 +3111,27 @@ impl<B: Backend> WindowManager<B> {
             }
             self.reflow_frame(id);
             self.fit_maximized(id, directions);
+            if !had_restore {
+                // The new maximize snapshot came from the pre-fullscreen
+                // rectangle, which can predate the now-current chrome.
+                self.restore_title_metrics.remove(&(id, RestoreKind::Maximized));
+                if let Some(saved) = saved_title {
+                    self.restore_title_metrics.insert((id, RestoreKind::Maximized), saved);
+                }
+            }
             self.fullscreen_restore.insert(id, self.clients[id].geometry);
+            // A partial maximize leaves one axis of the pre-fullscreen
+            // rectangle intact. That free axis still belongs to its original
+            // title metrics, so leaving fullscreen may need to rescue it.
+            let fullscreen_title = if directions == MaximizeDirections::FULL {
+                Some(TitleMetrics::of(&self.clients[id].layout))
+            } else {
+                saved_title
+            };
+            self.restore_title_metrics.remove(&(id, RestoreKind::Fullscreen));
+            if let Some(saved) = fullscreen_title {
+                self.restore_title_metrics.insert((id, RestoreKind::Fullscreen), saved);
+            }
             self.clients[id].flags.insert(ClientFlags::FULLSCREEN);
             self.reflow_frame(id);
             self.publish_client_net_state(id);
@@ -3062,6 +3158,7 @@ impl<B: Backend> WindowManager<B> {
 
         if client.restore_geometry.is_none() {
             client.restore_geometry = Some(client.geometry);
+            self.restore_title_metrics.insert((id, RestoreKind::Maximized), TitleMetrics::of(&client.layout));
         }
 
         // Overhead (border/titlebar/resize-bar chrome) is constant
@@ -3100,14 +3197,19 @@ impl<B: Backend> WindowManager<B> {
         let Some(restore) = client.restore_geometry.take() else {
             return;
         };
+        let saved_title = self.restore_title_metrics.remove(&(id, RestoreKind::Maximized));
         if client.flags.contains(ClientFlags::FULLSCREEN) {
             self.fullscreen_restore.insert(id, restore);
+            self.restore_title_metrics.remove(&(id, RestoreKind::Fullscreen));
+            if let Some(saved) = saved_title {
+                self.restore_title_metrics.insert((id, RestoreKind::Fullscreen), saved);
+            }
         } else {
             client.geometry = restore;
         }
         client.flags.remove(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
         self.bump_protocol_state_revision();
-        self.reflow_frame(id);
+        self.reflow_frame_internal(id, ReflowReason::Restore(saved_title));
         self.publish_client_net_state(id);
         self.reflow_client_workspace(id);
         tracing::info!(?id, "unmaximized");
@@ -3301,6 +3403,7 @@ impl<B: Backend> WindowManager<B> {
             return;
         };
         self.fullscreen_restore.insert(id, client.geometry);
+        self.restore_title_metrics.insert((id, RestoreKind::Fullscreen), TitleMetrics::of(&client.layout));
         client.flags.insert(ClientFlags::FULLSCREEN);
         self.bump_protocol_state_revision();
         self.reflow_frame(id);
@@ -3314,9 +3417,10 @@ impl<B: Backend> WindowManager<B> {
         tracing::info!(?id, "entered fullscreen");
     }
 
-    /// Reverses `fullscreen`, restoring the exact content geometry saved
-    /// on entry through the normal reflow path (theme layout recomputed,
-    /// chrome repainted). A no-op if not currently fullscreen.
+    /// Reverses `fullscreen`, restoring saved content geometry and recomputing
+    /// chrome. Changed title metrics may rescue an unreachable restored title;
+    /// unchanged chrome preserves the original anchor, including overlap.
+    /// A no-op if not currently fullscreen.
     pub fn unfullscreen(&mut self, id: ClientId) {
         self.cancel_client_layout_interaction(id);
         let Some(client) = self.clients.get_mut(id) else {
@@ -3326,13 +3430,14 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         client.flags.remove(ClientFlags::FULLSCREEN);
+        let saved_title = self.restore_title_metrics.remove(&(id, RestoreKind::Fullscreen));
         if let Some(saved) = self.fullscreen_restore.remove(&id) {
             if let Some(client) = self.clients.get_mut(id) {
                 client.geometry = saved;
             }
         }
         self.bump_protocol_state_revision();
-        self.reflow_frame(id);
+        self.reflow_frame_internal(id, ReflowReason::Restore(saved_title));
         self.publish_client_net_state(id);
         self.reflow_client_workspace(id);
         self.mac_leave_fullscreen(id);
@@ -3350,13 +3455,8 @@ impl<B: Backend> WindowManager<B> {
         self.apply_fullscreen_action(id, NetStateAction::Toggle);
     }
 
-    /// Iconifies a client: unmaps its frame and marks it `Miniaturized`.
-    /// Pushes `Notification::Miniaturized` so the desktop shell can show
-    /// an icon tile in its place — clicking that tile should call
-    /// `deminiaturize` with this same id. Captures a snapshot of the
-    /// window's content first, while it's still mapped and viewable —
-    /// once unmapped, there's nothing left to capture (see
-    /// `Backend::capture_window_image`).
+    /// Unmaps a client family and records its minimized state. Alt-Tab or an
+    /// explicit activation restores it; no preview image is allocated.
     pub fn miniaturize(&mut self, id: ClientId) {
         self.cancel_client_layout_interaction(id);
         for member in self.transient_family(id) {
@@ -3371,10 +3471,6 @@ impl<B: Backend> WindowManager<B> {
         if client.lifecycle != Lifecycle::Normal {
             return;
         }
-        let window = client.window;
-        let content_size = client.geometry.size;
-        let preview = self.backend.capture_window_image(window, content_size);
-
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -3385,7 +3481,7 @@ impl<B: Backend> WindowManager<B> {
         // rejects this client and the successor search cannot pick it
         // back up; `Some(id)` says so rather than relying on it.
         self.focus_successor_of(id);
-        self.notifications.push_back(Notification::Miniaturized(id, preview));
+        self.notifications.push_back(Notification::Miniaturized(id));
         self.publish_client_net_state(id);
         self.reflow_client_workspace(id);
         tracing::info!(?id, "miniaturized");
@@ -3691,7 +3787,7 @@ impl<B: Backend> WindowManager<B> {
             // user is in and index 1 is the one they were in before it.
             // This used to be storage order: Alt-Tab was a fixed ring
             // unrelated to which windows the user had just visited.
-            let order = self.focus_order();
+            let order = self.ordered_clients(|id| self.is_switchable(id));
             if order.is_empty() {
                 return;
             }
@@ -3702,7 +3798,7 @@ impl<B: Backend> WindowManager<B> {
             // to a no-op. `direction` is applied below, so starting at
             // index 0 makes forward reach the previous window and
             // backward wrap to the oldest candidate.
-            let selected = 0;
+            let selected = if self.focused.is_some() { 0 } else if direction > 0 { order.len() - 1 } else { 0 };
             self.backend.grab_keyboard();
             self.cycle = Some(CycleSession { order, selected, modifier: Modifiers::ALT, applications: false });
         }
@@ -3722,6 +3818,9 @@ impl<B: Backend> WindowManager<B> {
         if commit {
             if let Some(&id) = session.order.get(session.selected) {
                 if session.applications { self.reveal_application(id); }
+                if self.clients.get(id).is_some_and(|c| c.lifecycle == Lifecycle::Miniaturized) {
+                    self.deminiaturize(id);
+                }
                 if let Some(client) = self.clients.get(id) {
                     let window = client.window;
                     let content_size = client.geometry.size;
@@ -3766,7 +3865,7 @@ impl<B: Backend> WindowManager<B> {
     }
 
     /// A live thumbnail of a client's current content for the switcher
-    /// panel — same capture path miniaturize previews use.
+    /// panel — captured only while this transient UI needs a preview.
     pub fn client_preview(&self, id: ClientId) -> Option<DecorationBuffer> {
         let client = self.clients.get(id)?;
         self.backend.capture_window_image(client.window, client.geometry.size)
@@ -3786,6 +3885,7 @@ impl<B: Backend> WindowManager<B> {
         }
         client.flags.remove(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
         client.restore_geometry = None;
+        self.restore_title_metrics.remove(&(id, RestoreKind::Maximized));
         self.bump_protocol_state_revision();
         self.publish_client_net_state(id);
         tracing::debug!(?id, "drag broke the maximized state");
@@ -4948,7 +5048,27 @@ mod tests {
     }
 
     #[test]
-    fn alt_tab_skips_miniaturized_clients() {
+    fn minimizing_and_cancelling_switcher_never_capture_or_restore_a_tile() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let captures = wm.backend().capture_calls.get();
+        wm.miniaturize(id);
+        assert_eq!(wm.backend().capture_calls.get(), captures);
+        wm.dispatch(alt_tab());
+        wm.cycle_end(false);
+        assert_eq!(wm.client(id).unwrap().lifecycle, Lifecycle::Miniaturized);
+        assert_eq!(wm.focused_client(), None);
+        wm.dispatch(alt_tab());
+        wm.dispatch(alt_release());
+        assert_eq!(wm.client(id).unwrap().lifecycle, Lifecycle::Normal);
+        assert_eq!(wm.focused_client(), Some(id));
+    }
+
+    #[test]
+    fn alt_tab_restores_miniaturized_clients_only_on_commit() {
         let mut backend = FakeBackend::new();
         let w1 = backend.create_window();
         let w2 = backend.create_window();
@@ -4962,17 +5082,14 @@ mod tests {
         let id3 = wm.client_for_window(w3).unwrap();
         wm.miniaturize(id2);
 
-        // Focused is w3 (mapped last); Alt+Tab must skip miniaturized w2
-        // entirely and land on w1.
         wm.dispatch(alt_tab());
+        assert_eq!(wm.client(id2).unwrap().lifecycle, Lifecycle::Miniaturized);
+        assert!(wm.client(id3).unwrap().flags.contains(ClientFlags::FOCUSED));
         wm.dispatch(alt_release());
+        assert_eq!(wm.client(id2).unwrap().lifecycle, Lifecycle::Normal);
+        assert!(wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert!(!wm.client(id1).unwrap().flags.contains(ClientFlags::FOCUSED));
 
-        assert!(wm.client(id1).unwrap().flags.contains(ClientFlags::FOCUSED));
-        assert!(!wm.client(id3).unwrap().flags.contains(ClientFlags::FOCUSED));
-        assert!(
-            !wm.client(id2).unwrap().flags.intersects(ClientFlags::FOCUSED),
-            "a miniaturized client must never be cycled to"
-        );
     }
 
     /// Clicking the window that already looks focused is how a user
@@ -5841,8 +5958,7 @@ mod tests {
     /// lingered on 0 after the next switch back and vanished from 1,
     /// because `deminiaturize` never updated the client's workspace.
     /// Restoring must adopt the workspace that's active at restore
-    /// time: the icon tiles are visible everywhere, so the gesture
-    /// means "bring it here".
+    /// time: explicit activation means "bring it here".
     #[test]
     fn deminiaturize_restores_onto_the_active_workspace() {
         let mut backend = FakeBackend::new();
@@ -6183,8 +6299,7 @@ mod tests {
     }
 
     /// A window miniaturized on this workspace is not something a
-    /// carry can pick up — it is not focused, it lives on the desk as
-    /// an icon tile, and `switch_workspace` deliberately leaves
+    /// carry can pick up — it is not focused, and `switch_workspace` deliberately leaves
     /// miniaturized clients alone. Carrying the *other* window must
     /// therefore leave it exactly as it was: still miniaturized, still
     /// on its own workspace, and still not focused.
@@ -7145,7 +7260,7 @@ mod tests {
         // miniaturize gesture it has — this desktop draws no chrome
         // for it. The request must land as the full NeXTSTEP gesture:
         // frameless surface hidden, lifecycle Miniaturized, the
-        // notification that makes the shell draw an icon tile pushed.
+        // minimization notification pushed.
         let mut backend = FakeBackend::new();
         let window = backend.create_window();
         backend.set_geometry(window, Rect { pos: Point::new(0, 0), size: Size::new(400, 300) });
@@ -7160,8 +7275,8 @@ mod tests {
         assert!(!wm.backend().mapped_frameless.contains(&window), "the window must leave the screen");
         assert!(matches!(wm.take_notification(), Some(Notification::Mapped(_))), "map notification first");
         assert!(
-            matches!(wm.take_notification(), Some(Notification::Miniaturized(got, _)) if got == id),
-            "and the miniaturize notification the shell turns into an icon tile"
+            matches!(wm.take_notification(), Some(Notification::Miniaturized(got)) if got == id),
+            "and the minimization notification is published"
         );
     }
 
@@ -7435,7 +7550,7 @@ mod tests {
         assert_eq!(wm.take_notification(), Some(Notification::Mapped(id)));
 
         wm.miniaturize(id);
-        assert_eq!(wm.take_notification(), Some(Notification::Miniaturized(id, None)));
+        assert_eq!(wm.take_notification(), Some(Notification::Miniaturized(id)));
         assert_eq!(wm.take_notification(), None);
 
         wm.deminiaturize(id);
@@ -7481,7 +7596,7 @@ mod tests {
         assert_eq!(wm.take_notification(), Some(Notification::Mapped(id)));
 
         wm.miniaturize(id);
-        assert_eq!(wm.take_notification(), Some(Notification::Miniaturized(id, None)));
+        assert_eq!(wm.take_notification(), Some(Notification::Miniaturized(id)));
 
         wm.dispatch(BackendEvent::Destroyed(window));
         assert_eq!(wm.take_notification(), Some(Notification::Removed(id)));
@@ -7947,8 +8062,21 @@ mod tests {
                 assert_eq!(wm.backend().paint_count[&frame], count + 1, "{style:?} transition {transition}");
                 let after = &wm.backend().last_paint_parts[&frame];
                 assert_eq!(before.frame_size, after.frame_size);
-                assert_ne!(before.parts[0], after.parts[0], "title pixels must actually change");
-                assert_eq!(before.parts[1..], after.parts[1..], "non-title pixels must remain unchanged");
+                if style == wm_theme::DecorationStyle::Modern {
+                    assert_ne!(&before, after, "the visible transition must change chrome");
+                    // Modern may recolor the perimeter on focus, as its theme
+                    // requests. Text/control transitions must still leave the
+                    // non-title perimeter unchanged; solids have no pixel upload.
+                    if transition != 1 {
+                        let top = wm.client(id).unwrap().layout.client_offset.y;
+                        let outside = |surface: &wm_theme_api::DecorationSurface| surface.solids.iter()
+                            .filter(|solid| solid.rect.pos.y >= top).copied().collect::<Vec<_>>();
+                        assert_eq!(outside(&before), outside(after));
+                    }
+                } else {
+                    assert_ne!(before.parts[0], after.parts[0], "title pixels must actually change");
+                    assert_eq!(before.parts[1..], after.parts[1..], "non-title pixels must remain unchanged");
+                }
             }
             // Cancel the held close box by releasing outside it.
             wm.dispatch(frame_release(frame, Point::new(100, 100)));

@@ -1,49 +1,3 @@
-//! Session layout persistence and restore — the half of the "living
-//! desktop" the shell owns. While a session runs, the shell records
-//! every managed window's application identity, content geometry,
-//! workspace and shape flags into one state file; at the next opt-in
-//! startup (`restore_session = true`) it relaunches those applications
-//! and, as their windows map, puts each one back where its record says.
-//!
-//! Backend-generic by construction, like everything in this crate: the
-//! store speaks in `WindowRecord`s the shell distills from
-//! `wm_core::Client`s, so the X11 session and the Wayland compositor
-//! restore identically because they run this very code.
-//!
-//! # The rules that shape the design
-//!
-//! - **A window the user closed is forgotten.** The store never edits
-//!   records in place; every persist rewrites the file from a snapshot
-//!   of the *live* client set, so a closed window drops out of the next
-//!   snapshot and therefore out of the file by construction. There is
-//!   no "remove on Destroyed" code to forget to call.
-//! - **Persist on settle, not on motion.** A drag produces geometry
-//!   changes at input rate; writing the file on each would be the
-//!   launchdock's persist-on-commit idiom inverted into a disk grinder.
-//!   Instead the shell hands the store a snapshot once per tick, and
-//!   the store writes only once the snapshot has held still for
-//!   [`DEBOUNCE`] and differs from what is on disk.
-//! - **A crash mid-write must never eat the layout.** The file is
-//!   written to a sibling temp path and renamed over the original —
-//!   rename is atomic on the same filesystem, so the file is always
-//!   either the old complete layout or the new complete one.
-//! - **Matching is first-come-first-matched per class.** When a
-//!   relaunched application maps, the first pending record with its
-//!   window class claims it — the pragmatic rule every session-restore
-//!   implementation lands on, because nothing sturdier exists: a
-//!   relaunched process shares no identity with its predecessor beyond
-//!   its class.
-//! - **A record whose application never maps expires quietly.** After
-//!   [`RESTORE_GRACE`] the pending list is dropped with a log line;
-//!   an uninstalled app or a launch that failed must not leave the
-//!   shell holding stale records forever — nor, worse, applying one to
-//!   some unrelated window mapped an hour later.
-//!
-//! While a restore is still pending, persistence is suppressed: the
-//! moment after startup the live client set is empty, and writing that
-//! snapshot would wipe the very file being restored — so a crash
-//! during the restore window would lose the layout. Recording resumes
-//! when every pending record is matched or expired.
 
 use std::path::{Path, PathBuf};
 use std::io::{Read, Write};
@@ -480,20 +434,6 @@ fn relaunch_plan(record: &WindowRecord, apps: &[AppEntry]) -> Option<RelaunchPla
 
 // -- the wire format -----------------------------------------------------
 
-/// One tab-separated record per line, human-inspectable like the
-/// theme/wallpaper/dock files beside it:
-///
-/// ```text
-/// @window \t class-json \t app-json \t x \t y \t w \t h \t workspace \t flags-or-'-' \t monitor-json \t spatial-json
-/// ```
-///
-/// Text fields are JSON strings (or null), so client-controlled newlines and
-/// tabs cannot create records or workspace directives. The explicit prefix
-/// distinguishes escaped fields from legacy literal classes, including quotes
-/// and backslashes. Eight-, nine- and ten-column legacy records remain readable.
-/// Flags are a comma-joined subset of `maximized,shaded,miniaturized`. A
-/// line that does not parse is skipped with a warning — one corrupted
-/// record must cost that record, never the layout.
 fn serialize(records: &[WindowRecord]) -> String {
     let mut text = String::new();
     for record in records {

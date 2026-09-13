@@ -93,8 +93,9 @@ pub struct SessionState {
     /// see [`crate::appearance`] for the resolution layers and the
     /// published/request file contract.
     pub appearance: Appearance,
-    /// Config-only frame recipe, independent of theme and appearance state files.
     pub decoration_style: wm_theme_api::DecorationStyle,
+    /// Retained policy so live theme changes can resolve Auto again.
+    pub decoration_style_policy: wm_theme_api::DecorationStyle,
     /// `Some(wm_theme::omarchy::ID)` while this session *follows*
     /// Omarchy — its theme choice is "whatever Omarchy's current theme
     /// is" rather than one of the built-ins — and `None` otherwise.
@@ -133,39 +134,7 @@ pub struct SessionState {
     /// taken over — Omarchy's own "Restart shell" row does that — but
     /// it is carried here so it resolves through the one path.
     pub omarchy_shell: bool,
-    /// The config file's opinion about Omarchy's hosted bar
-    /// (`omarchy_bar`), unresolved: `None` when the file said nothing,
-    /// so `BarVisibility::resolve` can still tell that apart from an
-    /// explicit `false`.
-    ///
-    /// Unresolved here, unlike [`Self::dock`] beside it, because the
-    /// bar is the *guest's* surface and the shell settles its
-    /// visibility at the one moment it decides whether to host the
-    /// shell at all — there is nothing to resolve on a session that is
-    /// not hosting one (`crate::shell::Shell::new`).
     pub omarchy_bar: Option<bool>,
-    /// Whether this desk wears its Dock — the resolved answer, not the
-    /// raw `show_dock` key: the persisted choice the root menu's `Dock`
-    /// row and the `toggle-dock` binding write wins over the config
-    /// file, exactly as the persisted theme choice wins over `theme`
-    /// (see [`crate::desktop::DockVisibility::resolve`]).
-    ///
-    /// Carried here, and applied on every reload rather than only at
-    /// boot, because both halves of hiding the Dock — the surface and
-    /// the strip of workarea it reserves — are things a live session
-    /// can change in place. The decoration rules are the cautionary
-    /// tale in the comment below: a setting that only some of the ways
-    /// of asking for a reload actually applied.
-    pub dock: crate::desktop::DockVisibility,
-    /// Per-application decoration overrides, handed to the backend.
-    ///
-    /// Carried here rather than read straight off the config by each
-    /// backend for the reason the doc comment above gives: this is the
-    /// one path config takes into a running session, and a setting that
-    /// travels beside it cannot be the one a reload forgets. It was —
-    /// the marker-file reload updated the decoration policy and the
-    /// bound `reload` key did not, so the same edit applied or did not
-    /// depending on how the user asked for it.
     pub decorations: DecorationRules,
     /// The modifier for the move/resize drag gesture. `None` disables
     /// it.
@@ -255,10 +224,12 @@ impl SessionState {
     /// its historical 1x default.
     pub fn resolve_with_scale_default(config: &Config, scale_default: f32) -> Self {
         let look = resolve_look(config.theme.as_deref(), config.appearance.as_deref());
+        let decoration_style = look.theme.resolve_style(config.decoration_style);
         Self {
             base_theme: look.theme,
             appearance: look.appearance,
-            decoration_style: config.decoration_style,
+            decoration_style,
+            decoration_style_policy: config.decoration_style,
             following: look.following,
             scale: read_scale_factor_with_default(config.scale, scale_default),
             focus: if read_focus_follows_mouse(config.focus_follows_mouse) {
@@ -274,7 +245,6 @@ impl SessionState {
             omarchy_menu: config.omarchy_menu,
             omarchy_shell: config.omarchy_shell,
             omarchy_bar: config.omarchy_bar,
-            dock: crate::desktop::DockVisibility::resolve(config.show_dock),
             decorations: config.decorations.clone(),
             drag_modifier: config.drag_modifier,
             float_policy: config.float_policy.clone(),
@@ -431,8 +401,9 @@ pub struct Look {
 /// and nothing configured, every theme looks exactly as it always has.
 ///
 /// When the id is [`wm_theme::omarchy::ID`] the theme is built from
-/// Omarchy's current `colors.toml` instead, and **the palette's `mode`
-/// is the appearance** — a light Omarchy theme is a light desk, no
+/// Omarchy's current `colors.toml` instead, with an optional public
+/// `chonkstep.toml` descriptor for an authored modern design. The descriptor's
+/// appearance, or otherwise **the palette's `mode`, is the appearance** — a light Omarchy theme is a light desk, no
 /// matter what was published or configured. An Omarchy theme has one
 /// rendition, the one its author wrote; there is no other to switch to,
 /// and re-deriving one would put colours on screen the author never
@@ -491,9 +462,6 @@ pub fn config_theme_fallback(config_theme: Option<&str>) -> Option<String> {
     Some(requested.to_string())
 }
 
-/// Where this session keeps the small state files it writes for
-/// itself: the theme-menu choice, the dock order, the published
-/// appearance (see `crate::appearance`), and the request markers below.
 pub(crate) fn state_dir() -> std::path::PathBuf {
     if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
         return std::path::PathBuf::from(root).join("chonkstep");
@@ -502,11 +470,6 @@ pub(crate) fn state_dir() -> std::path::PathBuf {
     home.join(".local/state/chonkstep")
 }
 
-/// One of this session's small state files by name — `theme`,
-/// `wallpaper`, `dock`, `dock-items`, `omarchy-bar` — under
-/// [`state_dir`]. `None` only when neither `XDG_STATE_HOME` nor `HOME`
-/// is set, which is a session with nowhere to remember anything: every
-/// caller treats that as "do not persist", never as an error.
 pub(crate) fn state_file(name: &str) -> Option<std::path::PathBuf> {
     if std::env::var_os("XDG_STATE_HOME").is_none() && std::env::var_os("HOME").is_none() {
         return None;
@@ -604,17 +567,6 @@ pub fn restart_requested() -> bool {
     std::fs::remove_file(state_dir().join("restart")).is_ok()
 }
 
-/// Whether something has asked this session to re-read its config file
-/// and apply it in place since the last call (`scripts/reload.sh`).
-///
-/// The cheaper half of the pair, and the one to reach for: a reload
-/// keeps every window, every client connection and every dockapp,
-/// where a restart on the Wayland session keeps only the compositor
-/// and its dockapps. Polled rather than watched with inotify — the
-/// same argument the dockapp theme broadcast makes for polling. The
-/// session's adaptive loop bounds this path's response to 100 ms, so a
-/// poll costs an `unlink` syscall on a path that is almost never there
-/// without imposing a frame-rate wakeup on an idle desktop.
 pub fn reload_requested() -> bool {
     std::fs::remove_file(state_dir().join("reload")).is_ok()
 }
@@ -632,10 +584,6 @@ pub fn recovering_from_crash() -> bool {
     std::fs::remove_file(state_dir().join("recovery")).is_ok()
 }
 
-/// The state-file path the session layout store persists to — beside
-/// the theme, wallpaper and dock files it behaves like. Exposed from
-/// here (rather than duplicated in `session_layout`) so every state
-/// file resolves through the one `state_dir` rule.
 pub fn session_layout_path() -> std::path::PathBuf {
     state_dir().join("session")
 }
@@ -664,28 +612,6 @@ const SESSION_CONTINUES_VAR: &str = "CHONKSTEP_SESSION_CONTINUES";
 /// taking the variable back out of the environment.
 static SESSION_CONTINUES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Reads the continuation marker and removes it from the environment.
-///
-/// Call once, first thing in `main`, before any thread exists — the
-/// same placement and the same reason as
-/// [`crate::spawn::declare_display_stack`]. `remove_var` is only sound
-/// while this process is single-threaded.
-///
-/// It has to be *consumed* rather than merely read, because a marker
-/// left in the environment is inherited by every process the desktop
-/// launches, and it means the wrong thing to all of them. It says "you
-/// are a continuation of a session that is already running". A terminal,
-/// a browser, a dockapp — none of them care. But a nested chonkstep
-/// session started from a terminal inside a restarted one reads it,
-/// concludes it is a hot restart, and silently skips both session
-/// restore and autostart. That is a genuinely confusing failure: the
-/// same binary and the same config behave differently depending on
-/// whether the session that launched the terminal had ever been
-/// restarted.
-///
-/// Found exactly that way — an autostart entry that worked from a fresh
-/// login did nothing when launched from a terminal, because the
-/// terminal's parent session had been hot-restarted hours earlier.
 pub fn consume_session_continuation() {
     let present = std::env::var_os(SESSION_CONTINUES_VAR).is_some();
     // Set before removing, so a `session_continues()` racing in from
@@ -970,11 +896,12 @@ mod tests {
 
     #[test]
     fn decoration_style_resolves_from_config_on_every_reload() {
-        for name in ["system7", "windowmaker", "system7"] {
+        for name in ["system7", "windowmaker", "modern", "system7"] {
             let config = wm_config::parse(&format!("decoration_style = {name:?}")).unwrap();
             assert_eq!(SessionState::resolve(&config).decoration_style.name(), name);
         }
-        assert_eq!(SessionState::resolve(&Config::default_config()).decoration_style.name(), "windowmaker");
+        // Auto follows the selected theme, including persisted modern themes;
+        // explicit overrides above must work regardless of that host state.
     }
 
     #[test]
@@ -984,6 +911,7 @@ mod tests {
             base_theme: base.clone(),
             appearance: Appearance::Dark,
             decoration_style: wm_theme_api::DecorationStyle::WindowMaker,
+            decoration_style_policy: wm_theme_api::DecorationStyle::Auto,
             following: None,
             scale: 2.0,
             focus: FocusPolicy::ClickToFocus,
@@ -998,7 +926,6 @@ mod tests {
             omarchy_menu: true,
             omarchy_shell: true,
             omarchy_bar: None,
-            dock: crate::desktop::DockVisibility::Shown,
             decorations: DecorationRules::default(),
             drag_modifier: Some(wm_core::DEFAULT_DRAG_MODIFIER),
             float_policy: None,
@@ -1019,6 +946,52 @@ mod tests {
         // scaled theme would drift a little further from the original
         // every time the scale changed.
         assert_eq!(state.base_theme, base);
+    }
+
+    #[test]
+    fn omarchy_modern_descriptor_resolves_auto_at_startup_and_preserves_overrides() {
+        const CHILD: &str = "CHONKSTEP_MODERN_IMPORT_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            // Session resolution reads process-global paths. Keep the real
+            // resolver test in a private child instead of changing other tests'
+            // environment or reading the user's persisted theme selection.
+            let root=std::env::temp_dir().join(format!("chonk-modern-import-startup-{}",std::process::id()));
+            let _=std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("state/omarchy/current/theme")).unwrap();
+            std::fs::create_dir_all(root.join("config")).unwrap();
+            #[allow(clippy::disallowed_methods)]
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","startup::tests::omarchy_modern_descriptor_resolves_auto_at_startup_and_preserves_overrides","--nocapture"])
+                .env(CHILD,"1").env("XDG_STATE_HOME",root.join("state"))
+                .env("XDG_CONFIG_HOME",root.join("config")).env_remove("CHONKSTEP_SCALE")
+                .output().unwrap();
+            let _=std::fs::remove_dir_all(root);
+            assert!(output.status.success(),"{}\n{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let current=wm_theme::omarchy::current_dir().unwrap();
+        let mut config=Config {theme:Some("omarchy".into()),scale:Some(2.0),hyprland_config:Some(false),..Config::default_config()};
+        for id in ["obsidian","washi","relay"] {
+            let authored=wm_theme::default_theme::theme_by_id(id).unwrap();
+            std::fs::write(current.join("theme/colors.toml"),wm_theme::omarchy::palette_from_theme(&authored).to_toml()).unwrap();
+            std::fs::write(current.join("theme").join(wm_theme::omarchy::DESCRIPTOR_FILE),wm_theme::omarchy::descriptor_from_theme(&authored).unwrap().unwrap()).unwrap();
+            std::fs::write(current.join("theme.name"),id).unwrap();
+            config.decoration_style=wm_theme_api::DecorationStyle::Auto;
+            let state=SessionState::resolve(&config);
+            assert_eq!(state.decoration_style,wm_theme_api::DecorationStyle::Modern);
+            assert_eq!(state.following,Some(wm_theme::omarchy::ID));
+            assert_eq!(state.base_theme.chrome,authored.chrome);
+            assert_eq!(state.theme().chrome,authored.scaled(2.0).chrome,"startup scales imported geometry exactly once");
+            for style in [wm_theme_api::DecorationStyle::WindowMaker,wm_theme_api::DecorationStyle::System7] {
+                config.decoration_style=style;
+                let state=SessionState::resolve(&config);
+                assert_eq!(state.decoration_style,style);
+                assert_eq!(state.base_theme.chrome,authored.chrome,"a frame override retains theme-owned shell design");
+            }
+        }
+        std::fs::remove_file(current.join("theme").join(wm_theme::omarchy::DESCRIPTOR_FILE)).unwrap();
+        config.decoration_style=wm_theme_api::DecorationStyle::Auto;
+        assert_eq!(SessionState::resolve(&config).decoration_style,wm_theme_api::DecorationStyle::WindowMaker);
     }
 
     #[test]

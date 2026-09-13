@@ -367,7 +367,7 @@ pub(crate) fn tick(comp: &mut Compositor) {
 }
 
 pub(crate) fn render(
-    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     scene: &Transition,

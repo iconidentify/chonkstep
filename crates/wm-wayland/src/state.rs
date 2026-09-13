@@ -80,7 +80,6 @@ use wm_theme_api::{DecorationBuffer, Point, Rect, ResizeEdge, Size};
 use crate::input::DragGrab;
 use crate::input::keyboard::{resolve_keyboard_config, ResolvedKeyboard};
 
-use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::startup::{
     ensure_xcursor_size, recovering_from_crash, SessionRequestPoller, SessionState,
@@ -102,12 +101,6 @@ pub struct WlWindowId(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct WlFrameId(pub u64);
 
-/// A shell-owned surface (dock, Clip, launcher strip, icon tiles, menu
-/// popups) — the id space `chonk-shell` draws the whole desktop
-/// through. On X11 these are override-redirect windows; here they are
-/// internal scene elements the renderer composes directly, which is
-/// exactly the substitution `wm_core::Backend`'s docs promise the
-/// shell cannot observe.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct WlShellId(pub u64);
 
@@ -519,6 +512,32 @@ pub(crate) struct FramePart {
     pub binary_alpha: bool,
 }
 
+/// Uniform chrome keeps no CPU pixel buffer or GPU texture. Its element ID
+/// belongs to the retained frame, and its commit changes only on semantic edits.
+pub(crate) struct FrameSolid {
+    pub solid: wm_theme_api::DecorationSolid,
+    pub id: smithay::backend::renderer::element::Id,
+    pub commit: smithay::backend::renderer::utils::CommitCounter,
+}
+
+impl FrameSolid {
+    pub(crate) fn new(solid: wm_theme_api::DecorationSolid) -> Self {
+        Self { solid, id: smithay::backend::renderer::element::Id::new(), commit: Default::default() }
+    }
+
+    pub(crate) fn update(&mut self, solid: wm_theme_api::DecorationSolid) {
+        if self.solid != solid { self.solid = solid; self.commit.increment(); }
+    }
+
+    pub(crate) fn element(&self, rect: Rect, alpha: f32) -> smithay::backend::renderer::element::solid::SolidColorRenderElement {
+        use smithay::backend::renderer::{element::{solid::SolidColorRenderElement, Kind}, Color32F};
+        let [r, g, b] = self.solid.rgb.map(|channel| f32::from(channel) / 255.0 * alpha);
+        SolidColorRenderElement::new(self.id.clone(), smithay::utils::Rectangle::new(
+            (rect.pos.x, rect.pos.y).into(), (rect.size.w as i32, rect.size.h as i32).into()),
+            self.commit, Color32F::new(r, g, b, alpha), Kind::Unspecified)
+    }
+}
+
 /// Ledger entry for one decoration frame. `parts` holds only the imported
 /// chrome perimeter; the stable solid fill covers transient client gaps.
 /// No layout is cached here: chrome hit-testing happens in `wm-core`
@@ -529,6 +548,8 @@ pub(crate) struct FrameRecord {
     pub geometry: Rect,
     pub input_margin: u32,
     pub parts: Vec<FramePart>,
+    pub solids: Vec<FrameSolid>,
+    pub effects: Option<crate::frame_effects::FrameEffects>,
     pub fill_id: smithay::backend::renderer::element::Id,
     pub mapped: bool,
 }
@@ -1654,7 +1675,7 @@ pub(crate) struct OutputEntry {
     /// element handles are cleared between frames while the vector's
     /// allocation stays hot; offscreen captures intentionally keep
     /// their one-shot storage separate.
-    pub scene_scratch: Vec<crate::renderer::SceneElement<GlesRenderer>>,
+    pub scene_scratch: Vec<crate::renderer::SceneElement>,
     /// The `wl_output` global clients bind to. Dropping the id does not
     /// take the global down — that needs
     /// `DisplayHandle::disable_global` — so this is held for the one
@@ -1742,32 +1763,14 @@ pub(crate) fn physical_damage_tracker(output: &Output, fallback_size: Size) -> O
     )
 }
 
-/// The scale every `wl_output` advertises for a session UI scale, and
-/// the only channel a native Wayland client actually listens on:
-/// verified under `WAYLAND_DEBUG`, GTK with `GDK_SCALE=2` against
-/// outputs at scale 1 makes no `set_buffer_scale` call at all. A
-/// client that hears 2 here answers `set_buffer_scale(2)`, renders
-/// twice the pixels, and the rest of this crate already meets it — the
-/// ledger measures its commits by the factor it committed
-/// (`xdg::committed_content_size`), configures it back in its own
-/// logical pixels (`resize_client`), hit-tests through the same factor
-/// (`input.rs`), and draws its buffer 1:1
-/// (`renderer::push_surface_tree`).
-///
-/// Integer, because `wl_output.scale` is an integer: a fractional
-/// session scale rounds UP to the next whole step (1.5 — and 1.25 —
-/// advertise 2), clamped to 1 and up. Rounding up is deliberate and
-/// the direction matters: this integer is the *fallback* for clients
-/// that never bind `fractional-scale-v1`, and a fallback client told
-/// the ceiling renders MORE pixels than the output needs, which the
-/// compositor then downscales to the true factor
-/// (`xdg::effective_surface_scale`) — crisp. Told the floor it would
-/// render too few and be upscaled — blurry. Clients that do bind
-/// fractional-scale hear the exact fraction and the ceiling never
-/// applies to them. (`f32::max` returns 1.0 for a NaN scale, so the
-/// cast is always sane — same guard as `default_cursor_pixels`.)
+/// Keep the actual scale for xdg-output's logical geometry. Smithay
+/// rounds only `wl_output.scale` up to its integer fallback, so older
+/// clients still render enough pixels to downsample crisply. Rounding
+/// the whole OutputScale instead made Omarchy clamp panels to a screen
+/// smaller than the layer-shell surface they were drawn inside.
 pub(crate) fn advertised_output_scale(scale: f32) -> OutputScale {
-    OutputScale::Integer(scale.max(1.0).ceil() as i32)
+    let scale = if scale.is_finite() && scale > 0.0 { scale.max(0.125) } else { 1.0 };
+    OutputScale::Fractional(f64::from(scale))
 }
 
 /// (Re-)advertises the session's UI scale on every output. smithay
@@ -2294,20 +2297,13 @@ pub struct Compositor {
     /// The policy brain, owning the [`WaylandBackend`] ledger. Protocol
     /// handlers reach the ledger through `self.wm.backend_mut()`.
     pub wm: WindowManager<WaylandBackend>,
-    /// The whole desktop — dock, Clip, menus, launcher, wallpaper —
-    /// identical by construction to the X11 session's.
     pub shell: Shell<WaylandBackend>,
 
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Compositor>,
-    /// One calloop source per file descriptor the shell asked to be
-    /// woken on that this compositor knows nothing else about: the
-    /// dockapp listener, and one per connected out-of-process dock
-    /// tile. Reconciled against `Shell::extra_poll_fds` at the end of
-    /// every dispatch pass — see [`Compositor::sync_dock_sources`].
-    dock_sources: Vec<(RawFd, RegistrationToken)>,
+    ipc_sources: Vec<(RawFd, RegistrationToken)>,
     /// Reused storage for the desired source set. Taking and returning
-    /// it in `sync_dock_sources` keeps the hot dispatch path allocation
+    /// it in `sync_ipc_sources` keeps the hot dispatch path allocation
     /// free after the largest set seen so far establishes its capacity.
     source_scratch: Vec<RawFd>,
     /// Reused set for desired membership during pruning, then for the
@@ -2319,11 +2315,6 @@ pub struct Compositor {
     /// callback needs this bit; collecting it once avoids a nested
     /// ownership scan for every descriptor.
     hyprland_source_scratch: HashSet<RawFd>,
-    /// The Hyprland IPC server, when the session asked for one
-    /// (`CHONKSTEP_HYPRLAND_IPC=1`). `None` in an ordinary session,
-    /// which then pays one env lookup at startup and nothing else.
-    /// Its file descriptors are reconciled by the same pass that
-    /// handles the dockapp ones — see [`Compositor::sync_dock_sources`].
     hyprland_ipc: Option<chonk_hyprland_ipc::Server>,
     /// `ext_workspace_v1`: the workspace row as native Wayland clients
     /// see it. See `workspace.rs`.
@@ -2716,27 +2707,11 @@ impl Compositor {
             };
             self.note_outcome(outcome);
         }
-        // Scroll drains beside the clicks and separately from them: an
-        // axis event is not a button, so `take_shell_click` never
-        // reports one and the two drains cannot double-count the same
-        // gesture. Queued rather than coalesced, unlike motion, because
-        // every notch is its own command — three notches on a volume
-        // tile is three steps, and keeping only the last would swallow
-        // input the user gave. A scroll produces no `ShellOutcome`, so
-        // it sits on this side of the exit check with the clicks that
-        // do.
-        while let Some((surface, local, delta)) = self.wm.backend_mut().take_shell_scroll() {
-            self.shell.on_shell_scroll(&mut self.wm, surface, local, delta);
-        }
+        // No persistent shell widgets consume wheel events.
+        while self.wm.backend_mut().take_shell_scroll().is_some() {}
 
         if !self.running {
-            // Exit/restart was requested somewhere above — mirror the
-            // X11 loop's break-before-tick. Sources are reconciled even
-            // on the way out: a menu pick above (Remove on a dock
-            // tile's menu) can have closed a dockapp socket, and
-            // leaving its source registered would hand calloop a closed
-            // descriptor if anything dispatched again.
-            self.sync_dock_sources();
+            self.sync_ipc_sources();
             return;
         }
 
@@ -2981,9 +2956,9 @@ impl Compositor {
         self.service_hyprland_ipc();
 
         // Last, after every socket this pass was going to close has
-        // been closed. See `sync_dock_sources` for why that ordering is
+        // been closed. See `sync_ipc_sources` for why that ordering is
         // the safety argument and not a tidiness one.
-        self.sync_dock_sources();
+        self.sync_ipc_sources();
         self.frame_stats.ipc.record(phase_started.elapsed());
 
         // Test-door barriers ack only after the frame above has landed
@@ -3069,41 +3044,6 @@ impl Compositor {
     }
 
 
-    /// Brings the set of registered dockapp sources in line with what
-    /// the shell is currently waiting on.
-    ///
-    /// # Why a source per fd rather than one for the listener
-    ///
-    /// A dockapp is not a Wayland client. It never opens a display
-    /// connection — the shell strips `WAYLAND_DISPLAY` and `DISPLAY`
-    /// from its environment before `exec` — so nothing in this
-    /// compositor's own protocol machinery will ever hear from it. It
-    /// is a process on the end of a `SOCK_SEQPACKET` socket, and the
-    /// only thing this loop has to do about that is wake up when one
-    /// has something to say. That is the *entire* Wayland-side cost of
-    /// out-of-process dock tiles; the X11 binary pays the same cost by
-    /// adding the same descriptors to its `poll` set.
-    ///
-    /// # Why nothing is read in the callback
-    ///
-    /// The callback is empty. Its only job is to end the
-    /// `event_loop.dispatch` wait; `dispatch_pending` then services
-    /// every dockapp regardless of which fd woke us, and each of those
-    /// reads until `EAGAIN`. Level-triggered polling is therefore safe
-    /// rather than a spin: the socket that woke us is always drained
-    /// before the next wait begins.
-    ///
-    /// # Why the reconciliation runs *here*
-    ///
-    /// The registered `BorrowedFd` outlives the borrow checker's
-    /// ability to prove it is valid, so validity is a property of this
-    /// ordering: `dispatch_pending` services the dockapps (which is the
-    /// only place a dockapp socket is ever closed) and *then* runs
-    /// this, which unregisters the sources for any fd that went away —
-    /// all before control returns to `event_loop.dispatch`, which is
-    /// the only place calloop touches a registered descriptor. There is
-    /// no point at which a source names a closed fd and something polls
-    /// it.
     /// Accept, answer and stream on the Hyprland IPC sockets.
     ///
     /// When requests are actually present, the two-snapshot discipline
@@ -3218,14 +3158,16 @@ impl Compositor {
     pub(crate) fn hyprland_ipc_source_counts(&self) -> (usize, usize) {
         let desired = self.hyprland_ipc.as_ref().map_or(0, |server| server.poll_fds().len());
         let registered = self
-            .dock_sources
+            .ipc_sources
             .iter()
             .filter(|(fd, _)| self.hyprland_source_scratch.contains(fd))
             .count();
         (desired, registered)
     }
 
-    fn sync_dock_sources(&mut self) {
+    /// Reconcile control and Hyprland IPC descriptors after servicing them.
+    /// Closed descriptors are unregistered before calloop can poll again.
+    fn sync_ipc_sources(&mut self) {
         let mut wanted = std::mem::take(&mut self.source_scratch);
         let mut membership = std::mem::take(&mut self.source_membership_scratch);
         let mut hyprland = std::mem::take(&mut self.hyprland_source_scratch);
@@ -3250,10 +3192,10 @@ impl Compositor {
         // unregistered before anything else can be inserted at the same
         // number.
         let loop_handle = &self.loop_handle;
-        retain_wanted_sources(&mut self.dock_sources, &membership, |token| loop_handle.remove(token));
+        retain_wanted_sources(&mut self.ipc_sources, &membership, |token| loop_handle.remove(token));
 
         membership.clear();
-        membership.extend(self.dock_sources.iter().map(|(fd, _)| *fd));
+        membership.extend(self.ipc_sources.iter().map(|(fd, _)| *fd));
         for &fd in &wanted {
             if !membership.insert(fd) {
                 continue;
@@ -3272,18 +3214,18 @@ impl Compositor {
                 }
                 Ok(PostAction::Continue)
             }) {
-                Ok(token) => self.dock_sources.push((fd, token)),
+                Ok(token) => self.ipc_sources.push((fd, token)),
                 Err(error) => {
                     // Not fatal, and worth being precise about why: the
                     // loop still has a 100 ms maximum idle bound, so an
-                    // unregistered dockapp fd costs that tile up to that
+                    // unregistered IPC fd costs the request up to that
                     // much frame latency and nothing else. This
                     // is a latency optimisation, not a correctness
                     // requirement.
                     tracing::warn!(
                         fd,
                         ?error,
-                        "could not watch a dockapp socket; its frames will arrive on the housekeeping tick instead"
+                        "could not watch an IPC socket; requests will be handled on the housekeeping tick instead"
                     );
                 }
             }
@@ -4184,7 +4126,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         viewporter_state,
         core_protocols,
         popups: PopupManager::default(),
-        dock_sources: Vec::new(),
+        ipc_sources: Vec::new(),
         source_scratch: Vec::new(),
         source_membership_scratch: HashSet::new(),
         hyprland_source_scratch: HashSet::new(),
@@ -4379,23 +4321,6 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
-    // Whatever ended the loop — the root menu's Exit, a theme pick, a
-    // touched restart marker — the dockapps this session launched are
-    // its responsibility. On a restart they are left running and their
-    // tokens are handed to the incoming compositor, which readopts them;
-    // on a real exit they are stopped. See `Shell::shut_down`.
-    //
-    // Worth naming here of all places, because this is the backend where
-    // it is remarkable: a Wayland client dies with the compositor's
-    // socket and there is no SaveSet equivalent to adopt it afterwards
-    // (README, "Restart costs you your clients"). A dockapp is not a
-    // Wayland client, so it survives the restart that kills every window
-    // on the screen — strictly more than any ordinary client here gets.
-    // Before anything else about the teardown: put every screen's
-    // colour back. A compositor that exits — or hot-restarts — while a
-    // night-light daemon holds a warm ramp would otherwise hand the
-    // greeter, or its own replacement, an orange display with nothing
-    // left running that knows why. See `gamma.rs`.
     crate::gamma::restore_all(&mut comp);
 
     // The Hyprland sockets go before the shell's, and explicitly,
@@ -4406,7 +4331,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     if let Some(server) = &mut comp.hyprland_ipc {
         server.shut_down();
     }
-    comp.shell.shut_down(if comp.restart { Farewell::Restarting } else { Farewell::SessionOver });
+    comp.shell.shut_down();
 
     if comp.restart {
         // `nested` is the decision this process made at startup, so the
@@ -5351,6 +5276,8 @@ mod tests {
                     window,
                     geometry: Rect::default(),
                     parts: Vec::new(),
+                solids: Vec::new(),
+                effects: None,
                     fill_id: smithay::backend::renderer::element::Id::new(),
                     mapped: true,
                 },
@@ -5440,6 +5367,19 @@ mod tests {
     }
 
     #[test]
+    fn fractional_output_geometry_keeps_the_actual_scale() {
+        // Omarchy uses xdg-output's logical size to clamp its panels.
+        // Advertising Integer(2) at 150% made a 4K screen look only
+        // 1920px wide while layer surfaces were configured at 2560px.
+        for (scale, logical_width) in [(0.75, 5120), (1.0, 3840), (1.25, 3072), (1.5, 2560), (2.0, 1920)] {
+            let advertised = advertised_output_scale(scale);
+            let mode = SSize::<i32, Physical>::from((3840, 2160));
+            let logical = mode.to_f64().to_logical(advertised.fractional_scale()).to_i32_round::<i32>();
+            assert_eq!(logical.w, logical_width, "output scale {scale}");
+        }
+    }
+
+    #[test]
     fn the_integral_fallback_advertises_the_ceiling() {
         // Round UP: the fallback client renders more pixels than the
         // output needs and is downscaled — the crisp direction. 1.25
@@ -5450,8 +5390,7 @@ mod tests {
         assert_eq!(advertised_output_scale(1.5).integer_scale(), 2);
         assert_eq!(advertised_output_scale(2.0).integer_scale(), 2);
         assert_eq!(advertised_output_scale(2.25).integer_scale(), 3);
-        // Degenerate inputs stay sane (the NaN guard `f32::max`
-        // documents).
+        // Degenerate inputs stay sane.
         assert_eq!(advertised_output_scale(0.0).integer_scale(), 1);
         assert_eq!(advertised_output_scale(f32::NAN).integer_scale(), 1);
     }

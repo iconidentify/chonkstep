@@ -184,3 +184,247 @@ fn live_restyle_does_not_submit_geometry_for_withdrawn_clients() {
     assert_eq!(wm.backend().frame_geometry_count, frames);
     assert_eq!(wm.backend().client_resize_count, resizes);
 }
+
+#[test]
+fn live_restyle_rescues_partial_maximize_free_axis_without_changing_restore_geometry() {
+    for directions in [MaximizeDirections::HORIZONTAL, MaximizeDirections::VERTICAL, MaximizeDirections::FULL] {
+        let (mut wm, ids) = desktop(1);
+        let id = ids[0];
+        wm.backend_mut().set_monitor(Rect::new(Point::new(0, 0), Size::new(800, 600)));
+        wm.clients[id].geometry = Rect::new(Point::new(1, 20), Size::new(400, 300));
+        wm.reflow_frame(id);
+        wm.maximize(id, directions);
+        let saved = wm.clients[id].restore_geometry;
+        let frame = wm.clients[id].frame.unwrap();
+        let count = wm.backend().frame_geometry_count[&frame];
+        wm.set_theme_engine(Box::new(TallTheme));
+        assert!(client_frame_rect(&wm.clients[id]).pos.y >= 0, "{directions:?}: title is reachable");
+        assert_eq!(wm.clients[id].restore_geometry, saved);
+        assert_eq!(wm.backend().frame_geometry_count[&frame] - count, 1);
+        if directions == MaximizeDirections::HORIZONTAL {
+            assert_eq!(wm.clients[id].geometry.size.h, 300);
+            assert_eq!(wm.clients[id].geometry.pos.y, 40, "only the newly hidden title is rescued");
+        }
+        let count = wm.backend().frame_geometry_count[&frame];
+        wm.unmaximize(id);
+        assert!(client_frame_rect(&wm.clients[id]).pos.y >= 0, "{directions:?}: restored title is reachable");
+        assert_eq!(wm.clients[id].geometry.size, saved.unwrap().size);
+        assert_eq!(wm.backend().frame_geometry_count[&frame] - count, 1);
+    }
+}
+
+#[test]
+fn live_restyle_while_fullscreen_restores_reachable_title_without_resizing_content() {
+    let (mut wm, ids) = desktop(1);
+    let id = ids[0];
+    wm.backend_mut().set_monitor(Rect::new(Point::new(0, 0), Size::new(800, 600)));
+    wm.clients[id].geometry = Rect::new(Point::new(1, 20), Size::new(400, 300));
+    wm.reflow_frame(id);
+    let saved = wm.clients[id].geometry;
+    let frame = wm.clients[id].frame.unwrap();
+    wm.fullscreen(id);
+    wm.set_theme_engine(Box::new(TallTheme));
+    assert_eq!(wm.fullscreen_restore[&id], saved);
+    let count = wm.backend().frame_geometry_count[&frame];
+    wm.unfullscreen(id);
+    assert_eq!(client_frame_rect(&wm.clients[id]).pos.y, 0);
+    assert_eq!(wm.clients[id].geometry.size, saved.size);
+    assert_eq!(wm.backend().frame_geometry_count[&frame] - count, 1);
+}
+
+#[test]
+fn unchanged_chrome_restores_deliberate_overlap_exactly() {
+    for fullscreen in [false, true] {
+        for reload in [false, true] {
+            let (mut wm, ids) = desktop(1);
+            let id = ids[0];
+            wm.backend_mut().set_monitor(Rect::new(Point::new(0, 0), Size::new(800, 600)));
+            wm.clients[id].geometry = Rect::new(Point::new(-60, 8), Size::new(400, 300));
+            wm.reflow_frame(id);
+            let saved = wm.clients[id].geometry;
+            if fullscreen { wm.fullscreen(id); } else { wm.maximize(id, MaximizeDirections::FULL); }
+            if reload { wm.set_theme_engine(Box::new(FakeTheme)); }
+            if fullscreen { wm.unfullscreen(id); } else { wm.unmaximize(id); }
+            assert_eq!(wm.clients[id].geometry, saved, "fullscreen={fullscreen} reload={reload}: unchanged title metrics preserve user placement");
+            assert!(wm.restore_title_metrics.is_empty(), "consumed snapshot metadata must not linger");
+        }
+    }
+}
+
+#[test]
+fn nested_fullscreen_maximize_keeps_each_restore_title_snapshot() {
+    for directions in [
+        MaximizeDirections::HORIZONTAL,
+        MaximizeDirections::VERTICAL,
+        MaximizeDirections::FULL,
+    ] {
+        for maximize_first in [false, true] {
+            for unmaximize_inside_fullscreen in [false, true] {
+                let (mut wm, ids) = desktop(1);
+                let id = ids[0];
+                wm.backend_mut()
+                    .set_monitor(Rect::new(Point::new(0, 0), Size::new(800, 600)));
+                wm.clients[id].geometry = Rect::new(Point::new(1, 20), Size::new(400, 300));
+                wm.reflow_frame(id);
+                if maximize_first {
+                    wm.maximize(id, directions);
+                }
+                wm.fullscreen(id);
+                wm.set_theme_engine(Box::new(TallTheme));
+                if !maximize_first {
+                    wm.maximize(id, directions);
+                }
+                assert_eq!(wm.clients[id].restore_geometry.unwrap().size, Size::new(400, 300));
+                if unmaximize_inside_fullscreen {
+                    wm.unmaximize(id);
+                }
+                let frame = wm.clients[id].frame.unwrap();
+                let count = wm.backend().frame_geometry_count[&frame];
+                wm.unfullscreen(id);
+                let visual = client_frame_rect(&wm.clients[id]);
+                assert_eq!(visual.pos.y, 0,
+                "{directions:?} maximize_first={maximize_first} unmaximize_inside={unmaximize_inside_fullscreen}: fullscreen restores the free axis");
+                assert_eq!(
+                    wm.backend().frame_geometry_count[&frame] - count,
+                    1,
+                    "restoration submits one final configure"
+                );
+                if !unmaximize_inside_fullscreen {
+                    if directions.contains(MaximizeDirections::HORIZONTAL) {
+                        assert_eq!(
+                            (visual.pos.x, visual.size.w),
+                            (0, 800),
+                            "maximized horizontal axis refits current overhead"
+                        );
+                    } else {
+                        assert_eq!(
+                            wm.clients[id].geometry.size.w, 400,
+                            "free axis retains its content width"
+                        );
+                    }
+                    if directions.contains(MaximizeDirections::VERTICAL) {
+                        assert_eq!(
+                            (visual.pos.y, visual.size.h),
+                            (0, 600),
+                            "maximized vertical axis refits current overhead"
+                        );
+                    } else {
+                        assert_eq!(
+                            wm.clients[id].geometry.size.h, 300,
+                            "free axis retains its content height"
+                        );
+                    }
+                }
+                if !unmaximize_inside_fullscreen {
+                    wm.unmaximize(id);
+                }
+                assert_eq!(wm.clients[id].geometry.size, Size::new(400, 300));
+                assert_eq!(
+                    client_frame_rect(&wm.clients[id]).pos.y,
+                    0,
+                    "maximize_first={maximize_first} unmaximize_inside={unmaximize_inside_fullscreen}"
+                );
+                assert!(wm.restore_title_metrics.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn broken_or_destroyed_restore_snapshots_clear_title_metadata() {
+    let (mut wm, ids) = desktop(1);
+    let id = ids[0];
+    wm.maximize(id, MaximizeDirections::FULL);
+    assert_eq!(wm.restore_title_metrics.len(), 1);
+    wm.break_maximize(id);
+    assert!(wm.restore_title_metrics.is_empty());
+    wm.maximize(id, MaximizeDirections::FULL);
+    wm.fullscreen(id);
+    assert_eq!(wm.restore_title_metrics.len(), 2);
+    let window = wm.clients[id].window;
+    wm.dispatch(BackendEvent::Destroyed(window));
+    assert!(wm.restore_title_metrics.is_empty());
+}
+
+#[test]
+fn modern_restyle_keeps_title_controls_reachable_without_resizing_or_extra_reflows() {
+    use wm_theme::{Appearance, DecorationStyle, FontState, RasterThemeEngine};
+    let fonts = FontState::new();
+    for top_reservation in [0, 26] {
+        let (mut wm, ids) = desktop(2);
+        let area = Rect::new(
+            Point::new(0, top_reservation),
+            Size::new(800, 600 - top_reservation as u32),
+        );
+        wm.backend_mut()
+            .set_monitor(Rect::new(Point::new(0, 0), Size::new(800, 600)));
+        wm.set_workarea(area);
+        let edge = ids[0];
+        let safe = ids[1];
+        wm.clients[edge].geometry =
+            Rect::new(Point::new(1, top_reservation + 20), Size::new(400, 300));
+        wm.clients[safe].geometry = Rect::new(Point::new(180, 180), Size::new(200, 180));
+        wm.reflow_frame(edge);
+        wm.reflow_frame(safe);
+        let safe_geometry = wm.clients[safe].geometry;
+        for scale in [1.0, 1.5, 2.0, 1.0] {
+            for (name, _) in wm_theme::modern::CHOICES {
+                wm.backend_mut().set_monitor_scales(vec![scale]);
+                let theme = wm_theme::modern::theme(name, Appearance::Dark)
+                    .unwrap()
+                    .scaled(scale);
+                let engine = RasterThemeEngine::with_fonts_at_scale(theme, fonts.clone(), scale)
+                    .with_style(DecorationStyle::Modern)
+                    .unwrap();
+                let counts = wm.backend().frame_geometry_count.clone();
+                wm.set_theme_engine(Box::new(engine));
+                for id in [edge, safe] {
+                    let client = &wm.clients[id];
+                    let frame = client.frame.unwrap();
+                    let visual = client_frame_rect(client);
+                    assert!(
+                        visual.pos.y >= area.pos.y,
+                        "{name} {scale}: title stays below output/reserved bar"
+                    );
+                    for (_, button) in &client.layout.button_hitboxes {
+                        let global = Point::new(
+                            client.geometry.pos.x - client.layout.client_offset.x + button.pos.x,
+                            client.geometry.pos.y - client.layout.client_offset.y + button.pos.y,
+                        );
+                        assert!(
+                            area.contains(global),
+                            "{name} {scale}: every control remains reachable"
+                        );
+                        assert!(area.contains(Point::new(
+                            global.x + button.size.w as i32 - 1,
+                            global.y + button.size.h as i32 - 1
+                        )));
+                    }
+                    assert_eq!(
+                        wm.backend().frame_geometry_count[&frame] - counts[&frame],
+                        1,
+                        "one configure per restyle"
+                    );
+                }
+                assert_eq!(wm.clients[edge].geometry.size, Size::new(400, 300));
+                assert_eq!(
+                    wm.clients[safe].geometry, safe_geometry,
+                    "reachable content keeps its exact anchor and size"
+                );
+            }
+        }
+        // A palette-only reload does not reposition a deliberately moved frame.
+        wm.clients[edge].geometry.pos.y = -10;
+        wm.reflow_frame(edge);
+        let before = wm.clients[edge].geometry;
+        wm.set_theme_engine(Box::new(
+            RasterThemeEngine::with_fonts(
+                wm_theme::modern::theme("relay", Appearance::Light).unwrap(),
+                fonts.clone(),
+            )
+            .with_style(DecorationStyle::Modern)
+            .unwrap(),
+        ));
+        assert_eq!(wm.clients[edge].geometry, before);
+    }
+}

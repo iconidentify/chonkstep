@@ -170,7 +170,7 @@ impl Stack {
 // drawing while explicitly forwarding damage to MultiFrame's target-copy plan.
 // Merely drawing through AsMut<GlesFrame> would omit opaque-element damage and
 // could copy an empty/partial target despite having drawn the full source.
-impl RenderElement<Renderer<'_>> for SceneElement<GlesRenderer> {
+impl RenderElement<Renderer<'_>> for SceneElement {
     fn draw(
         &self,
         frame: &mut <Renderer<'_> as RendererSuper>::Frame<'_, '_>,
@@ -246,7 +246,7 @@ mod tests {
                         whole
                     };
                     let color = if partial { [192, 32, 64] } else { [32, 64, 128] };
-                    let element: SceneElement<GlesRenderer> = SolidColorRenderElement::new(
+                    let element: SceneElement = SolidColorRenderElement::new(
                         Id::new(),
                         dst,
                         CommitCounter::default(),
@@ -264,7 +264,7 @@ mod tests {
                     let mut frame = renderer.render(&mut fb, extent, Transform::Normal).unwrap();
                     // No clear: all damage is opaque custom GLES drawing. This
                     // fails if damage forwarding to the transfer is omitted.
-                    <SceneElement<GlesRenderer> as RenderElement<Renderer<'_>>>::draw(
+                    <SceneElement as RenderElement<Renderer<'_>>>::draw(
                         &element,
                         &mut frame,
                         smithay::backend::renderer::element::Element::src(&element),

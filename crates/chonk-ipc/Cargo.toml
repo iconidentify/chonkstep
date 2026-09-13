@@ -1,0 +1,8 @@
+[package]
+name = "chonk-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nonblocking Unix stream transport for compositor IPC"
+[dependencies]
+libc = "0.2"

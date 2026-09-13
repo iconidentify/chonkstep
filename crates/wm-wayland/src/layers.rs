@@ -795,7 +795,7 @@ fn apply_workareas(comp: &mut Compositor) {
 /// says nothing to it. Insets are non-negative by construction
 /// (`reserve` only ever adds), so the clamp is belt and braces.
 fn dock_reservation(insets: EdgeInsets) -> EdgeReservation {
-    EdgeReservation { top: insets.top.max(0) as u32, right: insets.right.max(0) as u32 }
+    EdgeReservation { top: insets.top.max(0) as u32, right: insets.right.max(0) as u32, bottom:insets.bottom.max(0) as u32, left:insets.left.max(0) as u32 }
 }
 
 /// The commit-time half of the lifecycle, called from
@@ -1219,14 +1219,14 @@ mod tests {
     }
 
     #[test]
-    fn only_the_top_and_right_insets_reach_the_dock() {
+    fn all_bar_insets_reach_the_shell() {
         // A top bar with a left dock-style panel (waybar + nwg-dock):
-        // the Dock steps under the bar and ignores the panel entirely.
+        // the rail and bottom workspace navigation receive all edges.
         let insets = EdgeInsets { top: 40, left: 64, right: 0, bottom: 0 };
-        assert_eq!(dock_reservation(insets), EdgeReservation { top: 40, right: 0 });
-        // A right-edge panel and a bottom bar: only the panel counts.
+        assert_eq!(dock_reservation(insets), EdgeReservation { top: 40, right: 0, bottom:0, left:64 });
+        // A right-edge panel and a bottom bar both constrain modern chrome.
         let insets = EdgeInsets { top: 0, left: 0, right: 48, bottom: 32 };
-        assert_eq!(dock_reservation(insets), EdgeReservation { top: 0, right: 48 });
+        assert_eq!(dock_reservation(insets), EdgeReservation { top: 0, right: 48, bottom:32, left:0 });
         // No bars at all is the reservation the Dock started with, so
         // the pass after the last bar leaves puts it back exactly.
         assert_eq!(dock_reservation(EdgeInsets::default()), EdgeReservation::default());

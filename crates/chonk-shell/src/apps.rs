@@ -1,31 +1,3 @@
-//! Freedesktop application discovery: scanning and parsing the
-//! `.desktop` entries every installed app ships, into the flat
-//! [`AppEntry`] list the Applications menu and the launcher dock both
-//! consume.
-//!
-//! The module follows the freedesktop Desktop Entry specification, but
-//! is deliberately split into a pure core and a thin filesystem shell:
-//! parsing ([`parse_desktop_entry`]) and cross-directory collation
-//! (`collate_scanned`) operate on plain strings and are exhaustively
-//! unit-tested, while [`scan_applications`] only walks the XDG
-//! directories and feeds what it finds into that core. The `TryExec`
-//! existence probe likewise goes through a function-pointer seam so the
-//! skip logic tests without a real `$PATH`.
-//!
-//! Deliberate simplifications, each documented where it lives:
-//! - Only the plain `Name` key is honored; localized `Name[xx]`
-//!   variants are ignored. Chonkstep's own chrome is untranslated, so a
-//!   localized menu label would be the odd one out anyway.
-//! - Entries carrying `OnlyShowIn` are skipped outright. That key
-//!   restricts an entry to specific registered desktop environments
-//!   (GNOME's control center panels, KDE service menus, ...), and
-//!   chonkstep is not a registered desktop, so no value of the list can
-//!   ever name us. `NotShowIn` is ignored for the same reason: it can
-//!   never match us either, so those entries stay visible.
-//! - The desktop-file id drops the `.desktop` suffix (matching the
-//!   `org.mozilla.firefox` shape documented on [`AppEntry::id`]): every
-//!   file carries the same extension, so it adds nothing to the
-//!   identity that launcher pins persist.
 
 use std::collections::{hash_map::Entry, HashMap};
 use std::env;

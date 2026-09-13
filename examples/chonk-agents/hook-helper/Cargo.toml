@@ -1,0 +1,15 @@
+[package]
+name = "chonk-agent-hook"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+[workspace]
+
+[dependencies]
+libc = "0.2"
+serde_json = "1.0"
+
+[profile.release]
+strip = true

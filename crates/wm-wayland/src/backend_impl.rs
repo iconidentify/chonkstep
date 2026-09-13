@@ -639,6 +639,10 @@ impl Backend for WaylandBackend {
         }
     }
 
+    fn live_overview_paint_order(&self) -> Option<&[usize]> {
+        self.overview.as_ref().map(|overview| overview.paint_order())
+    }
+
     fn hide_live_overview(&mut self) {
         if self.overview.take().is_some() {
             self.mark_damaged();
@@ -982,6 +986,8 @@ impl Backend for WaylandBackend {
                 geometry,
                 input_margin: layout.input_margin,
                 parts: Vec::new(),
+                solids: Vec::new(),
+                effects: None,
                 fill_id: smithay::backend::renderer::element::Id::new(),
                 mapped: false,
             },
@@ -1064,9 +1070,10 @@ impl Backend for WaylandBackend {
                     .windows
                     .get(&record.window)
                     .is_some_and(|window| !window.mapped)
-                && record.parts.iter().any(|part| {
+                && (record.parts.iter().any(|part| {
                     decoration_part_exceeds_frame(part.offset, part.size, surface.frame_size)
-                })
+                }) || record.solids.iter().any(|part| decoration_part_exceeds_frame(
+                    part.solid.rect.pos, part.solid.rect.size, surface.frame_size)))
         });
         if let Some(record) = self.frames.get_mut(&frame) {
             let mut previous = std::mem::take(&mut record.parts).into_iter();
@@ -1110,7 +1117,21 @@ impl Backend for WaylandBackend {
                 imported.push(FramePart { offset: part.offset, size, buffer, binary_alpha });
             }
             record.parts = imported;
-            if retires_visible_chrome {
+            record.solids.truncate(surface.solids.len());
+            let old_radius=record.effects.as_ref().and_then(|e|e.shape).map(|s|(s.radius,s.border));
+            let new_radius=surface.shape.map(|s|(s.radius,s.border));
+            // Palette focus changes preserve client damage. A silhouette recipe
+            // change invalidates the old corner coverage once, including live
+            // client buffers whose own commit did not change with the theme.
+            let unbordered_rect_changed=surface.shape.is_some_and(|shape|shape.border==0)
+                && record.effects.as_ref().and_then(|e|e.shape).map(|s|s.rect)!=surface.shape.map(|s|s.rect);
+            let silhouette_changed=old_radius!=new_radius || unbordered_rect_changed;
+            crate::frame_effects::FrameEffects::update(&mut record.effects, surface);
+            for (index, solid) in surface.solids.iter().enumerate() {
+                if let Some(retained) = record.solids.get_mut(index) { retained.update(*solid); }
+                else { record.solids.push(crate::state::FrameSolid::new(*solid)); }
+            }
+            if retires_visible_chrome || silhouette_changed {
                 self.full_damage_required = true;
             }
             self.mark_damaged();
@@ -1189,8 +1210,24 @@ impl Backend for WaylandBackend {
     }
 
     fn set_decoration_layout(&mut self, frame: Self::FrameId, layout: &DecorationLayout) {
+        let mut retired = false;
         if let Some(record) = self.frames.get_mut(&frame) {
             record.input_margin = layout.input_margin;
+            // Fullscreen explicitly supplies a frameless layout and skips
+            // decoration painting. Retire its previous pixels AND silhouette:
+            // every scene/input walker reads this same retained frame record.
+            if layout.titlebar_height == 0 && layout.input_margin == 0 && layout.client_offset == Point::new(0, 0) {
+                retired = !record.parts.is_empty() || !record.solids.is_empty() || record.effects.is_some();
+                record.parts.clear();
+                record.solids.clear();
+                record.effects = None;
+            }
+        }
+        if retired {
+            // A client whose own texture/commit did not change still needs its
+            // formerly clipped corners exposed on this one transition.
+            self.full_damage_required = true;
+            self.mark_damaged();
         }
     }
 
@@ -1605,15 +1642,6 @@ impl Backend for WaylandBackend {
         handle
     }
 
-    /// Ends the drag `handle` names, and only that one.
-    ///
-    /// A handle that names no current grab is ignored deliberately,
-    /// which is what the token is for: the shell hands a stale one back
-    /// when it supersedes a press whose release never arrived
-    /// (`LaunchDock::handle_click`), and `input.rs` can have already
-    /// reclaimed the grab from a drag that outlived its buttons. In
-    /// both cases the grab this names is gone and the one in flight, if
-    /// any, belongs to somebody else.
     fn ungrab_pointer(&mut self, handle: DragHandle) {
         if self.pointer_grab.as_ref().is_some_and(|grab| grab.holds(handle)) {
             self.end_pointer_grab();
@@ -2140,6 +2168,62 @@ impl wm_theme_api::PopupHost for WaylandBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frameless_layout_retires_pixels_solids_effects_and_restores_on_repaint() {
+        use wm_theme::{DecorationStyle, RasterThemeEngine};
+        use wm_theme_api::{DecorationRequest, ThemeEngine};
+        let display = smithay::reexports::wayland_server::Display::<crate::state::Compositor>::new().unwrap();
+        let mut backend = WaylandBackend::new(display.handle(), Vec::new(), 1.0);
+        for style in [DecorationStyle::WindowMaker, DecorationStyle::System7, DecorationStyle::Modern] {
+            let engine = RasterThemeEngine::nextstep_classic().with_style(style).unwrap();
+            let request = DecorationRequest { content_size: Size::new(400, 300), title: "Lifecycle".into(), focused: true, resizable: true, buttons: Vec::new() };
+            let layout = engine.layout(&request);
+            let surface = engine.render_surface(&request, &layout);
+            let frame = backend.create_decoration(WlWindowId(42), &layout);
+            backend.paint_decoration(frame, &surface);
+            assert!(!backend.frames[&frame].parts.is_empty());
+            let fullscreen = DecorationLayout { frame_size: Size::new(1280, 800), input_margin: 0, client_offset: Point::new(0, 0), titlebar_height: 0, button_hitboxes: Vec::new(), resize_hitboxes: Vec::new(), shaded_frame_height: 0 };
+            backend.full_damage_required = false;
+            backend.set_decoration_layout(frame, &fullscreen);
+            let record = &backend.frames[&frame];
+            assert!(record.parts.is_empty() && record.solids.is_empty() && record.effects.is_none(), "{style:?}: fullscreen has no stale visual or input mask");
+            assert!(backend.full_damage_required);
+            backend.full_damage_required = false;
+            backend.set_decoration_layout(frame, &fullscreen);
+            assert!(!backend.full_damage_required, "unchanged fullscreen layout is idle");
+            backend.set_decoration_layout(frame, &layout);
+            backend.paint_decoration(frame, &surface);
+            let record = &backend.frames[&frame];
+            assert_eq!(record.parts.len(), surface.parts.len());
+            assert_eq!(record.solids.len(), surface.solids.len());
+            assert_eq!(record.effects.is_some(), surface.shape.is_some() || surface.shadow.is_some());
+            backend.destroy_decoration(frame);
+        }
+    }
+
+    #[test]
+    fn retained_solid_chrome_keeps_identity_and_damages_only_semantic_changes() {
+        use smithay::backend::renderer::element::Element;
+        let solid = wm_theme_api::DecorationSolid { rect: Rect::new(Point::new(3,9),Size::new(80,2)), rgb:[31,47,63] };
+        let mut retained = crate::state::FrameSolid::new(solid);
+        let id = retained.id.clone();
+        let commit = retained.commit;
+        retained.update(solid);
+        assert_eq!(retained.id,id);
+        assert_eq!(retained.commit,commit);
+        let first = retained.element(solid.rect,1.0);
+        assert!(first.damage_since(1.0.into(),Some(commit)).is_empty());
+        let mut changed = solid; changed.rgb[0] += 1;
+        retained.update(changed);
+        assert_eq!(retained.id,id);
+        assert_ne!(retained.commit,commit);
+        assert!(!retained.element(solid.rect,1.0).damage_since(1.0.into(),Some(commit)).is_empty());
+        let current = retained.commit;
+        retained.update(changed);
+        assert_eq!(retained.commit,current);
+        assert_eq!(retained.element(solid.rect,1.0).geometry(1.0.into()).size,(80,2).into());
+    }
 
     #[test]
     fn binary_chrome_requires_exact_zero_holes_and_fully_opaque_visible_pixels() {

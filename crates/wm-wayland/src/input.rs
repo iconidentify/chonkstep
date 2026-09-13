@@ -2954,10 +2954,11 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         }) {
             return hit;
         }
-        if !record.geometry.contains(at) {
+        if !record.geometry.contains(at) || record.effects.as_ref().is_some_and(|effects|
+            !effects.accepts_input(local_to(at,record.geometry.pos))) {
             continue;
         }
-        let over_content = window.is_some_and(|window| window.mapped && window.content.contains(at));
+        let over_content = record.effects.as_ref().is_none_or(|effects|effects.client_accepts_input(local_to(at,record.geometry.pos))) && window.is_some_and(|window| window.mapped && window.content.contains(at));
         if over_content {
             if let Some(hit) = content_hit(backend, Some(*frame), record.window, position) {
                 return hit;

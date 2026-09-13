@@ -23,6 +23,7 @@ pub struct FakeFrameId(pub u64);
 #[derive(Default)]
 pub struct FakeBackend {
     next_id: u64,
+    pub capture_calls: std::cell::Cell<usize>,
     queued_events: VecDeque<BackendEvent<FakeWindowId, FakeFrameId>>,
     titles: HashMap<FakeWindowId, String>,
     geometries: HashMap<FakeWindowId, Rect>,
@@ -426,6 +427,7 @@ impl Backend for FakeBackend {
     }
 
     fn capture_window_image(&self, _window: Self::WindowId, _size: Size) -> Option<DecorationBuffer> {
+        self.capture_calls.set(self.capture_calls.get() + 1);
         None
     }
 

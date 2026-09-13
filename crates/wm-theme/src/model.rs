@@ -1,22 +1,6 @@
 use serde::{Deserialize, Serialize};
 use wm_theme_api::ButtonKind;
 
-/// The session-wide light/dark axis every theme is rendered along.
-///
-/// An appearance is not a theme: the theme decides *which* desktop you
-/// have (Amber Phosphor, Teal Blueprint, ...) and the appearance
-/// decides which of that theme's two renditions you are looking at.
-/// Every built-in theme ships both — same identity, same chrome
-/// geometry, two deliberate palettes — and
-/// `default_theme::theme_variant` resolves an `(id, Appearance)` pair
-/// to the right one. A [`Theme`] value records which rendition it is
-/// in [`Theme::appearance`], so anything holding a resolved theme
-/// (the shell, a dockapp fed `theme_toml`) can tell without asking.
-///
-/// Serialized in kebab-lowercase (`"light"` / `"dark"`) — the same
-/// spelling the config file, the published state file and the
-/// appearance-request IPC file all use, so there is exactly one
-/// vocabulary for the axis everywhere it appears.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
@@ -300,6 +284,10 @@ pub struct Theme {
     /// authored in.
     #[serde(default)]
     pub appearance: Appearance,
+    /// Optional modern design tokens. Old serialized themes remain unchanged;
+    /// instruments receive these with the same live ThemeChanged payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chrome: Option<crate::modern::Chrome>,
     pub titlebar: TitlebarStyle,
     pub resize_bar: ResizeBarStyle,
     pub border: BorderStyle,
@@ -341,6 +329,23 @@ pub struct TerminalPalette {
 }
 
 impl Theme {
+    /// The frame recipe may be overridden independently. Optional chrome
+    /// tokens continue to describe the theme-owned dock and instrument design.
+    pub fn resolve_style(&self, style: wm_theme_api::DecorationStyle) -> wm_theme_api::DecorationStyle {
+        use wm_theme_api::DecorationStyle;
+        match style {
+            DecorationStyle::Auto if self.chrome.is_some() => DecorationStyle::Modern,
+            DecorationStyle::Auto => DecorationStyle::WindowMaker,
+            explicit => explicit,
+        }
+    }
+
+    /// Normalize serialized or externally constructed modern geometry without
+    /// changing the palette, appearance, or any legacy theme dimensions.
+    pub fn normalized_chrome(mut self) -> Self {
+        self.chrome = self.chrome.map(crate::modern::Chrome::normalized);
+        self
+    }
     /// Returns a copy with every pixel-valued dimension (titlebar/button/
     /// bevel/border sizes, font sizes, menu metrics) multiplied by
     /// `factor` — colors are untouched. Exists for HiDPI displays: this
@@ -350,13 +355,17 @@ impl Theme {
     /// (as is typical for a nested/nonnative X server). `factor` above
     /// 1.0 scales the WM's whole chrome up to compensate.
     pub fn scaled(&self, factor: f32) -> Theme {
+        let factor = if factor.is_finite() && factor > 0.0 { factor } else { 1.0 };
         if factor == 1.0 {
-            return self.clone();
+            return self.clone().normalized_chrome();
         }
-        let scale_u8 = |v: u8| ((v as f32) * factor).round().clamp(1.0, 255.0) as u8;
-        let scale_u16 = |v: u16| ((v as f32) * factor).round().max(1.0) as u16;
+        // Zero is a deliberate absence of relief or resize strip in modern
+        // themes; scaling must never introduce either element.
+        let scale_u8 = |v: u8| if v == 0 { 0 } else { ((v as f32) * factor).round().clamp(1.0, 255.0) as u8 };
+        let scale_u16 = |v: u16| if v == 0 { 0 } else { ((v as f32) * factor).round().max(1.0) as u16 };
 
         let mut theme = self.clone();
+        theme.chrome = theme.chrome.map(|chrome| chrome.scaled(factor));
 
         theme.titlebar.height = scale_u16(theme.titlebar.height);
         theme.titlebar.font.size *= factor;

@@ -55,29 +55,6 @@ pub const fn client_size_limit(screen: Size) -> Size {
     )
 }
 
-/// Absolute ceiling on how many `wl_subsurface` links may separate a
-/// surface tree's root from its deepest leaf.
-///
-/// The second client-controlled quantity that reaches into the
-/// compositor, and the one with the worse failure. A size becomes an
-/// allocation, and a refused allocation is a `SIGABRT` that at least
-/// runs the panic hook; a *depth* becomes recursion, and every
-/// traversal of a surface tree — three of them inside smithay, one
-/// commit is enough to enter all three — is recursive. Running out of
-/// stack is not a panic: the guard page faults, the kernel delivers
-/// `SIGSEGV`, and nothing runs. No `tracing::error!`, no gamma-ramp
-/// restore, no IPC-socket unlink, no dockapp teardown — the supervisor
-/// sees only "compositor exited abnormally".
-///
-/// Nothing in the protocol bounds this. `wl_subcompositor.get_subsurface`
-/// rejects only self-parenting and cycles, so a client that spends a
-/// few hundred thousand messages — a fraction of a second — arrives at
-/// tens of thousands of frames on an 8 MiB stack.
-///
-/// 64 is generous by two orders of magnitude in the direction that
-/// matters. Real toolkits nest in single digits: the deepest tree this
-/// desktop actually runs is a video surface under a decoration under a
-/// toplevel.
 pub const MAX_SUBSURFACE_DEPTH: u32 = 64;
 
 /// Whether attaching a child to a parent would push some root-to-leaf

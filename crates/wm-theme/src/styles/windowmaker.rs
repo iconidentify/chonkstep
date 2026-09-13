@@ -205,7 +205,7 @@ pub(crate) fn render_sparse_decoration(
         });
     }
 
-    DecorationSurface { frame_size: frame, parts }
+    DecorationSurface { frame_size: frame, parts, solids: Vec::new(), shadow: None, shape: None }
 }
 
 fn render_bottom(theme: &Theme, request: &DecorationRequest, w: u32, h: u32) -> DecorationBuffer {

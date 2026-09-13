@@ -28,7 +28,7 @@
 #   5. Seeds ~/.config/chonkstep/config.toml from the fully commented
 #      example, only if there is none.
 #   6. Links the user-facing tools into ~/.local/bin: chonkrec (screen
-#      recording), chonkstep-bugreport, chonk-get (the dockapp installer)
+#      recording), chonkstep-bugreport
 #      and omarchy-export-themes (chonkstep's themes
 #      as Omarchy themes). Nothing under ~/.config/omarchy is touched;
 #      the Omarchy bar widgets under omarchy/plugins/ are yours to link
@@ -79,7 +79,7 @@ echo "Installing dependencies (sudo)..."
 # X11 compositing manager behind the themes' translucent terminals -
 # the Wayland session needs no equivalent, because a compositor
 # composites itself. wireplumber:
-# wpctl, which the dock's sound instrument reads and controls (already
+# wpctl, which Omarchy's audio controls use (already
 # present on any PipeWire desktop; harmless elsewhere - without a sink
 # the instrument shows its dead-screen face). Fonts: DejaVu (the
 # chiseled window chrome), gsfonts/Nimbus Sans (the NeXT Lavender
@@ -284,15 +284,13 @@ fi
 # The tools a user reaches for by name, put on PATH the same way
 # the session entries were: as links back into this checkout, so
 # scripts/update.sh keeps them current with nothing else to do.
-# chonk-get is a script and lives in scripts/; omarchy-export-themes is
-# a release binary beside the session ones. ln -sfn makes a rerun (or
+# omarchy-export-themes is a release binary beside the session ones. ln -sfn makes a rerun (or
 # a moved checkout, after re-running this script) rewrite the links
 # rather than fail on them. ~/.local/bin is the XDG-blessed spot and
 # is on PATH on stock Omarchy; the note below covers a shell where it
 # is not, since a link nobody can reach is worse than none.
 bin="$HOME/.local/bin"
 install -d "$bin"
-ln -sfn "${repo}/scripts/chonk-get" "$bin/chonk-get"
 ln -sfn "${repo}/scripts/chonkrec" "$bin/chonkrec"
 ln -sfn "${repo}/scripts/chonkstep-bugreport" "$bin/chonkstep-bugreport"
 ln -sfn "${repo}/target/release/omarchy-export-themes" "$bin/omarchy-export-themes"
@@ -313,79 +311,12 @@ if [ -x "${repo}/target/release/omarchy-export-themes" ]; then
     "${repo}/target/release/omarchy-export-themes" >/dev/null 2>&1 ||
         echo "note: could not export themes into ~/.config/omarchy/themes; run omarchy-export-themes by hand" >&2
 fi
-# chonk-netjoin is the odd one out here: nobody types it. It is the
-# wifi passphrase dialog the LNK panel spawns when someone clicks a
-# secured network it has no saved profile for, and the dock launches it
-# by bare name through the effect runner - which resolves it on PATH.
-# So it is linked for the machine's benefit rather than the user's, and
-# without the link the panel's "JOIN..." row silently does nothing.
+# Keep the independent network-join helper available to external launchers.
 ln -sfn "${repo}/target/release/chonk-netjoin" "$bin/chonk-netjoin"
 bin_on_path=""
 case ":${PATH}:" in
     *":${bin}:"*) bin_on_path="yes" ;;
 esac
-
-# The Tailscale operator grant, offered once and never taken silently.
-#
-# Reading the tailnet needs no privilege, so the LNK panel can always
-# show it. Moving it is different: tailscaled's IPN bus is
-# root-or-operator, and a `tailscale up`/`down` from the panel comes
-# back "Access denied: ... must be root or Operator" unless this user
-# holds the operator role. The panel handles that honestly - the row
-# locks and shows the remedy rather than pretending the toggle worked
-# (docs/link-panel.md) - but an honest dead toggle is still a dead
-# toggle, and the fix is one command that has to be run as root.
-#
-# So: explain it, ask, and default to no. This grants THIS user the
-# power to change the machine's VPN state with no further
-# authentication, which is a real privilege decision and not one an
-# installer should make on someone's behalf while they look away.
-#
-# The test is "can this user talk to the socket", not "is the operator
-# preference set", because the first is the question that actually
-# decides whether the toggle works: tailscaled hands the operator its
-# control socket, but a site that has widened the socket's permissions
-# some other way is equally able to toggle, and nagging it to run a
-# command it does not need would be wrong.
-ts_sock="/var/run/tailscale/tailscaled.sock"
-if command -v tailscale >/dev/null 2>&1 && [ -S "$ts_sock" ] && [ ! -w "$ts_sock" ]; then
-    cat <<TAILSCALE
-
-Tailscale is installed here, and the dock's LNK panel can show your
-tailnet - but not toggle it. Changing Tailscale's state needs root or
-the "operator" role, which this account does not have, so the panel
-will draw that row locked with the command that would unlock it.
-
-Granting it runs:
-
-    sudo tailscale set --operator=${USER}
-
-after which ${USER} can bring Tailscale up and down - from the panel or
-the command line - without a password. That is a genuine privilege;
-say no if you would rather use sudo each time.
-
-TAILSCALE
-    # Only ask where there is somebody to answer. A piped or CI install
-    # has no terminal, and the safe default for an unattended run is
-    # the one that changes nothing.
-    if [ -t 0 ] && [ -t 1 ]; then
-        printf 'Grant the operator role to %s now? [y/N] ' "$USER"
-        read -r ts_reply || ts_reply=""
-        case "$ts_reply" in
-            [yY] | [yY][eE][sS])
-                if sudo tailscale set --operator="$USER"; then
-                    echo "Granted. The panel's Tailscale row is now a working toggle."
-                else
-                    echo "That did not take; the panel will keep showing the remedy." >&2
-                fi
-                ;;
-            *) echo "Left alone. Run the command above whenever you want it." ;;
-        esac
-    else
-        echo "(Not a terminal, so nothing was asked or changed.)"
-    fi
-    echo
-fi
 
 # How this machine logs in decides which instructions are honest. The
 # installer has already enabled chonkstep's own SDDM picker without
@@ -460,7 +391,7 @@ cat <<DONE
       ${repo}/target/release/chonkstep-wayland
     from a terminal inside your current desktop. The compositor sees a
     desktop already running and opens a window that is its screen -
-    same chrome, dock, menus, and themes, with X11 apps through
+    same chrome, menus, and themes, with X11 apps through
     XWayland.
 DONE
 if [ -z "$has_logind" ]; then
@@ -478,8 +409,7 @@ cat <<DONE
   - HiDPI: set "scale = 2.0" in ${config}
     (the whole file is optional and every line is documented; both
     backends read it).
-  - On PATH, as links into this checkout: chonk-get (install a dockapp:
-    chonk-get install examples/chonk-shelf), chonkrec (record demos with
+  - On PATH, as links into this checkout: chonkrec (record demos with
     chonkrec start --demo), chonkstep-bugreport, and omarchy-export-themes
     (write chonkstep's themes where omarchy-theme-set can find them).
 DONE

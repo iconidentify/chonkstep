@@ -1,35 +1,25 @@
 [package]
 name = "chonk-shell"
-description = "The chonkstep desktop shell, backend-generic: dock, Clip, menus, launcher, instruments"
+description = "The chonkstep desktop shell, backend-generic: menus, window navigation and Omarchy integration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [features]
-# Everything LCOS-specific: the Lunduke Navy artwork, the LCOS dock
-# mark, the solid grounds the desk themes name, and the wm-theme themes
+# Everything LCOS-specific: the Lunduke Navy artwork, the solid grounds the desk themes name, and the wm-theme themes
 # themselves. 2.5MB of assets that the Arch/Omarchy package has no use
 # for, so they are compiled out of it entirely rather than shipped and
 # ignored — `include_bytes!` behind a `cfg` leaves nothing behind.
 lcos = ["wm-theme/lcos"]
 
 [dependencies]
-chonk-dock-proto = { path = "../chonk-dock-proto" }
-chonk-dock-widget = { path = "../chonk-dock-widget" }
-# The six built-in instruments. The edge points this way and only this
-# way: `chonk-instruments` cannot see this crate, which is what makes
-# its per-crate ban on file, process and thread APIs meaningful — there
-# is nothing there to reach for, not merely a lint saying not to.
-chonk-instruments = { path = "../chonk-instruments" }
+chonk-ipc = { path = "../chonk-ipc" }
 wm-core = { path = "../wm-core" }
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
 wm-config = { path = "../wm-config" }
 cosmic-text = "0.19"
-# `SIGTERM` for a dockapp whose socket died while its process did not
-# (`spawn::SpawnedChild::terminate`). std has no way to signal a process
-# it is not currently holding a `Child` for, and holding one would mean
-# owning the `wait` that must stay on its own thread.
+# Signals and bounded subprocess supervision.
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 # Two wires need JSON. Omarchy's menu definition (`omarchy_menu`) is
@@ -49,10 +39,7 @@ tiny-skia = "0.11"
 # once per change, on the shell's own thread, and the dependency graph
 # stays free of C and of a thread pool.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
-# `.dockapp` registration files. Already a workspace dependency (the
-# config, the theme model, and `chonk-ui` all speak it), so a dockapp
-# manifest costs nothing new and looks like every other file this
-# desktop asks a user to edit.
+# Theme descriptors and shell configuration.
 toml = "0.9"
 tracing = "0.1"
 tempfile = "3"

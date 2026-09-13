@@ -179,3 +179,75 @@ The recurring part of (1) is now removed. If stalls persist, Overview entry
 and the synchronous portions of (2) remain the first places to instrument;
 the capture path exposes trace-level per-readback telemetry (including target
 dimensions) so this can be measured rather than guessed at.
+
+## Chromium/Edge Media SIGILL after `Failed to map NvKmsKapiMemory`
+
+A different NVIDIA dmabuf failure than hover flicker. Measured on this
+machine 2026-09-12 while scrolling X in Microsoft Edge 152 on native
+Wayland (`--ozone-platform=wayland`), trying to play a video. The
+compositor was the shipping `chonkstep-wayland` session: display on
+PCI `01:00.0` / `renderD128`, overlay and primary-any scanout **off**,
+no `CHONKSTEP_RENDER_DEVICE` (single-GPU path). Edge's GPU process was
+pinned to the same render node.
+
+**Measured, same second:**
+
+```
+NVRM: dmaAllocMapping_GM107: can't alloc VA space for mapping.
+NVRM: nvAssertOkFailedNoLog: ... NV_ERR_NO_MEMORY ... mapping_reuse.c:273
+[drm:__nv_drm_gem_nvkms_map] ERROR [nvidia-drm] [GPU ID 0x00000100] Failed to map NvKmsKapiMemory ...
+traps: Media[…] trap invalid opcode … in msedge[…]
+```
+
+The crashing thread is Edge's renderer **Media** thread, signal SIGILL
+`ILL_ILLOPN`. Both 3090s on this box have a **256 MiB BAR1** (Resizable
+BAR off). Framebuffer VRAM was mostly occupied by a vLLM worker on the
+*display* GPU; BAR1 is the scarce resource, not FB.
+
+This is not unique to ChonkStep. The same pairing — BAR1 VA exhaustion,
+`__nv_drm_gem_nvkms_map` failure, Chromium-family Media/`ud2` SIGILL —
+is reported on KDE, COSMIC, GNOME, and Hyprland, including nvidia-open
+610.57.04 (this driver). NVIDIA tracks the Wayland-only map storm as
+internal bug 5762513. Chromium then `IMMEDIATE_CRASH()`s instead of
+falling back to software decode. Firefox does not take this path.
+
+**What this compositor can and cannot do:**
+
+- Cannot prevent Edge's GPU/Media process mmap'ing its own dma-buf.
+  That ioctl is client → nvidia-drm and does not go through the
+  compositor.
+- Must not advertise a `linux-dmabuf` `main_device` that is a different
+  GPU than the client's `--render-node-override`. Issue #28 already
+  refuses a display-only primary node; dual full NVIDIA GPUs still
+  need the advertised render node to match the display GPU unless
+  `CHONKSTEP_RENDER_DEVICE` is an explicit cross-GPU session.
+- Conservative fullscreen primary scanout is on by default; overlay
+  and primary-any remain experimental. Those experiments change client
+  allocations and were left off after qualification. They are not
+  required to hit this SIGILL.
+- `CHONKSTEP_STRICT_BUFFER_RELEASE` (default on for NVIDIA) holds one
+  extra frame of client buffers. That is the flicker fix. It slightly
+  increases BAR1 residency; it is not the map-failure root cause.
+
+**Levers, in order:**
+
+1. Stop hardware video decode in the browser:
+   `--disable-accelerated-video-decode`. Do not enable
+   `VaapiOnNvidiaGPUs`.
+2. Keep large CUDA/vLLM workers off the display GPU. A 20 GiB compute
+   process on the same card as the compositor and the browser is a
+   BAR1 amplifier even when FB still has slack.
+3. Enable Above 4G Decoding + Resizable BAR so BAR1 is tens of GiB
+   instead of 256 MiB. That helped one 610/Chromium/Media SIGILL
+   report; it is firmware, not a compositor switch.
+4. `--ozone-platform=x11` avoids NVIDIA's Wayland-only map storm
+   (353598). Native Wayland is still the intended session.
+5. `chonkstep-bugreport` now dumps BAR1, `nvidia-smi` processes, and
+   recent `NvKmsKapiMemory` / `dmaAllocMapping` / Media SIGILL kernel
+   lines so the next report can prove this class instead of guessing
+   flicker.
+
+`CHONKSTEP_NO_DIRECT_SCANOUT=1` is a useful A/B if a future crash
+coincides with overlay/primary-any experiments. On the shipping
+conservative-primary session it is not expected to change this Media
+SIGILL.

@@ -3,23 +3,12 @@
 > **One line.** Put `desktop = "omarchy"` at the top of
 > `~/.config/chonkstep/config.toml` and log back in.
 
-Chonkstep is a stacking window manager with a whole desktop wrapped
-around it — a Dock of instruments, a root menu, its own themes, its own
-wallpaper. Omarchy is a whole desktop too, and a good one. Running both
-at once gets you two clocks, two volume readouts and two ideas about
-what `super+return` means.
+ChonkStep manages windows, decorations, desktop menus, Alt-Tab and Overview.
+Omarchy provides the menu bar, workspace indicators, system panels and desktop
+services. The compositor has no dock or persistent desktop workspace switcher.
 
-`desktop = "omarchy"` resolves that in the direction an Omarchy user
-wants: **chonkstep becomes the window manager for Omarchy's desktop.**
-Its windowing, its chrome, its Alt+Tab and its Overview; Omarchy's bar,
-menu, pickers, panels, notifications, lock screen and theme.
-
-Everything below is a **default**. A preset in chonkstep is a set of
-starting values, never a lock: the posture is applied to the built-in
-defaults *before* your file's own keys are read, so writing any one of
-these keys out overrides it by the ordinary TOML rule, with no
-precedence table to learn. `desktop = "omarchy"` followed by
-`show_dock = true` gets you the whole posture with the Dock back.
+The preset applies before your explicit configuration keys, so each setting
+can be overridden independently.
 
 ---
 
@@ -27,15 +16,14 @@ precedence table to learn. `desktop = "omarchy"` followed by
 
 | Key | Chonkstep default | Under `desktop = "omarchy"` | Why |
 |---|---|---|---|
-| `show_dock` | `true` | **`false`** | Omarchy's bar already carries the clock, volume, network, Bluetooth and power readouts the Dock's instruments carry. Two strips of furniture on one screen is the thing this mode exists to stop. |
-| `omarchy_bar` | *(unset — the bar is hosted but hidden)* | **`true`** | With the Dock gone, the bar is the desk's furniture rather than a guest's, so it starts on screen instead of waiting to be asked for. |
+| `omarchy_bar` | *(unset — the bar is hosted but hidden)* | **`true`** | Show Omarchy's workspace indicators and system controls. |
 | `theme` | *(unset — the flagship)* | **`"omarchy"`** | Follow Omarchy's palette: chrome, menus, wallpaper and terminal colours re-dress within a second of `omarchy-theme-set`. |
 | `lock_command` | *(unset)* | **`"omarchy-system-lock"`** | Recovery enters a blank, input-isolated lock domain before launching Omarchy's own lock entry point; hosting a newly restarted shell does not lock it by itself. |
 | `keymap` | `"chonkstep"` | **`"omarchy"`** | The adoption cliff, and the reason this is one line and not two. See [the keymap](#the-keymap) below. |
 | `omarchy_menu` | `true` | `true` | Already on; restated by the posture so a change of default cannot silently take the posture with it. |
 | `omarchy_shell` | `true` | `true` | Same. |
 
-Nothing else. The mode sets seven values and no more; there is no hidden
+Nothing else. The mode sets six values and no more; there is no hidden
 behaviour keyed off the posture anywhere in the codebase, which is why
 `desktop` is carried on the resolved config only so a session can
 *report* what it read.
@@ -45,24 +33,15 @@ behaviour keyed off the posture anywhere in the codebase, which is why
 ```toml
 desktop = "omarchy"     # the whole posture...
 
-show_dock = true        # ...but keep the Dock
 omarchy_bar = false     # ...or start with the bar hidden
 theme = "amber-phosphor"# ...or wear a chonkstep theme anyway
 lock_command = "swaylock"# ...or use a different recovery locker
-keymap = "chonkstep"    # ...or keep the NeXTSTEP chords
+keymap = "chonkstep"    # ...or keep ChonkStep's native chords
 omarchy_shell = false   # ...or do not host Omarchy's shell at all
 ```
 
-Two of these have a *third* layer above the file, and it wins over both
-your key and the preset:
-
-- **The Dock** — the root menu's `Dock` row and the `toggle-dock`
-  binding write your choice to chonkstep's state, and a stored choice
-  beats `show_dock`.
-- **Omarchy's bar** — the root menu's `Omarchy Bar` row does the same
-  for `omarchy_bar`.
-
-That ordering is deliberate and matches how `theme` already works: a
+The root menu's `Omarchy Bar` row persists visibility above the configured
+`omarchy_bar` default. That ordering is deliberate and matches how `theme` already works: a
 choice you made *in the running session* is more recent and more
 deliberate than a line you wrote in a file once, so hiding the bar from
 the menu is not undone the next time you log in.
@@ -172,7 +151,7 @@ Three kinds of Omarchy binding get three different answers:
 | Chord | Omarchy | Here | The difference |
 |---|---|---|---|
 | `super+f` / `super+alt+f` | fullscreen / "full width" (Hyprland's `maximized`) | `toggle-fullscreen` / `toggle-maximize` | The pair keeps its shape: the plain chord takes the whole output with no chrome, the modified one fills the workarea and keeps the titlebar. |
-| `super+alt+s` | move the window to the scratchpad workspace | `miniaturize` | Both mean "send this window away, recoverably". Omarchy's goes to a hidden workspace and comes back with the same chord; chonkstep's collapses to an **icon tile on the desk** and comes back by double-clicking that tile. There is no chord for the way back — `super+s` (toggle scratchpad) is unbound. |
+| `super+alt+s` | move the window to the scratchpad workspace | `miniaturize` | Both mean "send this window away, recoverably". Omarchy's goes to a hidden workspace and comes back with the same chord; ChonkStep hides the window until it is selected with Alt-Tab. `super+s` (toggle scratchpad) is unbound. |
 | `control+escape` | nothing | `window-menu` | The window menu is a chonkstep verb Omarchy has no vocabulary for. It keeps its own chord, which Omarchy leaves free. |
 
 Binding firing semantics are preserved too. Omarchy's media and brightness
@@ -254,13 +233,10 @@ So has silent workspace movement: `super+shift+alt+1..0` sends the
 focused window to that workspace, keeps the current workspace on
 screen, and focuses the window it exposed.
 
-- **Toggling Omarchy's bar** (`super+shift+space`) has no chonkstep
-  verb: `toggle-dock` toggles *this desk's* Dock, which is a different
-  piece of furniture, and mapping one to the other would hide the wrong
-  thing. The root menu's `Omarchy Bar` row is the way, and
-  `omarchy_bar = false` is the way to start without it.
-
 ---
+
+The root menu's `Omarchy Bar` row controls bar visibility; `omarchy_bar = false`
+starts with it hidden.
 
 ## What it looks like when it worked
 
@@ -271,10 +247,10 @@ hosting Omarchy's shell   launcher=/usr/share/omarchy/bin/omarchy-launch-shell
 ```
 
 ...and the desk comes up with Omarchy's bar across the top, no
-chonkstep Dock in the corner, and Omarchy's own palette on the window
+extra desktop strips, and Omarchy's own palette on the window
 chrome. `super+return` opens a terminal; `super+space` opens Omarchy's
-menu; right-clicking the desk still gets chonkstep's root menu, with
-`Dock` and `Omarchy Bar` rows in it to change your mind.
+menu; right-clicking the desk still gets chonkstep's root menu, including
+its `Omarchy Bar` visibility control.
 
 ## Related
 

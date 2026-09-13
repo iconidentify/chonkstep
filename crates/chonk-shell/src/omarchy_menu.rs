@@ -580,12 +580,6 @@ impl MenuModel {
         (!lines.is_empty()).then(|| format!("{}{lines}", condition_prelude(&lines)))
     }
 
-    /// Renders the tree against a condition snapshot. `base` is the
-    /// first action id; `inert` is the id a `disabled` row fires (one
-    /// that resolves to nothing, so the pick dismisses the menu — the
-    /// same device the dock's About rows use, since `MenuItem` has no
-    /// disabled variant and growing the theme SDK for this one menu
-    /// would touch every menu in the desktop).
     pub fn items(&self, conditions: Option<&Conditions>, base: u32, inert: u32) -> Vec<MenuItem> {
         self.render_level(&self.roots, conditions, base, inert)
     }

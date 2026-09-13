@@ -1,86 +1,3 @@
-//! User-facing configuration: the `config.toml` format, keybinding spec
-//! parsing, and the built-in defaults everything merges over.
-//!
-//! Kept as its own crate from the start (even though its needs are
-//! small) because config parsing is genuinely orthogonal to
-//! windowing/rendering — a future control tool could reuse it without
-//! pulling in either.
-//!
-//! Two rules shape every decision here:
-//!
-//! - **A broken config must never cost the user their session.**
-//!   [`load`] is infallible: a missing file silently yields the
-//!   defaults; an unreadable or syntactically invalid file logs a
-//!   warning and falls back to the defaults; and an individually bad
-//!   entry (a typo'd key spec, an unknown action name, a wrongly typed
-//!   value) is warned about and skipped while every *other* entry still
-//!   applies. A window manager that refuses to start over one bad line
-//!   would strand the user at a blank X session with no way to fix it.
-//! - **User bindings merge over the defaults, they never replace the
-//!   set wholesale.** Listing one combo in `[keybindings]` overrides
-//!   only that combo; unlisted defaults survive. The sentinel value
-//!   `"none"` unbinds a combo outright, so every default is escapable
-//!   without the user re-listing the rest. Within the file, a combo
-//!   spelled twice (possible via case or aliases like `ctrl`/`control`)
-//!   resolves to the *last* occurrence, matching how people read a file
-//!   top to bottom.
-//!
-//! The format, in full:
-//!
-//! ```toml
-//! desktop = "omarchy"                # optional; a whole posture's defaults (see `preset`)
-//! keymap = "omarchy"                 # optional; which binding vocabulary (see `preset`)
-//! focus_follows_mouse = false        # optional; default false
-//! autoraise = true                   # optional; does taking focus also raise?
-//! scale = 2.0                        # optional; UI scale factor
-//! theme = "nextstep-classic"         # optional; theme name
-//! appearance = "dark"                # optional; "light" | "dark"
-//! decoration_style = "windowmaker"  # optional; "windowmaker" | "system7"
-//! placement = "smart"                # optional; "smart" | "cascade" | "center"
-//! edge_resistance = 10               # optional; px, 0 disables edge snapping
-//! terminal_font_px = 18              # optional; terminal font size at 1x
-//! drag_modifier = "alt"              # optional; move/resize drag modifier, or "none"
-//! restore_session = true             # optional; relaunch last session's windows
-//! lock_command = "swaylock"          # optional; locker for post-crash recovery
-//!                                      # (`desktop = "omarchy"` supplies Omarchy's entry point)
-//! show_dock = true                  # optional; the Dock column and its screen strip
-//! omarchy_menu = true                # optional; Omarchy's menu under right-click
-//! omarchy_shell = true               # optional; host Omarchy's shell (bar, panels, OSD)
-//! omarchy_bar = true                 # optional; start with that bar shown
-//! terminal = "alacritty"             # optional; the terminal the shell spawns (string or argv)
-//! autostart = [["udiskie", "--automount"]]  # optional; run once, in order, on a fresh session
-//!
-//! [commands]                         # optional; named argv lists for `run <name>`
-//! menu = "omarchy-menu toggle"       # a string is split on whitespace; an array is literal
-//!
-//! [decorations]                      # optional; per-application overrides
-//! server_side = ["bare.kde.app"]     # frame a client whose own chrome never shows up
-//! client_side = ["borderless-game"]  # let an xdg client stay bare
-//!
-//! [input]                            # optional; live libinput configuration
-//! sensitivity = 0.0                 # -1.0 through 1.0
-//! accel_profile = "adaptive"         # or "flat"
-//! left_handed = false
-//!
-//! [input.touchpad]
-//! natural_scroll = true
-//! scroll_factor = 0.4
-//!
-//! [keybindings]
-//! "alt+shift+return" = "spawn-terminal"
-//! "super+t" = "spawn-terminal"       # extra binding for the same action
-//! "super+space" = "run menu"         # a `[commands]` entry, by name
-//! "alt+ctrl+right" = "none"          # unbind a default
-//! ```
-//!
-//! Key specs are case-insensitive, `+`-separated modifier tokens
-//! followed by exactly one key token (see [`parse_key`]). Action names
-//! are the kebab-case of the [`Action`] variants. Precedence against
-//! environment variables and persisted UI state (`CHONKSTEP_SCALE`,
-//! the theme-menu state file, ...) is the binary's business, not this
-//! crate's — which is why `scale` and `theme` stay `Option` here
-//! instead of being defaulted: the caller must be able to tell "user
-//! said nothing" apart from "user chose the default value".
 
 pub mod hyprland;
 pub mod preset;
@@ -192,16 +109,6 @@ pub enum Action {
     /// says why it exists: "To access the window commands menu of a
     /// window without its titlebar, press Control+Esc."
     WindowMenu,
-    /// Show the Dock if it is hidden, hide it if it is shown — the
-    /// keyboard's way to the same choice the root menu's `Dock` row
-    /// makes, remembered across sessions in chonkstep's own state.
-    ///
-    /// A verb rather than a `[commands]` entry because hiding the Dock
-    /// is not a program to run: it unmaps a surface *and* gives the
-    /// strip it reserved back to the workarea, which is the window
-    /// manager's own semantics and nothing an external command could
-    /// reach.
-    ToggleDock,
     /// Re-read this file and apply it to the running session — theme,
     /// UI scale, focus policy, placement, edge resistance and these
     /// very bindings, with no restart and nothing closed.
@@ -352,7 +259,6 @@ fn action_from_name(name: &str) -> Option<Action> {
         "overview" => Some(Action::Overview),
         "root-menu" => Some(Action::RootMenu),
         "window-menu" => Some(Action::WindowMenu),
-        "toggle-dock" => Some(Action::ToggleDock),
         "reload" => Some(Action::Reload),
         "restart" => Some(Action::Restart),
         // The two verbs that carry a workspace *number* rather than a
@@ -464,7 +370,6 @@ pub struct Config {
     /// lives in `wm-theme`, which this crate deliberately does not
     /// depend on.
     pub appearance: Option<String>,
-    /// Frame geometry and glyph recipe; selected only by this config file.
     pub decoration_style: wm_theme_api::DecorationStyle,
     /// Where newly mapped windows go when the client expressed no
     /// position preference. Fed to the WM's placement engine verbatim.
@@ -562,34 +467,6 @@ pub struct Config {
     /// half a feature without it: a speed test, a theme picker or a
     /// volume key each ends in a panel that shell draws.
     pub omarchy_shell: bool,
-    /// Whether the session comes up wearing its Dock — the instrument
-    /// column in the primary monitor's top-right corner, and the strip
-    /// of screen it reserves off the workarea.
-    ///
-    /// On by default: the Dock is what a chonkstep desk *is*. Set it
-    /// to false for the configuration chonkstep is offered to Omarchy
-    /// as — its window management and chrome under Omarchy's own bar
-    /// and pickers, with no second piece of furniture in the corner.
-    ///
-    /// This is the *starting point*, not the last word: the root
-    /// menu's `Dock` row and the `toggle-dock` binding both write the
-    /// user's choice to chonkstep's state, and a stored choice wins
-    /// over this key exactly as a stored theme choice wins over
-    /// `theme` (see `chonk_shell::desktop::DockVisibility::resolve`).
-    pub show_dock: bool,
-    /// Whether the session starts with Omarchy's hosted bar on screen.
-    ///
-    /// `Option` for the same reason `theme` is: the bar's visibility is
-    /// a *remembered* choice (the root menu's `Omarchy Bar` row writes
-    /// it to chonkstep's own state), so the resolver must be able to
-    /// tell "the file said nothing, use the remembered choice or the
-    /// desk's own default of hidden" apart from "the file said start it
-    /// shown" — see `chonk_shell::omarchy_shell::BarVisibility::resolve`.
-    ///
-    /// `None` by default, because a chonkstep desk that merely *hosts*
-    /// Omarchy's shell already has a Dock in the corner and does not
-    /// want a second instrument strip unasked. `desktop = "omarchy"`
-    /// is the posture that asks.
     pub omarchy_bar: Option<bool>,
     /// Which posture's defaults this file was read over
     /// ([`preset::Desktop`]). Carried so a session can *report* what it
@@ -686,7 +563,7 @@ impl Config {
             scale: None,
             theme: None,
             appearance: None,
-            decoration_style: wm_theme_api::DecorationStyle::WindowMaker,
+            decoration_style: wm_theme_api::DecorationStyle::Auto,
             // Smart is the classic default placement, and 10px
             // matches the stock edge-resistance feel: strong enough
             // to catch a deliberate drag toward an edge, weak enough
@@ -715,7 +592,6 @@ impl Config {
             autostart: Vec::new(),
             omarchy_menu: true,
             omarchy_shell: true,
-            show_dock: true,
             omarchy_bar: None,
             desktop: preset::Desktop::Chonkstep,
             keymap: preset::Keymap::Chonkstep,
@@ -1430,7 +1306,7 @@ pub fn parse_with(
                 Some(style) => config.decoration_style = style,
                 None => {
                     let message = format!(
-                        "config: decoration_style must be \"windowmaker\" or \"system7\", keeping default (got {value})"
+                        "config: decoration_style must be \"auto\", \"windowmaker\", \"system7\" or \"modern\", keeping default (got {value})"
                     );
                     tracing::warn!("{message}");
                     config.diagnostics.push(message);
@@ -1510,13 +1386,7 @@ pub fn parse_with(
                     "config: omarchy_bar must be a boolean, keeping default"
                 ),
             },
-            "show_dock" => match value {
-                toml::Value::Boolean(b) => config.show_dock = *b,
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: show_dock must be a boolean, keeping default"
-                ),
-            },
+            "show_dock" => {},
             "lock_command" => match value {
                 // An empty or whitespace-only command means the same
                 // thing as no key at all: nothing to run. Filtering it
@@ -1911,7 +1781,6 @@ pub fn effective_config_report(config: &Config) -> String {
     line("terminal_font_px", config.terminal_font_px.to_string());
     line("drag_modifier", format!("{:?}", config.drag_modifier));
     line("restore_session", config.restore_session.to_string());
-    line("show_dock", config.show_dock.to_string());
     line("omarchy_bar", format!("{:?}", config.omarchy_bar));
     line("input", format!("{:?}", config.input));
     line("monitor_rules", config.monitor_rules.len().to_string());
@@ -2672,7 +2541,6 @@ scroll_factor = 0.4
             ("overview", Action::Overview),
             ("root-menu", Action::RootMenu),
             ("window-menu", Action::WindowMenu),
-            ("toggle-dock", Action::ToggleDock),
             (
                 "global-shortcut org.example.App:mute",
                 Action::GlobalShortcut("org.example.App:mute".into()),
@@ -3002,7 +2870,7 @@ scroll_factor = 0.4
     fn decoration_style_is_config_only_defaults_and_reports_its_effective_value() {
         use wm_theme_api::DecorationStyle;
         for text in ["", "theme = \"omarchy\""] {
-            assert_eq!(parse(text).unwrap().decoration_style, DecorationStyle::WindowMaker);
+            assert_eq!(parse(text).unwrap().decoration_style, DecorationStyle::Auto);
         }
         for style in [DecorationStyle::WindowMaker, DecorationStyle::System7] {
             let config = parse(&format!("decoration_style = {:?}", style.name())).unwrap();
@@ -3021,7 +2889,7 @@ scroll_factor = 0.4
             let config = parse(&format!(
                 "decoration_style = {value}\nfocus_follows_mouse = true\ntheme = \"omarchy\"\n[keybindings]\n\"super+t\" = \"spawn-terminal\""
             )).unwrap();
-            assert_eq!(config.decoration_style, DecorationStyle::WindowMaker);
+            assert_eq!(config.decoration_style, DecorationStyle::Auto);
             assert!(config.focus_follows_mouse);
             assert_eq!(config.theme.as_deref(), Some("omarchy"));
             assert_eq!(action_for(&config, "super+t"), Some(Action::SpawnTerminal));
@@ -3129,30 +2997,8 @@ scroll_factor = 0.4
         let config = parse("omarchy_menu = false\nomarchy_shell = true").unwrap();
         assert!(!config.omarchy_menu && config.omarchy_shell);
     }
-
     #[test]
-    fn show_dock_defaults_on_and_parses_as_a_boolean() {
-        // The Dock is what a chonkstep desk is, so it is there unless
-        // the file says otherwise.
-        assert!(Config::default_config().show_dock);
-        assert!(!parse("show_dock = false").unwrap().show_dock);
-        assert!(parse("show_dock = true").unwrap().show_dock);
-        // And it is independent of the Omarchy keys beside it: the
-        // dockless configuration is exactly "chonkstep's windowing
-        // under Omarchy's shell", which needs both halves at once.
-        let config = parse("show_dock = false\nomarchy_shell = true").unwrap();
-        assert!(!config.show_dock && config.omarchy_shell);
-    }
-
-    #[test]
-    fn wrongly_typed_show_dock_keeps_the_default() {
-        for text in ["show_dock = \"off\"", "show_dock = 0"] {
-            assert!(parse(text).unwrap().show_dock, "text {text:?}");
-        }
-    }
-
-    #[test]
-    fn wrongly_typed_omarchy_shell_keeps_the_default() {
+fn wrongly_typed_omarchy_shell_keeps_the_default() {
         for text in ["omarchy_shell = \"off\"", "omarchy_shell = 1"] {
             assert!(parse(text).unwrap().omarchy_shell, "text {text:?}");
         }

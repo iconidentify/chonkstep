@@ -73,7 +73,6 @@ echo "==> staging package tree"
 install -Dm755 "$CARGO_TARGET_DIR/release/chonkstep"     "$STAGE/usr/bin/chonkstep"
 install -Dm755 "$CARGO_TARGET_DIR/release/chonk-about"   "$STAGE/usr/bin/chonk-about"
 install -Dm755 "$CARGO_TARGET_DIR/release/chonk-netjoin" "$STAGE/usr/bin/chonk-netjoin"
-install -Dm755 scripts/chonk-get                          "$STAGE/usr/bin/chonk-get"
 install -Dm755 scripts/chonkstep-bugreport                "$STAGE/usr/bin/chonkstep-bugreport"
 
 # The session launcher and the two live-reload helpers the running

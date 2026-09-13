@@ -1,85 +1,3 @@
-//! Hosting Omarchy's shell.
-//!
-//! # Why the desktop starts a process it did not write
-//!
-//! Omarchy 4's user interface is one Quickshell process — `omarchy-shell`,
-//! `$OMARCHY_PATH/shell/shell.qml` — and most of Omarchy's scripts are
-//! only half a feature without it. `omarchy-menu` opens a panel that
-//! shell draws; the speed tests summon one; the theme, background and
-//! image pickers are its selectors; notifications, the volume and
-//! brightness OSD, the clipboard and emoji pickers and the lock screen
-//! are its plugins; `omarchy-theme-set` ends by telling it to repaint.
-//! Every one of those rows mirrored into the root menu by
-//! [`crate::omarchy_menu`] runs to completion and then, with no shell
-//! listening, does nothing visible — thirty-seven of Omarchy's scripts
-//! check for the shell and exit quietly when it is not there.
-//!
-//! Under Hyprland the shell is there because Omarchy's `autostart.lua`
-//! execs `omarchy-launch-shell` as the session comes up. Chonkstep
-//! stands where Hyprland stood, so it does the same, at the same
-//! moment (beside the config's own `autostart` list) and through the
-//! same launcher: a small supervising script that runs Quickshell
-//! under `systemd-cat` so the shell's log lands in the journal and
-//! relaunches it after an abnormal exit. Running the launcher rather
-//! than Quickshell itself is deliberate — it is Omarchy's own start
-//! path, and whatever Omarchy changes about it next release reaches
-//! this desktop without a change here.
-//!
-//! # What is different from Hyprland
-//!
-//! The launcher is run as `bash -lc '<path to omarchy-launch-shell>'`,
-//! the form every Omarchy menu action takes
-//! ([`crate::omarchy_menu::action_argv`]) because the login shell is
-//! what exports `OMARCHY_PATH` and puts `$OMARCHY_PATH/bin` on `PATH` —
-//! the launcher itself and everything it starts need both.
-//!
-//! It is *not* gated on [`crate::startup::session_continues`], unlike
-//! `autostart`. That gate exists because an X11 hot restart keeps every
-//! client alive through the SaveSet, and relaunching would double them.
-//! Quickshell is a Wayland client, and a Wayland re-exec closes the
-//! display: the shell dies with it, and its supervisor — which asks
-//! `hyprctl` whether the compositor is alive, an answer chonkstep never
-//! gives — exits rather than relaunching. The new process therefore has
-//! no shell unless it starts one. There is no X11 case to double.
-//!
-//! The launcher is named by its resolved path under the Omarchy root
-//! rather than by bare name (Hyprland's autostart says
-//! `omarchy-launch-shell` and lets `PATH` find it), because the desk
-//! has just checked that very file exists — and because a test can then
-//! stand up an Omarchy root of its own, whose launcher is whatever the
-//! test needs.
-//!
-//! # The bar is the user's to show
-//!
-//! Omarchy's bar is the shell's most visible surface, and this desk
-//! already has a Dock and a Clip in the corners it wants. So the bar is
-//! *off by default* and switched on from the root menu's `Omarchy Bar`
-//! row; the choice is remembered across sessions in chonkstep's own
-//! state ([`BarVisibility`]), never in Omarchy's — `omarchy-toggle-bar`
-//! writes a flag Omarchy's Hyprland session reads too, and a preference
-//! about this desk should not follow the user into that one. Hiding is
-//! the compositor's doing (`Backend::set_layer_surface_hidden` on the
-//! bar's namespace): the bar keeps running, keeps its clock, and takes
-//! no space, no clicks and no pixels until it is asked for.
-//!
-//! The one part of the shell this desktop declines is its Background
-//! plugin: a full-screen surface on the layer-shell `background` layer
-//! that would paint Omarchy's wallpaper over chonkstep's own and take
-//! every click on the desk — the root menu's right-click included. The
-//! compositor keeps the surface configured and answered but neither
-//! draws nor hit-tests it (`wm_wayland::layers::declined`); the desk
-//! stays chonkstep's, wearing Omarchy's background through
-//! [`crate::wallpaper::Wallpaper::Omarchy`] when the theme follows.
-//!
-//! # When it does not happen
-//!
-//! `omarchy_shell = false` in the config; an X11 session (Quickshell is
-//! Wayland-only); or no shell to start — the test for "installed" is
-//! the two files the launcher itself needs, `shell/shell.qml` and
-//! `bin/omarchy-launch-shell` under the Omarchy root. Nothing in the
-//! session tests any further: a shell that fails to come up costs the
-//! user the shell, never the session, which is the same rule
-//! `autostart` entries live by.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -200,23 +118,6 @@ impl BarVisibility {
         Self::stored().unwrap_or(Self::DEFAULT)
     }
 
-    /// The session's answer: the persisted choice if the user has ever
-    /// made one, else the config file's `omarchy_bar`, else the
-    /// default above.
-    ///
-    /// Persisted-over-configured, exactly as
-    /// [`crate::desktop::DockVisibility::resolve`] resolves the Dock
-    /// beside it and `startup::resolve_theme_id` resolves the theme:
-    /// the `Omarchy Bar` menu row is *this session's* control, and a
-    /// choice made with it has to outlive the session that made it, or
-    /// hiding the bar would silently undo itself at the next login.
-    ///
-    /// `None` for the configured value — rather than a `bool` with the
-    /// default folded in — because the three layers have to stay
-    /// distinguishable. `desktop = "omarchy"` sets this key to `true`
-    /// as a *preset default*, and a user who then hides the bar from
-    /// the menu must keep it hidden; that only works if "the file said
-    /// shown" is a different state from "nobody said anything".
     pub fn resolve(configured: Option<bool>) -> Self {
         Self::stored().or_else(|| configured.map(Self::from_config)).unwrap_or(Self::DEFAULT)
     }

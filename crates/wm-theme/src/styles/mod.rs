@@ -2,22 +2,24 @@
 //! in the engine; each recipe owns only its geometry and sparse painting.
 pub(crate) mod windowmaker;
 pub(crate) mod system7;
+pub(crate) mod modern;
 
 use wm_theme_api::DecorationStyle;
 
 /// Renderers actually implemented in this build. Tests/benchmarks iterate this
 /// list; reserved names must never silently fall back to another style's pixels.
-pub const SUPPORTED_DECORATION_STYLES: &[DecorationStyle] = &[DecorationStyle::WindowMaker, DecorationStyle::System7];
+pub const SUPPORTED_DECORATION_STYLES: &[DecorationStyle] = &[DecorationStyle::WindowMaker, DecorationStyle::System7, DecorationStyle::Modern];
 
 #[derive(Clone, Copy)]
 pub(crate) enum FrameStyle {
     WindowMaker,
     System7,
+    Modern,
 }
 
 impl FrameStyle {
     pub(crate) const fn name(self) -> DecorationStyle {
-        match self { Self::WindowMaker => DecorationStyle::WindowMaker, Self::System7 => DecorationStyle::System7 }
+        match self { Self::WindowMaker => DecorationStyle::WindowMaker, Self::System7 => DecorationStyle::System7, Self::Modern => DecorationStyle::Modern }
     }
 }
 
@@ -40,6 +42,8 @@ impl TryFrom<DecorationStyle> for FrameStyle {
         match style {
             DecorationStyle::WindowMaker => Ok(Self::WindowMaker),
             DecorationStyle::System7 => Ok(Self::System7),
+            DecorationStyle::Modern => Ok(Self::Modern),
+            DecorationStyle::Auto => Err(UnsupportedDecorationStyle(style)),
         }
     }
 }

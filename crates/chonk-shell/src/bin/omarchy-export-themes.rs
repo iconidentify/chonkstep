@@ -4,7 +4,7 @@
 //! own theme menu) can dress the rest of the machine in Amber Phosphor.
 //! Runs in a moment, touches only `TARGET`, and refreshes in place:
 //! run it again after an update and the palettes follow.
-//! Sample frames intentionally use WindowMaker to compare palettes consistently;
+//! Sample frames resolve each theme's default recipe through Auto;
 //! the exporter does not read the running desktop's `decoration_style` setting.
 //!
 //! The work is `chonk_shell::omarchy_export::export`; this is the
@@ -22,7 +22,9 @@ fn main() {
                 "usage: omarchy-export-themes [TARGET]\n\n\
                  Writes chonkstep's built-in themes as Omarchy themes under TARGET\n\
                  (default: ~/.config/omarchy/themes), one directory per theme with a\n\
-                 colors.toml and a backgrounds/ folder. Existing exports are refreshed."
+                 colors.toml, backgrounds/ and preview.png; modern themes also provide\n\
+                 shell.toml surface colors and a public Theme in chonkstep.toml.\n\
+                 Existing exports are refreshed."
             );
             std::process::exit(2);
         }

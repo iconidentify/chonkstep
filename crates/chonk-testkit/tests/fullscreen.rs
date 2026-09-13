@@ -264,12 +264,11 @@ fn a_clients_fullscreen_control_enters_and_leaves_in_one_press_each() {
 }
 
 /// Fullscreen is an output plane, not merely a window resized to the
-/// output. The Omarchy bar (`Top`) and chonkstep dock (`shell above`)
-/// must disappear behind it in both rendering and hit-testing, while a
+/// output. The Omarchy bar (`Top`) must disappear behind it in both rendering and hit-testing, while a
 /// key still reaches the focused application and lets it leave.
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
-fn fullscreen_occludes_top_layers_and_dock_pixels_and_input() {
+fn fullscreen_occludes_top_layers_and_covers_desktop_pixels_and_input() {
     let (mut session, windowed) = probe_session("fullscreen-bands");
     let bar =
         profile_binary("chonk-fake-bar").expect("cargo build -p chonk-testkit builds the bar");
@@ -280,17 +279,12 @@ fn fullscreen_occludes_top_layers_and_dock_pixels_and_input() {
 
     let world = session.world().expect("the scene ledger answers");
     let top = (world.output_w as i32 / 2, BAR as i32 / 2);
-    let dock = world.dock().expect("the dock is mapped").clone();
-    let dock_point = (dock.x + dock.w as i32 / 2, dock.y + dock.h as i32 / 2);
+    assert!(world.shells.is_empty(), "there is no persistent core desktop UI");
+    let desktop_point = (world.output_w as i32 - 24, world.output_h as i32 - 24);
     assert_eq!(
         session.door().hit(top.0, top.1).unwrap(),
         "layer",
         "the visible bar owns its input before fullscreen"
-    );
-    assert_eq!(
-        session.door().hit(dock_point.0, dock_point.1).unwrap(),
-        "shell",
-        "the visible dock owns its input before fullscreen"
     );
     let before = session
         .screenshot("desktop-bands-before-fullscreen")
@@ -350,17 +344,17 @@ fn fullscreen_occludes_top_layers_and_dock_pixels_and_input() {
         "the invisible Top layer must not retain input"
     );
     assert_eq!(
-        session.door().hit(dock_point.0, dock_point.1).unwrap(),
+        session.door().hit(desktop_point.0, desktop_point.1).unwrap(),
         "content",
-        "the invisible dock must not retain input"
+        "fullscreen owns input at the former desktop point"
     );
     assert!(
         near(
-            full.mean_rgb(dock_point.0 as u32 - 8, dock_point.1 as u32 - 8, 16, 16),
+            full.mean_rgb(desktop_point.0 as u32 - 8, desktop_point.1 as u32 - 8, 16, 16),
             PROBE_RGB
         ),
-        "fullscreen pixels must replace the dock: {:?}",
-        full.mean_rgb(dock_point.0 as u32 - 8, dock_point.1 as u32 - 8, 16, 16)
+        "fullscreen pixels must cover the desktop: {:?}",
+        full.mean_rgb(desktop_point.0 as u32 - 8, desktop_point.1 as u32 - 8, 16, 16)
     );
 
     // The same key the screensaver's PTY waits for reaches the focused

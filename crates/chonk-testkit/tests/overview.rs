@@ -416,10 +416,14 @@ fn native_overview_keeps_wallpaper_proportions_and_live_pixels() {
     }
 }
 
+fn preview_tile_size(world: &World) -> u32 {
+    ((56.0 * world.scale).round() as u32).max(16)
+}
+
 fn workspace_layout(world: &World) -> wm_theme::overview::OverviewLayout {
     wm_theme::overview::live::layout(
         wm_theme_api::Size::new(world.output_w, world.output_h),
-        world.dock().expect("default dock supplies the tile size").w,
+        preview_tile_size(world),
         &[],
         world.workspace_count,
     )
@@ -466,7 +470,7 @@ fn dragging_a_live_card_moves_only_that_window_and_keeps_overview_open() {
         let active = session.world().unwrap();
         let preview = active.overview_drag.as_ref().expect("live drag image");
         assert_eq!((preview.id, preview.target), (dragged, Some(1)));
-        assert!(preview.rect.size.w <= world.dock().unwrap().w * 3);
+        assert!(preview.rect.size.w <= preview_tile_size(&world) * 3);
         assert_eq!(active.current_workspace, 0, "hovering the target is visual, not a switch");
         session.screenshot("window-over-desktop").unwrap();
         session.door().button("left", false).unwrap();

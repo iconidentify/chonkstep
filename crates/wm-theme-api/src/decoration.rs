@@ -5,19 +5,25 @@ use crate::{Point, Rect, Size};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DecorationStyle {
+    /// Configuration policy: resolve against the theme before rendering.
+    Auto,
     /// Chiseled WindowMaker/NeXTSTEP chrome, preserving existing defaults.
     #[default]
     WindowMaker,
     /// Classic System 7.5 document-window chrome.
     System7,
+    /// Modern, token-driven chrome shared by present and future themes.
+    Modern,
 }
 
 impl DecorationStyle {
     /// Parse the stable configuration spelling; unknown names are not aliases.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "auto" => Some(Self::Auto),
             "windowmaker" => Some(Self::WindowMaker),
             "system7" => Some(Self::System7),
+            "modern" => Some(Self::Modern),
             _ => None,
         }
     }
@@ -25,8 +31,10 @@ impl DecorationStyle {
     /// Stable configuration and diagnostic spelling.
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::WindowMaker => "windowmaker",
             Self::System7 => "system7",
+            Self::Modern => "modern",
         }
     }
 }
@@ -130,12 +138,27 @@ pub struct DecorationPart {
     pub buffer: DecorationBuffer,
 }
 
+/// An opaque, uniformly colored chrome rectangle. Backends retain geometry
+/// and color, rather than allocating or uploading a rectangle of identical
+/// RGBA pixels. Rectangles and raster parts must be disjoint and frame-local.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecorationSolid {
+    pub rect: Rect,
+    pub rgb: [u8; 3],
+}
+
 /// Rasterized chrome for one frame. `frame_size` describes the complete frame
 /// for placement and gap filling; `parts` contain only visible chrome bands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecorationSurface {
     pub frame_size: Size,
     pub parts: Vec<DecorationPart>,
+    /// Empty for legacy raster recipes: no extra heap allocation or change to
+    /// the allocation size of their independently retained raster parts.
+    pub solids: Vec<DecorationSolid>,
+    /// Optional effects contain no pixels and never change the input margin.
+    pub shadow: Option<crate::DecorationShadow>,
+    pub shape: Option<crate::DecorationShape>,
 }
 
 impl DecorationSurface {
@@ -144,6 +167,9 @@ impl DecorationSurface {
         Self {
             frame_size: Size::new(buffer.width, buffer.height),
             parts: vec![DecorationPart { offset: Point::new(0, 0), buffer }],
+            solids: Vec::new(),
+            shadow: None,
+            shape: None,
         }
     }
 

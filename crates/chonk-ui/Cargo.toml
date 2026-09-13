@@ -14,7 +14,6 @@ default = ["x11"]
 x11 = ["dep:x11rb"]
 
 [dependencies]
-chonk-dock-proto = { path = "../chonk-dock-proto" }
 wm-theme = { path = "../wm-theme" }
 tiny-skia = "0.11"
 # The `theme_toml` correctness path in `Welcome`/`ThemeChanged`: a

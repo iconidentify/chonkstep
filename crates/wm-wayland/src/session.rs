@@ -710,7 +710,7 @@ struct SessionOutput {
     /// Reusable scene-construction storage. Draining this into
     /// `pending_scene` preserves the allocation for the next frame
     /// while the latter owns any client buffers until vblank.
-    scene_scratch: Vec<crate::renderer::SceneElement<GlesRenderer>>,
+    scene_scratch: Vec<crate::renderer::SceneElement>,
     /// The render elements of the frame whose page flip is in flight.
     /// Held for composited frames only while
     /// [`SessionGraphics::strict_release`] is on, and unconditionally
@@ -731,7 +731,7 @@ struct SessionOutput {
     /// handler once a composited flip completes; moved into
     /// `scanout_scene` instead when this commit makes a client buffer
     /// the display's continuing source.
-    pending_scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
+    pending_scene: Vec<crate::renderer::SceneElement>,
     /// Elements backing the client planes currently being scanned
     /// out directly. A vblank makes an atomic commit *current*, not
     /// finished: the display engine keeps reading that buffer until a
@@ -739,7 +739,7 @@ struct SessionOutput {
     /// [`SessionOutput::pending_scene`] prevents `wl_buffer.release`
     /// (and explicit-sync release signaling) while the pixels are
     /// still physically on screen.
-    scanout_scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
+    scanout_scene: Vec<crate::renderer::SceneElement>,
     /// Cached solely for transition telemetry; unlike inspecting the
     /// scene, this costs no walk in the vblank callback.
     client_scanout_active: bool,

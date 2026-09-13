@@ -170,7 +170,6 @@ fn the_key_tokens_the_omarchy_keymap_needed_are_documented_and_real() {
 fn the_reference_summarises_the_posture_correctly() {
     let config = wm_config::parse("desktop = \"omarchy\"").expect("the documented one-liner must parse");
     let claims = [
-        ("show_dock    = false", !config.show_dock),
         ("omarchy_bar  = true", config.omarchy_bar == Some(true)),
         ("theme        = \"omarchy\"", config.theme.as_deref() == Some("omarchy")),
         (
@@ -215,7 +214,6 @@ fn the_documented_preset_names_all_parse() {
     // And the combination the card and the mode page both suggest.
     let config = wm_config::parse("desktop = \"omarchy\"\nkeymap = \"chonkstep\"").unwrap();
     assert_eq!(config.keymap.id(), "chonkstep");
-    assert!(!config.show_dock);
 }
 
 /// Nothing in either page names a chord that is in both tables: a

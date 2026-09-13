@@ -348,40 +348,7 @@ fn scale_2_composition_stays_intact() {
         );
     }
 
-    // The dock column: the ledger says where it is; the pixels must
-    // agree. Sample the middle of the column and compare with the
-    // wallpaper just left of it — the dock's chiseled tiles are
-    // nothing like the wallpaper, and in the shipped bug this
-    // rectangle held bare wallpaper while the dock itself was drawn
-    // off-screen.
-    let dock = world
-        .dock()
-        .expect("a dock column at the right edge of the ledger")
-        .clone();
-    let inside = shot.mean_rgb(
-        dock.x as u32 + dock.w / 4,
-        dock.y as u32 + dock.w / 2,
-        dock.w / 2,
-        16,
-    );
-    let beside = shot.mean_rgb(
-        (dock.x - dock.w as i32) as u32,
-        dock.y as u32 + dock.w / 2,
-        dock.w / 2,
-        16,
-    );
-    let contrast = inside
-        .iter()
-        .zip(beside.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f64, f64::max);
-    assert!(
-        contrast > 25.0,
-        "the dock's ledger rectangle {dock:?} holds wallpaper-looking pixels \
-         (inside {inside:?} vs beside {beside:?}) — the dock is not being drawn where the \
-         ledger says it is (screenshot: {})",
-        shot.path.display()
-    );
+    assert!(world.shells.is_empty(), "scale changes must not allocate persistent shell chrome");
 
     // The client is crisp 2x, not stretched 1x: its physical width is
     // twice the scale-1 run's, within a small tolerance for theme
@@ -476,7 +443,7 @@ fn live_reload_applies() {
     session.door().barrier().unwrap();
     let before = session.world().unwrap();
     assert_eq!(before.scale, 1.0);
-    let dock_before = before.dock().expect("a dock at scale 1").clone();
+    assert!(before.shells.is_empty());
 
     session.rewrite_config("scale = 2\n").unwrap();
     session.request_reload().unwrap();
@@ -491,8 +458,7 @@ fn live_reload_applies() {
             "the reload to re-scale the dock in place",
             || {
                 let world = door.windows().ok()?;
-                let dock = world.dock()?;
-                (world.scale == 2.0 && dock.w == dock_before.w * 2).then_some(())
+                (world.scale == 2.0 && world.shells.is_empty()).then_some(())
             },
         )
         .expect("the live reload never applied");
@@ -667,23 +633,8 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
          and the restore will dedup into an input-dead window",
     );
 
-    // Restore via the icon tile: the one mapped shell surface that
-    // appeared with the miniaturize.
-    let tile = session
-        .door()
-        .windows()
-        .unwrap()
-        .shells
-        .into_iter()
-        .find(|s| s.mapped && !shells_before.contains(&s.id))
-        .expect("miniaturizing should have grown an icon tile shell");
-    session
-        .door()
-        .click(
-            tile.x as f64 + tile.w as f64 / 2.0,
-            tile.y as f64 + tile.h as f64 / 2.0,
-        )
-        .unwrap();
+    assert!(session.world().unwrap().shells.iter().all(|surface| shells_before.contains(&surface.id)));
+    session.door().chord(56, 15).unwrap();
 
     {
         let door = session.door();
@@ -691,7 +642,7 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
             let world = door.windows().ok()?;
             world.window_matching("TestMini").map(|_| ())
         })
-        .expect("clicking the icon tile never restored the window");
+        .expect("Alt-Tab never restored the window");
     }
     // And the client was told: a fresh enter, not a dedup.
     poll_until(ACT, "the client to see a fresh wl_keyboard.enter", || {

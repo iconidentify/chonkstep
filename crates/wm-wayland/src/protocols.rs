@@ -248,7 +248,7 @@ struct CaptureTarget {
     include_overlays: bool,
     texture: GlesTexture,
     damage_tracker: OutputDamageTracker,
-    scene_scratch: Vec<SceneElement<GlesRenderer>>,
+    scene_scratch: Vec<SceneElement>,
     rendered: bool,
     used: Instant,
 }

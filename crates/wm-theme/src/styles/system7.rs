@@ -154,16 +154,41 @@ pub(crate) fn render_sparse(
                 buffer: filled(width.min(w), content_h, roles.ink) });
         }
     }
-    DecorationSurface { frame_size: layout.frame_size, parts }
+    DecorationSurface { frame_size: layout.frame_size, parts, solids: Vec::new(), shadow: None, shape: None }
 }
 
 pub(crate) fn flatten(surface: DecorationSurface) -> DecorationBuffer {
+    let shape = surface.shape;
     let mut result = filled(surface.frame_size.w, surface.frame_size.h, [0; 4]);
+    for solid in surface.solids {
+        fill(&mut result, solid.rect.pos.x as u32, solid.rect.pos.y as u32,
+            solid.rect.size.w, solid.rect.size.h, [solid.rgb[0], solid.rgb[1], solid.rgb[2], 255]);
+    }
     for part in surface.parts {
         for y in 0..part.buffer.height {
             let from = (y * part.buffer.width * 4) as usize;
             let to = (((part.offset.y as u32 + y) * result.width + part.offset.x as u32) * 4) as usize;
             result.pixels[to..to + part.buffer.width as usize * 4].copy_from_slice(&part.buffer.pixels[from..from + part.buffer.width as usize * 4]);
+        }
+    }
+    if let Some(shape)=shape {
+        let radius=u32::from(shape.normalized().radius);
+        // Raster titles already carry their antialias coverage. Cap coverage
+        // instead of multiplying it twice; only the corner squares need work.
+        for (left,top) in [(shape.rect.pos.x,shape.rect.pos.y),
+            (shape.rect.pos.x+shape.rect.size.w as i32-radius as i32,shape.rect.pos.y),
+            (shape.rect.pos.x,shape.rect.pos.y+shape.rect.size.h as i32-radius as i32),
+            (shape.rect.pos.x+shape.rect.size.w as i32-radius as i32,shape.rect.pos.y+shape.rect.size.h as i32-radius as i32)] {
+            for y in top.max(0)..(top+radius as i32).min(result.height as i32) {
+                for x in left.max(0)..(left+radius as i32).min(result.width as i32) {
+                    let pixel=&mut result.pixels[((y as u32*result.width+x as u32)*4) as usize..][..4];
+                    let alpha=(shape.coverage(Point::new(x,y))*255.0).round() as u8;
+                    if pixel[3]>alpha {
+                        let factor=f32::from(alpha)/f32::from(pixel[3]);
+                        for channel in pixel { *channel=(f32::from(*channel)*factor).round() as u8; }
+                    }
+                }
+            }
         }
     }
     result

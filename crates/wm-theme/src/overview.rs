@@ -7,6 +7,7 @@
 
 use tiny_skia::Pixmap;
 pub mod live;
+pub mod modern;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use crate::model::{TextAlign, Theme};

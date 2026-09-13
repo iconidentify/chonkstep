@@ -32,6 +32,18 @@ pub struct OverviewWorkspace<W, F> {
     pub label: DecorationBuffer,
     pub drop_label: DecorationBuffer,
     pub close: Option<(Rect, DecorationBuffer)>,
+    /// Optional theme-owned workspace-card chrome. The interior remains solid
+    /// geometry; only corner coverage and small labels carry CPU pixels.
+    pub card: Option<wm_theme_api::DecorationSurface>,
+    pub status: Option<DecorationBuffer>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverviewCards {
+    pub metrics: wm_theme_api::OverviewMetrics,
+    pub bounds: Rect,
+    pub background: [u8; 3],
+    pub empty: [u8; 3],
 }
 
 /// Optional flat chrome for native Overview. Colors/metrics are resolved once
@@ -40,6 +52,7 @@ pub struct OverviewWorkspace<W, F> {
 pub struct OverviewChrome {
     pub ink: [u8; 3],
     pub line: u32,
+    pub cards: Option<OverviewCards>,
 }
 
 /// A compositor can present existing client textures directly. Only small text
@@ -209,6 +222,9 @@ pub trait Backend {
     fn select_live_overview(&mut self, selected: usize) {
         let _ = selected;
     }
+    /// Front-to-back indices into the submitted scene, retained by a live
+    /// backend. Overlapping previews use the same order for pixels and input.
+    fn live_overview_paint_order(&self) -> Option<&[usize]> { None }
     fn hide_live_overview(&mut self) {}
 
     fn drag_live_overview(&mut self, drag: Option<OverviewDrag>) {

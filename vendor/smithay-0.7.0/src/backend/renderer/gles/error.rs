@@ -13,6 +13,9 @@ pub enum GlesError {
     /// A program could not be linked
     #[error("Failed to link Program")]
     ProgramLinkError,
+    /// A custom pixel vertex stage lacks a required active, correctly typed input.
+    #[error("Invalid pixel shader input: {0}")]
+    InvalidPixelShaderInterface(&'static str),
     /// A framebuffer could not be bound
     #[error("Failed to bind Framebuffer")]
     FramebufferBindingError,
@@ -60,6 +63,9 @@ pub enum GlesError {
     /// There was an error mapping the buffer
     #[error("Error mapping the buffer")]
     MappingError,
+    /// A single-texture read scope attempted to sample another texture.
+    #[error("A texture read scope cannot sample another texture")]
+    TextureReadBatchConflict,
     /// The provided buffer's size did not match the requested one.
     #[error("Error reading buffer, size is too small for the given dimensions")]
     UnexpectedSize,
@@ -108,6 +114,8 @@ impl From<GlesError> for SwapBuffersError {
             | x @ GlesError::UnsupportedPixelLayout
             | x @ GlesError::BufferAccessError(_)
             | x @ GlesError::MappingError
+            | x @ GlesError::TextureReadBatchConflict
+            | x @ GlesError::InvalidPixelShaderInterface(_)
             | x @ GlesError::UnexpectedSize
             | x @ GlesError::UnknownSize
             | x @ GlesError::BlitError
@@ -131,6 +139,8 @@ impl From<GlesError> for SwapBuffersError {
             GlesError::ContextActivationError(err) => err.into(),
             x @ GlesError::FramebufferBindingError
             | x @ GlesError::MappingError
+            | x @ GlesError::TextureReadBatchConflict
+            | x @ GlesError::InvalidPixelShaderInterface(_)
             | x @ GlesError::UnknownPixelFormat
             | x @ GlesError::UnsupportedPixelFormat(_)
             | x @ GlesError::UnsupportedPixelLayout

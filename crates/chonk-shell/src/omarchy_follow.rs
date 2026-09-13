@@ -1,36 +1,3 @@
-//! Noticing that Omarchy changed its theme — or its background — so a
-//! session that follows it changes too, with no hook installed on
-//! Omarchy's side.
-//!
-//! `omarchy-theme-set` swaps `current/theme` atomically (`rm -rf` the
-//! old copy, `mv` the staged new one into place) and *then* writes
-//! `current/theme.name`. That ordering is the contract this module
-//! rides: when `theme.name` is seen to change, `colors.toml` under it
-//! is already the new theme's, so a single re-resolve reads a
-//! consistent palette. The palette file's own identity (its mtime and
-//! size) is folded into the signature too, for the less tidy cases —
-//! a theme edited in place, a theme *appearing* after a session
-//! started following an empty state directory, or Omarchy being
-//! uninstalled under a running desk.
-//!
-//! The background is the third ingredient. `omarchy-theme-set` and
-//! `omarchy-theme-bg-set` both end with `ln -nsf <image>
-//! current/background`, so the link's *target* is the background's
-//! identity, and it is read (not followed) into the signature: a
-//! cycle to the next picture changes the target and nothing else. The
-//! target file's own mtime and size ride along for a picture edited
-//! in place under the same name. Omarchy's own shell polls this very
-//! link for the same reason.
-//!
-//! Polled at one hertz from `Shell::tick`, not watched with inotify:
-//! the same argument the reload marker and the dockapp theme
-//! broadcast make (`startup::reload_requested`), plus a specific one —
-//! the directory is *replaced*, not modified, and an inotify watch on
-//! a path that is unlinked and recreated has to be re-armed by exactly
-//! the kind of code that goes wrong at 3 a.m. Two `stat` calls a
-//! second on paths that are usually there is nothing, and a theme
-//! change landing within a second of the user pressing the key is
-//! indistinguishable from instant beside Omarchy's own reload fan-out.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -43,12 +10,13 @@ const CADENCE: Duration = Duration::from_secs(1);
 
 /// The identity of Omarchy's current look on disk, cheap to take and
 /// compared by equality: `theme.name`'s mtime, `colors.toml`'s
-/// (mtime, size), and the `background` link's target with the target's
+/// (mtime, size), optional `chonkstep.toml`'s (mtime, size), and the `background` link's target with the target's
 /// (mtime, size) — each `None` when the file is not there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Signature {
     name: Option<SystemTime>,
     colors: Option<(SystemTime, u64)>,
+    descriptor: Option<(SystemTime, u64)>,
     background: Option<(PathBuf, Option<(SystemTime, u64)>)>,
 }
 
@@ -56,6 +24,7 @@ impl Signature {
     fn of(current: &Path) -> Self {
         let name = std::fs::metadata(current.join("theme.name")).and_then(|m| m.modified()).ok();
         let colors = Self::identity(&current.join("theme/colors.toml"));
+        let descriptor = Self::identity(&current.join("theme").join(wm_theme::omarchy::DESCRIPTOR_FILE));
         let link = current.join("background");
         // `read_link`, not `metadata`: the link is what Omarchy moves.
         // A background that is a plain file rather than a link (a
@@ -66,7 +35,7 @@ impl Signature {
             let identity = Self::identity(&link);
             (target, identity)
         });
-        Self { name, colors, background }
+        Self { name, colors, descriptor, background }
     }
 
     /// (mtime, size) of the file at `path`, through any link.
@@ -234,5 +203,32 @@ mod tests {
         std::fs::remove_file(dir.join("theme/colors.toml")).unwrap();
         assert!(watch.changed_in(&dir, t0 + Duration::from_secs(6)), "vanished");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_descriptor_change_restyles_without_touching_the_palette() {
+        let dir = scratch("descriptor");
+        let palette=dir.join("theme/colors.toml");
+        std::fs::write(&palette,"unchanged palette").unwrap();
+        let palette_identity=Signature::identity(&palette);
+        let descriptor=dir.join("theme").join(wm_theme::omarchy::DESCRIPTOR_FILE);
+        let mut watch=Watch::new();
+        let start=Instant::now();
+        assert!(!watch.changed_in(&dir,start));
+        std::fs::write(&descriptor,"first").unwrap();
+        touch(&descriptor,100);
+        assert!(!watch.changed_in(&dir,start+Duration::from_millis(500)),"descriptor uses the existing cadence");
+        assert!(watch.changed_in(&dir,start+Duration::from_secs(1)),"descriptor appeared");
+        touch(&descriptor,10);
+        assert!(watch.changed_in(&dir,start+Duration::from_secs(2)),"same-sized edit changes mtime");
+        let replacement=dir.join("theme/replacement.toml");
+        std::fs::write(&replacement,"replacement descriptor").unwrap();
+        std::fs::rename(&replacement,&descriptor).unwrap();
+        assert!(watch.changed_in(&dir,start+Duration::from_secs(3)),"atomic replacement is observed");
+        assert!(!watch.changed_in(&dir,start+Duration::from_secs(4)),"one resolve per change");
+        std::fs::remove_file(&descriptor).unwrap();
+        assert!(watch.changed_in(&dir,start+Duration::from_secs(5)),"removal returns to the palette recipe");
+        assert_eq!(Signature::identity(&palette),palette_identity,"no palette rewrite is needed");
+        let _=std::fs::remove_dir_all(dir);
     }
 }

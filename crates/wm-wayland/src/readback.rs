@@ -39,7 +39,7 @@ pub(crate) struct RgbaDownload {
     bytes: u64,
     // The producer must not receive wl_buffer.release while the GPU can
     // still sample it. Cancellation retires this whole download until ready.
-    scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
+    scene: Vec<crate::renderer::SceneElement>,
 }
 
 impl RgbaDownload {
@@ -59,7 +59,7 @@ impl RgbaDownload {
         Self { storage, completion, ready_after: started + delay, ready: Cell::new(false), started, bytes: bytes as u64, scene: Vec::new() }
     }
 
-    pub fn hold_scene(&mut self, scene: &mut Vec<crate::renderer::SceneElement<GlesRenderer>>) {
+    pub fn hold_scene(&mut self, scene: &mut Vec<crate::renderer::SceneElement>) {
         self.scene.append(scene);
     }
 
