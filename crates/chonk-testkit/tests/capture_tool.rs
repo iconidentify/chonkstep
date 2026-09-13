@@ -491,6 +491,73 @@ fn screenshot_workflow(scale: f32, name: &str) {
 
 #[test]
 #[ignore = "needs nested Wayland; scripts/e2e.sh --headless --test capture_tool"]
+fn screenshots_preserve_an_open_root_menu_and_restore_its_input() {
+    let mut session = boot("capture-root-menu", 1.0);
+    align_capture_comparison(&mut session);
+    let exports = session.dir.join("exports");
+    let probe = profile_binary("chonk-input-probe").unwrap();
+    session.launch(probe.to_str().unwrap(), &["1"]).unwrap();
+    let window = session.wait_for_window("input-probe").unwrap();
+    session.door().click((window.x + 50) as f64, (window.y + 50) as f64).unwrap();
+    let world = session.world().unwrap();
+    session.door().right_click(world.output_w as f64 / 2.0, 100.0).unwrap();
+    let menu = poll_until(Duration::from_secs(5), "root menu opens", || {
+        session.world().ok()?.menus().into_iter().next()
+    }).unwrap();
+    let before = session.screenshot("open-root-menu").unwrap();
+    let assert_menu_pixels = |image: &Screenshot, origin: (u32, u32)| {
+        for y in 0..menu.h {
+            for x in 0..menu.w {
+                assert_eq!(image.pixel(origin.0 + x, origin.1 + y),
+                    before.pixel(menu.x as u32 + x, menu.y as u32 + y),
+                    "capture preserves menu pixel {x},{y}");
+            }
+        }
+    };
+
+    shortcut(&mut session, 3);
+    let full = Screenshot::load(&saved(&exports, 1, "png")).unwrap();
+    assert_menu_pixels(&full, (menu.x as u32, menu.y as u32));
+
+    // Omarchy's Print alias must open selection over the menu. A full-screen
+    // shortcut remains usable during selection, and Escape cancels only that
+    // selection, leaving the original menu available for another attempt.
+    session.door().tap_key(99).unwrap();
+    let selecting = diagnostic(&mut session, "selecting-over-menu");
+    assert!(selecting.diff_fraction(&before, 0) > 0.01, "selection opens above the menu");
+    shortcut(&mut session, 3);
+    let full = Screenshot::load(&saved(&exports, 2, "png")).unwrap();
+    assert_menu_pixels(&full, (menu.x as u32, menu.y as u32));
+    session.door().tap_key(1).unwrap();
+    assert!(session.world().unwrap().menus().iter().any(|m| m.id == menu.id));
+
+    session.door().tap_key(99).unwrap();
+    session.door().drag_to((menu.x as f64, menu.y as f64),
+        ((menu.x + menu.w as i32) as f64, (menu.y + menu.h as i32) as f64)).unwrap();
+    session.door().button("left", false).unwrap();
+    session.door().barrier().unwrap();
+    let area = Screenshot::load(&saved(&exports, 3, "png")).unwrap();
+    assert_eq!((area.width, area.height), (menu.w, menu.h));
+    assert_menu_pixels(&area, (0, 0));
+    assert!(session.world().unwrap().menus().iter().any(|m| m.id == menu.id));
+
+    // Completing selection must neither release the menu's keyboard nor
+    // leak its pointer press into a menu action or the application below.
+    session.door().tap_key(30).unwrap();
+    session.door().tap_key(108).unwrap();
+    session.door().barrier().unwrap();
+    assert!(session.world().unwrap().menus().iter().any(|m| m.id == menu.id));
+    assert!(!session.client_log("chonk-input-probe").contains("keyboard key 30 down"));
+    session.door().tap_key(1).unwrap();
+    session.door().tap_key(30).unwrap();
+    poll_until(Duration::from_secs(5), "typing returns after the menu closes", || {
+        session.client_log("chonk-input-probe").contains("keyboard key 30 down").then_some(())
+    }).unwrap();
+    assert!(session.world().unwrap().menus().is_empty());
+}
+
+#[test]
+#[ignore = "needs nested Wayland; scripts/e2e.sh --headless --test capture_tool"]
 fn screenshots_1x() {
     screenshot_workflow(1.0, "capture-1x");
 }

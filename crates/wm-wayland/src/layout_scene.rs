@@ -246,7 +246,7 @@ pub(crate) fn tick(comp: &mut Compositor) {
     let cancel = comp.wm.backend().locked
         || comp.wm.backend().gesture_scene.is_some()
         || comp.wm.backend().overview.is_some()
-        || comp.wm.backend().keyboard_grabbed
+        || comp.wm.backend().modal_keyboard_grabbed()
         || comp.wm.backend().capture_ui.is_some()
         || comp.layer_shell.exclusive_focus.is_some()
         || comp.focus_grab.is_active()

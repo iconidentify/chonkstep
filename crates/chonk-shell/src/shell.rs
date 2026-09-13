@@ -1585,7 +1585,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// arrive as ordinary `KeyPress` events that appear in no keymap;
     /// swallowing them would wedge the switcher open.
     ///
-    /// The one exception is the shell's own modal session: while the
+    /// Capture bindings remain available over modal UI. Other keys belong
+    /// to the shell's own modal session: while the
     /// Overview is open it holds the keyboard the same way the
     /// switcher does, and *every* press resolves to
     /// [`Action::Overview`] (the combo parked in `overview_key` for
@@ -1598,6 +1599,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// to open during one (see `run_action`) and its grab intercepts
     /// the keys that would start one.
     pub fn keymap_action(&mut self, combo: &KeyCombo) -> Option<KeyResolution> {
+        let configured = self.layer_keymap.get(combo).or_else(|| self.keymap.get(combo)).cloned();
+        if configured.as_ref().is_some_and(|action| self.capture_mode_for_action(action).is_some()) {
+            return configured.map(KeyResolution::Action);
+        }
         if self.help.visible() {
             self.help_key = Some(*combo);
             return Some(KeyResolution::Action(Action::Help));
@@ -1614,7 +1619,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         // An open menu owns the keyboard as completely as Overview.
         // Recognized navigation is returned for immediate dispatch;
-        // every other key is still consumed so typing cannot leak into
+        // every other non-capture key is consumed so typing cannot leak into
         // the client behind a modal menu.
         if self.desktop.menu_visible() {
             if combo.modifiers.is_empty() {
@@ -1646,7 +1651,23 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             self.transient_escape = true;
             return Some(KeyResolution::Consumed);
         }
-        self.layer_keymap.get(combo).or_else(|| self.keymap.get(combo)).cloned().map(KeyResolution::Action)
+        configured.map(KeyResolution::Action)
+    }
+
+    /// Recognize the configured capture verb, including Omarchy's standard
+    /// Print command, without sending selection keys to an underlying menu.
+    pub fn capture_mode_for_combo(&self, combo: &KeyCombo) -> Option<wm_config::CaptureMode> {
+        self.layer_keymap.get(combo).or_else(|| self.keymap.get(combo))
+            .and_then(|action| self.capture_mode_for_action(action))
+    }
+
+    fn capture_mode_for_action(&self, action: &Action) -> Option<wm_config::CaptureMode> {
+        match action {
+            Action::Capture(mode) => Some(*mode),
+            Action::Run(name) if self.state.commands.get(name)
+                .is_some_and(|argv| argv.as_slice() == ["omarchy-capture-screenshot"]) => Some(wm_config::CaptureMode::Area),
+            _ => None,
+        }
     }
 
     /// Install or remove the bindings scoped to a live layer-shell

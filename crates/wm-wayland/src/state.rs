@@ -448,31 +448,6 @@ pub(crate) struct WindowRecord {
     /// Zero for surfaces that declare no geometry, which is the
     /// overwhelming majority.
     pub content_offset: Point,
-    /// The last few content sizes this compositor has *asked* the
-    /// client to be (physical, newest last, capped small).
-    ///
-    /// Exists to answer one question on every commit: "is this the
-    /// client obeying us, or the client asking for something?" A commit
-    /// whose size matches any recent ask is an echo of our own
-    /// configure — possibly a stale one, because clients ack a
-    /// configure immediately but draw and commit asynchronously, so
-    /// the commit in hand routinely pairs with the ack *before* the
-    /// one most recently recorded. Reading `last_acked` at commit time
-    /// therefore mis-pairs, and treating those echoes as
-    /// client-initiated resizes put the two size authorities into a
-    /// sustained ping-pong: maximize → stale old-size commit adopted →
-    /// reconfigure → stale new-size commit adopted → forever, observed
-    /// live as an alternating 1218/700 configure stream that outlived
-    /// the maximize that started it. Membership here is what breaks
-    /// the cycle; a size we never asked for (a terminal's cell snap, a
-    /// spontaneous client resize) is in no ring and is adopted exactly
-    /// as before.
-    pub recent_asks: std::collections::VecDeque<Size>,
-    /// Physical resize echoes are valid only within one committed density.
-    /// A scale/viewport change starts a new epoch, including when returning
-    /// to a previously used scale. Otherwise an old ask can hide a genuine
-    /// client resize and leave its frame at half the rendered extent.
-    pub committed_size_scale: Option<f64>,
 }
 
 impl WindowRecord {
@@ -498,8 +473,6 @@ impl WindowRecord {
             snapshot_attempted_at: None,
             decoration: crate::decoration::DecorationNegotiation::default(),
             content_offset: Point::new(0, 0),
-            recent_asks: std::collections::VecDeque::new(),
-            committed_size_scale: None,
         }
     }
 }
@@ -1016,6 +989,12 @@ pub(crate) enum PointerGrabChange {
 }
 
 impl WaylandBackend {
+    /// Capture overlays and shell panels own input independently. Closing
+    /// either one must leave the other panel's modal ownership intact.
+    pub(crate) fn modal_keyboard_grabbed(&self) -> bool {
+        self.keyboard_grabbed || crate::capture_tool::modal(self)
+    }
+
     /// Whether this window's client draws its own chrome, from what it
     /// has actually told us — the decoration protocols first, and a
     /// `[decorations]` override above them.
@@ -1280,6 +1259,34 @@ impl WaylandBackend {
             crate::xdg::committed_surface_scale(&surface),
             self.window_output_scale(record),
         )
+    }
+
+    /// Keep a framed native client's last buffer inside its current interior
+    /// while a resize reply is in flight. Rendering and input use the same
+    /// transform; protocol sizes continue to use the unmodified surface scale.
+    pub(crate) fn window_presentation(
+        &self,
+        record: &WindowRecord,
+        framed: bool,
+    ) -> (Point, smithay::utils::Scale<f64>) {
+        let base = self.window_surface_scale(record);
+        let committed = if framed && matches!(record.surface, ManagedSurface::Xdg(_)) {
+            record.surface.wl_surface().and_then(|surface| {
+                crate::xdg::committed_content_size(&surface, base, self.output_size)
+            })
+        } else {
+            None
+        };
+        let fit = committed.filter(|size| size.w > 0 && size.h > 0)
+            .map(|size| (
+                record.content.size.w.max(1) as f64 / size.w as f64,
+                record.content.size.h.max(1) as f64 / size.h as f64,
+            )).unwrap_or((1.0, 1.0));
+        let origin = Point::new(
+            record.content.pos.x.saturating_sub(crate::xdg::scale_length(record.content_offset.x, fit.0)),
+            record.content.pos.y.saturating_sub(crate::xdg::scale_length(record.content_offset.y, fit.1)),
+        );
+        (origin, (base * fit.0, base * fit.1).into())
     }
 
     /// Inserts the authoritative window record and, when its root is
@@ -2681,6 +2688,20 @@ impl Compositor {
             if let Some(motion) = pending_motion.take() {
                 self.dispatch_motion(motion);
             }
+            if let BackendEvent::ClientSizeCommitted { window, size } = &event {
+                // Several commits can arrive in one dispatch, or an earlier
+                // input event can request another resize. Only adopt pixels
+                // that still answer the current request when the WM sees them.
+                let backend = self.wm.backend();
+                let current = backend.windows.get(window).is_some_and(|record| {
+                    record.surface.wl_surface().is_some_and(|root| {
+                        !crate::xdg::resize_pending(backend, *window, &root)
+                            && crate::xdg::committed_content_size(&root,
+                                backend.window_surface_scale(record), backend.output_size) == Some(*size)
+                    })
+                });
+                if !current { continue; }
+            }
             self.wm.dispatch(event);
         }
         if let Some(motion) = pending_motion.take() {
@@ -3534,7 +3555,7 @@ impl Compositor {
         // eventual restore is a real `wl_keyboard.enter` rather than a
         // smithay-deduplicated no-op.
         let surface = target
-            .filter(|_| !self.wm.backend().keyboard_grabbed)
+            .filter(|_| !self.wm.backend().modal_keyboard_grabbed())
             .and_then(|id| self.wm.backend().windows.get(&id))
             .filter(|record| record.surface.alive())
             .and_then(|record| crate::input::keyboard::KeyboardFocus::from_managed(&record.surface));

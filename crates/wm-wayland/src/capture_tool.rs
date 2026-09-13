@@ -22,7 +22,7 @@ use smithay::backend::renderer::Color32F;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::utils::{Physical, Rectangle as SRect};
 use wm_config::CaptureMode;
-use wm_core::{Backend, KeyCombo, Modifiers};
+use wm_core::{KeyCombo, Modifiers};
 use wm_theme::FontState;
 use wm_theme_api::{Point, Rect, Size};
 
@@ -178,6 +178,13 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
     if comp.wm.backend().locked {
         return;
     }
+    // A full-screen photograph does not take input. It can include menus,
+    // launchers, switchers and a held drag, even while recording or selecting.
+    if mode == CaptureMode::Screen {
+        let rect = Rect::new(Point::new(0, 0), comp.wm.backend().output_size);
+        photograph(comp, rect, None, destination);
+        return;
+    }
     if comp.capture_tool.recording || comp.capture_tool.finishing {
         if mode == CaptureMode::Toolbar {
             stop(comp);
@@ -188,20 +195,15 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
         dismiss(comp);
         return;
     }
-    // Never steal an existing modal session or a drag's held buttons.
-    if comp.wm.backend().keyboard_grabbed
-        || comp.wm.backend().pointer_grab.is_some()
+    // Shell menus and panels stay visible underneath selection. Held pointer
+    // operations and client-owned grabs still need to finish first.
+    if comp.wm.backend().pointer_grab.is_some()
         || comp.wm.interactive_drag_active()
         || crate::input::capture_pointer_busy(&comp.seat)
         || comp.focus_grab.is_active()
         || comp.layer_shell.exclusive_focus.is_some()
         || comp.seat.get_pointer().is_some_and(|p| p.is_grabbed())
     {
-        return;
-    }
-    if mode == CaptureMode::Screen {
-        let rect = Rect::new(Point::new(0, 0), comp.wm.backend().output_size);
-        photograph(comp, rect, None, destination);
         return;
     }
     let at = pointer(comp);
@@ -253,7 +255,9 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
         hovered: None,
     });
     crate::input::release_pointer_constraint(comp);
-    comp.wm.backend_mut().grab_keyboard();
+    // Capture owns a separate modal layer, so cancelling it cannot release
+    // the keyboard belonging to a menu or panel that is still open.
+    comp.wm.backend_mut().keyboard_grab_changed = true;
     crate::input::reset_client_input_focus(comp);
     comp.cursor_status = CursorImageStatus::default_named();
     motion(comp, at);
@@ -271,7 +275,7 @@ fn dismiss(comp: &mut Compositor) {
     let was_modal = modal(comp.wm.backend());
     comp.wm.backend_mut().capture_ui = None;
     if was_modal {
-        comp.wm.backend_mut().ungrab_keyboard();
+        comp.wm.backend_mut().keyboard_grab_changed = true;
     }
     comp.wm.backend_mut().mark_damaged();
     crate::input::sync_pointer_focus(comp);
@@ -417,13 +421,9 @@ pub(crate) fn key(comp: &mut Compositor, combo: &KeyCombo) -> bool {
     if !modal(comp.wm.backend()) {
         return false;
     }
-    if combo.modifiers.contains(Modifiers::SUPER) {
-        if let Some(chonk_shell::shell::KeyResolution::Action(wm_config::Action::Capture(mode))) =
-            comp.shell.keymap_action(combo)
-        {
-            begin(comp, mode);
-            return true;
-        }
+    if let Some(mode) = comp.shell.capture_mode_for_combo(combo) {
+        begin(comp, mode);
+        return true;
     }
     match combo.keysym {
         0xff1b => dismiss(comp), // Escape, including during a held drag.
