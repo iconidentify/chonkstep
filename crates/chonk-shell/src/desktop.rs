@@ -165,24 +165,21 @@ const ACTION_OMARCHY_BASE: u32 = 1_000_000;
 /// existing installs and buys nothing anybody sees.
 const DEFAULT_ROOT_MENU_TITLE: &str = "Omarchy";
 
-/// The root menu's title: the name of the desktop the person installed,
-/// taken from the host's `/etc/os-release`.
-///
-/// The reasoning above — that the title names the desktop, not the
-/// window manager — was never specific to Omarchy; it was only ever
-/// hardcoded because Omarchy was the one host. It is not any more, and a
-/// menu captioned "Omarchy" on somebody's LCOS desktop is simply wrong.
-///
-/// `NAME=` is exactly the field for this, and the two hosts spell
-/// themselves cleanly: Omarchy sets `NAME="Omarchy"`, LCOS sets
-/// `NAME="LCOS"`. So on Omarchy this resolves to the identical string
-/// the constant used to hold and nothing there changes at all — which is
-/// the point. Read once; an unreadable or empty value falls back.
+/// Name the installed desktop before falling back to the host OS.
+/// Omarchy can leave `/etc/os-release` naming its base distribution
+/// (including Arch Linux ARM), so that file alone cannot identify it.
+/// Other hosts, such as LCOS, retain their own OS name. Resolve once.
 fn root_menu_title() -> &'static str {
     static TITLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TITLE
         .get_or_init(|| {
-            os_release_field("NAME").unwrap_or_else(|| DEFAULT_ROOT_MENU_TITLE.to_string())
+            if crate::omarchy_shell::ShellPaths::discover().is_some()
+                || crate::omarchy_menu::OmarchyMenu::discover().is_some()
+            {
+                DEFAULT_ROOT_MENU_TITLE.to_string()
+            } else {
+                os_release_field("NAME").unwrap_or_else(|| DEFAULT_ROOT_MENU_TITLE.to_string())
+            }
         })
         .as_str()
 }
