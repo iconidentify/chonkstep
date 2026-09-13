@@ -176,10 +176,38 @@ fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
         return;
     }
     fn ime_chord(s: &mut Session, modifiers: &[u32], code: u32) {
-        // The seat barrier cannot acknowledge an asynchronous client changing
-        // its text-input focus and replacing the IME grab. Let that round trip
-        // settle before the next user chord.
-        std::thread::sleep(Duration::from_millis(250));
+        // Mapping/focusing an editor can replace Fcitx's grab asynchronously.
+        // A seat barrier or fixed delay can still send keys to a retired grab.
+        // F24 does not edit text: require a fresh probe to travel through Fcitx
+        // and reach the focused editor before testing the actual shortcut.
+        let world = s.world().unwrap();
+        let focused = world.windows.iter().find(|w| Some(w.id) == world.logical_focus).unwrap();
+        let role = focused.title.strip_prefix("IME Probe ").unwrap();
+        let state_path = s.dir.join(format!("{role}.json"));
+        let probes = || {
+            std::fs::read_to_string(&state_path).ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|state| state["events"].as_array()
+                    .map(|events| events.iter().filter(|event| event["key"] == "F24").count()))
+                .unwrap_or(0)
+        };
+        let before = probes();
+        let ime_log = s.dir.join("client-0-env.log");
+        let log_start = std::fs::read_to_string(&ime_log).unwrap_or_default().len();
+        poll_until(WAIT, "focused editor receives a fresh key through Fcitx", || {
+            let log = std::fs::read_to_string(&ime_log).unwrap_or_default();
+            let forwarded = log.get(log_start..).unwrap_or_default().lines().any(|line| {
+                let line = chonk_testkit::strip_ansi(line);
+                line.contains("zwp_virtual_keyboard_v1") && line.contains(".key(")
+                    && line.contains(", 194, 1)")
+            });
+            if probes() > before && forwarded {
+                return Some(());
+            }
+            s.door().tap_key(194).unwrap(); // KEY_F24
+            None
+        }).unwrap_or_else(|error| panic!("{error}: {role}; state {}",
+            std::fs::read_to_string(&state_path).unwrap_or_default()));
         chord(s, modifiers, code);
     }
     let mut s = boot("mac-ime-clipboard");
