@@ -1172,7 +1172,7 @@ pub fn parse_with(
         if table.contains_key("keymap") {
             return Err("interaction_mode = 'mac' owns its keymap; remove the explicit keymap setting (individual [keybindings] overrides are supported)".into());
         }
-        config.keybindings = preset::mac_keybindings();
+        config.keybindings = preset::mac_keybindings(config.desktop);
         config.drag_modifier = None;
         config.provenance.insert("drag_modifier".into(), "Mac interaction profile".into());
         config.bindings = config.keybindings.iter().filter(|(key,_)| key.keysym >= 0x10080000)
@@ -3314,6 +3314,44 @@ mod command_tests {
         assert!(parse("").expect("valid").terminal.is_none());
         assert!(Config::default_config().terminal.is_none());
     }
+
+    #[test]
+    fn mac_launcher_follows_desktop_and_preserves_user_overrides() {
+        let standalone = parse("interaction_mode = 'mac'").unwrap();
+        assert_eq!(action_for(&standalone, "cmd+space"), Some(Action::RootMenu));
+
+        let roots = hyprland::Roots::under(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/hyprland/machine"),
+        );
+        for import_hyprland in [false, true] {
+            let resolve = |overrides: &str| {
+                parse_with(
+                    &format!("desktop = 'omarchy'\ninteraction_mode = 'mac'\n{overrides}"),
+                    &|| import_hyprland.then(|| hyprland::read(&roots)),
+                )
+                .unwrap()
+            };
+            let config = resolve("");
+            assert_eq!(
+                action_for(&config, "cmd+space"),
+                Some(Action::Run("omarchy-menu".into())),
+            );
+            assert_eq!(
+                config.commands["omarchy-menu"],
+                ["omarchy-menu", "toggle"],
+            );
+            assert_eq!(action_for(&config, "cmd+q"), Some(Action::QuitApplication));
+
+            let custom_command = resolve("[commands]\nomarchy-menu = ['my-launcher']");
+            assert_eq!(custom_command.commands["omarchy-menu"], ["my-launcher"]);
+            let custom_binding = resolve("[keybindings]\n'cmd+space' = 'root-menu'");
+            assert_eq!(action_for(&custom_binding, "cmd+space"), Some(Action::RootMenu));
+            let unbound = resolve("[keybindings]\n'cmd+space' = 'none'");
+            assert_eq!(action_for(&unbound, "cmd+space"), None);
+        }
+    }
+
     #[test]
     fn mac_profile_is_validated_and_preserves_desktop_services_without_legacy_shortcuts() {
         let mac = parse("interaction_mode = 'mac'\nhyprland_config = false\n[mac.applications]\n'foot' = 'native'\n").unwrap();

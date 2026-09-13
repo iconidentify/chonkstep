@@ -56,8 +56,11 @@ Wayland session through XWayland.
 | Control-Left / Control-Right | Previous / next existing desktop; an edge does not create a desktop |
 | Control-Command-F | Enter or leave a dedicated fullscreen desktop; restore geometry and remove the empty desktop on exit |
 | Command-F3 or F11 | Show Desktop; repeat to restore the previously visible windows |
-| Command-Space | ChonkStep application/root menu |
+| Command-Space | Omarchy's launcher with `desktop = "omarchy"`; ChonkStep's application/root menu otherwise |
 | Control-Command-Q | Lock through the configured `lock_command`, or the `mac-lock` provider |
+
+Omarchy's launcher runs `omarchy-menu toggle`. Override `[commands] omarchy-menu`
+to choose another launcher, or `[keybindings] "cmd+space"` to change the action.
 
 Applications are grouped by app ID / WM_CLASS, including later identity updates,
 and transient windows belong to their application. Hide, minimize, and Show

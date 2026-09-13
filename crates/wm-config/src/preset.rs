@@ -395,11 +395,22 @@ pub fn mac_commands() -> BTreeMap<String, Vec<String>> {
     ].into_iter().map(|(name, argv)| (name.into(), argv.into_iter().map(str::to_owned).collect())).collect()
 }
 
-pub fn mac_keybindings() -> Vec<(wm_core::KeyCombo, Action)> {
-    MAC_BINDINGS.iter().map(|(chord, action)| (
-        parse_key(chord).expect("Mac shortcut must parse"),
-        crate::action_from_name(action).expect("Mac action must parse"),
-    )).collect()
+pub fn mac_keybindings(desktop: Desktop) -> Vec<(wm_core::KeyCombo, Action)> {
+    MAC_BINDINGS
+        .iter()
+        .map(|&(chord, action)| {
+            // Mac interaction owns the chord; the desktop supplies its launcher.
+            let action = if desktop == Desktop::Omarchy && chord == "cmd+space" {
+                "run omarchy-menu"
+            } else {
+                action
+            };
+            (
+                parse_key(chord).expect("Mac shortcut must parse"),
+                crate::action_from_name(action).expect("Mac action must parse"),
+            )
+        })
+        .collect()
 }
 
 /// The Omarchy keymap: every chord from Omarchy's own `bindings/*.lua`
