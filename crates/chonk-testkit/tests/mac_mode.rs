@@ -178,8 +178,9 @@ fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
     fn ime_chord(s: &mut Session, modifiers: &[u32], code: u32) {
         // Mapping/focusing an editor can replace Fcitx's grab asynchronously.
         // A seat barrier or fixed delay can still send keys to a retired grab.
-        // F24 does not edit text: require a fresh probe to travel through Fcitx
+        // F12 does not edit text: require a fresh probe to travel through Fcitx
         // and reach the focused editor before testing the actual shortcut.
+        // Unlike F24, F12 is mapped by older xkeyboard-config releases too.
         let world = s.world().unwrap();
         let focused = world.windows.iter().find(|w| Some(w.id) == world.logical_focus).unwrap();
         let role = focused.title.strip_prefix("IME Probe ").unwrap();
@@ -188,7 +189,7 @@ fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
             std::fs::read_to_string(&state_path).ok()
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok())
                 .and_then(|state| state["events"].as_array()
-                    .map(|events| events.iter().filter(|event| event["key"] == "F24").count()))
+                    .map(|events| events.iter().filter(|event| event["key"] == "F12").count()))
                 .unwrap_or(0)
         };
         let before = probes();
@@ -199,12 +200,12 @@ fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
             let forwarded = log.get(log_start..).unwrap_or_default().lines().any(|line| {
                 let line = chonk_testkit::strip_ansi(line);
                 line.contains("zwp_virtual_keyboard_v1") && line.contains(".key(")
-                    && line.contains(", 194, 1)")
+                    && line.contains(", 88, 1)")
             });
             if probes() > before && forwarded {
                 return Some(());
             }
-            s.door().tap_key(194).unwrap(); // KEY_F24
+            s.door().tap_key(88).unwrap(); // KEY_F12
             None
         }).unwrap_or_else(|error| panic!("{error}: {role}; state {}; world {:?}",
             std::fs::read_to_string(&state_path).unwrap_or_default(), s.world()));
