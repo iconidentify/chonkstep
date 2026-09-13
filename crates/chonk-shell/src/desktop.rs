@@ -174,7 +174,7 @@ fn root_menu_title() -> &'static str {
     TITLE
         .get_or_init(|| {
             if crate::omarchy_shell::ShellPaths::discover().is_some()
-                || crate::omarchy_menu::OmarchyMenu::discover().is_some()
+                || crate::omarchy_menu::MenuPaths::discover().is_some()
             {
                 DEFAULT_ROOT_MENU_TITLE.to_string()
             } else {
