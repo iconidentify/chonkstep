@@ -441,7 +441,9 @@ fn application_hide_desktop_switching_and_fullscreen_spaces() {
     chord(&mut s, &[CTRL], 103); // Mission Control
     poll_until(WAIT, "Mission Control", || s.world().ok()?.overview.map(|_| ())).unwrap();
     chord(&mut s, &[], 1); // Escape
-    assert!(s.world().unwrap().overview.is_none());
+    poll_until(WAIT, "Mission Control return animation finishes", || {
+        s.world().ok()?.overview.is_none().then_some(())
+    }).unwrap();
 }
 
 #[test]

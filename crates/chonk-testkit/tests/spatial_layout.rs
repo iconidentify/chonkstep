@@ -56,7 +56,9 @@ fn overview_roundtrip(session: &mut Session) {
     assert!(session.world().unwrap().overview.is_some());
     session.screenshot("overview").unwrap();
     session.door().tap_key(keys::ESC).unwrap();
-    assert!(session.world().unwrap().overview.is_none());
+    poll_until(Duration::from_secs(10), "Overview return animation finishes", || {
+        session.world().ok()?.overview.is_none().then_some(())
+    }).unwrap();
 }
 
 #[test]

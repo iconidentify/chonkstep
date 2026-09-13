@@ -494,7 +494,7 @@ impl Wallpaper {
 /// interpolation or a large background asset. One bit remains one pixel.
 fn quickdraw_pattern(rows: [u8; 8], screen: Size) -> Option<DecorationBuffer> {
     let mut tile = Pixmap::new(8, 8)?;
-    for (index, pixel) in tile.data_mut().chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in tile.data_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let value = if rows[index / 8] & (0x80 >> (index % 8)) != 0 { 0 } else { 255 };
         pixel.copy_from_slice(&[value, value, value, 255]);
     }
@@ -733,8 +733,8 @@ mod tests {
             (Wallpaper::System7DarkGray, 48),
         ] {
             let tile = wallpaper.render(Size::new(8, 8), Appearance::Light).unwrap();
-            assert_eq!(tile.pixels.chunks_exact(4).filter(|pixel| pixel[0] == 0).count(), black_pixels);
-            assert!(tile.pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255] || pixel == [255; 4]));
+            assert_eq!(tile.pixels.as_chunks::<4>().0.iter().filter(|pixel| pixel[0] == 0).count(), black_pixels);
+            assert!(tile.pixels.as_chunks::<4>().0.iter().all(|pixel| *pixel == [0, 0, 0, 255] || *pixel == [255; 4]));
             let source = Pixmap::from_vec(tile.pixels, IntSize::from_wh(8, 8).unwrap()).unwrap();
             let path = root.path().join(format!("{}.png", wallpaper.id()));
             std::fs::write(&path, source.encode_png().unwrap()).unwrap();

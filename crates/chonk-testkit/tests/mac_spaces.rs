@@ -835,7 +835,9 @@ fn desktop_thumbnails_show_real_placement_updates_moves_and_removal() {
     }).unwrap();
     sample(&mut s, 1, second.id, [40,190,100,255], "remaining-window-thumbnail-pixels");
     chord(&mut s, &[], 1);
-    assert!(s.world().unwrap().overview.is_none());
+    poll_until(WAIT, "Overview return animation finishes", || {
+        s.world().ok()?.overview.is_none().then_some(())
+    }).unwrap();
     assert_eq!(heads(&s), (1,2));
     std::thread::sleep(Duration::from_millis(300));
     let stopped = callbacks(&s);

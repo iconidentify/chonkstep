@@ -6,7 +6,8 @@ use wm_theme::{DecorationStyle, FontState, UiChrome, menu::MenuItem};
 
 const WAIT: Duration = Duration::from_secs(10);
 fn config(scale: u32, style: &str) -> String {
-    format!("scale = {scale}\ntheme = 'nextstep-classic'\ndecoration_style = '{style}'\ninteraction_mode = 'desktop'\nshow_dock = false\nomarchy_menu = false\nhyprland_config = false\n[keybindings]\n'super+o' = 'overview'\n")
+    // Exercise the tile-free opt-out; modern_chrome covers default desktop previews.
+    format!("scale = {scale}\ntheme = 'nextstep-classic'\ndecoration_style = '{style}'\ninteraction_mode = 'desktop'\nshow_dock = false\nminimized_previews = false\nomarchy_menu = false\nhyprland_config = false\n[keybindings]\n'super+o' = 'overview'\n")
 }
 fn above(world: &World) -> Vec<ShellInfo> {
     world.shells.iter().filter(|s| s.mapped && s.above && s.buffer_bytes > 0).cloned().collect()
