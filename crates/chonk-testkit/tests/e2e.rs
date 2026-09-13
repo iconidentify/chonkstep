@@ -633,7 +633,14 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
          and the restore will dedup into an input-dead window",
     );
 
-    assert!(session.world().unwrap().shells.iter().all(|surface| shells_before.contains(&surface.id)));
+    poll_until(ACT, "minimizing creates one desktop preview tile", || {
+        let world = session.world().ok()?;
+        let previews: Vec<_> = world.shells.iter()
+            .filter(|surface| !shells_before.contains(&surface.id))
+            .collect();
+        (previews.len() == 1 && previews[0].mapped && !previews[0].above
+            && previews[0].buffer_bytes > 0).then_some(())
+    }).expect("the default desktop preview should appear for the minimized window");
     session.door().chord(56, 15).unwrap();
 
     {
