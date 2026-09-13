@@ -169,7 +169,7 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
         CaptureMode::ScreenClipboard => (CaptureMode::Screen, Destination::Clipboard),
         CaptureMode::AreaClipboard => (CaptureMode::Area, Destination::Clipboard),
         CaptureMode::WindowClipboard => (CaptureMode::Window, Destination::Clipboard),
-        mode => (mode, if comp.wm.mac_mode() { Destination::File } else { Destination::Legacy }),
+        mode => (mode, if comp.wm.spaces_mode() { Destination::File } else { Destination::Legacy }),
     };
     if mode == CaptureMode::Stop {
         stop(comp);
@@ -306,7 +306,7 @@ fn commit(comp: &mut Compositor) {
         return;
     };
     let mode = ui.mode;
-    let destination = if ui.destination == Destination::File && comp.wm.mac_mode()
+    let destination = if ui.destination == Destination::File && comp.wm.spaces_mode()
         && comp.seat.get_keyboard().is_some_and(|keyboard| keyboard.modifier_state().ctrl) {
         Destination::Clipboard
     } else { ui.destination };

@@ -12,6 +12,28 @@ const CTRL: u32 = 29;
 const SHIFT: u32 = 42;
 const CONTENT: &str = "Mac clipboard: café — 日本語 🍎\nsecond line";
 
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_mode"]
+fn spaces_with_desktop_keys_deliver_untranslated_super_and_control() {
+    let mut s = Session::boot("spaces-desktop-input", SessionOptions {
+        config_extra: "interaction_mode='spaces'\nkeyboard_mode='desktop'\ndesktop='omarchy'\nhyprland_config=false\nshow_dock=false\n".into(),
+        ..Default::default()
+    }).unwrap();
+    for platform in ["wayland", "x11"] {
+        let mut b = browser(&mut s, platform, platform);
+        focus(&mut s, &mut b, "source");
+        b.evaluate("events.length=0;true").unwrap();
+        chord(&mut s, &[CMD], 30);
+        poll_until(WAIT, "untranslated Super-A", || {
+            (b.evaluate("events.some(e=>e.key==='a' && e.type==='keydown' && e.meta && !e.ctrl)").ok()? == true).then_some(())
+        }).unwrap();
+        chord(&mut s, &[CTRL], 30);
+        poll_until(WAIT, "ordinary Control-A", || {
+            (b.evaluate("events.some(e=>e.key==='a' && e.type==='keydown' && e.ctrl && !e.meta) && source.selectionStart===0 && source.selectionEnd===source.value.length").ok()? == true).then_some(())
+        }).unwrap();
+    }
+}
+
 fn clipboard_output(s: &Session, args: &[&str]) -> Option<Vec<u8>> {
     use std::process::{Command, Stdio};
     let path = s.dir.join("observed-clipboard");
@@ -900,14 +922,15 @@ fn nautilus_copies_files_using_command_shortcuts() {
     // sending Select All while that row is empty cannot select a future file.
     poll_until(WAIT, "Nautilus source file painted", || {
         let shot = s.screenshot("source-loaded").ok()?;
-        let pixels: Vec<_> = (60..200).flat_map(|y| (220..window.w.saturating_sub(30)).map(move |x| (x, y)))
+        let pixels: Vec<_> = (60..240).flat_map(|y| (220..window.w.saturating_sub(30)).map(move |x| (x, y)))
             .map(|(x, y)| shot.pixel(window.x.max(0) as u32 + x, window.y.max(0) as u32 + y))
             .collect();
         let light = pixels.iter().filter(|p| p[..3].iter().all(|c| *c > 110)).count();
         let dark = pixels.iter().filter(|p| p[..3].iter().all(|c| *c < 90)).count();
-        // A white loading surface is not a file icon. Require the dark
-        // fixture theme's background and contrasting file/text together.
-        (light > 100 && dark > pixels.len() / 2).then_some(())
+        // A flat loading surface is not a file icon. Require contrasting
+        // icon/text pixels in either appearance: libadwaita can ignore
+        // GTK_THEME and follow the desktop's light preference instead.
+        (light > 100 && dark > 100).then_some(())
     }).unwrap();
     s.door()
         .click(

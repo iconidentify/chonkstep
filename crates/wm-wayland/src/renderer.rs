@@ -271,12 +271,9 @@ pub(crate) fn build_scene_into(
                 monitor.geometry.pos.x - viewport.pos.x,
                 monitor.geometry.pos.y - viewport.pos.y,
             ));
-            // A locker commits at whatever scale its output told it —
-            // the same effective-factor rule as every other client.
-            let factor = crate::xdg::effective_surface_scale(
-                crate::xdg::committed_surface_scale(entry.surface.wl_surface()),
-                backend.scale_at(monitor.geometry),
-            );
+            // Lock configures use the output's logical size. Buffer density
+            // affects sampling, never the extent of this dedicated surface.
+            let factor = backend.scale_at(monitor.geometry);
             push_surface_tree(
                 elements,
                 renderer,

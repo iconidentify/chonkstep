@@ -1285,7 +1285,7 @@ pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key
     let seat = state.seat.clone();
     let shortcuts_inhibited = seat.keyboard_shortcuts_inhibited();
     let modal_owns_keyboard = keyboard::modal_owns_keyboard(state);
-    let app_target = if state.wm.mac_mode() {
+    let app_target = if state.wm.mac_keyboard() {
         keyboard.current_focus().and_then(|focus| state.wm.backend().window_for_surface(focus.surface()))
             .and_then(|id| state.wm.backend().windows.get(&id).and_then(|record| record.app_id.as_deref())
                 .map(|identity| (id, state.wm.interaction_config().profile(identity))))
@@ -1310,7 +1310,7 @@ pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key
         // AZERTY puts digits on the Shift level. Mac screenshot chords name
         // that digit, while Latin letters and punctuation retain the existing
         // unshifted matching rule (including Command-Shift-grave).
-        if data.wm.mac_mode() && mods.shift && !(0x30..=0x39).contains(&keysym.raw()) {
+        if data.wm.mac_keyboard() && mods.shift && !(0x30..=0x39).contains(&keysym.raw()) {
             let shifted = handle.modified_sym();
             if (0x30..=0x39).contains(&shifted.raw()) { keysym = shifted; }
         }
@@ -1458,7 +1458,7 @@ pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key
         }
     });
     if matches!(route, FilterResult::Forward) {
-        if state.wm.mac_mode() || state.mac_keyboard.has_held(keycode) {
+        if state.wm.mac_keyboard() || state.mac_keyboard.has_held(keycode) {
             keyboard::mac::forward(state, &keyboard, keyboard::mac::Delivery {
                 code: keycode, state: key_state, serial, time,
                 combo: physical_combo, physical: physical_modifiers, eligible,
@@ -3084,9 +3084,7 @@ fn lock_hit(
         }
         let root = entry.surface.wl_surface();
         let anchor: LogicalPoint<f64, Logical> = (monitor.geometry.pos.x as f64, monitor.geometry.pos.y as f64).into();
-        let scale = crate::xdg::effective_surface_scale(
-            crate::xdg::committed_surface_scale(root), backend.scale_at(monitor.geometry),
-        );
+        let scale = backend.scale_at(monitor.geometry);
         let probe = surface_probe(anchor, position, scale);
         return match under_from_surface_tree(
             root,

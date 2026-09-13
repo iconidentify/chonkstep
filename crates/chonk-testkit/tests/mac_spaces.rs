@@ -40,13 +40,20 @@ fn chord(s: &mut Session, mods: &[u32], key: u32) {
         s.door().key(m, false).unwrap();
     }
     s.door().barrier().unwrap();
+    if mods.is_empty() && key == 1 {
+        poll_until(WAIT, "Escape's Overview return transition settles", || {
+            s.world().ok()?.gesture.is_none().then_some(())
+        }).unwrap();
+    }
 }
 fn boot(name: &str) -> Session {
+    boot_with_config(name, "interaction_mode = 'mac'\n")
+}
+fn boot_with_config(name: &str, profile: &str) -> Session {
     let mut s = Session::boot(
         name,
         SessionOptions {
-            config_extra: "interaction_mode = 'mac'\nshow_dock = false\nhyprland_config = false\n"
-                .into(),
+            config_extra: format!("{profile}show_dock = false\nhyprland_config = false\n"),
             ..Default::default()
         },
     )
@@ -85,6 +92,46 @@ fn focus(s: &mut Session, title: &str) {
         .click((w.x + 50) as f64, (w.y + 50) as f64)
         .unwrap();
     s.door().barrier().unwrap();
+}
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn omarchy_keys_keep_independent_spaces_and_dedicated_fullscreen() {
+    let mut s = boot_with_config("spaces-omarchy", "interaction_mode='spaces'\nkeyboard_mode='desktop'\ndesktop='omarchy'\n");
+    let left = probe(&mut s, "Omarchy Left", 0);
+    let right = probe(&mut s, "Omarchy Right", 1);
+    s.door().motion(250.0, 200.0).unwrap();
+    dispatch(&mut s, "workspace 3");
+    assert_eq!(heads(&s), (3, 2));
+    chord(&mut s, &[125, 42], 15); // Super-Shift-Tab: previous Space on this display.
+    assert_eq!(heads(&s), (1, 2));
+    chord(&mut s, &[125], 15); // Super-Tab: next Space, other display stays put.
+    assert_eq!(heads(&s), (3, 2));
+    assert_eq!(pixel(&mut s, "Omarchy Right", "other-display-unchanged"), [32, 64, 128, 255]);
+    chord(&mut s, &[125, 42], 15);
+    focus(&mut s, "Omarchy Left");
+    chord(&mut s, &[125], 33); // Super-F, with Mac keyboard translation disabled.
+    let left_fullscreen = heads(&s).0;
+    assert_ne!(left_fullscreen, 1);
+    assert_eq!(heads(&s).1, 2);
+    focus(&mut s, "Omarchy Right");
+    chord(&mut s, &[125], 33);
+    assert_eq!(heads(&s).0, left_fullscreen);
+    assert_ne!(heads(&s).1, 2);
+    poll_until(WAIT, "both fullscreen Spaces paint", || {
+        let shot = s.screenshot("omarchy-both-fullscreen").ok()?;
+        (shot.pixel(10, 10) == [32, 64, 128, 255]
+            && shot.pixel(shot.width - 10, 10) == [32, 64, 128, 255]).then_some(())
+    }).unwrap();
+    chord(&mut s, &[125], 33);
+    focus(&mut s, "Omarchy Left");
+    chord(&mut s, &[125], 33);
+    assert_eq!(heads(&s), (1, 2));
+    let world = s.world().unwrap();
+    for original in [left, right] {
+        let restored = world.window_matching(&original.title).unwrap();
+        assert_eq!((restored.x, restored.y, restored.w, restored.h),
+            (original.x, original.y, original.w, original.h));
+    }
 }
 #[test]
 #[ignore = "scripts/e2e.sh --headless --test mac_spaces"]

@@ -31,6 +31,42 @@ fn visible(wm: &WindowManager<FakeBackend>, id: ClientId) -> bool {
 }
 
 #[test]
+fn disabling_mac_keys_preserves_independent_fullscreen_spaces() {
+    let mut wm = dual_mac();
+    let left = window_on(&mut wm, 0);
+    let right = window_on(&mut wm, 1);
+    let left_geometry = wm.client(left).unwrap().geometry;
+    let right_geometry = wm.client(right).unwrap().geometry;
+    wm.fullscreen(left);
+    wm.fullscreen(right);
+    let left_space = wm.client(left).unwrap().workspace;
+    let right_space = wm.client(right).unwrap().workspace;
+    let count = wm.workspace_count();
+    let mut config = wm.interaction_config().clone();
+    config.mode = crate::InteractionMode::Spaces;
+    config.keyboard_mode = Some(crate::KeyboardMode::Desktop);
+    wm.set_interaction_config(config.clone());
+    assert!(!wm.mac_keyboard());
+    assert!(wm.separate_spaces());
+    assert_eq!(wm.workspace_count(), count);
+    assert_eq!(wm.client(left).unwrap().workspace, left_space);
+    assert_eq!(wm.client(right).unwrap().workspace, right_space);
+    assert!(wm.client(left).unwrap().flags.contains(ClientFlags::FULLSCREEN));
+    assert!(wm.client(right).unwrap().flags.contains(ClientFlags::FULLSCREEN));
+    assert!(visible(&wm, left) && visible(&wm, right));
+    assert!(wm.backend().grabbed_keys.contains(&KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT }));
+    config.keyboard_mode = Some(crate::KeyboardMode::Mac);
+    wm.set_interaction_config(config);
+    assert!(wm.mac_keyboard());
+    assert_eq!(wm.client(left).unwrap().workspace, left_space);
+    assert_eq!(wm.client(right).unwrap().workspace, right_space);
+    wm.unfullscreen(left);
+    wm.unfullscreen(right);
+    assert_eq!(wm.client(left).unwrap().geometry, left_geometry);
+    assert_eq!(wm.client(right).unwrap().geometry, right_geometry);
+}
+
+#[test]
 fn independent_rows_preserve_other_display_pixels_and_restore_local_focus() {
     let mut wm = dual_mac();
     let left = window_on(&mut wm, 0);

@@ -917,7 +917,7 @@ impl<B: Backend> WindowManager<B> {
     /// and calling the matching public method when its `KeyPress`
     /// arrives. Call once after construction.
     pub fn bind_default_keys(&mut self) {
-        if self.mac_mode() { return; }
+        if self.mac_keyboard() { return; }
         self.backend.grab_key(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT });
         self.backend.grab_key(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT | Modifiers::SHIFT });
     }
@@ -1949,7 +1949,7 @@ impl<B: Backend> WindowManager<B> {
             self.idle_inhibit_clients.insert(id);
         }
         self.window_index.insert(window, id);
-        if self.mac_mode() && self.mac_hidden.iter().any(|other| self.same_application(*other, id)) {
+        if self.spaces_mode() && self.mac_hidden.iter().any(|other| self.same_application(*other, id)) {
             self.mac_hidden.insert(id);
             self.hide_client_surface(id);
         }

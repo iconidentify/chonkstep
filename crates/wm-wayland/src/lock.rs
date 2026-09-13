@@ -93,6 +93,15 @@ pub(crate) struct LockSurfaceEntry {
     pub surface: LockSurface,
 }
 
+/// Lock configure, rendering and pointer input share the output's logical
+/// coordinate system. wl_output's integer scale is only a buffer-density hint;
+/// dividing by that ceiling shrinks a lock on a fractional-scale display.
+fn logical_size(physical: wm_theme_api::Size, scale: f64) -> (u32, u32) {
+    let scale = if scale.is_finite() && scale >= 0.125 { scale } else { 1.0 };
+    ((physical.w as f64 / scale).ceil().max(1.0) as u32,
+     (physical.h as f64 / scale).ceil().max(1.0) as u32)
+}
+
 /// The compositor-side lock state: smithay's protocol state, the
 /// lifecycle machine, the not-yet-confirmed locker, and the protocol
 /// handle of whoever holds the lock (kept to tell a live locker from
@@ -400,20 +409,8 @@ impl SessionLockHandler for Compositor {
         let index = Output::from_resource(&wl_output)
             .and_then(|named| self.outputs.iter().position(|entry| entry.output == named))
             .unwrap_or(0);
-        let (physical, advertised) = {
-            let entry = &self.outputs[index];
-            (entry.size, crate::state::advertised_output_scale(self.ui_scale).integer_scale().max(1))
-        };
-        // The configure is in the client's logical units; the client
-        // multiplies back up by the scale the output advertises. An
-        // odd physical extent loses its last pixel to the division —
-        // the buffer lands one short and the clear color (black)
-        // shows through the sliver, which on a lock screen is the
-        // correct color to leak.
-        let logical = (
-            (physical.w as i32 / advertised).max(1) as u32,
-            (physical.h as i32 / advertised).max(1) as u32,
-        );
+        let entry = &self.outputs[index];
+        let logical = logical_size(entry.size, entry.scale);
         prime_reused_lock_surface(&surface, logical);
         surface.with_pending_state(|state| {
             state.size = Some(logical.into());
@@ -635,15 +632,11 @@ pub(crate) fn refresh(comp: &mut Compositor) {
     if !std::mem::take(&mut comp.session_lock.refresh_dirty) {
         return;
     }
-    let advertised = crate::state::advertised_output_scale(comp.ui_scale).integer_scale().max(1);
     {
         let Compositor { outputs, wm, .. } = comp;
         for lock in wm.backend().lock_surfaces.iter().filter(|entry| entry.surface.alive()) {
             let Some(entry) = outputs.get(lock.output) else { continue };
-            let logical = (
-                (entry.size.w as i32 / advertised).max(1) as u32,
-                (entry.size.h as i32 / advertised).max(1) as u32,
-            );
+            let logical = logical_size(entry.size, entry.scale);
             lock.surface.with_pending_state(|state| {
                 state.size = Some(logical.into());
             });

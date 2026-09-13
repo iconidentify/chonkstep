@@ -79,6 +79,26 @@ fn client_checkpoint(session: &Session, client: &str, checkpoint: &str) {
 }
 
 #[test]
+#[ignore = "real Qt locker: scripts/e2e.sh --headless --test session_lock"]
+fn quickshell_lock_fills_the_output_at_fractional_and_integer_scales() {
+    assert!(chonk_testkit::require_client("qs"));
+    for scale in [1.0, 1.5, 2.0] {
+        let mut session = Session::boot(&format!("lock-scale-{scale}"), SessionOptions {
+            scale: Some(scale), ..Default::default()
+        }).unwrap();
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/scaled-lock.qml");
+        session.launch("qs", &["-p", fixture.to_str().unwrap()]).unwrap();
+        poll_until(Duration::from_secs(15), "Qt lock covers all four output corners", || {
+            if !session.log().contains("lock surface created") { return None; }
+            let shot = session.screenshot("quickshell-lock").ok()?;
+            [(8, 8), (shot.width - 9, 8), (8, shot.height - 9), (shot.width - 9, shot.height - 9)]
+                .into_iter().all(|(x, y)| shot.pixel(x, y) == [8, 24, 64, 255]).then_some(())
+        }).unwrap_or_else(|error| panic!("{error}\n{}", session.client_log("qs")));
+        assert_eq!(session.door().hit(1100, 650).unwrap(), "lock");
+    }
+}
+
+#[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn a_lockers_other_surfaces_survive_the_unlock_teardown() {
     let mut session =

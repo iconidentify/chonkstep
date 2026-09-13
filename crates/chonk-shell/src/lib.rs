@@ -4,6 +4,7 @@ pub mod appearance;
 pub mod apps;
 pub mod control;
 pub mod desktop;
+mod miniwindows;
 pub mod omarchy_export;
 pub mod omarchy_follow;
 pub mod omarchy_menu;

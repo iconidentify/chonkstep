@@ -19,6 +19,15 @@ Return and Escape work throughout. An upward swipe while it is open keeps it
 open; horizontal swipes also work inside Overview. X11 retains the rasterized
 card fallback.
 
+Keyboard Overview shortcuts use the same live-window spring as gestures. Opening
+eases from the desktop into Overview; Escape, a second shortcut press, or choosing
+a window animates back. Pressing the shortcut while returning reverses smoothly
+from the current position. A new swipe can catch that motion too. These keyboard
+transitions work even with `[input.gestures] enabled = false` and with ordinary
+Linux keyboard shortcuts. Clients keep their sizes; only the compositor's live
+textures move and scale. Moving previews do not expose pointer targets until the
+transition settles. Locking or changing the output layout cancels the transition.
+
 Drag a window upward onto a desktop thumbnail to move it there without leaving
 Overview. The live window image follows the pointer, becomes smaller and
 translucent, and highlights the entire destination thumbnail. Desktop labels

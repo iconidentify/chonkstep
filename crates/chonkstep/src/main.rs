@@ -118,8 +118,8 @@ fn main() {
     // their session, because with the WM refusing to start there is no
     // terminal to fix the typo from.
     let config = wm_config::load();
-    if config.interaction.mode == wm_core::InteractionMode::Mac {
-        eprintln!("Mac interaction requires chonkstep-wayland; X11 applications are supported through XWayland. Use interaction_mode = 'desktop' for the standalone X11 session.");
+    if config.interaction.spaces_mode() || config.interaction.mac_keyboard() {
+        eprintln!("Spaces and Mac keyboard profiles require chonkstep-wayland; X11 applications are supported through XWayland. Use interaction_mode = 'desktop' and keyboard_mode = 'desktop' for the standalone X11 session.");
         std::process::exit(1);
     }
 
@@ -233,13 +233,13 @@ fn main() {
         if requests.reload {
             tracing::info!("reload requested — re-reading the config and applying it in place");
             match wm_config::inspect(None) {
-                Ok(config) if config.interaction.mode != wm_core::InteractionMode::Mac => {
+                Ok(config) if !config.interaction.spaces_mode() && !config.interaction.mac_keyboard() => {
                     let next = SessionState::resolve(&config);
                     published_appearance = next.appearance;
                     publish_appearance(&mut xsettings, &next);
                     shell.apply_session_state(&mut wm, next);
                 }
-                Ok(_) => tracing::warn!("Mac interaction requires chonkstep-wayland; retaining working configuration"),
+                Ok(_) => tracing::warn!("Spaces and Mac keyboard profiles require chonkstep-wayland; retaining working configuration"),
                 Err(error) => tracing::warn!(%error, "config reload rejected; retaining working configuration"),
             }
         }

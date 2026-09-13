@@ -687,6 +687,16 @@ pub(crate) fn switcher_preview_px(scale: f32) -> u32 {
     ((56.0 * scale).round() as u32).max(16)
 }
 
+/// Keep a readable selection on screen even with a long MRU list. The generous
+/// padding allowance covers all chrome recipes without shrinking the previews.
+fn switcher_range(count: usize, selected: usize, tile: u32, width: u32) -> std::ops::Range<usize> {
+    let visible = (width.saturating_sub(tile / 6) / (tile + tile / 6).max(1)).max(1) as usize;
+    let visible = visible.min(count);
+    let first = selected.min(count.saturating_sub(1)).saturating_sub(visible / 2)
+        .min(count.saturating_sub(visible));
+    first..first + visible
+}
+
 /// One workarea per monitor — the whole body of `Desktop::workareas`,
 /// split out so the per-monitor rule is testable without standing up a
 /// backend. The primary is matched by rect rather than by index because
@@ -992,8 +1002,15 @@ impl<B: Backend> Desktop<B> {
         let Some(panel) = switcher.as_mut() else {
             return;
         };
-        let buffer =
-            chrome.switcher(theme, &mut font_system, &mut swash_cache, &panel.entries, selected, *tile);
+        let preview = if chrome.style() == wm_theme::DecorationStyle::Modern {
+            // 192 logical pixels instead of the classic 56px icon square.
+            ((*tile as f64 * 192.0 / 56.0).round() as u32)
+                .min(primary.size.w / 2).min(primary.size.h / 2).max(1)
+        } else { *tile };
+        let range = switcher_range(panel.entries.len(), selected, preview, primary.size.w);
+        let visible_selected = selected.saturating_sub(range.start);
+        let buffer = chrome.switcher(theme, &mut font_system, &mut swash_cache,
+            &panel.entries[range], visible_selected, preview);
         if buffer.width == 0 || buffer.height == 0 {
             return;
         }
@@ -1040,6 +1057,7 @@ impl<B: Backend> Desktop<B> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn show_overview(
         &mut self,
         backend: &mut B,
@@ -1048,13 +1066,14 @@ impl<B: Backend> Desktop<B> {
         workspace: (usize, usize),
         workspace_windows: Vec<Vec<wm_core::OverviewThumbnail<B::WindowId, B::FrameId>>>,
         selection: (usize, Option<Rect>),
+        cards: bool,
     ) {
         let (selected, area) = selection;
         let area = area.unwrap_or(self.primary);
         let stage = self.overview_stage(area);
         let Self { overview, fonts, tile, .. } = self;
         let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
-        overview.show(backend, theme, &mut font_system, &mut swash_cache, area, stage, *tile, items, workspace, workspace_windows, selected);
+        overview.show(backend, theme, &mut font_system, &mut swash_cache, area, stage, *tile, items, workspace, workspace_windows, selected, cards);
     }
 
     pub(crate) fn overview_stage(&self, area: Rect) -> Rect {

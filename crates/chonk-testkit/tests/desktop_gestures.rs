@@ -2,6 +2,114 @@
 use chonk_testkit::{keys, poll_until, profile_binary, Session, SessionOptions, World};
 use std::time::Duration;
 
+fn keyboard_overview_session(name: &str, scale: f32, gestures: bool) -> Session {
+    Session::boot(name, SessionOptions {
+        scale: Some(scale),
+        config_extra: format!("theme='obsidian'\ninteraction_mode='spaces'\nkeyboard_mode='desktop'\n\
+            hyprland_config=false\n[keybindings]\n'super+o'='overview'\n\
+            [input.gestures]\nenabled={gestures}\n"),
+        ..Default::default()
+    }).unwrap()
+}
+
+fn overview_in_motion(session: &mut Session) -> World {
+    poll_until(Duration::from_secs(3), "Overview has intermediate live progress", || {
+        let world = session.world().ok()?;
+        let progress = world.overview.as_ref()?.progress;
+        (progress > 0.05 && progress < 0.85 && world.gesture.as_ref()?.settling).then_some(world)
+    }).unwrap_or_else(|error| panic!("{error}; world: {:?}", session.world()))
+}
+
+#[test]
+#[ignore = "requires nested Wayland"]
+fn keyboard_overview_animates_live_pixels_reverses_and_releases_input_without_gestures() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut session = keyboard_overview_session(&format!("keyboard-overview-{scale}"), scale, false);
+        let id = probe(&mut session, f64::from(scale));
+        session.door().barrier().unwrap();
+        let before = red_center(&session.screenshot("desktop").unwrap());
+        let configures = session.client_log("chonk-input-probe").matches("surface configure ").count();
+        session.door().chord(keys::LEFTMETA, 24).unwrap();
+        let moving = overview_in_motion(&mut session);
+        assert_eq!(moving.gesture.as_ref().unwrap().target, 1.0);
+        let labels = moving.overview.unwrap().label_bytes;
+        let during = red_center(&session.screenshot("opening").unwrap());
+        let opened = settled(&mut session);
+        assert_eq!(opened.overview.as_ref().unwrap().progress, 1.0);
+        assert_eq!(opened.overview.as_ref().unwrap().label_bytes, labels, "animation reuses its captions");
+        let after = red_center(&session.screenshot("overview").unwrap());
+        assert!((during.0-before.0).abs() + (during.1-before.1).abs() > 3.0);
+        assert!((during.0-after.0).abs() + (during.1-after.1).abs() > 3.0,
+            "the opening capture must show live windows between their endpoints");
+        assert_eq!(session.client_log("chonk-input-probe").matches("surface configure ").count(), configures,
+            "Overview transforms live textures without resizing clients");
+
+        session.door().chord(keys::LEFTMETA, 24).unwrap();
+        let closing = overview_in_motion(&mut session);
+        assert_eq!(closing.gesture.as_ref().unwrap().target, 0.0);
+        session.door().key(keys::LEFTMETA, true).unwrap();
+        let reversal_started = std::time::Instant::now();
+        let before_key = session.world().unwrap();
+        assert_eq!(before_key.gesture.as_ref().unwrap().target, 0.0, "Super alone does not dismiss or toggle Overview");
+        session.door().key(24, true).unwrap();
+        session.door().key(24, false).unwrap();
+        session.door().key(keys::LEFTMETA, false).unwrap();
+        session.door().barrier().unwrap();
+        let reversed = session.world().unwrap();
+        assert_eq!(reversed.gesture.as_ref().unwrap().target, 1.0);
+        let before_progress = before_key.overview.unwrap().progress;
+        let after_progress = reversed.overview.unwrap().progress;
+        // Door round trips wait for real frames; allow the measured travel
+        // during those frames while ruling out a jump to either endpoint.
+        let travel_bound = 8.0 * reversal_started.elapsed().as_secs_f64() + 0.05;
+        assert!(after_progress > 0.0 && after_progress < 1.0);
+        assert!((after_progress - before_progress).abs() <= travel_bound,
+            "a second toggle catches the current position instead of teleporting: {before_progress} -> {after_progress}");
+        assert_eq!(settled(&mut session).overview.unwrap().progress, 1.0);
+        session.door().tap_key(1).unwrap();
+        assert_eq!(overview_in_motion(&mut session).gesture.unwrap().target, 0.0);
+        let closed = settled(&mut session);
+        assert!(closed.overview.is_none());
+        assert_eq!(closed.seat_focus, Some(id));
+        session.door().tap_key(30).unwrap();
+        poll_until(Duration::from_secs(3), "keyboard returns to the app", || {
+            session.client_log("chonk-input-probe").contains("keyboard key 30 down").then_some(())
+        }).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires nested Wayland"]
+fn a_swipe_catches_a_keyboard_overview_animation_without_jumping() {
+    let mut session = keyboard_overview_session("keyboard-overview-catch", 1.5, true);
+    probe(&mut session, 1.5);
+    session.door().chord(keys::LEFTMETA, 24).unwrap();
+    overview_in_motion(&mut session);
+    session.door().swipe_begin_at(3, 0).unwrap();
+    let caught = session.world().unwrap().overview.unwrap().progress;
+    let following = following(&mut session, 0.0, -16.0, 100);
+    assert!(!following.settling);
+    assert!((following.progress - caught - 0.1).abs() < 0.001);
+    session.door().swipe_end_at(true, 200).unwrap();
+    assert!(settled(&mut session).overview.is_none());
+}
+
+#[test]
+#[ignore = "requires nested Wayland"]
+fn locking_during_keyboard_overview_discards_the_animation_and_its_grab() {
+    let mut session = keyboard_overview_session("keyboard-overview-lock", 1.5, false);
+    probe(&mut session, 1.5);
+    session.door().chord(keys::LEFTMETA, 24).unwrap();
+    overview_in_motion(&mut session);
+    let locker = profile_binary("chonk-lock-probe").unwrap();
+    session.launch(locker.to_str().unwrap(), &["--hold"]).unwrap();
+    poll_until(Duration::from_secs(10), "lock owns presentation", || {
+        session.client_log("chonk-lock-probe").contains("locked ").then_some(())
+    }).unwrap();
+    let world = session.world().unwrap();
+    assert!(world.overview.is_none() && world.gesture.is_none());
+}
+
 fn swipe(session: &mut Session, fingers: u32, x: f64, y: f64, cancelled: bool) {
     let door = session.door();
     door.swipe_begin_at(fingers, 0).unwrap();
@@ -269,8 +377,11 @@ fn cancellation_resume_device_loss_and_spring_interruption_release_scene_ownersh
     session.door().swipe_begin_at(3, 2000).unwrap();
     following(&mut session, -60.0, 0.0, 2020);
     session.door().chord(keys::LEFTMETA, keys::UP).unwrap();
-    assert!(session.world().unwrap().gesture.is_none());
+    let world = session.world().unwrap();
+    assert_eq!(world.current_workspace, 0, "the horizontal gesture was cancelled");
+    assert_eq!(world.gesture.unwrap().kind, "overview", "the keyboard opens its own Overview transition");
     session.door().tap_key(keys::ESC).unwrap();
+    assert!(settled(&mut session).overview.is_none());
 }
 
 #[test]

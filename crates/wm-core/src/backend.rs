@@ -227,6 +227,13 @@ pub trait Backend {
     fn live_overview_paint_order(&self) -> Option<&[usize]> { None }
     fn hide_live_overview(&mut self) {}
 
+    /// Set an animated Overview endpoint; `None` reverses the current goal.
+    /// Returns false when the backend needs the shell's immediate fallback.
+    fn transition_live_overview(&mut self, target: Option<bool>) -> bool {
+        let _ = target;
+        false
+    }
+
     fn drag_live_overview(&mut self, drag: Option<OverviewDrag>) {
         let _ = drag;
     }

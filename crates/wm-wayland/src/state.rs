@@ -670,6 +670,7 @@ pub struct WaylandBackend {
     pub(crate) frames: HashMap<WlFrameId, FrameRecord>,
     pub(crate) shells: HashMap<WlShellId, ShellRecord>,
     pub(crate) overview: Option<crate::overview::Overview>,
+    pub(crate) overview_target: Option<bool>,
     pub(crate) gesture_scene: Option<crate::gesture_scene::Transition>,
     pub(crate) layout_scene: crate::layout_scene::Scene,
     pub(crate) capture_ui: Option<crate::capture_tool::Overlay>,
@@ -1065,6 +1066,7 @@ impl WaylandBackend {
             next_id: 1,
             windows: HashMap::new(),
             overview: None,
+            overview_target: None,
             gesture_scene: None,
             layout_scene: crate::layout_scene::Scene::default(),
             capture_ui: None,
@@ -2189,7 +2191,7 @@ pub(crate) fn apply_connector_hotplug(
         backend.layer_layout_dirty = true;
         backend.idle_policy_dirty = true;
     }
-    if comp.wm.mac_mode() && comp.wm.interaction_config().separate_spaces {
+    if comp.wm.spaces_mode() && comp.wm.interaction_config().separate_spaces {
         comp.wm.reconcile_display_spaces();
     } else {
         for rect in departed { comp.wm.rescue_clients_from_removed_monitor(rect); }
@@ -2619,11 +2621,18 @@ impl Compositor {
             // switcher open (see the X11 loop's longer commentary;
             // `KeyRelease` is never intercepted at all).
             if let BackendEvent::KeyPress(combo) = &event {
-                if self.wm.backend().gesture_scene.is_some() { crate::input::gestures::cancel(self); }
+                let overview_motion = self.wm.backend().gesture_scene.as_ref()
+                    .is_some_and(|scene| !scene.horizontal() && self.wm.backend().overview.is_some());
+                if self.wm.backend().gesture_scene.is_some() && !overview_motion {
+                    crate::input::gestures::cancel(self);
+                }
                 if crate::capture_tool::key(self, combo) {
                     continue;
                 }
                 if let Some(resolution) = self.shell.keymap_action(combo) {
+                    if overview_motion && !matches!(&resolution, chonk_shell::shell::KeyResolution::Consumed) {
+                        crate::input::gestures::keyboard_takeover(self);
+                    }
                     if let Some(motion) = pending_motion.take() {
                         self.dispatch_motion(motion);
                     }
@@ -2887,6 +2896,7 @@ impl Compositor {
         // before rendering. It is event-driven: without a new surface,
         // output change, or surface death this returns immediately.
         crate::lock::refresh(self);
+        crate::gesture_scene::apply_overview_target(self);
         crate::gesture_scene::validate(self);
         crate::input::keyboard::sync_modal_focus(self);
         crate::input::sync_touchpad_typing(self);

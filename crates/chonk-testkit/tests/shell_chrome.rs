@@ -122,7 +122,7 @@ fn menus_switcher_overview_minimize_and_live_reload_follow_the_style_end_to_end(
             session.door().chord(keys::LEFTMETA, 24).unwrap(); // configured Super+O
             let world = poll_until(WAIT, "native Overview with two live windows", || {
                 let world = session.world().ok()?;
-                (world.overview.is_some() && world.overview_windows.len() == 2).then_some(world)
+                (world.overview.as_ref()?.progress == 1.0 && world.overview_windows.len() == 2).then_some(world)
             }).unwrap();
             let native = world.overview.unwrap();
             assert_eq!(native.preview_edge, 0, "style cannot enable capture/readback previews");
@@ -137,7 +137,9 @@ fn menus_switcher_overview_minimize_and_live_reload_follow_the_style_end_to_end(
             session.door().motion(0.0, 0.0).unwrap();
             session.screenshot(&name("overview")).unwrap();
             session.door().tap_key(keys::ENTER).unwrap();
-            assert!(session.world().unwrap().overview.is_none());
+            poll_until(WAIT, "window activation returns from Overview", || {
+                session.world().ok()?.overview.is_none().then_some(())
+            }).unwrap();
             // The next loop switches styles with a root menu and its grabs live.
             right_click(&mut session, 900.0, 40.0);
             only_popup(&mut session);

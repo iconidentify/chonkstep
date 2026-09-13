@@ -107,10 +107,10 @@ fn open_overview(session: &mut Session) {
     let door = session.door();
     poll_until(
         Duration::from_secs(10),
-        "the overview panel to appear in the ledger",
+        "the overview panel to settle before testing pointer targets",
         || {
             let world = door.windows().ok()?;
-            overview_shell(&world).map(|_| ())
+            overview_shell(&world).filter(|_| world.overview.as_ref().is_none_or(|o| o.progress == 1.0)).map(|_| ())
         },
     )
     .expect("super+up should open the Overview");

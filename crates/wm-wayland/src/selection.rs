@@ -89,7 +89,7 @@ impl SelectionHandler for Compositor {
         if ty == SelectionTarget::Clipboard {
             if source.is_some() { self.mac_copy_order.offered(); }
             self.clipboard_persistence.clear();
-            if self.wm.mac_mode() && self.wm.interaction_config().clipboard_persistence {
+            if self.wm.spaces_mode() && self.wm.interaction_config().clipboard_persistence {
                 if let Some(source) = source.as_ref() {
                     let requests = self.clipboard_persistence.begin(Some(source.clone()), source.mime_types());
                     for (mime, fd) in requests { source.send(mime, fd); }

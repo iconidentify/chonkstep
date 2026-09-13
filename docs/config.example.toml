@@ -24,11 +24,18 @@
 # the socket they were connected to.
 
 # ============================================================
-# MAC INTERACTION (chonkstep-wayland, including XWayland applications)
-# interaction_mode = "mac"
-# Remove any explicit keymap setting when enabling Mac interaction.
-# Set interaction_mode = "desktop" to return to the existing profile.
-# See docs/mac-mode.md for app overrides, service providers, and coverage.
+# SPACES AND KEYBOARD (chonkstep-wayland, including XWayland applications)
+# interaction_mode = "spaces"  # per-monitor Spaces and dedicated fullscreen
+# keyboard_mode = "desktop"   # ordinary keys; desktop="omarchy" supplies its bindings
+#
+# Only the keyboard_mode="mac" profile is experimental. It translates application
+# shortcuts and owns the keymap; remove any explicit keymap when enabling it.
+# Legacy interaction_mode="mac" defaults to Mac keys unless keyboard_mode is set.
+# Change keyboard_mode alone to keep Spaces and fullscreen desktops intact.
+# See docs/mac-mode.md and docs/mac-display-spaces.md.
+#
+# Optional standalone, clickable previews for minimized windows (160 logical px).
+# minimized_previews = true
 #
 # PRESETS -- one line for a whole posture
 # ============================================================
@@ -256,6 +263,12 @@
 # System 7 chrome is always light, including when appearance is dark.
 # See docs/decoration-styles.md for capture references and scaling policy.
 #decoration_style = "auto"
+
+# Overview arrangement is independent of themes and experimental Mac keyboard input.
+# "classic" (default): Mission Control-style desktop strip and large window previews.
+# "cards": numbered workspace cards with modern themes; classic fallback otherwise.
+# Changing this while Overview is open closes it; the next opening uses the new layout.
+#overview_style = "classic"
 
 # Where a newly mapped window goes when the application itself asked
 # for no particular position (an explicit position, like a terminal's
@@ -555,7 +568,8 @@
 #"alt+ctrl+shift+1" = "workspace-send 1"     # ...or send it and stay here
 
 # "overview" opens a modal view of every window on the current desk as
-# a grid of live thumbnails, with a workspace strip along the bottom.
+# large live previews, with a desktop strip across the top on Wayland
+# (the native X11 raster fallback keeps its strip at the bottom).
 # While it is open the keys are fixed modal machinery, like the Alt+Tab
 # switcher's: arrows move the selection, Return (or clicking a tile)
 # focuses and raises that window, clicking a workspace tile switches

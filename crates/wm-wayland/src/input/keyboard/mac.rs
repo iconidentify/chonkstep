@@ -119,7 +119,7 @@ pub(crate) fn forward(comp: &mut Compositor, keyboard: &KeyboardHandle<Composito
         translated = true;
     } else if state == KeyState::Pressed
         && eligible
-        && comp.wm.mac_mode()
+        && comp.wm.mac_keyboard()
         && index < MAX_KEYS
         && combo.modifiers.intersects(Modifiers::SUPER | Modifiers::ALT)
         && !physical.iso_level3_shift
@@ -252,7 +252,7 @@ pub(crate) fn forward(comp: &mut Compositor, keyboard: &KeyboardHandle<Composito
     keyboard.input_forward_with_modifiers(comp, out_code, state, serial, time, modifiers);
     comp.mac_keyboard.modifiers = None;
     comp.mac_keyboard.suppress_key = false;
-    if state == KeyState::Pressed && !suppress && eligible && comp.wm.mac_mode()
+    if state == KeyState::Pressed && !suppress && eligible && comp.wm.mac_keyboard()
         && combo.modifiers == Modifiers::SUPER && matches!(combo.keysym, 0x63 | 0x78) {
         if let Some(focus) = focus { comp.mac_copy_order.copied(focus); }
     }

@@ -325,7 +325,9 @@ impl ModernUi {
         let first = selected
             .saturating_sub(n / 2)
             .min(entries.len().saturating_sub(n));
-        let size = Size::new(n as u32 * (tile + pad) + pad, tile + pad * 2);
+        let card_h = (tile * 3 / 4).max(self.px(64));
+        let title_h = self.px(26);
+        let size = Size::new(n as u32 * (tile + pad) + pad, card_h + pad * 2 + title_h);
         let Some(mut p) = image(size) else {
             return empty();
         };
@@ -338,12 +340,18 @@ impl ModernUi {
                 cache,
                 Rect::new(
                     Point::new((pad + (i - first) as u32 * (tile + pad)) as i32, pad as i32),
-                    Size::new(tile, tile),
+                    Size::new(tile, card_h),
                 ),
                 &entry.title,
                 entry.preview.as_ref(),
                 i == selected,
             );
+        }
+        if let Some(entry) = entries.get(selected) {
+            self.text(&mut p, theme, fonts, cache, &entry.title,
+                Rect::new(Point::new(pad as i32, (card_h + pad * 2) as i32),
+                    Size::new(size.w.saturating_sub(pad * 2), title_h)),
+                false, TextAlign::Center);
         }
         buffer(p)
     }

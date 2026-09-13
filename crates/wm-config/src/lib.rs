@@ -317,6 +317,33 @@ fn action_from_name(name: &str) -> Option<Action> {
 /// the assertion below makes any drift a compile error.
 pub const MAX_WORKSPACE: usize = 99;
 
+/// Overview arrangement, independent of the palette and window decorations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverviewStyle {
+    /// Mission Control: a desktop strip above large live window previews.
+    #[default]
+    Classic,
+    /// Workspace cards, when the selected theme supplies modern chrome tokens.
+    Cards,
+}
+
+impl OverviewStyle {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "classic" => Some(Self::Classic),
+            "cards" => Some(Self::Cards),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Cards => "cards",
+        }
+    }
+}
+
 const _: () = assert!(MAX_WORKSPACE == wm_core::MAX_WORKSPACES);
 
 /// Reads the workspace number a `workspace` / `workspace-carry`
@@ -371,6 +398,7 @@ pub struct Config {
     /// depend on.
     pub appearance: Option<String>,
     pub decoration_style: wm_theme_api::DecorationStyle,
+    pub overview_style: OverviewStyle,
     /// Where newly mapped windows go when the client expressed no
     /// position preference. Fed to the WM's placement engine verbatim.
     pub placement: PlacementPolicy,
@@ -458,6 +486,8 @@ pub struct Config {
     /// integration *off* on a machine that has Omarchy but wants a
     /// plain chonkstep root menu.
     pub omarchy_menu: bool,
+    /// Show restorable window previews on the desktop when minimized.
+    pub minimized_previews: bool,
     /// Whether a Wayland session starts Omarchy's shell — the Quickshell
     /// process behind its bar, menus, panels, notifications, OSD and
     /// lock screen — the way Omarchy's own Hyprland configuration does
@@ -564,6 +594,7 @@ impl Config {
             theme: None,
             appearance: None,
             decoration_style: wm_theme_api::DecorationStyle::Auto,
+            overview_style: OverviewStyle::Classic,
             // Smart is the classic default placement, and 10px
             // matches the stock edge-resistance feel: strong enough
             // to catch a deliberate drag toward an edge, weak enough
@@ -591,6 +622,7 @@ impl Config {
             terminal: None,
             autostart: Vec::new(),
             omarchy_menu: true,
+            minimized_previews: false,
             omarchy_shell: true,
             omarchy_bar: None,
             desktop: preset::Desktop::Chonkstep,
@@ -666,6 +698,7 @@ impl Config {
             "theme",
             "appearance",
             "decoration_style",
+            "overview_style",
             "placement",
             "edge_resistance",
             "terminal_font_px",
@@ -679,6 +712,7 @@ impl Config {
             "omarchy_menu",
             "omarchy_shell",
             "show_dock",
+            "minimized_previews",
             "omarchy_bar",
             "desktop",
             "keymap",
@@ -1165,12 +1199,17 @@ pub fn parse_with(
     let mut config = preset::base(&table);
     if let Some(value) = table.get("interaction_mode") {
         config.interaction.mode = value.as_str().and_then(wm_core::InteractionMode::from_name)
-            .ok_or("interaction_mode must be 'desktop' or 'mac'")?;
+            .ok_or("interaction_mode must be 'desktop', 'spaces' or 'mac'")?;
         config.provenance.insert("interaction_mode".into(), "config file".into());
     }
-    if config.interaction.mode == wm_core::InteractionMode::Mac {
+    if let Some(value) = table.get("keyboard_mode") {
+        config.interaction.keyboard_mode = Some(value.as_str().and_then(wm_core::KeyboardMode::from_name)
+            .ok_or("keyboard_mode must be 'desktop' or 'mac'")?);
+        config.provenance.insert("keyboard_mode".into(), "config file".into());
+    }
+    if config.interaction.mac_keyboard() {
         if table.contains_key("keymap") {
-            return Err("interaction_mode = 'mac' owns its keymap; remove the explicit keymap setting (individual [keybindings] overrides are supported)".into());
+            return Err("Mac keyboard mode owns its keymap; remove the explicit keymap setting (individual [keybindings] overrides are supported)".into());
         }
         config.keybindings = preset::mac_keybindings(config.desktop);
         config.drag_modifier = None;
@@ -1190,7 +1229,7 @@ pub fn parse_with(
     // Chonkstep is also the implicit default, where
     // `hyprland_config = true` deliberately *does* ask for live
     // bindings.
-    let preserve_keymap = (config.interaction.mode == wm_core::InteractionMode::Mac || matches!(
+    let preserve_keymap = (config.interaction.mac_keyboard() || matches!(
         table.get("keymap"),
         Some(toml::Value::String(name))
             if preset::Keymap::from_name(name) == Some(preset::Keymap::Chonkstep)
@@ -1242,7 +1281,7 @@ pub fn parse_with(
         config.keybindings = keybindings;
         config.bindings = bindings;
         config.layer_bindings = layer_bindings;
-        if config.interaction.mode == wm_core::InteractionMode::Mac {
+        if config.interaction.mac_keyboard() {
             // Keep imported service commands, but restore profile-owned names.
             config.commands.extend(commands);
             config.provenance.insert("keybindings".into(), "Mac interaction profile".into());
@@ -1250,7 +1289,7 @@ pub fn parse_with(
             config.commands = commands;
         }
     }
-    if config.interaction.mode == wm_core::InteractionMode::Mac {
+    if config.interaction.mac_keyboard() {
         config.focus_follows_mouse = false;
         config.drag_modifier = None;
         config.provenance.insert("focus_follows_mouse".into(), "Mac interaction profile".into());
@@ -1312,6 +1351,16 @@ pub fn parse_with(
                     config.diagnostics.push(message);
                 }
             },
+            "overview_style" => match value.as_str().and_then(OverviewStyle::from_name) {
+                Some(style) => config.overview_style = style,
+                None => {
+                    let message = format!(
+                        "config: overview_style must be \"classic\" or \"cards\", keeping default (got {value})"
+                    );
+                    tracing::warn!("{message}");
+                    config.diagnostics.push(message);
+                }
+            },
             "placement" => match placement_from_value(value) {
                 Some(policy) => config.placement = policy,
                 None => tracing::warn!(
@@ -1357,7 +1406,7 @@ pub fn parse_with(
             // Both preset keys are resolved by `preset::base` above,
             // which also warns about a bad value. Listed here only so
             // they are not reported as unknown top-level keys.
-            "desktop" | "keymap" | "interaction_mode" => {}
+            "desktop" | "keymap" | "interaction_mode" | "keyboard_mode" => {}
             "mac" => {
                 let settings = value.as_table().ok_or("[mac] must be a table")?;
                 for key in settings.keys() {
@@ -1387,6 +1436,9 @@ pub fn parse_with(
                 ),
             },
             "show_dock" => {},
+            "minimized_previews" => {
+                config.minimized_previews = value.as_bool().ok_or("minimized_previews must be a boolean")?;
+            },
             "lock_command" => match value {
                 // An empty or whitespace-only command means the same
                 // thing as no key at all: nothing to run. Filtering it
@@ -1546,6 +1598,7 @@ pub fn parse_with(
             | "omarchy_shell"
             | "omarchy_bar"
             | "show_dock"
+            | "minimized_previews"
             | "hyprland_config"
                 if value.is_bool() =>
             {
@@ -1553,6 +1606,7 @@ pub fn parse_with(
             }
             "scale" if scale_from_value(value).is_some() => Some("scale"),
             "theme" if value.is_str() => Some("theme"),
+            "overview_style" if value.as_str().and_then(OverviewStyle::from_name).is_some() => Some("overview_style"),
             "decoration_style"
                 if value.as_str().and_then(wm_theme_api::DecorationStyle::from_name).is_some() =>
             {
@@ -1609,7 +1663,7 @@ pub fn parse_with(
     // through a named table is that a typo becomes one warning at
     // startup naming both the key and the command, instead of a key
     // that silently does nothing whenever it is pressed.
-    if config.interaction.mode == wm_core::InteractionMode::Mac {
+    if config.interaction.mac_keyboard() {
         if let Some(command) = config.lock_command.as_ref() {
             if !table.get("commands").and_then(toml::Value::as_table).is_some_and(|t| t.keys().any(|key| key.eq_ignore_ascii_case("mac-lock"))) {
                 config.commands.insert("mac-lock".into(), command.split_whitespace().map(str::to_owned).collect());
@@ -1631,7 +1685,7 @@ pub fn parse_with(
         );
         false
     });
-    if config.interaction.mode == wm_core::InteractionMode::Mac {
+    if config.interaction.mac_keyboard() {
         config.bindings.retain(|binding| config.keybindings.iter().any(|(combo,action)| *combo == binding.combo && *action == binding.action));
     }
     Ok(config)
@@ -1766,8 +1820,9 @@ pub fn effective_config_report(config: &Config) -> String {
         out.push_str(&format!("{key} = {value}\t# {source}\n"));
     };
     line("desktop", config.desktop.id().into());
-    line("keymap", if config.interaction.mode == wm_core::InteractionMode::Mac { "mac" } else { config.keymap.id() }.into());
+    line("keymap", if config.interaction.mac_keyboard() { "mac" } else { config.keymap.id() }.into());
     line("interaction_mode", config.interaction.mode.id().into());
+    line("keyboard_mode", config.interaction.keyboard_mode().id().into());
     line(
         "focus_follows_mouse",
         config.focus_follows_mouse.to_string(),
@@ -1776,6 +1831,7 @@ pub fn effective_config_report(config: &Config) -> String {
     line("theme", format!("{:?}", config.theme));
     line("appearance", format!("{:?}", config.appearance));
     line("decoration_style", format!("{:?}", config.decoration_style.name()));
+    line("overview_style", format!("{:?}", config.overview_style.name()));
     line("placement", format!("{:?}", config.placement));
     line("edge_resistance", config.edge_resistance.to_string());
     line("terminal_font_px", config.terminal_font_px.to_string());
@@ -1787,7 +1843,12 @@ pub fn effective_config_report(config: &Config) -> String {
     line("keybindings", config.keybindings.len().to_string());
     line("commands", config.commands.len().to_string());
     line("autostart", config.autostart.len().to_string());
-    if config.interaction.mode == wm_core::InteractionMode::Mac {
+    if config.interaction.spaces_mode() {
+        line("spaces.separate_displays", config.interaction.separate_spaces.to_string());
+        line("spaces.fullscreen", "true".into());
+        line("clipboard_persistence", config.interaction.clipboard_persistence.to_string());
+    }
+    if config.interaction.mac_keyboard() {
         line("mac.clipboard_persistence", config.interaction.clipboard_persistence.to_string());
         line("mac.separate_spaces", config.interaction.separate_spaces.to_string());
         line("mac.applications", format!("{:?}", config.interaction.applications));
@@ -2867,6 +2928,28 @@ scroll_factor = 0.4
     }
 
     #[test]
+    fn overview_defaults_to_classic_independently_of_theme_and_keyboard() {
+        for theme in ["obsidian", "washi", "relay", "omarchy", "nextstep-classic"] {
+            for mode in ["desktop", "spaces", "mac"] {
+                let config = parse(&format!("theme = {theme:?}\ninteraction_mode = {mode:?}")).unwrap();
+                assert_eq!(config.overview_style, OverviewStyle::Classic);
+                assert_eq!(config.provenance["overview_style"], "built-in");
+            }
+        }
+        let config = parse("overview_style = 'cards'").unwrap();
+        assert_eq!(config.overview_style, OverviewStyle::Cards);
+        assert!(effective_config_report(&config).contains("overview_style = \"cards\""));
+        assert_eq!(config.provenance["overview_style"], "config file");
+        for value in ["'typo'", "true", "42"] {
+            let config = parse(&format!("overview_style = {value}\nscale = 1.5")).unwrap();
+            assert_eq!(config.overview_style, OverviewStyle::Classic);
+            assert_eq!(config.scale, Some(1.5));
+            assert_eq!(config.provenance["overview_style"], "built-in");
+            assert!(config.diagnostics.iter().any(|d| d.contains("overview_style")));
+        }
+    }
+
+    #[test]
     fn decoration_style_is_config_only_defaults_and_reports_its_effective_value() {
         use wm_theme_api::DecorationStyle;
         for text in ["", "theme = \"omarchy\""] {
@@ -3350,6 +3433,44 @@ mod command_tests {
             let unbound = resolve("[keybindings]\n'cmd+space' = 'none'");
             assert_eq!(action_for(&unbound, "cmd+space"), None);
         }
+    }
+
+    #[test]
+    fn spaces_keep_omarchy_keys_without_mac_translation() {
+        let config = parse("interaction_mode = 'spaces'\ndesktop = 'omarchy'\nkeyboard_mode = 'desktop'\nhyprland_config = false\ndrag_modifier = 'super'\n").unwrap();
+        assert!(config.interaction.spaces_mode());
+        assert!(!config.interaction.mac_keyboard());
+        assert!(config.interaction.separate_spaces);
+        assert!(config.interaction.clipboard_persistence);
+        assert_eq!(config.drag_modifier, Some(Modifiers::SUPER));
+        assert_eq!(action_for(&config, "super+w"), Some(Action::Close));
+        assert_eq!(action_for(&config, "super+tab"), Some(Action::WorkspaceNext));
+        assert_eq!(action_for(&config, "super+f"), Some(Action::ToggleFullscreen));
+        assert_eq!(action_for(&config, "super+l"), Some(Action::ToggleLayout));
+        assert_eq!(action_for(&config, "super+c"), None);
+        let report = effective_config_report(&config);
+        for expected in ["interaction_mode = spaces", "keyboard_mode = desktop", "keymap = omarchy", "spaces.separate_displays = true", "spaces.fullscreen = true"] {
+            assert!(report.contains(expected), "missing {expected}: {report}");
+        }
+        assert!(!report.contains("# Mac system shortcuts"));
+    }
+
+    #[test]
+    fn keyboard_selection_is_independent_and_legacy_mac_config_still_works() {
+        let spaces = parse("interaction_mode = 'spaces'").unwrap();
+        assert!(!spaces.interaction.mac_keyboard());
+        let old = parse("interaction_mode = 'mac'").unwrap();
+        assert!(old.interaction.mac_keyboard());
+        let keys_off = parse("interaction_mode = 'mac'\nkeyboard_mode = 'desktop'\nkeymap = 'omarchy'\nhyprland_config = false").unwrap();
+        assert!(keys_off.interaction.spaces_mode());
+        assert!(!keys_off.interaction.mac_keyboard());
+        assert_eq!(action_for(&keys_off, "super+w"), Some(Action::Close));
+        let keys_on = parse("interaction_mode = 'spaces'\nkeyboard_mode = 'mac'").unwrap();
+        assert!(keys_on.interaction.spaces_mode() && keys_on.interaction.mac_keyboard());
+        assert_eq!(action_for(&keys_on, "cmd+q"), Some(Action::QuitApplication));
+        assert!(parse("keyboard_mode = 'spaces'").is_err());
+        assert!(parse("keyboard_mode = false").is_err());
+        assert!(parse("keyboard_mode = 'mac'\nkeymap = 'omarchy'").is_err());
     }
 
     #[test]
