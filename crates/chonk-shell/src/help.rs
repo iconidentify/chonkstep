@@ -393,7 +393,7 @@ impl Content {
                 "Workspaces keep groups of windows together. Use desktop shortcuts or the Overview strip to navigate. A send shortcut moves a window without following; a carry shortcut moves it and takes you there.".into()
             },
         );
-        reference("Minimized windows", if state.minimized_previews { "Click a desktop preview tile to restore its window. Overview also includes minimized windows; selecting one restores it." } else { "Open Overview and select a minimized window to restore it." }.into());
+        reference("Minimized windows", if state.minimized_previews { "Minimized windows stay out of Overview. Click a desktop preview tile to restore its window, or select it in the window switcher." } else { "Minimized windows stay out of Overview. Select a minimized window in the window switcher to restore it." }.into());
         if let Some(modifier) = state.drag_modifier {
             let key = modifiers(modifier, mac).join(" + ");
             reference("Move or resize from anywhere", format!("Hold {key} and drag with the left mouse button to move a window, or the right mouse button to resize. Window commands are also available by right-clicking a ChonkStep titlebar."));

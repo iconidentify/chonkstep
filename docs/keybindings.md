@@ -19,7 +19,8 @@ updated bindings. An optional binding can open it directly:
 The in-desktop list reflects the current session; the tables below describe
 the preset keymaps. The layout toggle enters Mosaic from Freeform and then
 alternates Mosaic and Flow. The Freeform binding returns to freely placed
-windows.
+windows. Overview excludes minimized windows; restore them through their desktop
+preview tiles or the window switcher.
 
 There are **two** keymaps. `keymap = "chonkstep"` is the default and is
 the NeXTSTEP-style `alt+shift` vocabulary the rest of this desktop was
@@ -53,7 +54,7 @@ ever do disagree, the source wins.
 | `alt+ctrl+left`    | `workspace-prev`       | Previous workspace (stops at the first)       |
 | `alt+shift+right`  | `workspace-carry-next` | Carry the focused window to the next          |
 | `alt+shift+left`   | `workspace-carry-prev` | Carry the focused window back                 |
-| `super+up`         | `overview`             | The modal Overview: every window as a card    |
+| `super+up`         | `overview`             | Overview of non-minimized windows            |
 | `super+shift+3`    | `capture-screen`       | Save screen PNG and copy it (Wayland)        |
 | `super+shift+4`    | `capture-area`         | Select area; Space selects a window          |
 | `super+shift+5`    | `capture`              | Screenshot / recording controls              |

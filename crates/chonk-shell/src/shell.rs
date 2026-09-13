@@ -1997,8 +1997,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let tile = crate::desktop::switcher_preview_px(self.state.scale);
         let row = wm.workspace_row_on_output(wm.workspace_output_index(workspace).unwrap_or(wm.active_output_index()));
         let local = row.iter().position(|&space| space == workspace).unwrap_or(0);
-        let clients: Vec<_> = wm.iter_clients().filter(|(_, c)| c.workspace == workspace
-            && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)).collect();
+        let clients: Vec<_> = wm.iter_clients().filter(|(id, c)| c.workspace == workspace
+            && c.lifecycle == Lifecycle::Normal && !wm.mac_client_hidden(*id)).collect();
         let sources: Vec<_> = clients.iter().map(|(_, c)| if c.frame.is_some() {
             c.visual_geometry()
         } else { c.geometry }).collect();
@@ -2110,13 +2110,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// do both), so the grid can never keep showing a window that is
     /// gone.
     ///
-    /// Miniaturized windows are included, visually asleep (dimmed
-    /// preview, inactive titlebar — see `wm_theme::overview`):
-    /// they live on this desk too, and the Overview restoring one in a
-    /// single gesture is strictly more useful than pretending it is
-    /// not there. Their preview is whatever the capture path can still
-    /// produce for an unmapped window — `None` degrades to the empty
-    /// well, never an error.
+    /// Only normal windows participate. Minimized windows remain available
+    /// through their desktop preview tiles and the window switcher.
     fn populate_overview(&mut self, wm: &mut WindowManager<B>) {
         self.overview_close_pressed = None;
         let output = if let Some(name) = &self.overview_output {
@@ -2141,7 +2136,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             .filter(|(id, client)| {
                 self.overview_application.is_none_or(|app| wm.same_application(app, *id))
                     && !wm.mac_client_hidden(*id)
-                    && client.workspace == current && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
+                    && client.workspace == current && client.lifecycle == Lifecycle::Normal
             })
             .map(|(id, client)| OverviewItem {
                 client: id,
@@ -2155,7 +2150,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 } else {
                     client.geometry
                 },
-                miniaturized: client.lifecycle == Lifecycle::Miniaturized,
             })
             .collect();
         // Previews in a second pass: `client_preview` borrows the WM
@@ -2206,21 +2200,16 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// Commits the selection: animate back, then focus + raise the chosen
     /// window through the public `ActivateRequested` path (the same
     /// one a pager's `_NET_ACTIVE_WINDOW` message and the launcher
-    /// strip ride), deminiaturizing first when the card was asleep —
-    /// activating an unmapped window would set focus on nothing
-    /// visible. The return animation retains its input ownership until the
+    /// strip ride). The return animation retains its input ownership until the
     /// windows reach their desktop positions; activation updates the stack
     /// beneath that transition without exposing moving pointer targets.
     fn commit_overview(&mut self, wm: &mut WindowManager<B>) {
         let target = self
             .desktop
             .overview_item(self.desktop.overview_selected())
-            .map(|item| (item.client, item.window, item.miniaturized));
+            .map(|item| item.window);
         self.dismiss_overview(wm, Some(false));
-        if let Some((client, window, miniaturized)) = target {
-            if miniaturized {
-                wm.deminiaturize(client);
-            }
+        if let Some(window) = target {
             wm.dispatch(BackendEvent::ActivateRequested(window));
         }
     }

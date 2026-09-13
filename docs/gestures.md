@@ -123,7 +123,8 @@ GPU textures and sparse decoration buffers, suspends screenshot readbacks while
 open or transitioning, and never allocates a monitor-sized raster. Captions are painted once per
 entry set; selection changes only the outline and which cached caption is
 shown. Packing runs only when the entry set changes (at most 32 linear passes).
-Closing releases the scene, labels and any small minimized-window fallbacks.
+Minimized windows are excluded from Overview and its desktop previews.
+Closing releases the scene and labels.
 Close glyphs are small cached textures created with the desktop row; hovering
 does not repaint or allocate them. Removing a desktop scans client memberships
 once and only maps windows newly revealed by the merge.

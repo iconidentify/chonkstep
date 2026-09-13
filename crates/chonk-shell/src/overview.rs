@@ -58,7 +58,7 @@ pub(crate) fn workspace_scene<W,F>(theme:&Theme, chrome:Option<&wm_theme::UiChro
 
 /// One window's stored session entry. `window` rides along so a
 /// commit can take the public `ActivateRequested` path (which speaks
-/// backend window ids), and `client` so window-menu and deminiaturize
+/// backend window ids), and `client` so window-menu and move
 /// verbs can name the client; both are re-validated by `wm-core` when
 /// used, so a window that died mid-session costs a no-op, not a bug.
 pub struct OverviewItem<B: Backend> {
@@ -68,7 +68,6 @@ pub struct OverviewItem<B: Backend> {
     pub geometry: Rect,
     pub title: String,
     pub preview: Option<DecorationBuffer>,
-    pub miniaturized: bool,
     pub managed: bool,
 }
 
@@ -214,7 +213,7 @@ impl<B: Backend> OverviewPanel<B> {
             && self.items.iter().zip(&items).all(|(old, new)|
                 old.client == new.client && old.window == new.window
                     && old.frame == new.frame && old.geometry == new.geometry
-                    && old.miniaturized == new.miniaturized && old.managed == new.managed);
+                    && old.managed == new.managed);
         if !preserve_pointer {
             self.invalidate_pointer(backend);
         }
@@ -367,7 +366,7 @@ impl<B: Backend> OverviewPanel<B> {
             .map(|item| OverviewEntry {
                 title: &item.title,
                 preview: item.preview.as_ref(),
-                miniaturized: item.miniaturized,
+                miniaturized: false,
             })
             .collect();
         // The raster fallback must draw the same desktop-strip controls it
@@ -442,7 +441,7 @@ impl<B: Backend> OverviewPanel<B> {
         let entry = OverviewEntry {
             title: &item.title,
             preview: item.preview.as_ref(),
-            miniaturized: item.miniaturized,
+            miniaturized: false,
         };
         let buffer = match &self.chrome {
             Some(chrome) => chrome.selection(theme, font_system, swash_cache, &entry, cell.size, layout.pad),
