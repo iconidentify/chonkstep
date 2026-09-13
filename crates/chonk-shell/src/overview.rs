@@ -12,18 +12,21 @@ use wm_theme::Theme;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 #[allow(clippy::too_many_arguments)] // Same caption call plus the optional session style.
-fn styled_label(chrome: Option<&wm_theme::UiChrome>, inverted: bool, theme: &Theme,
+pub(crate) fn styled_label(chrome: Option<&wm_theme::UiChrome>, inverted: bool, theme: &Theme,
     fonts: &mut cosmic_text::FontSystem, cache: &mut cosmic_text::SwashCache,
     text: &str, width: u32, height: u32) -> DecorationBuffer {
     match chrome {
-        Some(chrome) => chrome.label(theme, fonts, cache, text, width, height, inverted),
-        None => ov::live::label(theme, fonts, cache, text, width, height),
+        Some(chrome) if chrome.style() != wm_theme::DecorationStyle::Modern =>
+            chrome.label(theme, fonts, cache, text, width, height, inverted),
+        // Classic's measured captions keep desktop names readable over a
+        // modern wallpaper too; the card UI has its own caption recipe.
+        _ => ov::live::label(theme, fonts, cache, text, width, height),
     }
 }
 
-pub(crate) fn scene_chrome(theme: &Theme, chrome: Option<&wm_theme::UiChrome>, bounds: Rect) -> Option<wm_core::OverviewChrome> {
+pub(crate) fn scene_chrome(theme: &Theme, chrome: Option<&wm_theme::UiChrome>, bounds: Rect, cards: bool) -> Option<wm_core::OverviewChrome> {
     chrome.and_then(|chrome| chrome.overview_ink()).map(|(ink,line)| wm_core::OverviewChrome {
-        ink,line,cards:theme.chrome.map(|chrome| wm_core::OverviewCards {metrics:chrome.overview,bounds,
+        ink,line,cards:theme.chrome.filter(|_| cards).map(|chrome| wm_core::OverviewCards {metrics:chrome.overview,bounds,
             background:[chrome.background.r,chrome.background.g,chrome.background.b],
             empty:[chrome.line.r,chrome.line.g,chrome.line.b]}),
     })
@@ -33,8 +36,8 @@ pub(crate) fn scene_chrome(theme: &Theme, chrome: Option<&wm_theme::UiChrome>, b
 pub(crate) fn workspace_scene<W,F>(theme:&Theme, chrome:Option<&wm_theme::UiChrome>,
     fonts:&mut cosmic_text::FontSystem, cache:&mut cosmic_text::SwashCache,
     rect:Rect, close:Option<Rect>, index:usize, workspace:(usize,usize), label_h:u32,
-    windows:Vec<wm_core::OverviewThumbnail<W,F>>) -> wm_core::OverviewWorkspace<W,F> {
-    if let Some(tokens)=theme.chrome {
+    windows:Vec<wm_core::OverviewThumbnail<W,F>>, cards:bool) -> wm_core::OverviewWorkspace<W,F> {
+    if let Some(tokens)=theme.chrome.filter(|_| cards) {
         let metrics=tokens.overview;
         let width=rect.size.w.saturating_sub(u32::from(metrics.padding)*2);
         let title=format!("{:02} / Workspace {}",index+1,index+1);
@@ -55,7 +58,7 @@ pub(crate) fn workspace_scene<W,F>(theme:&Theme, chrome:Option<&wm_theme::UiChro
 
 /// One window's stored session entry. `window` rides along so a
 /// commit can take the public `ActivateRequested` path (which speaks
-/// backend window ids), and `client` so window-menu and deminiaturize
+/// backend window ids), and `client` so window-menu and move
 /// verbs can name the client; both are re-validated by `wm-core` when
 /// used, so a window that died mid-session costs a no-op, not a bug.
 pub struct OverviewItem<B: Backend> {
@@ -65,7 +68,6 @@ pub struct OverviewItem<B: Backend> {
     pub geometry: Rect,
     pub title: String,
     pub preview: Option<DecorationBuffer>,
-    pub miniaturized: bool,
     pub managed: bool,
 }
 
@@ -196,19 +198,22 @@ impl<B: Backend> OverviewPanel<B> {
         workspace: (usize, usize),
         workspace_windows: Vec<Vec<wm_core::OverviewThumbnail<B::WindowId, B::FrameId>>>,
         selected: usize,
+        cards: bool,
     ) {
         let live = backend.supports_live_overview();
+        let cards = cards && theme.chrome.is_some();
         // Semantic refreshes include ordinary title updates. Keep an armed
         // gesture only when every indexed target and its geometry are stable;
         // topology, membership and layout changes must still consume release.
         let preserve_pointer = self.visible && self.live && live
+            && self.cards == cards
             && self.geometry == primary && self.stage == stage && self.workspace == workspace
             && self.drag_limit == Size::new(tile * 3, tile * 2)
             && self.items.len() == items.len()
             && self.items.iter().zip(&items).all(|(old, new)|
                 old.client == new.client && old.window == new.window
                     && old.frame == new.frame && old.geometry == new.geometry
-                    && old.miniaturized == new.miniaturized && old.managed == new.managed);
+                    && old.managed == new.managed);
         if !preserve_pointer {
             self.invalidate_pointer(backend);
         }
@@ -227,7 +232,7 @@ impl<B: Backend> OverviewPanel<B> {
         self.stage = stage;
         self.workspace = workspace;
         self.live = live;
-        self.cards = theme.chrome.is_some();
+        self.cards = cards;
         self.drag_threshold = (tile as f64 * 3.0 / 56.0).ceil().max(2.0) as i32;
         self.drag_limit = Size::new(tile * 3, tile * 2);
         let layout = if self.cards {
@@ -304,7 +309,7 @@ impl<B: Backend> OverviewPanel<B> {
                     .enumerate()
                     .zip(workspace_windows.into_iter().chain(std::iter::repeat_with(Vec::new)))
                     .map(|((i, rect), windows)| workspace_scene(theme,self.chrome.as_ref(),font_system,swash_cache,
-                        *rect,layout.workspace_close_rect(i),i,workspace,label_h,windows))
+                        *rect,layout.workspace_close_rect(i),i,workspace,label_h,windows,self.cards))
                     .collect();
                 backend.show_live_overview(
                     window,
@@ -315,7 +320,7 @@ impl<B: Backend> OverviewPanel<B> {
                         workspace: workspace.0,
                         selected: self.selected,
                         gap: layout.pad,
-                        chrome: scene_chrome(theme,self.chrome.as_ref(),layout.grid),
+                        chrome: scene_chrome(theme,self.chrome.as_ref(),layout.grid,self.cards),
                     },
                 );
                 // Rebuilding the labels/miniatures replaces the backend scene.
@@ -361,9 +366,20 @@ impl<B: Backend> OverviewPanel<B> {
             .map(|item| OverviewEntry {
                 title: &item.title,
                 preview: item.preview.as_ref(),
-                miniaturized: item.miniaturized,
+                miniaturized: false,
             })
             .collect();
+        // The raster fallback must draw the same desktop-strip controls it
+        // hit-tests. Keep the resident UiChrome palette, but suppress the
+        // theme's workspace-card recipe for this one Classic panel.
+        let mut raster_theme;
+        let theme = if !self.cards && theme.chrome.is_some() {
+            raster_theme = theme.clone();
+            raster_theme.chrome = None;
+            &raster_theme
+        } else {
+            theme
+        };
         let buffer = match &self.chrome {
             Some(chrome) => chrome.overview(theme, font_system, swash_cache, &entries, self.workspace, layout),
             None => ov::render_overview(theme, font_system, swash_cache, &entries, self.workspace, layout),
@@ -425,7 +441,7 @@ impl<B: Backend> OverviewPanel<B> {
         let entry = OverviewEntry {
             title: &item.title,
             preview: item.preview.as_ref(),
-            miniaturized: item.miniaturized,
+            miniaturized: false,
         };
         let buffer = match &self.chrome {
             Some(chrome) => chrome.selection(theme, font_system, swash_cache, &entry, cell.size, layout.pad),

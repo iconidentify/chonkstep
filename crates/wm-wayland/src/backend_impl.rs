@@ -626,7 +626,12 @@ impl Backend for WaylandBackend {
         scene: wm_core::OverviewScene<Self::WindowId, Self::FrameId>,
     ) {
         let previous = self.overview.take();
+        let entering = previous.is_none();
         self.overview = Some(crate::overview::Overview::refresh(previous, surface, scene, self));
+        if entering {
+            self.overview.as_mut().unwrap().progress = 0.0;
+            self.overview_target = Some(true);
+        }
         self.mark_damaged();
     }
 
@@ -644,9 +649,22 @@ impl Backend for WaylandBackend {
     }
 
     fn hide_live_overview(&mut self) {
+        self.overview_target = None;
         if self.overview.take().is_some() {
             self.mark_damaged();
         }
+    }
+
+    fn transition_live_overview(&mut self, target: Option<bool>) -> bool {
+        if self.overview.is_none() {
+            return false;
+        }
+        let current = self.overview_target.unwrap_or_else(|| self.gesture_scene.as_ref()
+            .filter(|scene| !scene.horizontal()).and_then(|scene| scene.spring)
+            .is_none_or(|spring| spring.target > 0.5));
+        self.overview_target = Some(target.unwrap_or(!current));
+        self.mark_damaged();
+        true
     }
 
     fn drag_live_overview(&mut self, drag: Option<wm_core::OverviewDrag>) {

@@ -166,6 +166,12 @@ install_system_file "$resilience_template" \
 reload_systemd_manager
 enable_omarchy_posture
 
+# The integration command can run before the user's first ChonkStep session.
+# Register the themes now, under that user's config rather than root's home.
+if [ -n "$config_home" ]; then
+    "$(system_path /usr/bin/omarchy-export-themes)" --missing "$config_home/omarchy/themes"
+fi
+
 # Fresh encrypted Omarchy installs autologin through an Omarchy-owned snippet.
 # Override only its Session key, preserving its User and every other setting.
 # On systems without autologin, the picker defaults visibly to chonkstep (uwsm).

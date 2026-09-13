@@ -19,6 +19,15 @@ Return and Escape work throughout. An upward swipe while it is open keeps it
 open; horizontal swipes also work inside Overview. X11 retains the rasterized
 card fallback.
 
+Keyboard Overview shortcuts use the same live-window spring as gestures. Opening
+eases from the desktop into Overview; Escape, a second shortcut press, or choosing
+a window animates back. Pressing the shortcut while returning reverses smoothly
+from the current position. A new swipe can catch that motion too. These keyboard
+transitions work even with `[input.gestures] enabled = false` and with ordinary
+Linux keyboard shortcuts. Clients keep their sizes; only the compositor's live
+textures move and scale. Moving previews do not expose pointer targets until the
+transition settles. Locking or changing the output layout cancels the transition.
+
 Drag a window upward onto a desktop thumbnail to move it there without leaving
 Overview. The live window image follows the pointer, becomes smaller and
 translucent, and highlights the entire destination thumbnail. Desktop labels
@@ -114,7 +123,8 @@ GPU textures and sparse decoration buffers, suspends screenshot readbacks while
 open or transitioning, and never allocates a monitor-sized raster. Captions are painted once per
 entry set; selection changes only the outline and which cached caption is
 shown. Packing runs only when the entry set changes (at most 32 linear passes).
-Closing releases the scene, labels and any small minimized-window fallbacks.
+Minimized windows are excluded from Overview and its desktop previews.
+Closing releases the scene and labels.
 Close glyphs are small cached textures created with the desktop row; hovering
 does not repaint or allocate them. Removing a desktop scans client memberships
 once and only maps windows newly revealed by the merge.

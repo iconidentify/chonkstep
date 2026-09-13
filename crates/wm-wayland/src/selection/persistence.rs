@@ -200,7 +200,7 @@ fn publish(comp: &mut Compositor, data: BTreeMap<String, Arc<Vec<u8>>>) {
 }
 
 fn poll(comp: &mut Compositor) {
-    let enabled = comp.wm.mac_mode() && comp.wm.interaction_config().clipboard_persistence;
+    let enabled = comp.wm.spaces_mode() && comp.wm.interaction_config().clipboard_persistence;
     let newly_enabled = enabled && !comp.clipboard_persistence.enabled;
     comp.clipboard_persistence.enabled = enabled;
     // Enabling persistence adopts the authoritative live offer once. A copy

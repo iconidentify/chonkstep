@@ -6,12 +6,15 @@ The palette and frame recipe are independent:
 theme = "nextstep-classic"         # or another palette, including "omarchy"
 appearance = "dark"                # session palette preference
 decoration_style = "auto"           # auto | windowmaker | system7 | modern
+overview_style = "classic"          # classic (default) | cards
 ```
 
 Edit `~/.config/chonkstep/config.toml` and run `/usr/lib/chonkstep/reload.sh`. The selector is
 config-only; there is no competing state file, request file or root-menu picker.
-The default `auto` follows the theme: themes with modern chrome tokens select
-Modern, and existing palettes select WindowMaker. An explicit recipe overrides
+The default `auto` follows the theme: System 7 themes select System 7, themes
+with modern chrome tokens select Modern, and existing palettes select WindowMaker.
+System 7 Classic, Light Gray, and Dark Gray are available through the ordinary
+[theme picker](system7-themes.md). An explicit recipe overrides
 that choice across theme switches. Unknown names and non-string values produce
 a warning and retain Auto while the rest of the config applies. `--check-config`
 reports the diagnostic and `--print-config` prints the configured policy. The
@@ -38,6 +41,16 @@ Mac keyboard behavior is a separate feature: changing decoration style does not
 change Command-key translations, shortcuts or Spaces policy.
 
 ## Window-derived shell surfaces
+
+Overview defaults to the earlier Mission Control arrangement: a strip of desktops
+across the top and large live window previews below. `overview_style = "classic"`
+keeps that arrangement with every theme, including Obsidian, Washi, Relay and
+Omarchy. `"cards"` opts into numbered workspace cards with modern themes; legacy
+themes fall back to Classic. This choice is independent of window decorations,
+keyboard translation, Freeform/Mosaic/Flow and per-monitor/fullscreen Spaces.
+Changing it during Overview closes the view and releases its input; reopen to
+use the new arrangement. In Classic, clicking a desktop keeps Overview open;
+clicking a window activates it and closes the view. Escape also closes it.
 
 Root and window commands menus, Alt-Tab, minimized window icons, and Overview
 cards/captions follow `decoration_style`. System 7 uses light paper and ink,
@@ -190,3 +203,15 @@ The style seam must preserve `wm_theme_api::ThemeEngine`'s contract. Golden
 fixtures are generated deliberately from a named source revision with a committed
 generator. System 7 reference goldens must come from genuine emulator captures,
 with source and pixel coordinates; renderer output cannot serve as its own oracle.
+
+## Readable window navigation
+
+Modern themes (Obsidian, Washi and Relay) use 192-logical-pixel-wide Alt-Tab
+cards with a separate selected-window title. Long candidate lists show a moving
+subset around the selection so cards stay inside the monitor rather than shrink.
+
+Set `minimized_previews = true` at the top level of the ChonkStep configuration
+to retain standalone desktop previews. These are 160 logical pixels square
+(240 physical pixels at 150%), use the current theme, and appear on their
+window's Space. Click to restore or drag to reposition. This setting is independent
+of keyboard mode and does not enable the retired dock or widgets.

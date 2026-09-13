@@ -1,4 +1,4 @@
-//! Transient scene ownership for finger-driven desktop transitions. WM topology
+//! Transient scene ownership for finger and keyboard desktop transitions. WM topology
 //! and focus are untouched until settlement; every frame reuses live textures.
 use crate::overview::{Overview, Window};
 use crate::renderer::SceneElement;
@@ -70,11 +70,10 @@ impl Transition {
 }
 
 pub(crate) fn update(comp: &mut Compositor, motion: SwipeMotion) {
-    let Some(monitor) = comp.wm.monitors_ref().get(comp.wm.active_output_index()) else {
+    let Some(_) = comp.wm.monitors_ref().get(comp.wm.active_output_index()) else {
         cancel(comp);
         return;
     };
-    let output = comp.wm.separate_spaces().then_some(monitor.geometry);
     if comp
         .wm
         .backend()
@@ -98,110 +97,118 @@ pub(crate) fn update(comp: &mut Compositor, motion: SwipeMotion) {
                 return;
             }
         }
-        let origin = comp.wm.current_workspace();
-        let count = comp.wm.workspace_count();
-        let previous = if comp.wm.mac_mode() { comp.wm.neighboring_workspace(origin, -1) } else { origin.checked_sub(1) };
-        let next = if comp.wm.mac_mode() { comp.wm.neighboring_workspace(origin, 1) } else { (origin + 1 < wm_core::MAX_WORKSPACES
-            && (origin + 1 < count || comp.wm.workspace_has_windows(origin)))
-        .then_some(origin + 1) };
-        let mut planes = Vec::new();
-        if motion.axis == SwipeAxis::Horizontal {
-            for workspace in [Some(origin), previous, next].into_iter().flatten() {
-                let windows: Vec<_> = comp
-                    .wm
-                    .backend()
-                    .stacking
-                    .iter()
-                    .rev()
-                    .filter_map(|entry| match entry {
-                        StackEntry::Window(id) => comp.wm.client_for_window(*id),
-                        StackEntry::Frame(id) => comp.wm.client_for_frame(*id),
-                    })
-                    .filter_map(|id| comp.wm.client(id))
-                    .filter(|c| {
-                        (if c.flags.contains(ClientFlags::STICKY) { workspace == origin } else { c.workspace == workspace })
-                            && c.lifecycle == Lifecycle::Normal
-                            && (!comp.wm.separate_spaces() || comp.wm.workspace_output_index(c.workspace) == comp.wm.workspace_output_index(origin))
-                    })
-                    .map(|c| {
-                        let source = c.frame.and_then(|id| comp.wm.backend().frames.get(&id))
-                            .map_or(c.geometry, |frame| frame.visual_geometry());
-                        let mut window = Window::snapshot(c.window, c.frame, source, comp.wm.backend());
-                        window.draw_content = !c.flags.contains(ClientFlags::SHADED);
-                        window.sticky = c.flags.contains(ClientFlags::STICKY);
-                        window
-                    })
-                    .collect();
-                let overview = comp
-                    .wm
-                    .backend()
-                    .overview
-                    .as_ref()
-                    .filter(|_| workspace != origin)
-                    .map(|o| {
-                        let scene = comp
-                            .shell
-                            .desktop_gesture_overview_scene(&comp.wm, workspace, o.geometry);
-                        Overview::new(o.surface, scene, comp.wm.backend())
-                    });
-                planes.push(Plane {
-                    workspace,
-                    windows,
-                    overview,
-                    background: Id::new(),
-                });
-            }
-        }
-        let now = Instant::now();
-        let monitors = comp
-            .wm
-            .backend()
-            .monitors
-            .iter()
-            .map(|m| (m.geometry, comp.wm.backend().scale_at(m.geometry)))
-            .collect();
-        let frame_interval = comp
-            .outputs
-            .iter()
-            .filter_map(|o| o.output.current_mode())
-            .filter(|m| m.refresh > 0)
-            .map(|m| {
-                Duration::from_nanos(1_000_000_000_000 / (m.refresh as u64).clamp(1000, 1_000_000))
-            })
-            .min()
-            .unwrap_or(Duration::from_nanos(1_000_000_000 / 60));
-        let overview_token = comp
-            .wm
-            .backend()
-            .overview
-            .as_ref()
-            .map(|o| o.token().clone());
-        comp.wm.backend_mut().gesture_scene = Some(Transition {
-            motion,
-            origin,
-            output,
-            count,
-            previous,
-            next,
-            position: 0.0,
-            velocity: 0.0,
-            projected: 0.0,
-            spring: None,
-            overview_origin: opened,
-            base: 0.0,
-            planes,
-            monitors,
-            last_frame: now,
-            next_frame: now,
-            frame_interval,
-            overview_token,
-        });
-        crate::input::sync_pointer_focus(comp);
+        begin(comp, motion, opened);
     }
     if let Some(scene) = comp.wm.backend_mut().gesture_scene.as_mut() {
         scene.follow(motion);
     }
+    // Finger input owns progress even when opening constructed a keyboard target.
+    comp.wm.backend_mut().overview_target = None;
     sync_progress(comp);
+}
+
+fn begin(comp: &mut Compositor, motion: SwipeMotion, opened: bool) {
+    let Some(monitor) = comp.wm.monitors_ref().get(comp.wm.active_output_index()) else { return; };
+    let output = comp.wm.separate_spaces().then_some(monitor.geometry);
+    let origin = comp.wm.current_workspace();
+    let count = comp.wm.workspace_count();
+    let previous = if comp.wm.spaces_mode() { comp.wm.neighboring_workspace(origin, -1) } else { origin.checked_sub(1) };
+    let next = if comp.wm.spaces_mode() { comp.wm.neighboring_workspace(origin, 1) } else { (origin + 1 < wm_core::MAX_WORKSPACES
+        && (origin + 1 < count || comp.wm.workspace_has_windows(origin)))
+    .then_some(origin + 1) };
+    let mut planes = Vec::new();
+    if motion.axis == SwipeAxis::Horizontal {
+        for workspace in [Some(origin), previous, next].into_iter().flatten() {
+            let windows: Vec<_> = comp
+                .wm
+                .backend()
+                .stacking
+                .iter()
+                .rev()
+                .filter_map(|entry| match entry {
+                    StackEntry::Window(id) => comp.wm.client_for_window(*id),
+                    StackEntry::Frame(id) => comp.wm.client_for_frame(*id),
+                })
+                .filter_map(|id| comp.wm.client(id))
+                .filter(|c| {
+                    (if c.flags.contains(ClientFlags::STICKY) { workspace == origin } else { c.workspace == workspace })
+                        && c.lifecycle == Lifecycle::Normal
+                        && (!comp.wm.separate_spaces() || comp.wm.workspace_output_index(c.workspace) == comp.wm.workspace_output_index(origin))
+                })
+                .map(|c| {
+                    let source = c.frame.and_then(|id| comp.wm.backend().frames.get(&id))
+                        .map_or(c.geometry, |frame| frame.visual_geometry());
+                    let mut window = Window::snapshot(c.window, c.frame, source, comp.wm.backend());
+                    window.draw_content = !c.flags.contains(ClientFlags::SHADED);
+                    window.sticky = c.flags.contains(ClientFlags::STICKY);
+                    window
+                })
+                .collect();
+            let overview = comp
+                .wm
+                .backend()
+                .overview
+                .as_ref()
+                .filter(|_| workspace != origin)
+                .map(|o| {
+                    let scene = comp
+                        .shell
+                        .desktop_gesture_overview_scene(&comp.wm, workspace, o.geometry);
+                    Overview::new(o.surface, scene, comp.wm.backend())
+                });
+            planes.push(Plane {
+                workspace,
+                windows,
+                overview,
+                background: Id::new(),
+            });
+        }
+    }
+    let now = Instant::now();
+    let monitors = comp
+        .wm
+        .backend()
+        .monitors
+        .iter()
+        .map(|m| (m.geometry, comp.wm.backend().scale_at(m.geometry)))
+        .collect();
+    let frame_interval = comp
+        .outputs
+        .iter()
+        .filter_map(|o| o.output.current_mode())
+        .filter(|m| m.refresh > 0)
+        .map(|m| {
+            Duration::from_nanos(1_000_000_000_000 / (m.refresh as u64).clamp(1000, 1_000_000))
+        })
+        .min()
+        .unwrap_or(Duration::from_nanos(1_000_000_000 / 60));
+    let overview_token = comp
+        .wm
+        .backend()
+        .overview
+        .as_ref()
+        .map(|o| o.token().clone());
+    comp.wm.backend_mut().gesture_scene = Some(Transition {
+        motion,
+        origin,
+        output,
+        count,
+        previous,
+        next,
+        position: 0.0,
+        velocity: 0.0,
+        projected: 0.0,
+        spring: None,
+        overview_origin: opened,
+        base: 0.0,
+        planes,
+        monitors,
+        last_frame: now,
+        next_frame: now,
+        frame_interval,
+        overview_token,
+    });
+    crate::input::sync_pointer_focus(comp);
 }
 
 /// Touching a moving desktop catches it at its exact current position. The
@@ -226,6 +233,35 @@ pub(crate) fn catch(comp: &mut Compositor) -> bool {
     scene.spring = None;
     scene.velocity = 0.0;
     true
+}
+
+/// Keyboard and pointer commands settle the same live scene as a released
+/// swipe. Run after the shell's event drain, before its first rendered frame.
+pub(crate) fn apply_overview_target(comp: &mut Compositor) {
+    let Some(opened) = comp.wm.backend_mut().overview_target.take() else { return; };
+    let Some(overview) = comp.wm.backend().overview.as_ref() else { return; };
+    let position = overview.progress;
+    if !crate::input::gestures::available(comp) {
+        if !opened || position < 1.0 {
+            comp.shell.finish_desktop_gesture_overview(&mut comp.wm, false);
+        }
+        return;
+    }
+    let compatible = comp.wm.backend().gesture_scene.as_ref().is_some_and(|scene|
+        !scene.horizontal() && scene.overview_token.as_ref() == Some(overview.token()));
+    if !compatible {
+        cancel(comp);
+        begin(comp, SwipeMotion { axis: SwipeAxis::Vertical, x: 0.0, y: 0.0,
+            progress: 0.0, velocity: 0.0 }, position >= 1.0);
+    }
+    if let Some(scene) = comp.wm.backend_mut().gesture_scene.as_mut() {
+        scene.position = position;
+        let target = if opened { 1.0 } else { 0.0 };
+        scene.spring = Some(physics::Spring::new(position, scene.velocity, target));
+        scene.last_frame = Instant::now();
+        scene.next_frame = scene.last_frame;
+    }
+    sync_progress(comp);
 }
 
 fn sync_progress(comp: &mut Compositor) {
@@ -267,10 +303,11 @@ pub(crate) fn cancel(comp: &mut Compositor) {
     let Some(scene) = comp.wm.backend_mut().gesture_scene.take() else {
         return;
     };
-    if !scene.horizontal() && !scene.overview_origin {
+    let owns_overview = scene.overview_token.as_ref() == comp.wm.backend().overview.as_ref().map(|o| o.token());
+    if owns_overview && !scene.horizontal() && !scene.overview_origin {
         comp.shell
             .finish_desktop_gesture_overview(&mut comp.wm, false);
-    } else if let Some(overview) = comp.wm.backend_mut().overview.as_mut() {
+    } else if let Some(overview) = comp.wm.backend_mut().overview.as_mut().filter(|_| owns_overview) {
         overview.progress = 1.0;
     }
     comp.wm.backend_mut().mark_damaged();

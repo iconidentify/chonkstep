@@ -20,7 +20,7 @@ fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
 /// struct just to list them. `registry_matches_choices` pins this to
 /// `all_themes()`.
 #[cfg(not(feature = "lcos"))]
-pub const CHOICES: [(&str, &str); 11] = [
+pub const CHOICES: [(&str, &str); 14] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
@@ -32,6 +32,9 @@ pub const CHOICES: [(&str, &str); 11] = [
     ("obsidian", "Obsidian"),
     ("washi", "Washi"),
     ("relay", "Relay"),
+    ("system-7-classic", "System 7 Classic"),
+    ("system-7-light-gray", "System 7 Light Gray"),
+    ("system-7-dark-gray", "System 7 Dark Gray"),
 ];
 
 /// The same list with the LCOS themes appended. Written out rather than
@@ -39,7 +42,7 @@ pub const CHOICES: [(&str, &str); 11] = [
 /// must stay in step, and `every_choice_resolves` fails loudly if they
 /// do not.
 #[cfg(feature = "lcos")]
-pub const CHOICES: [(&str, &str); 15] = [
+pub const CHOICES: [(&str, &str); 18] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
@@ -51,6 +54,9 @@ pub const CHOICES: [(&str, &str); 15] = [
     ("obsidian", "Obsidian"),
     ("washi", "Washi"),
     ("relay", "Relay"),
+    ("system-7-classic", "System 7 Classic"),
+    ("system-7-light-gray", "System 7 Light Gray"),
+    ("system-7-dark-gray", "System 7 Dark Gray"),
     ("lcos", "LCOS"),
     ("lunduke-walnut", "Lunduke Walnut"),
     ("lunduke-desk", "Lunduke Desk"),
@@ -77,6 +83,9 @@ pub fn all_themes() -> Vec<Theme> {
         crate::modern::theme("obsidian", Appearance::Dark).unwrap(),
         crate::modern::theme("washi", Appearance::Light).unwrap(),
         crate::modern::theme("relay", Appearance::Dark).unwrap(),
+        crate::system7::theme("system-7-classic", Appearance::Light).unwrap(),
+        crate::system7::theme("system-7-light-gray", Appearance::Light).unwrap(),
+        crate::system7::theme("system-7-dark-gray", Appearance::Light).unwrap(),
         #[cfg(feature = "lcos")]
         lcos(),
         #[cfg(feature = "lcos")]
@@ -122,6 +131,7 @@ pub fn native_appearance(id: &str) -> Option<Appearance> {
 /// menu palette, terminal scheme, and which rendition of the wallpaper
 /// artwork the shell composes underneath.
 pub fn theme_variant(id: &str, appearance: Appearance) -> Option<Theme> {
+    if let Some(theme) = crate::system7::theme(id, appearance) { return Some(theme); }
     if let Some(theme) = crate::modern::theme(id, appearance) { return Some(theme); }
     let theme = match (id, appearance) {
         ("nextstep-classic", Appearance::Dark) => nextstep_classic(),
@@ -197,6 +207,7 @@ pub fn nextstep_classic() -> Theme {
 
     Theme {
         chrome: None,
+        preferred_decoration_style: None,
         id: "nextstep-classic".to_string(),
         name: "NeXTSTEP Classic".to_string(),
         appearance: Appearance::Dark,
@@ -361,6 +372,7 @@ pub(crate) fn build_chrome(spec: ChromeSpec) -> Theme {
     };
     Theme {
         chrome: None,
+        preferred_decoration_style: None,
         id: spec.id,
         name: spec.name,
         appearance: spec.appearance,
@@ -1895,7 +1907,7 @@ mod tests {
     #[test]
     fn native_renditions_are_what_each_theme_originally_shipped_as() {
         for (id, _) in CHOICES {
-            let expected = if matches!(id,"ivory-halftone" | "washi") { Appearance::Light } else { Appearance::Dark };
+            let expected = if matches!(id,"ivory-halftone" | "washi") || id.starts_with("system-7-") { Appearance::Light } else { Appearance::Dark };
             assert_eq!(native_appearance(id), Some(expected), "{id}");
             let by_id = theme_by_id(id).unwrap();
             assert_eq!(by_id.appearance, expected, "{id}");

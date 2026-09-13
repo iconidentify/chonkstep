@@ -180,10 +180,10 @@ struct ThemeDescriptor {
     theme: Theme,
 }
 
-/// Serialize a modern theme at its authored 1x scale. Classic exports omit
-/// the descriptor and retain Omarchy's existing palette-only contract.
+/// Serialize a theme with its own frame recipe at its authored 1x scale.
+/// Older palette-only themes retain Omarchy's existing contract.
 pub fn descriptor_from_theme(theme: &Theme) -> Result<Option<String>, String> {
-    if theme.chrome.is_none() {
+    if theme.chrome.is_none() && theme.preferred_decoration_style.is_none() {
         return Ok(None);
     }
     let theme = normalize_descriptor_theme(theme.clone())?;
@@ -197,8 +197,11 @@ pub fn descriptor_from_theme(theme: &Theme) -> Result<Option<String>, String> {
 }
 
 fn normalize_descriptor_theme(theme: Theme) -> Result<Theme, String> {
-    if theme.chrome.is_none() {
-        return Err("Chonkstep theme descriptor requires modern chrome tokens".into());
+    if theme.chrome.is_none() && theme.preferred_decoration_style.is_none() {
+        return Err("Chonkstep theme descriptor requires modern chrome tokens or a preferred decoration style".into());
+    }
+    if theme.preferred_decoration_style == Some(wm_theme_api::DecorationStyle::Auto) {
+        return Err("Chonkstep theme descriptor must name a concrete preferred decoration style".into());
     }
     for font in [&theme.titlebar.font, &theme.menu.title_font, &theme.menu.item_font] {
         if font.family.is_empty() || font.family.len() > 512 || !font.size.is_finite() || !(1.0..=128.0).contains(&font.size) {

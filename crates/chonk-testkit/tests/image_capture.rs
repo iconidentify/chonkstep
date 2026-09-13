@@ -357,6 +357,8 @@ fn first_idle_frame_and_frame_after_session_destroy_capture_exact_output() {
         },
     )
     .unwrap();
+    // Match native capture pixels to grim without fractional logical-size resampling.
+    session.door().set_virtual_outputs("aligned").unwrap();
     let expected = session.screenshot("idle-source").unwrap();
     let mut client = Client::connect(&session);
     let (copy, size) = client.session();
@@ -596,6 +598,8 @@ fn demo_image_capture_keeps_its_policy_and_respects_locking() {
         config_extra: "show_dock = false\ninteraction_mode = 'mac'\n".into(),
         ..Default::default()
     }).unwrap();
+    // Use the same native pixel grid for both capture protocol references.
+    session.door().set_virtual_outputs("aligned").unwrap();
     let clean = session.screenshot("demo-clean-before").unwrap();
     session.door().key(125, true).unwrap();
     session.door().key(42, true).unwrap();

@@ -89,6 +89,12 @@ pub(crate) fn cancel(state: &mut Compositor) {
     cancel_at(state, state.start_time.elapsed().as_millis() as u32);
 }
 
+/// A key can retarget Overview's existing spring. Retire the physical swipe
+/// stream without snapping its retained visual scene to an endpoint.
+pub(crate) fn keyboard_takeover(state: &mut Compositor) {
+    cancel_client(state, state.start_time.elapsed().as_millis() as u32);
+}
+
 fn cancel_at(state: &mut Compositor, time: u32) {
     crate::gesture_scene::cancel(state);
     cancel_client(state, time);

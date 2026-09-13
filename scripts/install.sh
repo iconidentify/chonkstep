@@ -304,11 +304,11 @@ ln -sfn "${repo}/target/release/omarchy-export-themes" "$bin/omarchy-export-them
 # Writing into the user's config on install is a real intrusion, so it
 # is bounded: the exporter only ever touches `<target>/<theme id>/`
 # for ids this desktop ships, it writes nothing that runs code, and a
-# rerun refreshes those directories rather than adding more. A failure
+# rerun adds new built-ins while preserving existing themes. A failure
 # is not fatal to the install — a machine without Omarchy has nowhere
 # to put them and does not need them.
 if [ -x "${repo}/target/release/omarchy-export-themes" ]; then
-    "${repo}/target/release/omarchy-export-themes" >/dev/null 2>&1 ||
+    "${repo}/target/release/omarchy-export-themes" --missing >/dev/null 2>&1 ||
         echo "note: could not export themes into ~/.config/omarchy/themes; run omarchy-export-themes by hand" >&2
 fi
 # Keep the independent network-join helper available to external launchers.

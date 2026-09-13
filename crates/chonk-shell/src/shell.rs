@@ -568,6 +568,13 @@ fn host_omarchy_shell(
     use crate::omarchy_shell::{self, Verdict};
     match verdict {
         Verdict::Launch(paths) => {
+            if let Some(target) = crate::omarchy_export::default_target() {
+                match crate::omarchy_export::install_missing(&target) {
+                    Ok(written) if !written.is_empty() => tracing::info!(count = written.len(), "registered ChonkStep themes in Omarchy"),
+                    Ok(_) => {},
+                    Err(error) => tracing::warn!(%error, path = %target.display(), "could not register ChonkStep themes in Omarchy"),
+                }
+            }
             let command = omarchy_shell::launch_command(paths);
             let (program, args) = crate::omarchy_menu::action_argv(&command);
             match spawn::spawn_detached_with_env(program, &args, &launch_env(theme_id, Some(appearance), scale), &[]) {
@@ -734,6 +741,7 @@ fn root_action_outcome(action: &RootMenuAction) -> ShellOutcome {
         RootMenuAction::SetTheme(_) => ShellOutcome::Continue,
         RootMenuAction::LaunchTerminal
         | RootMenuAction::LaunchAbout
+        | RootMenuAction::Help
         | RootMenuAction::LaunchApp(_)
         | RootMenuAction::OmarchyCommand { .. }
         | RootMenuAction::ToggleOmarchyBar
@@ -941,6 +949,9 @@ pub enum KeyResolution {
 
 pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     desktop: Desktop<B>,
+    miniwindows: crate::miniwindows::Miniwindows<B>,
+    help: crate::help::HelpPanel<B>,
+    help_key: Option<KeyCombo>,
     apps: Vec<AppEntry>,
     /// Everything a live change can alter, as resolved — the source
     /// `theme` below is derived from, and the base every later
@@ -1194,6 +1205,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
 
         Self {
             desktop,
+            miniwindows: crate::miniwindows::Miniwindows::default(),
+            help: crate::help::HelpPanel::default(),
+            help_key: None,
             apps,
             keymap: build_keymap(&state.keybindings),
             release_keymap: state
@@ -1249,10 +1263,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     }
 
     fn apply_session_state_inner(&mut self, wm: &mut WindowManager<B>, mut next: SessionState, reload_menu: bool) {
+        self.dismiss_help(wm);
+        self.miniwindows.invalidate(wm.backend_mut());
         next.decoration_style = next.base_theme.resolve_style(next.decoration_style_policy);
-        if next.interaction.mode == wm_core::InteractionMode::Mac && !wm.backend().supports_mac_interaction() {
-            tracing::warn!("Mac interaction requires chonkstep-wayland (including XWayland apps); retaining working configuration");
+        if (next.interaction.spaces_mode() || next.interaction.mac_keyboard()) && !wm.backend().supports_mac_interaction() {
+            tracing::warn!("Spaces and Mac keyboard profiles require chonkstep-wayland (including XWayland apps); retaining working configuration");
             return;
+        }
+        if next.overview_style != self.state.overview_style && self.desktop.overview_visible() {
+            self.close_overview(wm);
         }
         // 1. Policy.
         wm.set_focus_policy(next.focus);
@@ -1579,7 +1598,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// to open during one (see `run_action`) and its grab intercepts
     /// the keys that would start one.
     pub fn keymap_action(&mut self, combo: &KeyCombo) -> Option<KeyResolution> {
+        if self.help.visible() {
+            self.help_key = Some(*combo);
+            return Some(KeyResolution::Action(Action::Help));
+        }
         if self.desktop.overview_visible() {
+            // A chord arrives as modifier-down, then its actual key. Dismissing
+            // on Super-down would reverse again when the O in Super+O arrives.
+            if matches!(combo.keysym, 0xffe1..=0xffee | 0xff7e | 0xff7f | 0xfe03 | 0xfe11)
+                && self.keymap.get(combo) != Some(&Action::Overview) {
+                return Some(KeyResolution::Consumed);
+            }
             self.overview_key = Some(*combo);
             return Some(KeyResolution::Action(Action::Overview));
         }
@@ -1664,11 +1693,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
 
     /// Resolves the release half of a `bindr`/`release = true` pair.
     pub fn keymap_release_action(&self, combo: &KeyCombo) -> Option<Action> {
+        if self.help.visible() { return None; }
         self.release_keymap.get(combo).cloned()
     }
 
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
+            Action::Help => {
+                if let Some(combo) = self.help_key.take() {
+                    self.help.key(wm.backend_mut(), &self.theme, &self.fonts, combo);
+                } else { self.open_help(wm); }
+            }
             Action::Capture(mode) => return ShellOutcome::Capture(*mode),
             Action::SpawnTerminal => {
                 let terminal = spawn_terminal(
@@ -1776,7 +1811,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 self.desktop.open_force_quit_menu(wm.backend_mut(), &self.theme, applications);
             }
             Action::ApplicationOverview => {
-                if self.desktop.overview_visible() { self.close_overview(wm); }
+                if self.desktop.overview_visible() { self.dismiss_overview(wm, None); }
                 else if wm.cycle_state().is_none() {
                     self.overview_application = wm.focused_client();
                     self.open_overview(wm);
@@ -1790,7 +1825,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 let direction = if matches!(action, Action::WorkspaceNext) { 1 } else { -1 };
                 if let Some(next) = wm.neighboring_workspace(wm.current_workspace(), direction) {
                     wm.switch_workspace(next);
-                } else if !wm.mac_mode() && direction > 0 {
+                } else if !wm.spaces_mode() && direction > 0 {
                     wm.switch_workspace(wm.current_workspace() + 1);
                 }
             }
@@ -1835,7 +1870,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                         return ShellOutcome::Continue;
                     }
                     match key {
-                        Some(combo) if !rebound_toggle && wm.mac_mode()
+                        Some(combo) if !rebound_toggle && wm.mac_keyboard()
                             && combo.modifiers == wm_core::Modifiers::CONTROL
                             && matches!(combo.keysym, XK_LEFT | XK_RIGHT) => {
                             let output = self.overview_output.as_ref().and_then(|name| wm.monitors_ref().iter().position(|m| &m.name == name))
@@ -1851,14 +1886,14 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                                 self.desktop.move_overview_selection(wm.backend_mut(), &self.theme, dx, dy)
                             }
                             OverviewIntent::Commit => self.commit_overview(wm),
-                            OverviewIntent::Dismiss => self.close_overview(wm),
+                            OverviewIntent::Dismiss => self.dismiss_overview(wm, Some(false)),
                         },
                         // The rebound toggle, or (defensively) no
                         // parked key at all: close. A missing key can
                         // only mean a caller ran the action without
                         // resolving a combo first, and "the toggle
                         // toggles" is the only safe reading.
-                        _ => self.close_overview(wm),
+                        _ => self.dismiss_overview(wm, None),
                     }
                 }
             }
@@ -1866,7 +1901,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 let direction = if matches!(action, Action::WorkspaceCarryNext) { 1 } else { -1 };
                 if let Some(next) = wm.neighboring_workspace(wm.current_workspace(), direction) {
                     wm.carry_focused_to_workspace(next);
-                } else if !wm.mac_mode() && direction > 0 {
+                } else if !wm.spaces_mode() && direction > 0 {
                     wm.carry_focused_to_workspace(wm.current_workspace() + 1);
                 }
             }
@@ -1957,6 +1992,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }).collect()).collect()
     }
 
+    fn overview_cards(&self) -> bool {
+        self.state.overview_style == wm_config::OverviewStyle::Cards && self.theme.chrome.is_some()
+    }
+
     /// Prepare a neighboring live Overview without switching the WM or taking
     /// any input ownership. Called once at horizontal axis lock, never per frame.
     pub fn desktop_gesture_overview_scene(&self, wm: &WindowManager<B>, workspace: usize,
@@ -1965,40 +2004,42 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let tile = crate::desktop::switcher_preview_px(self.state.scale);
         let row = wm.workspace_row_on_output(wm.workspace_output_index(workspace).unwrap_or(wm.active_output_index()));
         let local = row.iter().position(|&space| space == workspace).unwrap_or(0);
-        let clients: Vec<_> = wm.iter_clients().filter(|(_, c)| c.workspace == workspace
-            && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)).collect();
+        let clients: Vec<_> = wm.iter_clients().filter(|(id, c)| c.workspace == workspace
+            && c.lifecycle == Lifecycle::Normal && !wm.mac_client_hidden(*id)).collect();
         let sources: Vec<_> = clients.iter().map(|(_, c)| if c.frame.is_some() {
             c.visual_geometry()
         } else { c.geometry }).collect();
         let sizes: Vec<_> = sources.iter().map(|r| r.size).collect();
-        let mut layout = if self.theme.chrome.is_some() {
+        let cards = self.overview_cards();
+        let mut layout = if cards {
             wm_theme::overview::modern::layout_in(&self.theme,geometry,self.desktop.overview_stage(geometry),&sources,(local,row.len()))
         } else { live::layout(geometry.size,tile,&sizes,row.len().max(local+1)) };
-        if self.theme.chrome.is_none() && wm.workspace_layout(workspace) != wm_core::LayoutMode::Freeform {
+        if !cards && wm.workspace_layout(workspace) != wm_core::LayoutMode::Freeform {
             live::preserve_arrangement(&mut layout, &sources);
         }
         let (mut fonts, mut swash) = (self.fonts.system(), self.fonts.swash());
         let label_h = (tile / 2).max(16);
-        let mut label = |text: &str, width, inverted| self.desktop.chrome().label(&self.theme, &mut fonts, &mut swash, text, width, label_h, inverted);
+        let mut label = |text: &str, width, inverted| crate::overview::styled_label(
+            Some(self.desktop.chrome()), inverted, &self.theme, &mut fonts, &mut swash, text, width, label_h);
         let windows = clients.iter().zip(sources).zip(&layout.cells).map(|(((_, c), source), destination)| {
             wm_core::OverviewWindow { window: c.window, frame: c.frame, source, destination: *destination,
-                label: if self.theme.chrome.is_some(){DecorationBuffer {width:0,height:0,pixels:Vec::new()}}
+                label: if cards {DecorationBuffer {width:0,height:0,pixels:Vec::new()}}
                     else{label(&c.title, (tile * 6).min(geometry.size.w), true)} }
         }).collect();
         let workspace_windows = Self::workspace_overview_windows(wm, &row);
         let spaces = layout.strip.iter().enumerate()
             .zip(workspace_windows.into_iter().chain(std::iter::repeat_with(Vec::new)))
             .map(|((i,rect),windows)| crate::overview::workspace_scene(&self.theme,Some(self.desktop.chrome()),
-                &mut fonts,&mut swash,*rect,layout.workspace_close_rect(i),i,(local,row.len()),label_h,windows)).collect();
+                &mut fonts,&mut swash,*rect,layout.workspace_close_rect(i),i,(local,row.len()),label_h,windows,cards)).collect();
         let selected = wm.focused_client().and_then(|focused| clients.iter().position(|(id, _)| *id == focused)).unwrap_or(0);
         wm_core::OverviewScene { geometry, windows, spaces, workspace: local, selected, gap: layout.pad,
-            chrome: crate::overview::scene_chrome(&self.theme,Some(self.desktop.chrome()),layout.grid) }
+            chrome: crate::overview::scene_chrome(&self.theme,Some(self.desktop.chrome()),layout.grid,cards) }
     }
 
     /// A desktop swipe can share Overview's grab, but cannot displace another
     /// modal UI or an interactive window drag.
     pub fn desktop_gesture_available(&self, wm: &WindowManager<B>) -> bool {
-        !wm.cycle_active() && !wm.interactive_drag_active() && !self.desktop.menu_visible()
+        !wm.cycle_active() && !wm.interactive_drag_active() && !self.desktop.menu_visible() && !self.help.visible()
             && !self.desktop.overview_pointer_pending()
     }
 
@@ -2028,7 +2069,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             }
             DesktopGesture::WorkspaceNext | DesktopGesture::WorkspacePrevious => {
                 let current = wm.current_workspace();
-                let target = if wm.mac_mode() {
+                let target = if wm.spaces_mode() {
                     let direction = if gesture == DesktopGesture::WorkspaceNext { 1 } else { -1 };
                     let Some(target) = wm.neighboring_workspace(current, direction) else { return; };
                     target
@@ -2056,6 +2097,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// failed to create would leave a desk with dead keys and nothing
     /// on screen explaining why.
     fn open_overview(&mut self, wm: &mut WindowManager<B>) {
+        self.miniwindows.invalidate(wm.backend_mut());
         self.overview_output = wm.separate_spaces().then(|| wm.monitors_ref().get(wm.active_output_index()).map(|m| m.name.clone())).flatten();
         // The Overview covers the monitor the panel hangs on, and its
         // modal grab would eat the panel's Escape: exactly one of the
@@ -2075,13 +2117,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// do both), so the grid can never keep showing a window that is
     /// gone.
     ///
-    /// Miniaturized windows are included, visually asleep (dimmed
-    /// preview, inactive titlebar — see `wm_theme::overview`):
-    /// they live on this desk too, and the Overview restoring one in a
-    /// single gesture is strictly more useful than pretending it is
-    /// not there. Their preview is whatever the capture path can still
-    /// produce for an unmapped window — `None` degrades to the empty
-    /// well, never an error.
+    /// Only normal windows participate. Minimized windows remain available
+    /// through their desktop preview tiles and the window switcher.
     fn populate_overview(&mut self, wm: &mut WindowManager<B>) {
         self.overview_close_pressed = None;
         let output = if let Some(name) = &self.overview_output {
@@ -2106,7 +2143,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             .filter(|(id, client)| {
                 self.overview_application.is_none_or(|app| wm.same_application(app, *id))
                     && !wm.mac_client_hidden(*id)
-                    && client.workspace == current && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
+                    && client.workspace == current && client.lifecycle == Lifecycle::Normal
             })
             .map(|(id, client)| OverviewItem {
                 client: id,
@@ -2120,7 +2157,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 } else {
                     client.geometry
                 },
-                miniaturized: client.lifecycle == Lifecycle::Miniaturized,
             })
             .collect();
         // Previews in a second pass: `client_preview` borrows the WM
@@ -2140,7 +2176,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let workspace = (row.iter().position(|&space| space == current).unwrap_or(0), row.len());
         let workspace_windows = Self::workspace_overview_windows(wm, &row);
         self.overview_revision = wm.protocol_state_revision();
-        self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, workspace_windows, (selected, area));
+        self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, workspace_windows, (selected, area), self.overview_cards());
     }
 
     /// Ends the session without committing: grab released first, so
@@ -2158,23 +2194,29 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.desktop.hide_overview(wm.backend_mut());
     }
 
-    /// Commits the selection: close, then focus + raise the chosen
+    fn dismiss_overview(&mut self, wm: &mut WindowManager<B>, target: Option<bool>) {
+        self.desktop.close_menu(wm.backend_mut());
+        if self.desktop.overview_pointer_pending() {
+            self.desktop.cancel_overview_pointer(wm.backend_mut(), &self.theme);
+        }
+        if !wm.backend_mut().transition_live_overview(target) {
+            self.close_overview(wm);
+        }
+    }
+
+    /// Commits the selection: animate back, then focus + raise the chosen
     /// window through the public `ActivateRequested` path (the same
     /// one a pager's `_NET_ACTIVE_WINDOW` message and the launcher
-    /// strip ride), deminiaturizing first when the card was asleep —
-    /// activating an unmapped window would set focus on nothing
-    /// visible. Closing before activating keeps the raise honest: the
-    /// full-screen panel is already gone when the window comes up.
+    /// strip ride). The return animation retains its input ownership until the
+    /// windows reach their desktop positions; activation updates the stack
+    /// beneath that transition without exposing moving pointer targets.
     fn commit_overview(&mut self, wm: &mut WindowManager<B>) {
         let target = self
             .desktop
             .overview_item(self.desktop.overview_selected())
-            .map(|item| (item.client, item.window, item.miniaturized));
-        self.close_overview(wm);
-        if let Some((client, window, miniaturized)) = target {
-            if miniaturized {
-                wm.deminiaturize(client);
-            }
+            .map(|item| item.window);
+        self.dismiss_overview(wm, Some(false));
+        if let Some(window) = target {
             wm.dispatch(BackendEvent::ActivateRequested(window));
         }
     }
@@ -2195,7 +2237,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// a retired identity is never interpreted as a request for a new space.
     fn ensure_overview_space(&self, wm: &mut WindowManager<B>, local: usize) -> Option<usize> {
         if let Some(space) = self.overview_space(wm, local) { return Some(space); }
-        if self.theme.chrome.is_none() || local < self.overview_spaces.len()
+        if !self.overview_cards() || local < self.overview_spaces.len()
             || local >= wm_core::MAX_WORKSPACES { return None; }
         let needed = local + 1 - self.overview_spaces.len();
         if needed > wm_core::MAX_WORKSPACES.saturating_sub(wm.workspace_count()) { return None; }
@@ -2283,7 +2325,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // of what just became visible — the panel stays up,
                 // which is the point of having the strip at all.
                 (MouseButton::Left, OverviewHit::Workspace(target)) => {
-                    if self.theme.chrome.is_some() {
+                    if self.overview_cards() {
                         let destination = self.ensure_overview_space(wm,target);
                         self.close_overview(wm);
                         if let Some(destination) = destination { wm.switch_workspace(destination); }
@@ -2302,7 +2344,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 }
                 // Pressing the empty panel backs out, like clicking
                 // away from a menu.
-                (MouseButton::Left, OverviewHit::Background) => self.close_overview(wm),
+                (MouseButton::Left, OverviewHit::Background) => self.dismiss_overview(wm, Some(false)),
                 _ => {}
             }
         } else if button == MouseButton::Left {
@@ -2325,6 +2367,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// binary's to route through [`Shell::on_shell_click`], whose
     /// launcher-release offer must still see them (see its doc).
     pub fn on_root_press(&mut self, wm: &mut WindowManager<B>, at: Point, button: MouseButton) -> ShellOutcome {
+        if self.help.visible() { self.dismiss_help(wm); return ShellOutcome::Continue; }
         // Any press on the bare desktop is a click away from an open
         // instrument panel; the press then keeps meaning what it always
         // did (a right press still opens the root menu).
@@ -2368,6 +2411,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         button: MouseButton,
         pressed: bool,
     ) -> ShellOutcome {
+        if self.help.owns(surface) {
+            if button == MouseButton::Left { self.help.click(wm.backend_mut(), &self.theme, &self.fonts, local, pressed); }
+            return ShellOutcome::Continue;
+        }
         // The modal Overview first: while it is open it covers the
         // primary monitor, so a click on its surface can mean nothing
         // else — and no strip/icon drag can be in progress under a
@@ -2383,6 +2430,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             return self.on_overview_click(wm, local, button, pressed);
         }
 
+        if button == MouseButton::Left {
+            if pressed && self.miniwindows.press(wm.backend_mut(), surface, local) {
+                return ShellOutcome::Continue;
+            }
+            if !pressed {
+                if let Some(id) = self.miniwindows.release(wm.backend_mut()) {
+                    wm.deminiaturize(id);
+                    return ShellOutcome::Continue;
+                }
+            }
+        }
         if pressed { return ShellOutcome::Continue; }
 
         if let Some(action) = self
@@ -2393,6 +2451,26 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
 
         ShellOutcome::Continue
+    }
+
+    fn open_help(&mut self, wm: &mut WindowManager<B>) {
+        if wm.cycle_active() || wm.interactive_drag_active() { return; }
+        self.desktop.close_menu(wm.backend_mut());
+        if self.desktop.overview_visible() { self.close_overview(wm); }
+        let Some(monitor) = wm.monitors_ref().get(wm.active_output_index()) else { return; };
+        let area = wm.usable_area_at(monitor.geometry.pos);
+        self.help_key = None;
+        self.help.open(wm.backend_mut(), &self.state, area, &self.fonts);
+    }
+
+    /// Release the guide before lock, output changes, or configuration reload.
+    pub fn dismiss_help(&mut self, wm: &mut WindowManager<B>) {
+        self.help.close(wm.backend_mut());
+        self.help_key = None;
+    }
+
+    pub fn on_shell_scroll(&mut self, wm: &mut WindowManager<B>, surface: B::ShellId, delta: wm_core::ScrollDelta) {
+        if self.help.owns(surface) { self.help.wheel(wm.backend_mut(), &self.theme, &self.fonts, delta.up); }
     }
 
     pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
@@ -2422,6 +2500,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 );
                 self.terminals.extend(terminal);
             }
+            RootMenuAction::Help => self.open_help(wm),
             RootMenuAction::LaunchAbout => {
                 let env = launch_env(&self.theme.id, Some(self.state.appearance), self.state.scale);
                 spawn::spawn_detached_with_env(&about_binary_path(), &[], &env, &[]);
@@ -2534,6 +2613,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
 
     pub fn on_motion(&mut self, wm: &mut WindowManager<B>, root: Point) {
         self.pointer_root = root;
+        self.miniwindows.motion(wm.backend_mut(), root);
         if self.desktop.overview_pointer_motion(wm.backend_mut(), &self.theme, root) {
             // A held card owns motion even outside the Overview output. Drain
             // stale hover so a later release cannot select a different card.
@@ -2743,6 +2823,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     }
 
     pub fn tick(&mut self, wm: &mut WindowManager<B>) {
+        self.miniwindows.sync(wm, self.state.minimized_previews, self.state.scale,
+            &self.theme, self.desktop.chrome(), &self.fonts);
         if let Some(spaces) = self.layout.take_restored_spaces() { wm.restore_display_spaces(spaces); }
         if let Some(modes) = self.layout.take_restored_modes() {
             for (workspace, mode) in modes.into_iter().enumerate() {
@@ -3016,6 +3098,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// output being plugged in or unplugged lands the same way a plain
     /// resize does.
     pub fn on_screen_resize(&mut self, wm: &mut WindowManager<B>, size: Size) {
+        self.dismiss_help(wm);
+        self.miniwindows.invalidate(wm.backend_mut());
         if self.desktop.overview_visible() { self.close_overview(wm); }
         let primary = primary_rect(&wm.monitors(), size);
         self.desktop.resize_to_screen(wm.backend_mut(), size, primary);

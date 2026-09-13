@@ -107,7 +107,7 @@ pub(super) struct DisplaySpaces {
 
 impl<B: Backend> WindowManager<B> {
     pub fn separate_spaces(&self) -> bool {
-        self.mac_mode() && self.interaction.separate_spaces && self.display_spaces.is_some()
+        self.spaces_mode() && self.interaction.separate_spaces && self.display_spaces.is_some()
     }
 
     pub fn display_spaces_snapshot(&self) -> Option<&DisplaySpacesSnapshot> {
@@ -118,7 +118,7 @@ impl<B: Backend> WindowManager<B> {
     /// Restore only before clients map. Reject corrupt topology as a whole,
     /// keeping the working live model and bounded allocation/ID arithmetic.
     pub fn restore_display_spaces(&mut self, snapshot: DisplaySpacesSnapshot) -> bool {
-        if !self.mac_mode()
+        if !self.spaces_mode()
             || !self.interaction.separate_spaces
             || !self.clients.is_empty()
             || !snapshot.valid()
@@ -530,7 +530,7 @@ impl<B: Backend> WindowManager<B> {
 
     /// Called at topology/configuration boundaries, never at frame cadence.
     pub fn reconcile_display_spaces(&mut self) {
-        if !self.mac_mode() || !self.interaction.separate_spaces {
+        if !self.spaces_mode() || !self.interaction.separate_spaces {
             return;
         }
         self.end_active_drag();

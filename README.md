@@ -66,8 +66,10 @@ instruments, samplers and tile protocol have been removed from the compositor
 codebase. Future desktop components belong in separate applications or plugins.
 
 The [theme guide](docs/modern-themes.md) covers selection, appearance overrides
-and export. [Decoration styles](docs/decoration-styles.md) can also be selected
-independently of the palette.
+and export. [System 7 themes](docs/system7-themes.md) provide three period desktop
+patterns with their native window chrome through the same picker.
+[Decoration styles](docs/decoration-styles.md) can also be selected independently
+of the palette.
 
 ## Performance is a design constraint
 

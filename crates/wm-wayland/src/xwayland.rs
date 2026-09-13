@@ -653,7 +653,7 @@ impl XwmHandler for Compositor {
         if selection == SelectionTarget::Clipboard {
             if !mime_types.is_empty() { self.mac_copy_order.offered(); }
             self.clipboard_persistence.clear();
-            if self.wm.mac_mode() && self.wm.interaction_config().clipboard_persistence {
+            if self.wm.spaces_mode() && self.wm.interaction_config().clipboard_persistence {
                 let requests = self.clipboard_persistence.begin(None, mime_types.clone());
                 for (mime, fd) in requests {
                     if let Some(xwm) = self.xwayland.wm.as_mut() {

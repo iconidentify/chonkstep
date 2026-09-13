@@ -37,6 +37,7 @@
 #   chromium   the real-browser resize and popup-anchor regressions
 #   wayland-info  the registry enumeration probe
 #   hyprsunset the night-light integration (see CI_CANNOT_INSTALL)
+#   qs         real Qt lock-surface sizing (see CI_CANNOT_INSTALL)
 #
 # `--headless` starts an isolated Weston host first.  It is useful on a
 # CI runner, over SSH, or while the real desktop is locked: a hidden

@@ -175,6 +175,7 @@ fn alt_tab_withdraws_client_focus_and_restores_it_even_when_cancel_keeps_the_sam
 #[ignore = "needs a nested session; scripts/e2e.sh --headless --release"]
 fn held_overview_navigation_repeats_and_stops_when_the_modal_closes() {
     let mut session = boot("keyboard-focus-modal-repeat");
+    let enters = event_count(&session, "keyboard enter");
     open_overview(&mut session);
     session.door().key(KEY_DOWN, true).unwrap();
     poll_until(EVENT, "held Overview Down to emit modal repeats", || {
@@ -192,6 +193,8 @@ fn held_overview_navigation_repeats_and_stops_when_the_modal_closes() {
         "a modal repeat must end with its owner, even while the key is held"
     );
     session.door().key(KEY_DOWN, false).unwrap();
+    // The return animation retains modal input until client focus is restored.
+    wait_events(&session, "keyboard enter", enters + 1);
     session.door().tap_key(KEY_A).unwrap();
     wait_events(&session, "keyboard key 30 up", 1);
 }
@@ -243,12 +246,14 @@ fn zero_repeat_rate_applies_to_modal_navigation_too() {
         &[],
     );
     wait_events(&session, "keyboard repeat 0 0", 1);
+    let enters = event_count(&session, "keyboard enter");
     open_overview(&mut session);
     session.door().key(KEY_DOWN, true).unwrap();
     session.door().barrier().unwrap();
     assert!(session.door().repeating_binding().unwrap().is_none());
     session.door().key(KEY_DOWN, false).unwrap();
     session.door().tap_key(keys::ESC).unwrap();
+    wait_events(&session, "keyboard enter", enters + 1);
     session.door().tap_key(KEY_A).unwrap();
     wait_events(&session, "keyboard key 30 up", 1);
 }

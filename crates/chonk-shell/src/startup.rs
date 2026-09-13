@@ -94,6 +94,7 @@ pub struct SessionState {
     /// published/request file contract.
     pub appearance: Appearance,
     pub decoration_style: wm_theme_api::DecorationStyle,
+    pub overview_style: wm_config::OverviewStyle,
     /// Retained policy so live theme changes can resolve Auto again.
     pub decoration_style_policy: wm_theme_api::DecorationStyle,
     /// `Some(wm_theme::omarchy::ID)` while this session *follows*
@@ -128,6 +129,7 @@ pub struct SessionState {
     /// every reload, which is how a fresh `omarchy update` reaches the
     /// menu without a restart.
     pub omarchy_menu: bool,
+    pub minimized_previews: bool,
     /// Whether a Wayland session hosts Omarchy's shell
     /// (`crate::omarchy_shell`). Boot-time only, like `autostart`: a
     /// reload cannot start or stop a process the user may since have
@@ -243,6 +245,8 @@ impl SessionState {
             terminal_font_px: config.terminal_font_px,
             restore_session: config.restore_session,
             omarchy_menu: config.omarchy_menu,
+            minimized_previews: config.minimized_previews,
+            overview_style: config.overview_style,
             omarchy_shell: config.omarchy_shell,
             omarchy_bar: config.omarchy_bar,
             decorations: config.decorations.clone(),
@@ -924,6 +928,8 @@ mod tests {
             terminal: None,
             autostart: Vec::new(),
             omarchy_menu: true,
+            minimized_previews: false,
+            overview_style: wm_config::OverviewStyle::Classic,
             omarchy_shell: true,
             omarchy_bar: None,
             decorations: DecorationRules::default(),

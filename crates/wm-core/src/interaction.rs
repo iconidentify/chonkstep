@@ -9,10 +9,39 @@ use crate::{KeyCombo, Modifiers};
 pub enum InteractionMode {
     #[default]
     Desktop,
+    /// Spaces, fullscreen desktops and clipboard services with ordinary keys.
+    Spaces,
+    /// Legacy combined profile; defaults to the experimental Mac keyboard.
     Mac,
 }
 
 impl InteractionMode {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "desktop" => Some(Self::Desktop),
+            "spaces" => Some(Self::Spaces),
+            "mac" => Some(Self::Mac),
+            _ => None,
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Spaces => "spaces",
+            Self::Mac => "mac",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyboardMode {
+    #[default]
+    Desktop,
+    Mac,
+}
+
+impl KeyboardMode {
     pub fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "desktop" => Some(Self::Desktop),
@@ -62,8 +91,10 @@ impl AppProfile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InteractionConfig {
     pub mode: InteractionMode,
+    /// Unset preserves the legacy combined Mac profile's keyboard selection.
+    pub keyboard_mode: Option<KeyboardMode>,
     pub clipboard_persistence: bool,
-    /// Give every display its own active Space in Mac mode.
+    /// Give every display its own active Space when Spaces are enabled.
     pub separate_spaces: bool,
     /// Exact, case-insensitive application identities; user entries win.
     pub applications: Vec<(String, AppProfile)>,
@@ -73,6 +104,7 @@ impl Default for InteractionConfig {
     fn default() -> Self {
         Self {
             mode: InteractionMode::Desktop,
+            keyboard_mode: None,
             clipboard_persistence: true,
             separate_spaces: true,
             applications: Vec::new(),
@@ -81,6 +113,22 @@ impl Default for InteractionConfig {
 }
 
 impl InteractionConfig {
+    pub fn spaces_mode(&self) -> bool {
+        matches!(self.mode, InteractionMode::Spaces | InteractionMode::Mac)
+    }
+
+    pub fn keyboard_mode(&self) -> KeyboardMode {
+        self.keyboard_mode.unwrap_or(if self.mode == InteractionMode::Mac {
+            KeyboardMode::Mac
+        } else {
+            KeyboardMode::Desktop
+        })
+    }
+
+    pub fn mac_keyboard(&self) -> bool {
+        self.keyboard_mode() == KeyboardMode::Mac
+    }
+
     pub fn profile(&self, identity: &str) -> AppProfile {
         if let Some((_, profile)) = self
             .applications

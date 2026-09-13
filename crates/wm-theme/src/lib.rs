@@ -4,6 +4,7 @@
 pub mod bluetooth;
 pub mod cascade;
 pub mod default_theme;
+pub mod system7;
 pub mod icon;
 pub mod menu;
 pub mod model;

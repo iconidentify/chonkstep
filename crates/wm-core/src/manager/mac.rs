@@ -7,8 +7,11 @@ impl<B: Backend> WindowManager<B> {
         self.cycle_end(false);
     }
 
-    pub fn mac_mode(&self) -> bool {
-        self.interaction.mode == crate::InteractionMode::Mac
+    pub fn spaces_mode(&self) -> bool {
+        self.interaction.spaces_mode()
+    }
+    pub fn mac_keyboard(&self) -> bool {
+        self.interaction.mac_keyboard()
     }
     pub fn interaction_config(&self) -> &crate::InteractionConfig {
         &self.interaction
@@ -19,16 +22,17 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         self.cycle_end(false);
-        let was_mac = self.mac_mode();
+        let was_spaces = self.spaces_mode();
+        let was_mac_keyboard = self.mac_keyboard();
         let spaces_changed = config.separate_spaces != self.interaction.separate_spaces;
-        if config.mode != crate::InteractionMode::Mac || spaces_changed {
+        if !config.spaces_mode() || spaces_changed {
             let fullscreen: Vec<_> = self.mac_fullscreen.keys().copied().collect();
             for id in fullscreen {
                 self.unfullscreen(id);
             }
         }
         self.interaction = config;
-        if self.mac_mode() && self.interaction.separate_spaces {
+        if self.spaces_mode() && self.interaction.separate_spaces {
             self.reconcile_display_spaces();
         } else if self.display_spaces.take().is_some() {
             let ids: Vec<_> = self.clients.keys().collect();
@@ -39,25 +43,25 @@ impl<B: Backend> WindowManager<B> {
             self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
         }
 
-        if was_mac != self.mac_mode() {
+        if was_mac_keyboard != self.mac_keyboard() {
             for modifiers in [Modifiers::ALT, Modifiers::ALT | Modifiers::SHIFT] {
                 let key = KeyCombo {
                     keysym: XK_TAB,
                     modifiers,
                 };
-                if self.mac_mode() {
+                if self.mac_keyboard() {
                     self.backend.ungrab_key(key);
                 } else {
                     self.backend.grab_key(key);
                 }
             }
-            if !self.mac_mode() {
-                self.mac_hidden.clear();
-                self.desktop_reveal = None;
-                let ids: Vec<_> = self.clients.keys().filter(|&id| self.is_focusable(id)).collect();
-                for id in ids {
-                    self.show_client_surface(id);
-                }
+        }
+        if was_spaces && !self.spaces_mode() {
+            self.mac_hidden.clear();
+            self.desktop_reveal = None;
+            let ids: Vec<_> = self.clients.keys().filter(|&id| self.is_focusable(id)).collect();
+            for id in ids {
+                self.show_client_surface(id);
             }
         }
     }
@@ -171,7 +175,7 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub(super) fn mac_enter_fullscreen(&mut self, id: ClientId) {
-        if !self.mac_mode() || self.mac_fullscreen.contains_key(&id) || self.workspace_count >= MAX_WORKSPACES {
+        if !self.spaces_mode() || self.mac_fullscreen.contains_key(&id) || self.workspace_count >= MAX_WORKSPACES {
             return;
         }
         let origin = self.clients[id].workspace;
@@ -249,7 +253,7 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub(super) fn reveal_application(&mut self, id: ClientId) {
-        if !self.mac_mode() {
+        if !self.spaces_mode() {
             return;
         }
         if let Some((ids, _)) = self.desktop_reveal.as_mut() {

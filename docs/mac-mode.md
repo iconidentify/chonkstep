@@ -1,4 +1,4 @@
-# Mac interaction mode
+# Experimental Mac keyboard profile
 
 ChonkStep's Mac profile runs in **chonkstep-wayland**, including applications
 running through XWayland. Command and Option retain their physical identities;
@@ -11,17 +11,26 @@ this profile does not claim complete macOS parity.
 
 ## Enable and inspect
 
-Put this at the top level of `~/.config/chonkstep/config.toml`:
+Spaces and keyboard selection are independent. For supported per-monitor Spaces,
+dedicated fullscreen Spaces and clipboard persistence with ordinary Omarchy keys:
 
 ```toml
-interaction_mode = "mac"
+desktop = "omarchy"
+interaction_mode = "spaces"
+keyboard_mode = "desktop"
+drag_modifier = "super"
 ```
 
-It can coexist with `desktop = "omarchy"`: theme, shell, input-device settings,
-and service commands remain available. Remove an explicit `keymap` setting;
-Mac mode supplies its own bindings. `[keybindings]` overrides still win.
-Mac mode defaults to click-to-focus and disables modifier-drag gestures so
-Option remains available to applications.
+Only the Mac keyboard profile is experimental. To opt into its application
+shortcut translation and desktop bindings, change `keyboard_mode` to `"mac"`.
+Remove an explicit `keymap` when doing so; Mac keyboard mode supplies its own
+bindings. `[keybindings]` overrides still win. Mac keyboard mode defaults to
+click-to-focus and disables modifier-drag gestures so Option remains available
+to applications, unless those settings are explicitly overridden.
+
+The legacy `interaction_mode = "mac"` selects both Spaces and Mac keys when
+`keyboard_mode` is unset. An explicit `keyboard_mode = "desktop"` overrides that
+legacy keyboard default without changing desktop behavior.
 
 ```sh
 chonkstep-wayland --check-config
@@ -32,13 +41,15 @@ chonkstep-wayland --print-config
 
 `--print-config` includes the effective Mac system shortcuts, disabled defaults,
 and application overrides. An invalid reload retains the working configuration.
-Set `interaction_mode = "desktop"` to return to the existing desktop profile.
-Hidden windows and fullscreen desktops are restored when leaving Mac mode.
+Set `keyboard_mode = "desktop"` to turn off Mac keys while preserving Spaces.
+Changing keyboard mode does not close fullscreen Spaces or link displays.
+`interaction_mode = "desktop"` disables the expanded Spaces desktop behavior;
+hidden windows and fullscreen desktops are restored when leaving it.
 Enabling clipboard persistence also adopts the clipboard already owned by a
 live Wayland or X11 application; another Copy is not required.
 
-The standalone `chonkstep` X11 session rejects Mac mode because it does not
-implement the client delivery mechanism. X11 applications work inside the
+The standalone `chonkstep` X11 session rejects Spaces and Mac keyboard mode
+because these profiles require the native Wayland backend. X11 applications work inside the
 Wayland session through XWayland.
 
 ## Desktop shortcuts
@@ -66,8 +77,9 @@ Applications are grouped by app ID / WM_CLASS, including later identity updates,
 and transient windows belong to their application. Hide, minimize, and Show
 Desktop maintain separate state. The overview's existing desktop controls create
 and remove desktops; deleting a live fullscreen desktop is declined until its
-window exits fullscreen. Mac mode gives each connected display its own Space row
-by default; Control-Left/Right and swipes target the selected display. See
+window exits fullscreen. Spaces gives each connected display its own row
+by default. With Mac keys, Control-Left/Right and swipes target the selected display.
+With Omarchy keys, Super-Tab / Super-Shift-Tab navigate and Super-F toggles fullscreen. See
 [display Spaces](mac-display-spaces.md) for ownership, hotplug, restore, and IPC policy.
 Use `[mac] separate_spaces = false` for linked displays.
 

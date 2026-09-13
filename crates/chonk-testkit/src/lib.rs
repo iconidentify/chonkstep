@@ -203,6 +203,13 @@ const CI_CANNOT_INSTALL: &[(&str, &str)] = &[
     // for one gamma assertion. `gamma.rs`'s other tests drive the
     // protocol directly and do run.
     ("hyprsunset", "not packaged for Ubuntu; the rest of gamma.rs drives the protocol directly"),
+    // Ubuntu 24.04 has Qt 6.4; Quickshell requires Qt >= 6.6 and has no
+    // Ubuntu package. Keep the real Qt locker test on supported desktops;
+    // session_lock.rs also exercises the protocol with our own clients in CI.
+    // Remove this exception when the runner supplies a compatible Qt stack.
+    // https://packages.ubuntu.com/noble/qt6-base-dev
+    // https://github.com/quickshell-mirror/quickshell/blob/master/CMakeLists.txt
+    ("qs", "Quickshell is unavailable on Ubuntu 24.04's Qt 6.4; direct session-lock protocol tests still run"),
 ];
 
 /// Where [`require_client`] records a client it did not find, so a run
@@ -1247,14 +1254,12 @@ impl World {
 /// the two a given session has, so a test clicks a row by its label
 /// and never by a hand-counted index.
 ///
-/// "Dock" is unconditional — the Dock is chonkstep's own furniture, so
-/// every session has one to show or hide — which is why it is not one
-/// of [`RootMenu`]'s fields.
+/// Help is present in both menu shapes, immediately before Exit.
 /// The root menu on a machine with no Omarchy menu definition to read:
 /// this desk's own tree, which is the only place its theme and
 /// wallpaper rows appear.
 pub const ROOT_MENU_ROWS: &[&str] =
-    &["Terminal", "Applications", "Theme", "Wallpaper", "Omarchy Bar", "Exit"];
+    &["Terminal", "Applications", "Theme", "Wallpaper", "Omarchy Bar", "ChonkStep Help", "Exit"];
 
 /// Which rows a session's root menu carries.
 ///
@@ -1291,6 +1296,7 @@ impl RootMenu {
         if self.omarchy_bar {
             rows.push("Omarchy Bar");
         }
+        rows.push("ChonkStep Help");
         rows.push("Exit");
         rows
     }
@@ -1544,7 +1550,7 @@ impl Door {
     }
 
     pub fn set_virtual_outputs(&mut self, topology: &str) -> Result<(), String> {
-        if !matches!(topology, "split" | "single" | "compact" | "none") {
+        if !matches!(topology, "split" | "single" | "compact" | "aligned" | "none") {
             return Err("unknown virtual topology".into());
         }
         self.send(&format!("virtual-outputs {topology}"))?;
@@ -2202,19 +2208,17 @@ mod tests {
 
     /// The optional rows drop out without disturbing the order of the
     /// rest, and a label is found at its index in the menu that has
-    /// it and nowhere in one that does not. `Dock` is in every one of
-    /// them: the Dock is chonkstep's own furniture, so there is no
-    /// session with no Dock to offer.
+    /// it and nowhere in one that does not. Help is available in both shapes.
     #[test]
     fn root_menu_rows_keep_their_order_in_both_shapes() {
         // No Omarchy definition: this desk's own tree, which is the
         // only place Theme and Wallpaper appear.
         let plain = RootMenu::default();
-        assert_eq!(plain.rows(), ["Terminal", "Applications", "Theme", "Wallpaper", "Exit"]);
-        assert_eq!(plain.row_of("Exit"), Some(4));
+        assert_eq!(plain.rows(), ["Terminal", "Applications", "Theme", "Wallpaper", "ChonkStep Help", "Exit"]);
+        assert_eq!(plain.row_of("Exit"), Some(5));
         assert_eq!(plain.row_of("Omarchy Bar"), None);
         let hosted = RootMenu { omarchy_bar: true, omarchy_rows: &[] };
-        assert_eq!(hosted.row_count(), 6);
+        assert_eq!(hosted.row_count(), 7);
         assert_eq!(hosted.row_of("Omarchy Bar"), Some(4));
 
         // With one, Omarchy's rows *are* the menu: Applications ahead
@@ -2223,11 +2227,11 @@ mod tests {
         let full = RootMenu { omarchy_bar: true, omarchy_rows: &["Style", "System"] };
         assert_eq!(
             full.rows(),
-            ["Applications", "Terminal", "Style", "System", "Omarchy Bar", "Exit"]
+            ["Applications", "Terminal", "Style", "System", "Omarchy Bar", "ChonkStep Help", "Exit"]
         );
         assert_eq!(full.row_of("Omarchy"), None, "the menu is Omarchy's; it does not contain one");
         assert_eq!(full.row_of("Theme"), None, "one theme system: Omarchy's Style row owns it");
-        assert_eq!(full.row_of("Exit"), Some(5));
+        assert_eq!(full.row_of("Exit"), Some(6));
     }
 
     #[test]

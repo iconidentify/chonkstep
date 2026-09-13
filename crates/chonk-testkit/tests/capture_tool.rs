@@ -327,6 +327,18 @@ fn diagnostic(session: &mut Session, name: &str) -> Screenshot {
     .unwrap()
 }
 
+fn align_capture_comparison(session: &mut Session) {
+    // These assertions compare native GPU pixels with grim's exported image.
+    // At 1280x800 / 1.5, rounded logical dimensions make grim resample the
+    // native buffer: it exports 1280x799 and filters the colors. Multiples
+    // of six keep both axes exact at every comparison scale, preserving strict
+    // pixel equality. Recording/region tests retain their unaligned dimensions.
+    session.door().set_virtual_outputs("aligned").unwrap();
+    let world = session.world().unwrap();
+    assert_eq!(world.output_w % 6, 0);
+    assert_eq!(world.output_h % 6, 0);
+}
+
 fn settle_render_history(session: &mut Session) {
     // Barriers force damage, and diagnostics render a fresh offscreen scene.
     // Drain earlier presents so neither can make a missing input repaint pass.
@@ -355,6 +367,7 @@ fn input_schedules_frame(session: &mut Session, what: &str) {
 
 fn screenshot_workflow(scale: f32, name: &str) {
     let mut session = boot(name, scale);
+    align_capture_comparison(&mut session);
     let exports = session.dir.join("exports");
     let probe = profile_binary("chonk-input-probe").unwrap();
     session.launch(probe.to_str().unwrap(), &["1"]).unwrap();
@@ -524,6 +537,7 @@ fn assert_arrow_at(visible: &Screenshot, elsewhere: &Screenshot, x: u32, y: u32,
 
 fn toolbar_cursor_workflow(scale: f32, name: &str) {
     let mut session = boot(name, scale);
+    align_capture_comparison(&mut session);
     let world = session.world().unwrap();
     let before = session.screenshot("desktop-before-toolbar").unwrap();
     // Capture temporarily owns its cursor even while an Omarchy screensaver
@@ -699,7 +713,11 @@ fn recording_odd_area_is_playable_and_controls_are_excluded() {
 #[test]
 #[ignore = "needs nested Wayland, wf-recorder and ffmpeg"]
 fn recording_screen_and_area_preserve_changing_content() {
-    let mut session = boot("capture-motion", 1.0);
+    for scale in [1.0, 1.5, 2.0] { recording_motion_at_scale(scale); }
+}
+
+fn recording_motion_at_scale(scale: f32) {
+    let mut session = boot(&format!("capture-motion-{scale}"), scale);
     session.launch("foot", &[
         "--title=capture-animation", "--override=locked-title=yes", "bash", "-c",
         "while true; do printf '\\033[48;2;240;20;20m\\033[2J'; sleep 0.4; printf '\\033[48;2;20;20;240m\\033[2J'; sleep 0.4; done",

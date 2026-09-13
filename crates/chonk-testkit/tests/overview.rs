@@ -107,10 +107,10 @@ fn open_overview(session: &mut Session) {
     let door = session.door();
     poll_until(
         Duration::from_secs(10),
-        "the overview panel to appear in the ledger",
+        "the overview panel to settle before testing pointer targets",
         || {
             let world = door.windows().ok()?;
-            overview_shell(&world).map(|_| ())
+            overview_shell(&world).filter(|_| world.overview.as_ref().is_none_or(|o| o.progress == 1.0)).map(|_| ())
         },
     )
     .expect("super+up should open the Overview");
@@ -264,6 +264,75 @@ fn overview_on_an_empty_desk_is_quiet_not_a_crash() {
     session.door().tap_key(keys::ESC).unwrap();
     assert_overview_closed(&mut session, "Escape on an empty desk");
     assert!(session.compositor_alive());
+}
+
+#[test]
+#[ignore = "requires nested Wayland"]
+fn minimized_windows_stay_out_of_overview_and_restore_from_desktop_tiles() {
+    for style in ["classic", "cards"] {
+        let mut session = Session::boot(&format!("overview-minimized-{style}"), SessionOptions {
+            scale: Some(1.5),
+            config_extra: format!("theme='obsidian'\ninteraction_mode='spaces'\nkeyboard_mode='desktop'\n\
+                hyprland_config=false\nminimized_previews=true\noverview_style='{style}'\n\
+                [keybindings]\n'super+m'='miniaturize'\n"),
+            ..Default::default()
+        }).unwrap();
+        launch_terminal(&mut session, "VisibleWindow");
+        launch_terminal(&mut session, "MinimizedWindow");
+        let before = session.world().unwrap();
+        let visible = before.window_matching("VisibleWindow").unwrap().id;
+        let minimized = before.window_matching("MinimizedWindow").unwrap().id;
+        session.door().chord(keys::LEFTMETA, 50).unwrap();
+        let tile = poll_until(Duration::from_secs(10), "minimized window has a desktop tile", || {
+            let world = session.world().ok()?;
+            if world.frame_of(minimized)?.mapped { return None; }
+            world.shells.into_iter().find(|s| s.mapped && !s.above && s.w == 240 && s.h == 240)
+        }).unwrap();
+
+        open_overview(&mut session);
+        let world = session.world().unwrap();
+        assert_eq!(world.overview_windows.iter().map(|w| w.id).collect::<Vec<_>>(), vec![visible]);
+        assert!(!world.overview_space_windows.iter().any(|(_, id)| *id == minimized));
+        session.screenshot("one-visible-window").unwrap();
+        session.door().tap_key(keys::RIGHT).unwrap();
+        session.door().tap_key(keys::ENTER).unwrap();
+        assert_overview_closed(&mut session, "selecting the only visible window");
+        let world = session.world().unwrap();
+        assert_eq!(world.logical_focus, Some(visible));
+        assert!(!world.frame_of(minimized).unwrap().mapped, "keyboard navigation cannot restore a minimized window");
+
+        // A desk containing only minimized windows also stays empty when
+        // Overview is entered through the actual touchpad gesture route.
+        session.door().chord(keys::LEFTMETA, 50).unwrap();
+        poll_until(Duration::from_secs(10), "both windows are minimized", || {
+            let world = session.world().ok()?;
+            (!world.frame_of(visible)?.mapped && !world.frame_of(minimized)?.mapped).then_some(())
+        }).unwrap();
+        session.door().swipe_begin_at(3, 0).unwrap();
+        session.door().swipe_update_at(0.0, -200.0, 200).unwrap();
+        session.door().swipe_end_at(false, 200).unwrap();
+        let world = poll_until(Duration::from_secs(10), "gesture opens an empty Overview", || {
+            let world = session.world().ok()?;
+            (world.overview.as_ref()?.progress == 1.0).then_some(world)
+        }).unwrap();
+        assert!(world.overview_windows.is_empty());
+        assert!(world.overview_space_windows.is_empty());
+        session.screenshot("only-minimized-windows").unwrap();
+        session.door().tap_key(keys::ENTER).unwrap();
+        assert_overview_closed(&mut session, "Enter on an empty Overview");
+        assert!(!session.world().unwrap().frame_of(minimized).unwrap().mapped);
+
+        session.door().click((tile.x + 30) as f64, (tile.y + 30) as f64).unwrap();
+        poll_until(Duration::from_secs(10), "desktop tile restores its window", || {
+            session.world().ok()?.frame_of(minimized)?.mapped.then_some(())
+        }).unwrap();
+        open_overview(&mut session);
+        let world = session.world().unwrap();
+        assert_eq!(world.overview_windows.iter().map(|w| w.id).collect::<Vec<_>>(), vec![minimized]);
+        assert!(!world.frame_of(visible).unwrap().mapped);
+        session.door().tap_key(keys::ESC).unwrap();
+        assert_overview_closed(&mut session, "Escape after restoring from the desktop");
+    }
 }
 
 /// Visible pixels, not merely layout math: different window shapes, wallpaper

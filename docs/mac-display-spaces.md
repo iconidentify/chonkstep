@@ -1,15 +1,22 @@
-# Mac Spaces across displays
+# Spaces across displays
 
-Mac mode now gives each connected output its own Space row. Switching one display
+Spaces gives each connected output its own Space row, independently of the keyboard profile. Switching one display
 keeps the other displays' active Spaces visible. This applies to the ChonkStep
 Wayland compositor, including its managed XWayland applications.
 
 ```toml
-interaction_mode = "mac"
+desktop = "omarchy"
+interaction_mode = "spaces"
+keyboard_mode = "desktop"
 
-[mac]
-separate_spaces = true  # default in Mac mode
+[mac] # Legacy table name; these desktop settings do not enable Mac keys.
+separate_spaces = true  # default in Spaces
 ```
+
+Per-monitor Spaces and dedicated fullscreen Spaces are supported desktop features.
+Only `keyboard_mode = "mac"` is experimental. With Omarchy keys, Super-Tab and
+Super-Shift-Tab navigate the selected display; Super-F toggles dedicated fullscreen.
+The Mac-keyboard equivalents below apply when that keyboard profile is enabled.
 
 Set `separate_spaces = false` to use the previous linked-display desktop policy.
 Configuration reload preserves windows; changing the policy first exits dedicated

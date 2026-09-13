@@ -12,6 +12,28 @@ const CTRL: u32 = 29;
 const SHIFT: u32 = 42;
 const CONTENT: &str = "Mac clipboard: café — 日本語 🍎\nsecond line";
 
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_mode"]
+fn spaces_with_desktop_keys_deliver_untranslated_super_and_control() {
+    let mut s = Session::boot("spaces-desktop-input", SessionOptions {
+        config_extra: "interaction_mode='spaces'\nkeyboard_mode='desktop'\ndesktop='omarchy'\nhyprland_config=false\nshow_dock=false\n".into(),
+        ..Default::default()
+    }).unwrap();
+    for platform in ["wayland", "x11"] {
+        let mut b = browser(&mut s, platform, platform);
+        focus(&mut s, &mut b, "source");
+        b.evaluate("events.length=0;true").unwrap();
+        chord(&mut s, &[CMD], 30);
+        poll_until(WAIT, "untranslated Super-A", || {
+            (b.evaluate("events.some(e=>e.key==='a' && e.type==='keydown' && e.meta && !e.ctrl)").ok()? == true).then_some(())
+        }).unwrap();
+        chord(&mut s, &[CTRL], 30);
+        poll_until(WAIT, "ordinary Control-A", || {
+            (b.evaluate("events.some(e=>e.key==='a' && e.type==='keydown' && e.ctrl && !e.meta) && source.selectionStart===0 && source.selectionEnd===source.value.length").ok()? == true).then_some(())
+        }).unwrap();
+    }
+}
+
 fn clipboard_output(s: &Session, args: &[&str]) -> Option<Vec<u8>> {
     use std::process::{Command, Stdio};
     let path = s.dir.join("observed-clipboard");
@@ -154,10 +176,39 @@ fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
         return;
     }
     fn ime_chord(s: &mut Session, modifiers: &[u32], code: u32) {
-        // The seat barrier cannot acknowledge an asynchronous client changing
-        // its text-input focus and replacing the IME grab. Let that round trip
-        // settle before the next user chord.
-        std::thread::sleep(Duration::from_millis(250));
+        // Mapping/focusing an editor can replace Fcitx's grab asynchronously.
+        // A seat barrier or fixed delay can still send keys to a retired grab.
+        // F12 does not edit text: require a fresh probe to travel through Fcitx
+        // and reach the focused editor before testing the actual shortcut.
+        // Unlike F24, F12 is mapped by older xkeyboard-config releases too.
+        let world = s.world().unwrap();
+        let focused = world.windows.iter().find(|w| Some(w.id) == world.logical_focus).unwrap();
+        let role = focused.title.strip_prefix("IME Probe ").unwrap();
+        let state_path = s.dir.join(format!("{role}.json"));
+        let probes = || {
+            std::fs::read_to_string(&state_path).ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|state| state["events"].as_array()
+                    .map(|events| events.iter().filter(|event| event["key"] == "F12").count()))
+                .unwrap_or(0)
+        };
+        let before = probes();
+        let ime_log = s.dir.join("client-0-env.log");
+        let log_start = std::fs::read_to_string(&ime_log).unwrap_or_default().len();
+        poll_until(WAIT, "focused editor receives a fresh key through Fcitx", || {
+            let log = std::fs::read_to_string(&ime_log).unwrap_or_default();
+            let forwarded = log.get(log_start..).unwrap_or_default().lines().any(|line| {
+                let line = chonk_testkit::strip_ansi(line);
+                line.contains("zwp_virtual_keyboard_v1") && line.contains(".key(")
+                    && line.contains(", 88, 1)")
+            });
+            if probes() > before && forwarded {
+                return Some(());
+            }
+            s.door().tap_key(88).unwrap(); // KEY_F12
+            None
+        }).unwrap_or_else(|error| panic!("{error}: {role}; state {}; world {:?}",
+            std::fs::read_to_string(&state_path).unwrap_or_default(), s.world()));
         chord(s, modifiers, code);
     }
     let mut s = boot("mac-ime-clipboard");
@@ -167,7 +218,7 @@ fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
     let dir = s.dir.to_string_lossy().into_owned();
     let fixture = fixture.to_string_lossy().into_owned();
     for (role, text) in [("source", CONTENT), ("destination", "")] {
-        s.launch_isolated("env", &["GTK_IM_MODULE=wayland", "python3", &fixture, role, &dir, text])
+        s.launch_isolated("env", &["WAYLAND_DEBUG=1", "GTK_IM_MODULE=wayland", "python3", &fixture, role, &dir, text])
             .unwrap();
         s.wait_for_window(&format!("IME Probe {role}")).unwrap();
     }
@@ -419,7 +470,9 @@ fn application_hide_desktop_switching_and_fullscreen_spaces() {
     chord(&mut s, &[CTRL], 103); // Mission Control
     poll_until(WAIT, "Mission Control", || s.world().ok()?.overview.map(|_| ())).unwrap();
     chord(&mut s, &[], 1); // Escape
-    assert!(s.world().unwrap().overview.is_none());
+    poll_until(WAIT, "Mission Control return animation finishes", || {
+        s.world().ok()?.overview.is_none().then_some(())
+    }).unwrap();
 }
 
 #[test]
@@ -900,14 +953,15 @@ fn nautilus_copies_files_using_command_shortcuts() {
     // sending Select All while that row is empty cannot select a future file.
     poll_until(WAIT, "Nautilus source file painted", || {
         let shot = s.screenshot("source-loaded").ok()?;
-        let pixels: Vec<_> = (60..200).flat_map(|y| (220..window.w.saturating_sub(30)).map(move |x| (x, y)))
+        let pixels: Vec<_> = (60..240).flat_map(|y| (220..window.w.saturating_sub(30)).map(move |x| (x, y)))
             .map(|(x, y)| shot.pixel(window.x.max(0) as u32 + x, window.y.max(0) as u32 + y))
             .collect();
         let light = pixels.iter().filter(|p| p[..3].iter().all(|c| *c > 110)).count();
         let dark = pixels.iter().filter(|p| p[..3].iter().all(|c| *c < 90)).count();
-        // A white loading surface is not a file icon. Require the dark
-        // fixture theme's background and contrasting file/text together.
-        (light > 100 && dark > pixels.len() / 2).then_some(())
+        // A flat loading surface is not a file icon. Require contrasting
+        // icon/text pixels in either appearance: libadwaita can ignore
+        // GTK_THEME and follow the desktop's light preference instead.
+        (light > 100 && dark > 100).then_some(())
     }).unwrap();
     s.door()
         .click(

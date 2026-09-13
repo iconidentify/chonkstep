@@ -21,6 +21,7 @@ pub const DESKTOP_BG_LIGHT: (u8, u8, u8) = (198, 199, 216);
 pub enum RootMenuAction {
     LaunchTerminal,
     LaunchAbout,
+    Help,
     /// An entry picked from the Applications submenu — the payload is
     /// an index into the same scanned `Vec<AppEntry>` handed to
     /// `Desktop::new` (read back through `Desktop::apps`), not a menu
@@ -104,6 +105,7 @@ pub enum MenuAction {
 const ACTION_LAUNCH_TERMINAL: u32 = 1;
 const ACTION_LAUNCH_ABOUT: u32 = 2;
 const ACTION_EXIT: u32 = 3;
+const ACTION_HELP: u32 = 5;
 /// The `Omarchy Bar` toggle — present only while this session hosts
 /// Omarchy's shell (`Desktop::set_omarchy_bar`), marked when the bar
 /// is shown.
@@ -304,6 +306,7 @@ fn root_menu_items(
                 action: ACTION_OMARCHY_BAR,
             });
         }
+        items.push(MenuItem::Action { label: "ChonkStep Help".to_string(), action: ACTION_HELP });
         items.push(MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT });
         return items;
     }
@@ -324,6 +327,7 @@ fn root_menu_items(
             action: ACTION_OMARCHY_BAR,
         });
     }
+    items.push(MenuItem::Action { label: "ChonkStep Help".to_string(), action: ACTION_HELP });
     items.push(MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT });
     items
 }
@@ -337,6 +341,7 @@ fn resolve_action(action: u32, bounds: RootMenuBounds) -> Option<RootMenuAction>
     match action {
         ACTION_LAUNCH_TERMINAL => Some(RootMenuAction::LaunchTerminal),
         ACTION_LAUNCH_ABOUT => Some(RootMenuAction::LaunchAbout),
+        ACTION_HELP => Some(RootMenuAction::Help),
         ACTION_EXIT => Some(RootMenuAction::Exit),
         ACTION_OMARCHY_BAR => Some(RootMenuAction::ToggleOmarchyBar),
         // Subtraction-then-compare rather than a `Range::contains`:
@@ -687,6 +692,16 @@ pub(crate) fn switcher_preview_px(scale: f32) -> u32 {
     ((56.0 * scale).round() as u32).max(16)
 }
 
+/// Keep a readable selection on screen even with a long MRU list. The generous
+/// padding allowance covers all chrome recipes without shrinking the previews.
+fn switcher_range(count: usize, selected: usize, tile: u32, width: u32) -> std::ops::Range<usize> {
+    let visible = (width.saturating_sub(tile / 6) / (tile + tile / 6).max(1)).max(1) as usize;
+    let visible = visible.min(count);
+    let first = selected.min(count.saturating_sub(1)).saturating_sub(visible / 2)
+        .min(count.saturating_sub(visible));
+    first..first + visible
+}
+
 /// One workarea per monitor — the whole body of `Desktop::workareas`,
 /// split out so the per-monitor rule is testable without standing up a
 /// backend. The primary is matched by rect rather than by index because
@@ -992,8 +1007,15 @@ impl<B: Backend> Desktop<B> {
         let Some(panel) = switcher.as_mut() else {
             return;
         };
-        let buffer =
-            chrome.switcher(theme, &mut font_system, &mut swash_cache, &panel.entries, selected, *tile);
+        let preview = if chrome.style() == wm_theme::DecorationStyle::Modern {
+            // 192 logical pixels instead of the classic 56px icon square.
+            ((*tile as f64 * 192.0 / 56.0).round() as u32)
+                .min(primary.size.w / 2).min(primary.size.h / 2).max(1)
+        } else { *tile };
+        let range = switcher_range(panel.entries.len(), selected, preview, primary.size.w);
+        let visible_selected = selected.saturating_sub(range.start);
+        let buffer = chrome.switcher(theme, &mut font_system, &mut swash_cache,
+            &panel.entries[range], visible_selected, preview);
         if buffer.width == 0 || buffer.height == 0 {
             return;
         }
@@ -1040,6 +1062,7 @@ impl<B: Backend> Desktop<B> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn show_overview(
         &mut self,
         backend: &mut B,
@@ -1048,13 +1071,14 @@ impl<B: Backend> Desktop<B> {
         workspace: (usize, usize),
         workspace_windows: Vec<Vec<wm_core::OverviewThumbnail<B::WindowId, B::FrameId>>>,
         selection: (usize, Option<Rect>),
+        cards: bool,
     ) {
         let (selected, area) = selection;
         let area = area.unwrap_or(self.primary);
         let stage = self.overview_stage(area);
         let Self { overview, fonts, tile, .. } = self;
         let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
-        overview.show(backend, theme, &mut font_system, &mut swash_cache, area, stage, *tile, items, workspace, workspace_windows, selected);
+        overview.show(backend, theme, &mut font_system, &mut swash_cache, area, stage, *tile, items, workspace, workspace_windows, selected, cards);
     }
 
     pub(crate) fn overview_stage(&self, area: Rect) -> Rect {
@@ -1304,7 +1328,8 @@ mod tests {
         let row = hidden.iter().position(|label| label == "  Omarchy Bar").expect("an unmarked row for a hidden bar");
         // This desk's own furniture sits after Omarchy's rows and
         // before the one row that ends the session.
-        assert_eq!(hidden[row + 1], "Exit", "and Exit closes the menu");
+        assert_eq!(hidden[row + 1], "ChonkStep Help");
+        assert_eq!(hidden[row + 2], "Exit", "and Exit closes the menu");
         assert_eq!(hidden.last().unwrap(), "Exit");
         assert!(labels(Some(BarVisibility::Shown)).contains(&"\u{2022} Omarchy Bar".to_string()), "marked when shown");
         assert!(matches!(
@@ -1592,7 +1617,7 @@ mod tests {
             None,
         );
         let labels: Vec<&str> = without.iter().map(MenuItem::label).collect();
-        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "Exit"]);
+        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "ChonkStep Help", "Exit"]);
 
         // With Omarchy present its rows are the menu, at the top level
         // rather than behind an `Omarchy` cascade.
@@ -1605,7 +1630,7 @@ mod tests {
         let labels: Vec<&str> = with.iter().map(MenuItem::label).collect();
         assert_eq!(
             labels,
-            ["Applications", "Terminal", "Style", "System", "Exit"],
+            ["Applications", "Terminal", "Style", "System", "ChonkStep Help", "Exit"],
             "Omarchy's rows are the menu; this desk folds Applications in ahead of them and its own toggles after"
         );
         assert!(

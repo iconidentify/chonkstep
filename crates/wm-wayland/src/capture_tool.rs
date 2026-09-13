@@ -169,7 +169,7 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
         CaptureMode::ScreenClipboard => (CaptureMode::Screen, Destination::Clipboard),
         CaptureMode::AreaClipboard => (CaptureMode::Area, Destination::Clipboard),
         CaptureMode::WindowClipboard => (CaptureMode::Window, Destination::Clipboard),
-        mode => (mode, if comp.wm.mac_mode() { Destination::File } else { Destination::Legacy }),
+        mode => (mode, if comp.wm.spaces_mode() { Destination::File } else { Destination::Legacy }),
     };
     if mode == CaptureMode::Stop {
         stop(comp);
@@ -306,7 +306,7 @@ fn commit(comp: &mut Compositor) {
         return;
     };
     let mode = ui.mode;
-    let destination = if ui.destination == Destination::File && comp.wm.mac_mode()
+    let destination = if ui.destination == Destination::File && comp.wm.spaces_mode()
         && comp.seat.get_keyboard().is_some_and(|keyboard| keyboard.modifier_state().ctrl) {
         Destination::Clipboard
     } else { ui.destination };
@@ -340,7 +340,7 @@ fn commit(comp: &mut Compositor) {
         let Some((geometry, filter)) = recording_region(
             rect,
             monitor,
-            entry.output.current_scale().integer_scale(),
+            entry.output.current_scale().fractional_scale(),
             // Match the transform advertised to the screencopy client. The
             // nested backend adds an EGL flip absent from the layout transform.
             entry.output.current_transform(),
@@ -720,33 +720,41 @@ fn contains_rect(outer: Rect, inner: Rect) -> bool {
         && inner.pos.y as i64 + inner.size.h as i64 <= outer.pos.y as i64 + outer.size.h as i64
 }
 
-/// Request an even, output-logical enclosure, then crop in physical pixels.
+/// Request an enclosure with even physical dimensions, then crop in pixels.
 /// wf-recorder truncates odd SHM buffers before filtering. Expanding the request
 /// first preserves the last selected row/column; padding then makes H.264 happy.
 fn recording_region(
     rect: Rect,
     output: Rect,
-    scale: i32,
+    scale: f64,
     transform: smithay::utils::Transform,
 ) -> Option<(String, String)> {
     use smithay::utils::Transform;
-    if !contains_rect(output, rect) || scale < 1 {
+    if !contains_rect(output, rect) || !scale.is_finite() || scale < 1.0 {
         return None;
     }
     let axis = |start: i32, size: u32, limit: u32| {
-        let quantum = if scale % 2 == 0 { scale } else { scale * 2 };
-        let mut first = start / quantum * quantum;
-        let mut end = ((start + size as i32 + quantum - 1) / quantum) * quantum;
-        if end > limit as i32 {
-            end = limit as i32 / quantum * quantum;
-            if end < start + size as i32 {
-                return None;
+        // Match xdg-output logical_size and CaptureOutputRegion's rounding.
+        // wl_output.scale is rounded UP (150% advertises 2), and is not the
+        // coordinate space wf-recorder obtains from xdg-output. Mixing them
+        // produces a smaller capture buffer than the physical crop requires.
+        let physical = |logical: i32| (f64::from(logical) * scale).round() as i64;
+        let logical_limit = (f64::from(limit) / scale).round() as i32;
+        let near = (f64::from(start) / scale).floor() as i32;
+        // Normally one or two neighboring origins suffice. Zero is a bounded
+        // fallback for unusual fractional grids at the far output edge.
+        for first in ((near - 8).max(0)..=near).rev().chain(std::iter::once(0)) {
+            let offset = physical(first);
+            let needed = i64::from(start) + i64::from(size) - offset;
+            let minimum = ((needed as f64 / scale).floor() as i32).max(1);
+            for length in minimum..=logical_limit.saturating_sub(first) {
+                let captured = physical(length).min(i64::from(limit) - offset);
+                if captured >= needed && captured % 2 == 0 {
+                    return Some((first, length, i64::from(start) - offset));
+                }
             }
         }
-        if end <= first {
-            first = end - quantum;
-        }
-        Some((first / scale, (end - first) / scale, start - first))
+        None
     };
     let (x, w, crop_x) = axis(rect.pos.x - output.pos.x, rect.size.w, output.size.w)?;
     let (y, h, crop_y) = axis(rect.pos.y - output.pos.y, rect.size.h, output.size.h)?;
@@ -1152,14 +1160,39 @@ mod tests {
         let output = Rect::new(Point::new(1920, 0), Size::new(2560, 1440));
         let selected = Rect::new(Point::new(1971, 41), Size::new(301, 201));
         let (geometry, filter) =
-            recording_region(selected, output, 2, smithay::utils::Transform::Flipped180).unwrap();
+            recording_region(selected, output, 2.0, smithay::utils::Transform::Flipped180).unwrap();
         assert_eq!(geometry, "1945,20 151x101");
         assert_eq!(
             filter,
             "vflip,crop=301:201:1:1:exact=1,pad=ceil(iw/2)*2:ceil(ih/2)*2"
         );
         let (geometry, _) =
-            recording_region(selected, output, 1, smithay::utils::Transform::Normal).unwrap();
-        assert_eq!(geometry, "1970,40 302x202");
+            recording_region(selected, output, 1.0, smithay::utils::Transform::Normal).unwrap();
+        assert_eq!(geometry, "1971,41 302x202");
+    }
+
+    #[test]
+    fn recorder_fractional_grid_preserves_full_outputs_and_edge_selections() {
+        use smithay::utils::Transform;
+        let output = Rect::new(Point::new(1920, 0), Size::new(3840, 2160));
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.25] {
+            for rect in [output,
+                Rect::new(Point::new(1971, 41), Size::new(301, 201)),
+                Rect::new(Point::new(1920 + 3539, 1959), Size::new(301, 201))] {
+                let (geometry, filter) = recording_region(rect, output, scale, Transform::Normal).unwrap();
+                let values: Vec<i32> = geometry.split([',', ' ', 'x']).map(|v| v.parse().unwrap()).collect();
+                let x = ((values[0] - output.pos.x) as f64 * scale).round() as i32;
+                let y = (values[1] as f64 * scale).round() as i32;
+                let width = ((values[2] as f64 * scale).round() as i32).min(3840 - x);
+                let height = ((values[3] as f64 * scale).round() as i32).min(2160 - y);
+                assert_eq!(width % 2, 0, "recorder must not trim a column: {scale} {geometry}");
+                assert_eq!(height % 2, 0, "recorder must not trim a row: {scale} {geometry}");
+                let captured = Rect::new(Point::new(x + output.pos.x, y), Size::new(width as u32, height as u32));
+                assert!(contains_rect(captured, rect), "{scale} {geometry} must enclose {rect:?}");
+                assert!(filter.contains(&format!("crop={}:{}:{}:{}:", rect.size.w, rect.size.h, rect.pos.x - captured.pos.x, rect.pos.y - captured.pos.y)));
+            }
+        }
+        let (geometry, _) = recording_region(output, output, 1.5, Transform::Normal).unwrap();
+        assert_eq!(geometry, "1920,0 2560x1440", "150% uses its actual logical grid, not the integer 2x advertisement");
     }
 }

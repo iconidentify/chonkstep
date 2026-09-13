@@ -9,10 +9,157 @@ const WAIT: Duration = Duration::from_secs(15);
 const THEMES: [&str; 3] = ["obsidian", "washi", "relay"];
 const KEY_F: u32 = 33;
 
+#[test]
+#[ignore = "real Overview defaults: scripts/e2e.sh --headless --test modern_chrome"]
+fn classic_overview_survives_modern_themes_and_switches_style_without_losing_clients() {
+    let config = |theme: &str, style: Option<&str>| format!(
+        "theme={theme:?}\nscale=1.5\ninteraction_mode='spaces'\nkeyboard_mode='desktop'\n\
+         hyprland_config=false\n{}\n[keybindings]\n'super+o'='overview'\n\
+         'super+1'='workspace 1'\n'super+2'='workspace 2'\n",
+        style.map_or_else(String::new, |style| format!("overview_style={style:?}"))
+    );
+    let mut s = Session::boot("classic-overview-modern-theme", SessionOptions {
+        config_extra: config("washi", None), ..Default::default()
+    }).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+    let mut ids = Vec::new();
+    for title in ["Editor: workspace overview", "Browser: project notes"] {
+        s.launch(probe.to_str().unwrap(), &[title, title]).unwrap();
+        ids.push(s.wait_for_window(title).unwrap().id);
+    }
+    s.door().chord(keys::LEFTMETA, 3).unwrap(); // Desktop 2.
+    poll_until(WAIT, "second desktop", || (s.world().ok()?.current_workspace == 1).then_some(())).unwrap();
+    s.launch(probe.to_str().unwrap(), &["Files: Desktop 2", "classic-files"]).unwrap();
+    ids.push(s.wait_for_window("Files: Desktop 2").unwrap().id);
+    s.door().chord(keys::LEFTMETA, 2).unwrap(); // Desktop 1.
+    poll_until(WAIT, "first desktop", || (s.world().ok()?.current_workspace == 0).then_some(())).unwrap();
+
+    let open = |s: &mut Session| {
+        s.door().chord(keys::LEFTMETA, 24).unwrap(); // Ordinary Super+O, no gesture or Mac translation.
+        poll_until(WAIT, "Overview fully open", || {
+            let world = s.world().ok()?;
+            (world.overview.as_ref()?.progress == 1.0).then_some(world)
+        }).unwrap()
+    };
+    let assert_classic = |world: &World| {
+        assert_eq!(world.theme.decoration_style, "modern");
+        assert_eq!(world.overview_spaces.len(), 2, "classic shows the actual desktop strip");
+        let bottom = world.overview_spaces.iter().map(|space| {
+            assert!(space.rect.size.h < world.output_h / 3, "desktop thumbnails stay at the top");
+            space.rect.pos.y + space.rect.size.h as i32
+        }).max().unwrap();
+        assert!(world.overview_windows.iter().all(|window| window.rect.pos.y >= bottom),
+            "large window previews sit below the desktop strip");
+        assert_eq!(world.spatial.mode, "Freeform");
+    };
+    let world = open(&mut s);
+    assert_classic(&world);
+    s.screenshot("washi-classic-overview-1_5x").unwrap();
+    let center = |rect: wm_theme_api::Rect| (
+        f64::from(rect.pos.x) + f64::from(rect.size.w) / 2.0,
+        f64::from(rect.pos.y) + f64::from(rect.size.h) / 2.0,
+    );
+    let source = world.overview_windows.iter().find(|window| window.id == ids[0]).unwrap().rect;
+    let target = world.overview_spaces[1].rect;
+    s.door().drag_to(center(source), center(target)).unwrap();
+    s.door().button("left", false).unwrap();
+    poll_until(WAIT, "drag moves window to Desktop 2 while retaining Overview", || {
+        let world = s.world().ok()?;
+        (world.overview.is_some() && world.overview_space_windows.contains(&(1, ids[0]))).then_some(())
+    }).unwrap();
+    let (x, y) = center(target);
+    s.door().click(x, y).unwrap();
+    let world = poll_until(WAIT, "click desktop switches without dismissing Classic", || {
+        let world = s.world().ok()?;
+        (world.current_workspace == 1 && world.overview.is_some()
+            && world.overview_windows.iter().any(|w| w.id == ids[0])).then_some(world)
+    }).unwrap();
+    let (x, y) = center(world.overview_windows.iter().find(|w| w.id == ids[0]).unwrap().rect);
+    s.door().click(x, y).unwrap();
+    poll_until(WAIT, "window click activates and dismisses Overview", || {
+        let world = s.world().ok()?;
+        (world.overview.is_none() && world.logical_focus == Some(ids[0])).then_some(())
+    }).unwrap();
+
+    // Reloading only the layout must release the open view's input ownership.
+    open(&mut s);
+    s.rewrite_config(&config("washi", Some("cards"))).unwrap();
+    s.request_reload().unwrap();
+    poll_until(WAIT, "style reload dismisses the old scene", || s.world().ok()?.overview.is_none().then_some(())).unwrap();
+    assert!(open(&mut s).overview_spaces.len() > 2, "numbered future cards remain available by opt-in");
+    // Omitting the setting restores Classic; subsequent palette changes keep it.
+    for theme in ["washi", "obsidian", "relay"] {
+        s.rewrite_config(&config(theme, None)).unwrap();
+        s.request_reload().unwrap();
+        poll_until(WAIT, "theme reload completes", || {
+            let world = s.world().ok()?;
+            (world.theme.id == theme && world.overview.is_none()).then_some(())
+        }).unwrap();
+        let world = open(&mut s);
+        assert_classic(&world);
+        assert!(ids.iter().all(|id| world.windows.iter().any(|w| w.id == *id)));
+        s.door().tap_key(1).unwrap();
+        poll_until(WAIT, "Escape releases Overview", || s.world().ok()?.overview.is_none().then_some(())).unwrap();
+    }
+    assert!(s.compositor_alive());
+}
+
+#[test]
+#[ignore = "real preview navigation: scripts/e2e.sh --headless --test modern_chrome"]
+fn readable_switcher_and_minimized_previews_fit_and_restore_at_high_dpi() {
+    let mut s = Session::boot("readable-previews", SessionOptions {
+        config_extra: "theme='washi'\nscale=1.5\ninteraction_mode='spaces'\nkeyboard_mode='desktop'\nhyprland_config=false\n[keybindings]\n'super+m'='miniaturize'\n'super+d'='show-desktop'\n".into(),
+        ..Default::default()
+    }).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+    let mut ids = Vec::new();
+    for i in 0..9 {
+        let title = format!("Project {i}: window contents and readable titles");
+        s.launch(probe.to_str().unwrap(), &[&title, &format!("preview-{i}")]).unwrap();
+        ids.push(s.wait_for_window(&title).unwrap().id);
+    }
+    // Every selection, including those beyond the first visible page, fits.
+    s.door().key(keys::LEFTALT, true).unwrap();
+    for i in 0..9 {
+        s.door().tap_key(15).unwrap();
+        s.door().barrier().unwrap();
+        let world = s.world().unwrap();
+        let panel = world.shells.iter().find(|s| s.above && s.mapped && s.buffer_bytes > 0).unwrap();
+        let shot = s.screenshot(&format!("washi-switcher-{i}")).unwrap();
+        assert!(panel.x >= 0 && panel.y >= 0);
+        assert!(panel.x as u32 + panel.w <= shot.width && panel.y as u32 + panel.h <= shot.height);
+        assert!(panel.h >= 260, "large preview cards and a separate selected title");
+    }
+    s.door().key(keys::LEFTALT, false).unwrap();
+    s.door().barrier().unwrap();
+    let focused = s.world().unwrap().logical_focus.unwrap();
+    assert!(ids.contains(&focused));
+    s.door().chord(keys::LEFTMETA, 50).unwrap();
+    let tile = poll_until(WAIT, "large minimized preview", || {
+        s.world().ok()?.shells.into_iter().find(|s| s.mapped && !s.above && s.w == 240 && s.h == 240)
+    }).unwrap();
+    assert!(!s.world().unwrap().frame_of(focused).unwrap().mapped);
+    s.door().chord(keys::LEFTMETA, 32).unwrap(); // Show Desktop exposes tiles below ordinary windows.
+    let shot = s.screenshot("washi-minimized-preview").unwrap();
+    assert_eq!(shot.pixel(tile.x as u32 + tile.w / 2, tile.y as u32 + tile.h / 2), [32, 64, 128, 255]);
+    let start = ((tile.x + 30) as f64, (tile.y + 30) as f64);
+    s.door().drag_to(start, (start.0 + 300.0, start.1 - 120.0)).unwrap();
+    s.door().button("left", false).unwrap();
+    s.door().barrier().unwrap();
+    let tile = s.world().unwrap().shells.into_iter().find(|s| s.mapped && !s.above).unwrap();
+    assert_eq!((tile.x, tile.y), (start.0 as i32 - 30 + 300, start.1 as i32 - 30 - 120));
+    assert!(!s.world().unwrap().frame_of(focused).unwrap().mapped, "dragging must not restore");
+    s.door().click((tile.x + 30) as f64, (tile.y + 30) as f64).unwrap();
+    poll_until(WAIT, "clicking the preview restores its window", || {
+        let world = s.world().ok()?;
+        (world.frame_of(focused)?.mapped && world.shells.iter().all(|s| s.above || !s.mapped)).then_some(())
+    }).unwrap();
+}
+
 fn config(id: &str, scale: f32) -> String {
     format!(
         "omarchy_shell = false\nomarchy_menu = false\nhyprland_config = false\n\
-         restore_session = false\ntheme = {id:?}\nscale = {scale}\n\
+         restore_session = false\ntheme = {id:?}\nscale = {scale}\noverview_style = 'cards'\n\
          [keybindings]\n\"super+r\" = \"root-menu\"\n"
     )
 }

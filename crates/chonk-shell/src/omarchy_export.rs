@@ -49,24 +49,66 @@ pub fn export(target: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     for theme in wm_theme::default_theme::all_themes() {
         let dir = target.join(&theme.id);
-        std::fs::create_dir_all(dir.join("backgrounds"))?;
-        let palette = wm_theme::omarchy::palette_from_theme(&theme);
-        std::fs::write(dir.join("colors.toml"), colors_toml(&theme.name, &palette))?;
-        if let Some(shell) = shell_toml(&theme) {
-            std::fs::write(dir.join("shell.toml"), shell)?;
-        }
-        if let Some(descriptor) = wm_theme::omarchy::descriptor_from_theme(&theme).map_err(std::io::Error::other)? {
-            std::fs::write(dir.join(wm_theme::omarchy::DESCRIPTOR_FILE), descriptor)?;
-        }
-        let (file, png) = background(&theme.wallpaper, theme.appearance)?;
-        std::fs::write(dir.join("backgrounds").join(&file), png.clone())?;
-        // The picker's tile. A theme without one is a blank rectangle
-        // in Omarchy's theme list, which is the whole reason a user
-        // scrolls that list — see `preview`.
-        std::fs::write(dir.join("preview.png"), preview(&theme, &png)?)?;
+        export_theme(&theme, &dir)?;
         written.push(dir);
     }
     Ok(written)
+}
+
+/// Register newly shipped themes for this user without replacing existing
+/// themes or their customizations. Build each missing theme beside the theme
+/// directory, then publish the complete directory so the picker never caches
+/// an incomplete preview. Called before Omarchy's shell starts, including after
+/// a package upgrade or a compositor hot restart.
+pub fn install_missing(target: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut written = Vec::new();
+    for theme in wm_theme::default_theme::all_themes() {
+        let dir = target.join(&theme.id);
+        match dir.symlink_metadata() {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        std::fs::create_dir_all(target)?;
+        let parent = target.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let staging = tempfile::Builder::new().prefix(".chonkstep-theme-").tempdir_in(parent)?;
+        let staged = staging.path().join(&theme.id);
+        export_theme(&theme, &staged)?;
+        match std::fs::rename(&staged, &dir) {
+            Ok(()) => written.push(dir),
+            Err(_) if dir.symlink_metadata().is_ok() => {}, // Another session installed it first.
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(written)
+}
+
+/// The per-user directory read by Omarchy's theme picker.
+pub fn default_target() -> Option<PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config_home.join("omarchy/themes"))
+}
+
+fn export_theme(theme: &wm_theme::Theme, dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir.join("backgrounds"))?;
+    let palette = wm_theme::omarchy::palette_from_theme(theme);
+    std::fs::write(dir.join("colors.toml"), colors_toml(&theme.name, &palette))?;
+    if let Some(shell) = shell_toml(theme) {
+        std::fs::write(dir.join("shell.toml"), shell)?;
+    }
+    if let Some(descriptor) = wm_theme::omarchy::descriptor_from_theme(theme).map_err(std::io::Error::other)? {
+        std::fs::write(dir.join(wm_theme::omarchy::DESCRIPTOR_FILE), descriptor)?;
+    }
+    let (file, png) = background(&theme.wallpaper, theme.appearance)?;
+    std::fs::write(dir.join("backgrounds").join(&file), png.clone())?;
+    // The picker's tile. A theme without one is a blank rectangle
+    // in Omarchy's theme list, which is the whole reason a user
+    // scrolls that list — see `preview`.
+    std::fs::write(dir.join("preview.png"), preview(theme, &png)?)?;
+    Ok(())
 }
 
 /// The width and height of a rendered preview. Omarchy's own previews
@@ -102,7 +144,11 @@ fn preview(theme: &wm_theme::Theme, background_png: &[u8]) -> std::io::Result<Ve
     // The background, scaled to cover. `background` already handed us
     // PNG bytes for every theme — the procedural grounds included,
     // which it renders flat — so there is always something to draw.
-    if let Ok(art) = Pixmap::decode_png(background_png) {
+    let pattern = Wallpaper::from_id(&theme.wallpaper).filter(|wallpaper| wallpaper.pattern_rows().is_some());
+    let art = pattern.and_then(|wallpaper| wallpaper.render(Size::new(width, height), theme.appearance))
+        .and_then(|buffer| Pixmap::from_vec(buffer.pixels, tiny_skia::IntSize::from_wh(width, height)?))
+        .or_else(|| Pixmap::decode_png(background_png).ok());
+    if let Some(art) = art {
         let scale = (width as f32 / art.width() as f32).max(height as f32 / art.height() as f32);
         canvas.draw_pixmap(
             ((width as f32 - art.width() as f32 * scale) / 2.0) as i32,
@@ -186,7 +232,14 @@ fn colors_toml(theme_name: &str, palette: &wm_theme::omarchy::OmarchyPalette) ->
 /// Omarchy merges ~/.config/omarchy/shell.toml over this theme-owned file.
 fn shell_toml(theme: &wm_theme::Theme) -> Option<String> {
     use std::fmt::Write;
-    let chrome = theme.chrome?;
+    let system7 = theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::System7;
+    let chrome = if system7 {
+        let mut chrome = wm_theme::modern::Chrome::from_theme_at_scale(theme, 1.0);
+        chrome.line = wm_theme::model::Color::rgb(0, 0, 0);
+        chrome.selection = chrome.line;
+        chrome.danger = chrome.line;
+        chrome
+    } else { theme.chrome? };
     let mut out = String::from("# Generated by chonkstep's omarchy-export-themes.\n# Surface colors only; Omarchy owns bar layout, fonts and user overrides.\n");
     let mut section = |name: &str, colors: &[(&str, wm_theme::model::Color)], alpha: &[(&str, f32)]| {
         writeln!(out,"\n[{name}]").unwrap();
@@ -202,7 +255,7 @@ fn shell_toml(theme: &wm_theme::Theme) -> Option<String> {
     section("notifications",&[("background",chrome.panel),("text",chrome.text),("border",chrome.accent),("countdown",chrome.accent)],&[]);
     for name in ["menu","launcher"] {
         section(name,&[("background",chrome.panel),("text",chrome.text),("border",chrome.line),
-            ("scrim",chrome.background),("selected-background",chrome.selection),("selected-text",chrome.text),
+            ("scrim",chrome.background),("selected-background",chrome.selection),("selected-text",if system7 { theme.terminal.bg } else { chrome.text }),
             ("selected-border",chrome.line)],&[("background-alpha",1.0),("selected-background-alpha",1.0),("selected-border-alpha",0.0)]);
     }
     Some(out)
@@ -236,6 +289,54 @@ fn background(wallpaper_id: &str, appearance: Appearance) -> std::io::Result<(St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_registration_covers_fresh_installs_and_upgrades_without_overwriting_themes() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("themes");
+        let written = install_missing(&target).unwrap();
+        assert_eq!(written.len(), wm_theme::default_theme::all_themes().len());
+        for id in ["obsidian", "washi", "relay"] {
+            let dir = target.join(id);
+            for file in ["colors.toml", "shell.toml", "chonkstep.toml"] {
+                let text = std::fs::read_to_string(dir.join(file)).unwrap();
+                toml::from_str::<toml::Table>(&text).unwrap();
+            }
+            let png = std::fs::read(dir.join("preview.png")).unwrap();
+            tiny_skia::Pixmap::decode_png(&png).unwrap();
+            assert_eq!(std::fs::read_dir(dir.join("backgrounds")).unwrap().count(), 1);
+        }
+
+        // An upgrade introduces missing themes but must leave authored user
+        // overrides and their mtimes untouched, even on repeated logins.
+        let custom = target.join("obsidian/colors.toml");
+        std::fs::write(&custom, "# User's custom palette\n").unwrap();
+        let modified = custom.metadata().unwrap().modified().unwrap();
+        for id in ["washi", "relay"] {
+            std::fs::remove_dir_all(target.join(id)).unwrap();
+        }
+        let mut added = install_missing(&target).unwrap();
+        added.sort();
+        assert_eq!(added, vec![target.join("relay"), target.join("washi")]);
+        assert!(install_missing(&target).unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&custom).unwrap(), "# User's custom palette\n");
+        assert_eq!(custom.metadata().unwrap().modified().unwrap(), modified);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1, "temporary exports are cleaned up");
+    }
+
+    #[test]
+    fn automatic_registration_preserves_user_theme_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("themes");
+        std::fs::create_dir(&target).unwrap();
+        for theme in wm_theme::default_theme::all_themes() {
+            // A temporarily absent mount or checkout is still the user's
+            // theme. Do not replace a dangling link with a built-in export.
+            std::os::unix::fs::symlink(root.path().join("unmounted"), target.join(theme.id)).unwrap();
+        }
+        assert!(install_missing(&target).unwrap().is_empty());
+        assert!(target.join("obsidian").is_symlink());
+    }
 
     /// A fresh directory per test: the tests run in parallel and each
     /// removes its own on the way out.
@@ -277,18 +378,18 @@ mod tests {
             let background = dir.join("backgrounds").join(format!("{}.png", theme.wallpaper));
             let bytes = std::fs::read(&background).unwrap_or_else(|e| panic!("{}: {e}", background.display()));
             let decoded=tiny_skia::Pixmap::decode_png(&bytes).expect("a PNG Omarchy can set");
-            if theme.chrome.is_some() {
+            if theme.chrome.is_some() || theme.preferred_decoration_style.is_some() {
                 assert!(decoded.pixels().iter().any(|pixel|*pixel!=decoded.pixels()[0]),"{}: modern procedural artwork must not become a flat ground",theme.id);
             }
             let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
             assert_eq!(
                 entries.len(),
-                if theme.chrome.is_some() {5} else {3},
+                if theme.chrome.is_some() || theme.preferred_decoration_style.is_some() {5} else {3},
                 "{}: palette, artwork, preview and optional shell/Chonkstep descriptors, nothing that runs code: {entries:?}",
                 theme.id
             );
-            assert_eq!(dir.join("shell.toml").exists(),theme.chrome.is_some());
-            assert_eq!(dir.join(wm_theme::omarchy::DESCRIPTOR_FILE).exists(),theme.chrome.is_some());
+            assert_eq!(dir.join("shell.toml").exists(),(theme.chrome.is_some() || theme.preferred_decoration_style.is_some()));
+            assert_eq!(dir.join(wm_theme::omarchy::DESCRIPTOR_FILE).exists(),(theme.chrome.is_some() || theme.preferred_decoration_style.is_some()));
             // Exercise the real follow path, including Omarchy's current/theme
             // indirection, rather than just parsing the exported palette.
             let current = root.join("current");
@@ -299,11 +400,11 @@ mod tests {
             let loaded = wm_theme::omarchy::load_from_dir(&current).unwrap();
             assert_eq!(loaded.id,wm_theme::omarchy::ID);
             assert_eq!(loaded.wallpaper,wm_theme::omarchy::WALLPAPER);
-            if theme.chrome.is_some() {
+            if theme.chrome.is_some() || theme.preferred_decoration_style.is_some() {
                 let mut expected = theme.clone();
                 expected.id=loaded.id.clone();expected.name=loaded.name.clone();expected.wallpaper=loaded.wallpaper.clone();
                 assert_eq!(loaded,expected,"{}: full authored theme survives Omarchy selection",theme.id);
-                assert_eq!(loaded.resolve_style(wm_theme_api::DecorationStyle::Auto),wm_theme_api::DecorationStyle::Modern);
+                assert_eq!(loaded.resolve_style(wm_theme_api::DecorationStyle::Auto),theme.resolve_style(wm_theme_api::DecorationStyle::Auto));
             } else {
                 assert_eq!(loaded.chrome,None);
                 assert_eq!(loaded.resolve_style(wm_theme_api::DecorationStyle::Auto),wm_theme_api::DecorationStyle::WindowMaker);
@@ -340,7 +441,7 @@ mod tests {
                 }
             }
         }
-        for theme in wm_theme::default_theme::all_themes().into_iter().filter(|theme|theme.chrome.is_none()) {
+        for theme in wm_theme::default_theme::all_themes().into_iter().filter(|theme|theme.chrome.is_none() && theme.preferred_decoration_style.is_none()) {
             assert!(shell_toml(&theme).is_none(),"classic exports retain Omarchy's own default surface mapping");
         }
     }
@@ -387,11 +488,19 @@ mod tests {
             // Its titlebar. A frame that drew puts something else here;
             // a frame that did not leaves the content colour.
             let titlebar = at(600, 311);
-            assert_ne!(
-                content, titlebar,
-                "{}: the focused window's titlebar and its content are the same colour, so no frame was drawn",
-                theme.id
-            );
+            if theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::System7 {
+                // System 7 has white title paper and white content. Its six
+                // continuous horizontal stripes distinguish a rendered frame
+                // from the alternating pixels of the desktop behind it.
+                let stripes = (304..330).filter(|y| (360..380).all(|x| at(x, *y) == (0, 0, 0))).count();
+                assert!(stripes >= 6, "{}: missing System 7 title stripes", theme.id);
+            } else {
+                assert_ne!(
+                    content, titlebar,
+                    "{}: the focused window's titlebar and its content are the same colour, so no frame was drawn",
+                    theme.id
+                );
+            }
             // And the content is the theme's own background rather than
             // the opaque black the decoration buffer carries there.
             // Deliberately not a "corner differs from centre" check: on

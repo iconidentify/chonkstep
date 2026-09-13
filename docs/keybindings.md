@@ -1,5 +1,27 @@
 # The keybinding card
 
+For the guide inside the desktop, right-click the background and choose
+**ChonkStep Help**. **Everyday** covers common actions; **All shortcuts** shows
+the resolved configuration, including overrides and release bindings. Start
+typing to search by action or key. **Quick reference** explains Freeform,
+Mosaic, Flow, Overview, Spaces, minimized windows, and gestures.
+
+Use Tab or Left/Right to change sections, scroll or Up/Down and Page Up/Page
+Down to read, and Escape or Close to leave. Help is modal: close it before
+trying a desktop shortcut. Reopen it after a configuration reload to see the
+updated bindings. An optional binding can open it directly:
+
+```toml
+[keybindings]
+"super+f1" = "help"
+```
+
+The in-desktop list reflects the current session; the tables below describe
+the preset keymaps. The layout toggle enters Mosaic from Freeform and then
+alternates Mosaic and Flow. The Freeform binding returns to freely placed
+windows. Overview excludes minimized windows; restore them through their desktop
+preview tiles (enabled by default) or the window switcher.
+
 There are **two** keymaps. `keymap = "chonkstep"` is the default and is
 the NeXTSTEP-style `alt+shift` vocabulary the rest of this desktop was
 designed around; `keymap = "omarchy"` is Omarchy's own vocabulary
@@ -32,7 +54,7 @@ ever do disagree, the source wins.
 | `alt+ctrl+left`    | `workspace-prev`       | Previous workspace (stops at the first)       |
 | `alt+shift+right`  | `workspace-carry-next` | Carry the focused window to the next          |
 | `alt+shift+left`   | `workspace-carry-prev` | Carry the focused window back                 |
-| `super+up`         | `overview`             | The modal Overview: every window as a card    |
+| `super+up`         | `overview`             | Overview of non-minimized windows            |
 | `super+shift+3`    | `capture-screen`       | Save screen PNG and copy it (Wayland)        |
 | `super+shift+4`    | `capture-area`         | Select area; Space selects a window          |
 | `super+shift+5`    | `capture`              | Screenshot / recording controls              |
