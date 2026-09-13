@@ -1016,6 +1016,12 @@ pub(crate) enum PointerGrabChange {
 }
 
 impl WaylandBackend {
+    /// Capture overlays and shell panels own input independently. Closing
+    /// either one must leave the other panel's modal ownership intact.
+    pub(crate) fn modal_keyboard_grabbed(&self) -> bool {
+        self.keyboard_grabbed || crate::capture_tool::modal(self)
+    }
+
     /// Whether this window's client draws its own chrome, from what it
     /// has actually told us — the decoration protocols first, and a
     /// `[decorations]` override above them.
@@ -3534,7 +3540,7 @@ impl Compositor {
         // eventual restore is a real `wl_keyboard.enter` rather than a
         // smithay-deduplicated no-op.
         let surface = target
-            .filter(|_| !self.wm.backend().keyboard_grabbed)
+            .filter(|_| !self.wm.backend().modal_keyboard_grabbed())
             .and_then(|id| self.wm.backend().windows.get(&id))
             .filter(|record| record.surface.alive())
             .and_then(|record| crate::input::keyboard::KeyboardFocus::from_managed(&record.surface));

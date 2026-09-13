@@ -710,7 +710,7 @@ fn keyboard_target_given(comp: &Compositor, want: Option<(LayerId, WlSurface)>) 
         // runs before `focus_grab::refresh` and that pass only
         // re-asserts focus on the passes something changed.
         None => focus_grab_target(comp).or_else(|| {
-            (!comp.wm.backend().keyboard_grabbed)
+            (!comp.wm.backend().modal_keyboard_grabbed())
                 .then(|| focused_window_surface(comp))
                 .flatten()
         }),

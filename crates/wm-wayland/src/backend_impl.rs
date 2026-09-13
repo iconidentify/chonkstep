@@ -367,7 +367,7 @@ impl Backend for WaylandBackend {
             "focus pending={:?} pointer={:?} keyboard_grab={} pointer_grab={} pending_pointer_grab={}",
             self.pending_focus,
             self.pointer,
-            self.keyboard_grabbed,
+            self.modal_keyboard_grabbed(),
             self.pointer_grab.is_some(),
             self.pending_pointer_grab.is_some(),
         );

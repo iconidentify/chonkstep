@@ -20,7 +20,7 @@ pub(crate) use focus::KeyboardFocus;
 /// but must not swallow the keys destined for that higher-priority owner.
 pub(crate) fn modal_owns_keyboard(comp: &Compositor) -> bool {
     let backend = comp.wm.backend();
-    backend.keyboard_grabbed
+    backend.modal_keyboard_grabbed()
         && !backend.locked
         && comp.layer_shell.exclusive_focus.is_none()
         && !comp.focus_grab.is_active()
