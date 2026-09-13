@@ -443,7 +443,11 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: '1'
           GALLIUM_DRIVER: llvmpipe
           TMPDIR: ${{ runner.temp }}
-        run: scripts/e2e.sh --headless
+        run: |
+          # Check the real IME path early: a library/handshake failure should
+          # produce its protocol artifacts before the broad desktop suite.
+          scripts/e2e.sh --headless --test mac_mode command_shortcuts_survive_a_real_input_method_keyboard_grab
+          scripts/e2e.sh --headless
 
       - name: Preserve failed nested-session logs and screenshots
         if: failure()

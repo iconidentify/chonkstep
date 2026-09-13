@@ -206,8 +206,8 @@ fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
             }
             s.door().tap_key(194).unwrap(); // KEY_F24
             None
-        }).unwrap_or_else(|error| panic!("{error}: {role}; state {}",
-            std::fs::read_to_string(&state_path).unwrap_or_default()));
+        }).unwrap_or_else(|error| panic!("{error}: {role}; state {}; world {:?}",
+            std::fs::read_to_string(&state_path).unwrap_or_default(), s.world()));
         chord(s, modifiers, code);
     }
     let mut s = boot("mac-ime-clipboard");
@@ -217,7 +217,7 @@ fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
     let dir = s.dir.to_string_lossy().into_owned();
     let fixture = fixture.to_string_lossy().into_owned();
     for (role, text) in [("source", CONTENT), ("destination", "")] {
-        s.launch_isolated("env", &["GTK_IM_MODULE=wayland", "python3", &fixture, role, &dir, text])
+        s.launch_isolated("env", &["WAYLAND_DEBUG=1", "GTK_IM_MODULE=wayland", "python3", &fixture, role, &dir, text])
             .unwrap();
         s.wait_for_window(&format!("IME Probe {role}")).unwrap();
     }
