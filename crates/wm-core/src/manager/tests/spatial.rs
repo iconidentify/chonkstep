@@ -448,6 +448,7 @@ fn spatial_client_resize_requests_cannot_destroy_managed_or_saved_geometry() {
     wm.handle_configure_request(
         wm.clients[id].window,
         Rect::new(Point::new(0, 0), Size::new(10, 10)),
+        false,
     );
     assert_eq!(wm.clients[id].geometry, before);
     assert_eq!(wm.clients[id].placement.freeform, saved);

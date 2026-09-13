@@ -437,6 +437,12 @@ pub trait Backend {
     /// position within the frame, at `DecorationLayout::client_offset`,
     /// doesn't change from a content resize alone).
     fn resize_client(&mut self, window: Self::WindowId, size: Size);
+
+    /// Accept pixels a native client has already committed. Backends without
+    /// a separate configure/commit lifecycle use their ordinary resize path.
+    fn accept_client_size(&mut self, window: Self::WindowId, size: Size) {
+        self.resize_client(window, size);
+    }
     /// Honors a `ConfigureRequest` from a window the WM doesn't manage
     /// yet (no frame exists) — ICCCM requires acknowledging these even
     /// before the first `MapRequest`.

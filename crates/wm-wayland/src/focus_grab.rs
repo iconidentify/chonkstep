@@ -647,7 +647,7 @@ fn settle_keyboard(comp: &mut Compositor) {
 /// keyboard past it to a window would silently revoke a claim nobody
 /// released.
 fn keyboard_fallback(comp: &Compositor) -> Option<WlSurface> {
-    if comp.wm.backend().keyboard_grabbed {
+    if comp.wm.backend().modal_keyboard_grabbed() {
         return None;
     }
     if let Some(id) = comp.layer_shell.on_demand_focus {

@@ -3220,12 +3220,10 @@ fn content_hit(
     // window-geometry offset — so that a click resolves to the same
     // pixel the user is looking at. Anchoring on the window instead
     // would send every client coordinates shifted by its drop shadow.
-    let content_origin =
-        Point::new(record.content.pos.x - record.content_offset.x, record.content.pos.y - record.content_offset.y);
+    let (content_origin, scale) = backend.window_presentation(record, frame.is_some());
     let anchor: LogicalPoint<f64, Logical> = (content_origin.x as f64, content_origin.y as f64).into();
     let (surface, origin) = match &root_surface {
         Some(root) => {
-            let scale = backend.window_surface_scale(record);
             let probe = surface_probe(anchor, position, scale);
             let hit = under_from_surface_tree(
                 root, probe, (content_origin.x, content_origin.y), WindowSurfaceType::ALL,
@@ -3272,10 +3270,9 @@ fn content_hit(
 fn surface_probe(
     anchor: LogicalPoint<f64, Logical>,
     position: LogicalPoint<f64, Logical>,
-    scale: f64,
+    scale: impl Into<smithay::utils::Scale<f64>>,
 ) -> LogicalPoint<f64, Logical> {
-    let scale = surface::valid_scale(scale);
-    (anchor.x + (position.x - anchor.x) / scale, anchor.y + (position.y - anchor.y) / scale).into()
+    anchor + surface::SurfaceCoordinates::new(anchor, scale).local(position)
 }
 
 /// Tests a window's xdg popup tree (context menus, dropdowns of native

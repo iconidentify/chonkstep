@@ -71,7 +71,7 @@ impl TitleMetrics {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum RestoreKind { Maximized, Fullscreen }
 
-enum ReflowReason { Geometry, Restyle, Restore(Option<TitleMetrics>) }
+enum ReflowReason { Geometry, ClientCommit, Restyle, Restore(Option<TitleMetrics>) }
 
 /// The modifier the move/resize drag gesture rides on when nothing
 /// configures one: Alt, as Window Maker has bound it since 1997. The
@@ -1606,7 +1606,10 @@ impl<B: Backend> WindowManager<B> {
             BackendEvent::MapRequest(window) => self.handle_map_request(window),
             BackendEvent::Unmapped(window) => self.handle_unmap(window),
             BackendEvent::Destroyed(window) => self.handle_destroy(window),
-            BackendEvent::ConfigureRequest { window, requested } => self.handle_configure_request(window, requested),
+            BackendEvent::ConfigureRequest { window, requested } => self.handle_configure_request(window, requested, false),
+            BackendEvent::ClientSizeCommitted { window, size } => {
+                self.handle_configure_request(window, Rect::new(Point::new(0, 0), size), true);
+            }
             BackendEvent::PointerButton { surface, local, button, pressed, time_ms, mods } => {
                 self.handle_pointer_button(surface, local, button, pressed, time_ms, mods)
             }
@@ -2252,8 +2255,9 @@ impl<B: Backend> WindowManager<B> {
         }
     }
 
-    fn handle_configure_request(&mut self, window: B::WindowId, requested: Rect) {
+    fn handle_configure_request(&mut self, window: B::WindowId, requested: Rect, committed: bool) {
         let Some(&id) = self.window_index.get(&window) else {
+            if committed { return; }
             // Not yet managed (configure can arrive before the first
             // map request) — ICCCM requires honoring it directly.
             tracing::debug!(?window, ?requested, "configure request for an unmanaged window — applying directly");
@@ -2309,7 +2313,7 @@ impl<B: Backend> WindowManager<B> {
         }
         client.geometry.size = size;
         self.bump_protocol_state_revision();
-        self.reflow_frame(id);
+        self.reflow_frame_internal(id, if committed { ReflowReason::ClientCommit } else { ReflowReason::Geometry });
     }
 
     /// See `ClientFlags::SIZE_LOCKED`'s doc comment for what this does
@@ -2914,6 +2918,14 @@ impl<B: Backend> WindowManager<B> {
         self.reflow_frame_internal(id, ReflowReason::Geometry);
     }
 
+    fn apply_client_size(&mut self, window: B::WindowId, size: Size, reason: ReflowReason) {
+        if matches!(reason, ReflowReason::ClientCommit) {
+            self.backend.accept_client_size(window, size);
+        } else {
+            self.backend.resize_client(window, size);
+        }
+    }
+
     fn reflow_frame_internal(&mut self, id: ClientId, reason: ReflowReason) {
         // Parked clients have no physical frame to fit. In particular, do not
         // clamp their retained size against the 1x1 headless screen fallback.
@@ -2954,7 +2966,7 @@ impl<B: Backend> WindowManager<B> {
                 self.backend.set_frame_geometry(frame, monitor);
             }
             self.backend.position_client(window, Point::new(0, 0));
-            self.backend.resize_client(window, monitor.size);
+            self.apply_client_size(window, monitor.size, reason);
             self.publish_frame_extents(id);
             return;
         }
@@ -2974,7 +2986,7 @@ impl<B: Backend> WindowManager<B> {
             let window = client.window;
             let layout = frameless_layout(content.size);
             self.backend.position_client(window, content.pos);
-            self.backend.resize_client(window, content.size);
+            self.apply_client_size(window, content.size, reason);
             if let Some(client) = self.clients.get_mut(id) {
                 client.layout = layout;
                 client.geometry = content;
@@ -3022,7 +3034,7 @@ impl<B: Backend> WindowManager<B> {
         let margin = layout.input_margin as i32;
         let mut visual_pos = self.below_top_reservation(Point::new(frame_geom.pos.x + margin, frame_geom.pos.y + margin), anchor);
         let rescue_title = match reason {
-            ReflowReason::Geometry => false,
+            ReflowReason::Geometry | ReflowReason::ClientCommit => false,
             ReflowReason::Restyle => client.layout != layout,
             ReflowReason::Restore(saved) => saved.is_some_and(|saved| saved != TitleMetrics::of(&layout)),
         };
@@ -3045,7 +3057,7 @@ impl<B: Backend> WindowManager<B> {
             self.backend.set_frame_geometry(frame, frame_geom);
         }
         self.backend.position_client(window, layout.client_offset);
-        self.backend.resize_client(window, content_size);
+        self.apply_client_size(window, content_size, reason);
 
         if let Some(client) = self.clients.get_mut(id) {
             client.geometry.pos = Point::new(

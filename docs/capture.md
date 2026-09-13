@@ -16,6 +16,11 @@ finalization run on a bounded background worker.
 ¹ The standard Omarchy `omarchy-capture-screenshot` binding is routed to the
 native selector on Wayland. A customized command is left alone.
 
+Capture shortcuts also work over desktop menus, submenus, Help and Overview.
+Area selection leaves those panels visible; finishing or cancelling selection
+returns keyboard control to the panel underneath. Full-screen capture also
+works during window drags, recording and an existing capture selection.
+
 Omarchy already assigns Super+Shift+digits to desktop carrying and
 Super+Alt+digits to group selection. The additional Ctrl preserves those
 choices. Capture defaults fill otherwise-unclaimed chords in a live Hyprland

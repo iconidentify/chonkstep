@@ -387,6 +387,16 @@ fn cursorpos_is_plain_text_with_comma_space() {
 }
 
 #[test]
+fn cursorpos_json_preserves_logical_coordinates_and_handles_an_unseen_pointer() {
+    let mut snapshot = desktop();
+    snapshot.cursor_position = Some((-123, 799));
+    assert_eq!(ask_json("j/cursorpos", &snapshot), serde_json::json!({"x": -123, "y": 799}));
+    assert_eq!(ask("/cursorpos", &snapshot), "-123, 799");
+    snapshot.cursor_position = None;
+    assert_eq!(ask_json("j/cursorpos", &snapshot), serde_json::json!({"x": 0, "y": 0}));
+}
+
+#[test]
 fn live_diagnostic_commands_have_truthful_wire_shapes() {
     assert_eq!(ask("/systeminfo", &desktop()), "test system");
 

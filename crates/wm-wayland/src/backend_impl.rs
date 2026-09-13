@@ -367,7 +367,7 @@ impl Backend for WaylandBackend {
             "focus pending={:?} pointer={:?} keyboard_grab={} pointer_grab={} pending_pointer_grab={}",
             self.pending_focus,
             self.pointer,
-            self.keyboard_grabbed,
+            self.modal_keyboard_grabbed(),
             self.pointer_grab.is_some(),
             self.pending_pointer_grab.is_some(),
         );
@@ -1312,19 +1312,7 @@ impl Backend for WaylandBackend {
                     // fullscreen-sized window still labelled windowed is
                     // what taught us — see `xdg::flush_configures`).
                     configure_owed = true;
-                    // What the client will commit if it obeys: the
-                    // logical ask times its own factor — NOT `size`,
-                    // which the round trip through logical units may
-                    // have moved by a pixel (a certainty at fractional
-                    // factors). See `WindowRecord::recent_asks`.
-                    let expected = Size::new(
-                        crate::xdg::scale_length(logical.0, factor) as u32,
-                        crate::xdg::scale_length(logical.1, factor) as u32,
-                    );
-                    record.recent_asks.push_back(expected);
-                    while record.recent_asks.len() > 8 {
-                        record.recent_asks.pop_front();
-                    }
+
                 }
             }
             ManagedSurface::X11(surface) => {
@@ -1345,6 +1333,31 @@ impl Backend for WaylandBackend {
             // allocator churn after the first resize.
             self.note_popup_parent_resize(root);
         }
+        self.mark_damaged();
+    }
+
+    fn accept_client_size(&mut self, window: Self::WindowId, size: Size) {
+        let Some(record) = self.windows.get(&window) else { return; };
+        let factor = self.window_surface_scale(record);
+        let ManagedSurface::Xdg(toplevel) = &record.surface else {
+            self.resize_client(window, size);
+            return;
+        };
+        let root = toplevel.wl_surface().clone();
+        if crate::xdg::committed_content_size(&root, factor, self.output_size) != Some(size) {
+            // The WM may retain a maximized axis or clamp a hostile size.
+            self.resize_client(window, size);
+            return;
+        }
+        toplevel.with_pending_state(|state| {
+            state.size = Some((crate::xdg::physical_to_logical(size.w as i32, factor),
+                crate::xdg::physical_to_logical(size.h as i32, factor)).into());
+        });
+        self.windows.get_mut(&window).unwrap().content.size = size;
+        // Do not send a configure back for pixels the client already owns.
+        // Echoing them creates feedback with queued buffers; rejecting sizes
+        // from historical configures breaks legitimate terminal cell snaps.
+        self.note_popup_parent_resize(root);
         self.mark_damaged();
     }
 

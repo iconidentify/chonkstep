@@ -171,6 +171,10 @@ fn three_views_preserve_intent_with_native_input_and_live_surfaces_at_each_scale
             ("spatial-b", 900, 120, 550, 600),
             ("spatial-c", 600, 700, 600, 450),
         ] {
+            // Keep the same physical arrangement on the fixed-size test
+            // output. IPC requests use logical pixels; scaling these positions
+            // again would put titles offscreen and trigger restore's rescue.
+            let [x, y, w, h] = [x, y, w, h].map(|value| (f64::from(value) / f64::from(scale)).round() as i32);
             dispatch(
                 &mut session,
                 &format!("resizewindowpixel exact {w} {h},class:{class}"),
