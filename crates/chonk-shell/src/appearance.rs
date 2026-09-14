@@ -156,6 +156,11 @@ pub fn resolve(config_appearance: Option<&str>, theme_native: Appearance) -> App
 /// color-scheme` — live, no restart.
 mod propagation;
 
+/// The window buttons header-bar applications draw, published beside the
+/// color scheme and through the same GSettings.
+mod button_layout;
+pub use button_layout::publish_button_layout;
+
 const GSETTINGS_SCHEMA: &str = "org.gnome.desktop.interface";
 
 /// GTK theme pairs this desktop is willing to publish, in preference

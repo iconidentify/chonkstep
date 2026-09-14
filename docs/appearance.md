@@ -223,7 +223,14 @@ gate the desktop's own repaint):
    member of an installed light/dark pair this desktop knows
    (Adwaita/Adwaita-dark, or adw-gtk3/adw-gtk3-dark), it is flipped to
    the matching member so GTK3 applications follow too; a hand-picked
-   third-party theme is never overwritten.
+   third-party theme is never overwritten. Once per session, and on the
+   same terms, the shell publishes
+   `org.gnome.desktop.wm.preferences button-layout` as
+   `appmenu:minimize,maximize,close`, so GTK and libadwaita header bars
+   show the minimize and maximize buttons the compositor supports. It
+   replaces only the stock `appmenu:close`, and not even that when
+   `dconf` shows the user set it on purpose; any other layout is left
+   exactly as it is.
 5. **XSETTINGS (X11/XWayland clients)** -- on the X11 session the
    binary republishes `Net/ThemeName`/`Gtk/ThemeName` with the
    matching member of that same installed pair. If no known pair is

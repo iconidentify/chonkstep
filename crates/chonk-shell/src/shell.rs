@@ -1218,6 +1218,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         host_omarchy_shell(&verdict, &theme.id, state.appearance, state.scale);
 
         crate::appearance::publish(state.appearance);
+        // Header bars take their window buttons from GSettings, where the
+        // stock layout is Close alone; see `appearance::button_layout`.
+        crate::appearance::publish_button_layout();
 
         // Take the configured grabs through the same delta the applier
         // uses, from an empty starting set: one implementation, so a
