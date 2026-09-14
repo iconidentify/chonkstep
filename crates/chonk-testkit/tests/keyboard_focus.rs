@@ -49,8 +49,8 @@ fn boot_with(name: &str, hyprland: &str, probe_modes: &[&str]) -> Session {
     session
 }
 
-/// Boots a session whose Hyprland configuration gives foot windows a
-/// body alpha or a dim, and opens two red foot windows in it. Red on
+/// Boots a session whose Hyprland configuration gives probe windows a
+/// body alpha or a dim, and opens two red probe windows in it. Red on
 /// purpose: a focus cue that lives in the pixels has to be read from
 /// the pixels, and a solid red body makes "opaque" one exact colour.
 fn boot_two_red_windows(name: &str, hyprland: &str) -> (Session, chonk_testkit::WindowInfo, chonk_testkit::WindowInfo) {
@@ -63,10 +63,17 @@ fn boot_two_red_windows(name: &str, hyprland: &str) -> (Session, chonk_testkit::
         },
     )
     .unwrap();
+    // Use the harness's committed solid buffer: foot's color section
+    // changed in 1.28, and a rejected override maps an error terminal
+    // instead of the color these assertions need to measure.
+    let color = session.dir.join("opacity-rgb");
+    std::fs::write(&color, [255, 0, 0]).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
     let mut windows = Vec::new();
     for title in ["Opacity One", "Opacity Two"] {
         session
-            .launch("foot", &["--title", title, "-o", "colors.background=ff0000", "-o", "colors.alpha=1.0", "sleep", "120"])
+            .launch_isolated("env", &[&format!("CHONKSTEP_PROBE_COLOR_FILE={}", color.display()),
+                probe.to_str().unwrap(), title, "opacity-probe"])
             .unwrap();
         windows.push(session.wait_for_window(title).unwrap());
     }
@@ -76,7 +83,7 @@ fn boot_two_red_windows(name: &str, hyprland: &str) -> (Session, chonk_testkit::
 }
 
 /// The mean colour of the middle of a window's body, well away from
-/// the terminal cursor in its top-left cell.
+/// the surrounding frame.
 fn body_rgb(shot: &chonk_testkit::Screenshot, window: &chonk_testkit::WindowInfo) -> [f64; 3] {
     let x = window.x as u32 + window.w / 2 - 8;
     let y = window.y as u32 + window.h / 2 - 8;
@@ -105,7 +112,7 @@ fn focus_by_click(session: &mut Session, window: &chonk_testkit::WindowInfo) {
 #[ignore = "needs a nested session; scripts/e2e.sh --headless --test keyboard_focus"]
 fn a_focus_change_updates_the_body_alpha_on_the_next_frame() {
     let (mut session, one, two) =
-        boot_two_red_windows("keyboard-focus-opacity", "windowrule = opacity 1.0 0.5, match:class ^foot$\n");
+        boot_two_red_windows("keyboard-focus-opacity", "windowrule = opacity 1.0 0.5, match:class ^opacity-probe$\n");
     // The second window mapped last and holds focus: opaque red. The
     // first is unfocused at half alpha: red mixed with whatever lies
     // beneath it, which is not red.

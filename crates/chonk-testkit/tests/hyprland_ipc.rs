@@ -1431,10 +1431,14 @@ fn set_prop_opaque_toggles_the_window_and_other_properties_are_refused() {
     options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
     options.config_extra = "omarchy_menu = false\nhyprland_config = true\nshow_dock = false\n".into();
     options.config_root_files =
-        vec![("hypr/hyprland.conf".into(), "windowrule = opacity 0.5 0.5, match:class ^foot$\n".into())];
+        vec![("hypr/hyprland.conf".into(), "windowrule = opacity 0.5 0.5, match:class ^opacity-probe$\n".into())];
     let mut session = Session::boot("hypr-ipc-opaque", options).expect("nested session");
+    let color = session.dir.join("opacity-rgb");
+    std::fs::write(&color, [255, 0, 0]).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
     session
-        .launch("foot", &["--title", "Opaque Probe", "-o", "colors.background=ff0000", "-o", "colors.alpha=1.0", "sleep", "120"])
+        .launch_isolated("env", &[&format!("CHONKSTEP_PROBE_COLOR_FILE={}", color.display()),
+            probe.to_str().unwrap(), "Opaque Probe", "opacity-probe"])
         .unwrap();
     let window = session.wait_for_window("Opaque Probe").unwrap();
     session.door().click(f64::from(window.x) + f64::from(window.w) / 2.0, f64::from(window.y) + f64::from(window.h) / 2.0).unwrap();
