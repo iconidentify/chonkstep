@@ -285,6 +285,148 @@ fn hyprland_ctm_is_transactional_exclusive_and_restored_on_client_death() {
     assert_eq!(restored, (u16::MAX, u16::MAX, u16::MAX));
 }
 
+/// The white point of an untouched, linear ramp.
+const NEUTRAL: (u16, u16, u16) = (u16::MAX, u16::MAX, u16::MAX);
+
+/// Waits for a line in a probe's own log.
+fn wait_for_client(session: &Session, program: &str, checkpoint: &str) {
+    poll_until(
+        Duration::from_secs(10),
+        &format!("{program} to report {checkpoint:?}"),
+        || session.client_log(program).contains(checkpoint).then_some(()),
+    )
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(program)))
+}
+
+/// Waits until the ramp most recently programmed on output `index`
+/// satisfies `wanted`, returning its white point.
+fn wait_for_white_point_on(
+    session: &Session,
+    index: usize,
+    what: &str,
+    wanted: impl Fn((u16, u16, u16)) -> bool,
+) -> (u16, u16, u16) {
+    poll_until(Duration::from_secs(10), what, || {
+        last_white_point_on(&session.log(), index).filter(|white| wanted(*white))
+    })
+    .unwrap_or_else(|error| panic!("{error}; the compositor logged:\n{}", session.log()))
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn a_night_light_daemon_keeps_its_screen_across_a_monitor_hotplug() {
+    let mut session = Session::boot("gamma-hotplug", with_gamma()).unwrap();
+
+    // A daemon warms the first screen, then re-sends a ramp whenever
+    // the set of outputs changes, alternating 4500K and 3000K.
+    run_probe(&mut session, &["follow", "3000", "4500"], "**holding**");
+    let warm = wait_for_white_point_on(&session, 0, "the warm ramp", |_| true);
+    assert!(warm.2 < warm.0, "3000K pulls blue down: {warm:?}");
+
+    // A monitor is plugged in. The daemon still owns the screen it
+    // chose, so its next ramp must reach the hardware rather than being
+    // dropped without a word.
+    session.door().set_virtual_outputs("split").unwrap();
+    wait_for_client(&session, "chonk-gamma-probe", "**reapplied at 4500K after 1 output change(s)**");
+    let cooler = wait_for_white_point_on(
+        &session,
+        0,
+        "the ramp sent after a monitor was plugged in",
+        |white| white != warm,
+    );
+    assert!(cooler.2 > warm.2, "4500K is cooler than 3000K: {cooler:?} after {warm:?}");
+
+    // And unplugged again.
+    session.door().set_virtual_outputs("single").unwrap();
+    wait_for_client(&session, "chonk-gamma-probe", "**reapplied at 3000K after 2 output change(s)**");
+    wait_for_white_point_on(
+        &session,
+        0,
+        "the ramp sent after a monitor was unplugged",
+        |white| white == warm,
+    );
+
+    // Its exit after both hotplugs still puts the screen back.
+    session.kill_client("chonk-gamma-probe");
+    wait_for_log(&mut session, "restoring the original ramp");
+    wait_for_white_point_on(&session, 0, "the original ramp to come back", |white| white == NEUTRAL);
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn a_night_light_daemon_on_an_unplugged_monitor_is_told_its_control_failed() {
+    let mut session = Session::boot("gamma-unplug", with_gamma()).unwrap();
+
+    // The plugged head is the second `wl_output` the probe binds. The
+    // stand-in must give it a ramp too, or this claim is refused.
+    session.door().set_virtual_outputs("split").unwrap();
+    run_probe(&mut session, &["hold", "3000", "1"], "**holding**");
+    wait_for_white_point_on(&session, 1, "the plugged head's warm ramp", |white| white.2 < white.0);
+
+    session.door().set_virtual_outputs("single").unwrap();
+    wait_for_client(&session, "chonk-gamma-probe", "**control failed**");
+    assert_eq!(
+        last_white_point_on(&session.log(), 0),
+        None,
+        "the unplugged head's ramp must never be programmed onto the screen that inherited its position"
+    );
+
+    // The screen that stayed is unaffected, and free to claim.
+    let again = run_probe(&mut session, &["report"], "**gamma_size");
+    assert!(
+        again.contains(&format!("**gamma_size {RAMP}**")),
+        "the remaining output keeps its ramp size: {again}"
+    );
+    assert!(session.compositor_alive());
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn hyprsunset_keeps_colour_ownership_across_a_monitor_hotplug() {
+    let mut session = Session::boot("ctm-hotplug", with_gamma()).unwrap();
+
+    run_ctm_probe(&mut session, &["follow"], "**holding**");
+    let warm = wait_for_white_point_on(&session, 0, "the warm transform", |_| true);
+    assert!(warm.2 < warm.1 && warm.1 < warm.0, "{warm:?}");
+
+    // Plugging a monitor in leaves the manager owning colour: its next
+    // commit reprograms the first screen and sets the new one, which
+    // the commit does not name, to identity.
+    session.door().set_virtual_outputs("split").unwrap();
+    wait_for_client(&session, "chonk-ctm-probe", "**reapplied after 1 output change(s)**");
+    let cooler = wait_for_white_point_on(
+        &session,
+        0,
+        "the transform committed after a monitor was plugged in",
+        |white| white != warm,
+    );
+    assert!(cooler.1 > warm.1 && cooler.2 > warm.2, "{cooler:?} after {warm:?}");
+    wait_for_white_point_on(&session, 1, "the plugged head to be set to identity", |white| white == NEUTRAL);
+
+    session.door().set_virtual_outputs("single").unwrap();
+    wait_for_client(&session, "chonk-ctm-probe", "**reapplied after 2 output change(s)**");
+    wait_for_white_point_on(
+        &session,
+        0,
+        "the transform committed after a monitor was unplugged",
+        |white| white == warm,
+    );
+
+    // The hotplug opened no window for a second colour client.
+    let gamma = run_probe(&mut session, &["report"], "**claim");
+    assert!(
+        gamma.contains("**claim failed**"),
+        "wlr gamma must still not steal a CTM-owned output after a hotplug: {gamma}"
+    );
+
+    session.kill_client("chonk-ctm-probe");
+    wait_for_log(
+        &mut session,
+        "CTM manager released; restoring original gamma ramps",
+    );
+    wait_for_white_point_on(&session, 0, "the CTM ramp to be restored", |white| white == NEUTRAL);
+}
+
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
 fn a_non_diagonal_ctm_is_a_named_protocol_error_not_an_approximation() {
@@ -400,4 +542,20 @@ fn last_white_point(log: &str) -> Option<(u16, u16, u16)> {
             .ok()
     };
     Some((field("white_r")?, field("white_g")?, field("white_b")?))
+}
+
+/// [`last_white_point`] for one output: the most recent `gamma ramp
+/// programmed` line whose `index` field is `index`.
+fn last_white_point_on(log: &str, index: usize) -> Option<(u16, u16, u16)> {
+    let on_index = |line: &&str| {
+        line.contains("gamma ramp programmed")
+            && line
+                .split("index=")
+                .nth(1)
+                .and_then(|rest| rest.split(' ').next())
+                .and_then(|value| value.parse::<usize>().ok())
+                == Some(index)
+    };
+    let line = log.lines().rfind(on_index)?;
+    last_white_point(line)
 }

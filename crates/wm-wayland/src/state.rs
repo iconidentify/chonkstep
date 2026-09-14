@@ -2097,6 +2097,29 @@ pub(crate) fn transform_number(transform: Transform) -> i32 {
 /// Session outputs have already been inserted/removed when this is
 /// called; this half owns protocol globals, monitor policy, shell
 /// resize, and the index-bearing layer/lock records.
+/// Where an index into `Compositor::outputs` points once entry `removed`
+/// has left: nowhere for the removed entry itself, one lower for every
+/// later one.
+fn reindex_after_removal(output: Option<usize>, removed: usize) -> Option<usize> {
+    match output {
+        Some(at) if at == removed => None,
+        Some(at) if at > removed => Some(at - 1),
+        other => other,
+    }
+}
+
+/// Where `output` sits in `outputs`, by identity, or `None` once it has
+/// left. The pure half of [`Compositor::output_index_of`], taking any
+/// list of outputs so a ledger's tests can drive it without a
+/// compositor.
+pub(crate) fn output_index_in<'a>(
+    outputs: impl IntoIterator<Item = &'a Output>,
+    output: &smithay::output::WeakOutput,
+) -> Option<usize> {
+    let output = output.upgrade()?;
+    outputs.into_iter().position(|candidate| *candidate == output)
+}
+
 pub(crate) fn apply_connector_hotplug(
     comp: &mut Compositor,
     removed: &[usize],
@@ -2128,11 +2151,10 @@ pub(crate) fn apply_connector_hotplug(
                 layer.output -= 1;
             }
         });
-        backend.lock_surfaces.retain(|surface| surface.output != index);
+        // A lock surface on the removed output stays its client's until
+        // the client destroys it; it simply names no output any more.
         for surface in &mut backend.lock_surfaces {
-            if surface.output > index {
-                surface.output -= 1;
-            }
+            surface.output = reindex_after_removal(surface.output, index);
         }
     }
 
@@ -2140,9 +2162,15 @@ pub(crate) fn apply_connector_hotplug(
         comp.outputs.push(OutputEntry::new(setup, &comp.display_handle));
     }
 
-    // Re-read monitor rules on the rare structural change so a docked
-    // connector lands at its configured position/scale immediately.
-    let config = wm_config::load();
+    // Place the new connector set by the monitor rules the running
+    // session already holds, from its last successful load, reload or
+    // Hyprland-file follow. Re-reading the file here replaced every rule
+    // with the defaults whenever `config.toml` did not parse, and applied
+    // edits nobody had reloaded.
+    let (monitor_rules, scale_override) = {
+        let session = comp.shell.session_state();
+        (session.monitor_rules.clone(), session.scale_override.map(f64::from))
+    };
     let mut setups: Vec<OutputSetup> = comp
         .outputs
         .iter()
@@ -2161,8 +2189,7 @@ pub(crate) fn apply_connector_hotplug(
             vrr_enabled: entry.vrr_enabled,
         })
         .collect();
-    let scale_override = chonk_shell::startup::read_scale_override(config.scale).map(f64::from);
-    let scales = apply_monitor_rules(&mut setups, &config.monitor_rules, scale_override);
+    let scales = apply_monitor_rules(&mut setups, &monitor_rules, scale_override);
     crate::session::apply_output_setups(&mut comp.graphics, &mut setups);
     for ((entry, setup), scale) in comp.outputs.iter_mut().zip(setups).zip(scales) {
         entry.position = setup.position;
@@ -2207,7 +2234,8 @@ pub(crate) fn apply_connector_hotplug(
         for rect in departed { comp.wm.rescue_clients_from_removed_monitor(rect); }
     }
     crate::input::reconcile_pointer_after_output_change(comp);
-    crate::gamma::outputs_changed(&mut comp.gamma, &comp.graphics, &comp.display_handle);
+    crate::gamma::outputs_changed(comp);
+    crate::output_power::outputs_changed(comp);
     comp.output_mgmt.mark_dirty();
     comp.session_lock.mark_dirty();
     comp.layer_shell.needs_arrange = true;
@@ -3370,6 +3398,29 @@ impl Compositor {
         self.sync_monitor_outputs();
     }
 
+    /// Where `output` sits in [`Compositor::outputs`] now, or `None`
+    /// once it has left.
+    ///
+    /// The one identity-to-position lookup for every protocol that
+    /// keeps per-output state across requests (gamma, CTM, output
+    /// power). They hold a `WeakOutput` and resolve it here per
+    /// request, so a hotplug that shifts positions cannot hand one
+    /// client's state to a different monitor.
+    pub(crate) fn output_index_of(&self, output: &smithay::output::WeakOutput) -> Option<usize> {
+        output_index_in(self.outputs.iter().map(|entry| &entry.output), output)
+    }
+
+    /// The identity of the output a client's `wl_output` names, or
+    /// `None` for a resource that is not one of ours or whose output
+    /// has already left.
+    pub(crate) fn output_identity(
+        &self,
+        resource: &smithay::reexports::wayland_server::protocol::wl_output::WlOutput,
+    ) -> Option<smithay::output::WeakOutput> {
+        let output = Output::from_resource(resource)?.downgrade();
+        self.output_index_of(&output).map(|_| output)
+    }
+
     /// Mirrors each output's EDID identity and mode list onto the
     /// backend, where the IPC snapshot can reach them.
     ///
@@ -3416,6 +3467,18 @@ impl Compositor {
     /// ledger, wl_output metadata, fractional-scale preference and the
     /// primary output's compositor chrome are updated as one action so
     /// an `ok` response cannot describe only half a change.
+    /// Restyles the session for a new primary-output scale from the
+    /// running session's own configuration, never from the file. Shared by
+    /// `hyprctl keyword monitor`/`hl.monitor` and wlr-output-management,
+    /// so the two routes to one user action cannot disagree about where
+    /// the configuration lives: a `config.toml` that stopped parsing, or an
+    /// edit nobody reloaded, stays out of the live session until a reload.
+    pub(crate) fn apply_primary_ui_scale(&mut self, scale: f32) {
+        let mut state = self.shell.session_state().clone();
+        state.scale = scale;
+        self.shell.apply_session_state(&mut self.wm, state);
+    }
+
     pub(crate) fn set_output_scale(&mut self, name: &str, scale: f64) -> bool {
         if !scale.is_finite() || !(0.5..=4.0).contains(&scale) {
             return false;
@@ -3431,9 +3494,7 @@ impl Compositor {
         self.sync_monitor_scales();
         self.layer_shell.needs_arrange = true;
         if index == 0 {
-            let mut state = self.shell.session_state().clone();
-            state.scale = scale as f32;
-            self.shell.apply_session_state(&mut self.wm, state);
+            self.apply_primary_ui_scale(scale as f32);
         }
         self.wm.backend_mut().mark_damaged();
         true
@@ -3895,7 +3956,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // gamma LUT — every nested one, and some real crtcs — is refused
     // honestly, and a session where no output can be tinted advertises
     // no global at all rather than one that lies.
-    let gamma = crate::gamma::init(&display_handle, &graphics);
+    let gamma = crate::gamma::init(&display_handle, &graphics, &outputs);
     let ctm = crate::ctm::init(&display_handle, crate::gamma::available(&gamma));
     // And again for the one protocol with no crate behind it: this is
     // the global Omarchy's Quickshell looks for the moment it connects,
@@ -4273,10 +4334,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // Reload is almost always the one a user wants: it re-reads the
         // config and moves the running session onto it, where a restart
         // here costs every client on the screen (there is no SaveSet to
-        // hand them forward — see `restart_in_place`). `wm_config::load`
-        // cannot fail, so the worst a mistyped edit does to a live
-        // session is move it to the defaults, which is exactly what a
-        // restart with the same file would have done.
+        // hand them forward — see `restart_in_place`). A file that no
+        // longer parses keeps the configuration already running and
+        // reports why through `configerrors`, so a mistyped edit costs the
+        // session nothing.
         if requests.reload {
             tracing::info!("reload requested — re-reading the config and applying it in place");
             // Everything this reload touches — decoration rules and
@@ -4727,6 +4788,14 @@ fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32,
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn removing_an_output_unassigns_its_lock_surfaces_and_shifts_later_ones() {
+        assert_eq!(reindex_after_removal(Some(1), 1), None);
+        assert_eq!(reindex_after_removal(Some(2), 1), Some(1));
+        assert_eq!(reindex_after_removal(Some(0), 1), Some(0));
+        assert_eq!(reindex_after_removal(None, 0), None, "an unassigned surface stays unassigned");
+    }
 
     #[test]
     fn frame_stats_use_bounded_power_of_two_buckets_and_saturating_counts() {

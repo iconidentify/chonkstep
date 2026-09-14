@@ -1165,7 +1165,7 @@ impl Compositor {
         }
         for entry in &backend.lock_surfaces {
             if entry.surface.wl_surface() == scene_root {
-                if let Some(monitor) = backend.monitors.get(entry.output) {
+                if let Some(monitor) = entry.output.and_then(|index| backend.monitors.get(index)) {
                     return backend.scale_at(monitor.geometry);
                 }
             }

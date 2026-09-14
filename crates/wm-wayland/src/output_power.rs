@@ -4,14 +4,21 @@
 //! Turning a connector off clears its DRM surface, but its Wayland
 //! global, geometry, workspaces and shell placement remain intact; the
 //! first frame after power-on restores scanout.
+//!
+//! A control names its output by identity, never by its position in
+//! `Compositor::outputs`, and finds that position again for each
+//! request through `Compositor::output_index_of`. A hotplug that shifts
+//! the outputs therefore cannot point a DPMS client at another monitor,
+//! and the controller of an output that leaves is sent `failed`.
 
+use smithay::output::WeakOutput;
 use smithay::reexports::wayland_protocols_wlr::output_power_management::v1::server::zwlr_output_power_manager_v1::{
     self, ZwlrOutputPowerManagerV1,
 };
 use smithay::reexports::wayland_protocols_wlr::output_power_management::v1::server::zwlr_output_power_v1::{
     self, Mode, ZwlrOutputPowerV1,
 };
-use smithay::reexports::wayland_server::backend::{ClientId, GlobalId, ObjectId};
+use smithay::reexports::wayland_server::backend::{ClientId, GlobalId};
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
@@ -22,21 +29,78 @@ const VERSION: u32 = 1;
 
 pub(crate) struct OutputPower {
     _global: Option<GlobalId>,
-    owners: Vec<Option<ObjectId>>,
+    owners: Owners<WeakOutput, ZwlrOutputPowerV1>,
 }
 
+/// Per-`zwlr_output_power_v1` data: the output it was created for, by
+/// identity, or `None` for a `wl_output` that was never ours. Whether
+/// it controls that output is [`OutputPower::owners`]'s answer, so
+/// exclusivity is decided in one place.
 struct PowerData {
-    index: usize,
+    output: Option<WeakOutput>,
+}
+
+/// The protocol's exclusivity ledger: at most one controller per
+/// output, keyed by the output's identity and never by its position.
+///
+/// Generic over the identity and the controller so the tests at the
+/// bottom of this file can drive it without a Wayland connection, as
+/// `focus_grab::Whitelist` is. In production the identity is a
+/// `WeakOutput` and the controller its `zwlr_output_power_v1`.
+#[derive(Debug)]
+struct Owners<O, R> {
+    entries: Vec<(O, R)>,
+}
+
+impl<O: PartialEq, R: PartialEq> Owners<O, R> {
+    fn new() -> Self {
+        Owners { entries: Vec::new() }
+    }
+
+    /// Grants `output` to `controller`, or refuses while another
+    /// controller holds it.
+    fn claim(&mut self, output: O, controller: R) -> bool {
+        if self.owner(&output).is_some() {
+            return false;
+        }
+        self.entries.push((output, controller));
+        true
+    }
+
+    /// The controller holding `output`, if any.
+    fn owner(&self, output: &O) -> Option<&R> {
+        self.entries.iter().find_map(|(held, controller)| (held == output).then_some(controller))
+    }
+
+    /// Forgets `controller`'s claim. A controller that was refused
+    /// holds nothing, so its destruction frees nothing.
+    fn release(&mut self, controller: &R) {
+        self.entries.retain(|(_, held)| held != controller);
+    }
+
+    /// Drops every claim on an output `present` no longer finds, and
+    /// returns those controllers so each can be told.
+    fn retain_present(&mut self, present: impl Fn(&O) -> bool) -> Vec<R> {
+        let mut gone = Vec::new();
+        for (output, controller) in std::mem::take(&mut self.entries) {
+            if present(&output) {
+                self.entries.push((output, controller));
+            } else {
+                gone.push(controller);
+            }
+        }
+        gone
+    }
 }
 
 pub(crate) fn init(display: &DisplayHandle, graphics: &Graphics) -> OutputPower {
     if !crate::session::has_physical_outputs(graphics) {
         tracing::info!("no physical outputs; wlr-output-power-management is not advertised");
-        return OutputPower { _global: None, owners: Vec::new() };
+        return OutputPower { _global: None, owners: Owners::new() };
     }
     let global = display.create_global::<Compositor, ZwlrOutputPowerManagerV1, ()>(VERSION, ());
     tracing::info!(version = VERSION, "wlr-output-power-management advertised");
-    OutputPower { _global: Some(global), owners: Vec::new() }
+    OutputPower { _global: Some(global), owners: Owners::new() }
 }
 
 pub(crate) fn set_from_ipc(comp: &mut Compositor, name: Option<&str>, powered: bool) -> bool {
@@ -63,6 +127,24 @@ pub(crate) fn wake_all(comp: &mut Compositor) {
     }
 }
 
+/// Tells the controller of every output a connector hotplug removed
+/// that its control failed, which is the protocol's event for an output
+/// that disappeared, and frees the claim. Called from
+/// `apply_connector_hotplug` once `Compositor::outputs` holds the new
+/// set. The controller of an output that stayed keeps its claim,
+/// wherever the hotplug moved that output.
+pub(crate) fn outputs_changed(comp: &mut Compositor) {
+    let outputs = &comp.outputs;
+    let gone = comp.output_power.owners.retain_present(|output| {
+        crate::state::output_index_in(outputs.iter().map(|entry| &entry.output), output).is_some()
+    });
+    for controller in gone {
+        tracing::info!("output power control failed: its output was unplugged");
+        controller.failed();
+    }
+}
+
+/// `index` is resolved by the caller for this one request.
 fn set(comp: &mut Compositor, index: usize, powered: bool) -> bool {
     let Some(entry) = comp.outputs.get(index) else {
         return false;
@@ -93,12 +175,15 @@ fn set(comp: &mut Compositor, index: usize, powered: bool) -> bool {
     }
 }
 
+/// Sends `mode` to the controller of the output at `index`, found by
+/// that output's identity, so an IPC `dpms` reaches the client that
+/// holds the monitor it named.
 fn notify_owner(comp: &Compositor, index: usize, powered: bool) {
-    let Some(Some(owner)) = comp.output_power.owners.get(index) else {
+    let Some(entry) = comp.outputs.get(index) else {
         return;
     };
-    if let Ok(resource) = ZwlrOutputPowerV1::from_id(&comp.display_handle, owner.clone()) {
-        resource.mode(if powered { Mode::On } else { Mode::Off });
+    if let Some(owner) = comp.output_power.owners.owner(&entry.output.downgrade()) {
+        owner.mode(if powered { Mode::On } else { Mode::Off });
     }
 }
 
@@ -130,18 +215,18 @@ impl Dispatch<ZwlrOutputPowerManagerV1, ()> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if let zwlr_output_power_manager_v1::Request::GetOutputPower { id, output } = request {
-            let index = crate::gamma::output_index(state, &output);
-            let resource = data_init.init(id, PowerData { index: index.unwrap_or(usize::MAX) });
-            let Some(index) = index else {
+            let output = state.output_identity(&output);
+            let resource = data_init.init(id, PowerData { output: output.clone() });
+            let Some((output, index)) =
+                output.and_then(|output| state.output_index_of(&output).map(|index| (output, index)))
+            else {
                 resource.failed();
                 return;
             };
-            state.output_power.owners.resize_with(state.outputs.len(), || None);
-            if state.output_power.owners[index].is_some() {
+            if !state.output_power.owners.claim(output, resource.clone()) {
                 resource.failed();
                 return;
             }
-            state.output_power.owners[index] = Some(resource.id());
             resource.mode(if state.outputs[index].powered { Mode::On } else { Mode::Off });
         }
     }
@@ -167,15 +252,103 @@ impl Dispatch<ZwlrOutputPowerV1, PowerData> for Compositor {
                 }
                 _ => return,
             };
-            if !set(state, data.index, powered) {
+            // Only the controller holding its output may switch it, and
+            // it switches that output wherever it now sits. A control
+            // that was refused, or whose output was unplugged, is
+            // answered `failed` and never acts on another monitor.
+            let index = data
+                .output
+                .as_ref()
+                .filter(|output| state.output_power.owners.owner(output) == Some(resource))
+                .and_then(|output| state.output_index_of(output));
+            if !index.is_some_and(|index| set(state, index, powered)) {
                 resource.failed();
             }
         }
     }
 
-    fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwlrOutputPowerV1, data: &PowerData) {
-        if state.output_power.owners.get(data.index).and_then(Option::as_ref) == Some(&resource.id()) {
-            state.output_power.owners[data.index] = None;
-        }
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwlrOutputPowerV1, _data: &PowerData) {
+        state.output_power.owners.release(resource);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use smithay::output::{Output, PhysicalProperties, Subpixel};
+
+    use super::Owners;
+    use crate::state::output_index_in;
+
+    fn output(name: &str) -> Output {
+        Output::new(
+            name.to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: "test".into(),
+            },
+        )
+    }
+
+    /// The ledger as `outputs_changed` prunes it against `outputs`.
+    fn prune(owners: &mut Owners<smithay::output::WeakOutput, u32>, outputs: &[Output]) -> Vec<u32> {
+        owners.retain_present(|held| output_index_in(outputs, held).is_some())
+    }
+
+    #[test]
+    fn a_claim_follows_its_output_when_an_earlier_one_is_unplugged() {
+        // Controller 7 holds HDMI-A-1, the third output.
+        let mut outputs = vec![output("eDP-1"), output("DP-1"), output("HDMI-A-1")];
+        let hdmi = outputs[2].downgrade();
+        let mut owners = Owners::new();
+        assert!(owners.claim(hdmi.clone(), 7));
+
+        // DP-1 is unplugged and DP-2 plugged in at the end, so DP-2
+        // takes position 2 and HDMI-A-1 moves to 1.
+        outputs.remove(1);
+        outputs.push(output("DP-2"));
+        assert_eq!(prune(&mut owners, &outputs), Vec::<u32>::new(), "nothing anyone controlled left");
+
+        // The claim still names HDMI-A-1, now at position 1. A
+        // positional ledger would have handed controller 7 DP-2.
+        assert_eq!(owners.owner(&hdmi), Some(&7));
+        assert_eq!(output_index_in(&outputs, &hdmi), Some(1));
+        assert_eq!(owners.owner(&outputs[2].downgrade()), None);
+
+        // The new output can be claimed, and HDMI-A-1 stays exclusive.
+        assert!(owners.claim(outputs[2].downgrade(), 8));
+        assert!(!owners.claim(outputs[1].downgrade(), 9));
+    }
+
+    #[test]
+    fn an_unplugged_output_fails_only_its_own_controller() {
+        let mut outputs = vec![output("eDP-1"), output("DP-1"), output("HDMI-A-1")];
+        let mut owners = Owners::new();
+        assert!(owners.claim(outputs[1].downgrade(), 7));
+        assert!(owners.claim(outputs[2].downgrade(), 8));
+
+        outputs.remove(1);
+        assert_eq!(prune(&mut owners, &outputs), vec![7], "DP-1's controller is owed `failed`");
+        // HDMI-A-1 inherited DP-1's position, not its controller.
+        assert_eq!(owners.owner(&outputs[1].downgrade()), Some(&8));
+
+        // DP-1 plugged back in is a new output, free to claim.
+        outputs.push(output("DP-1"));
+        assert!(owners.claim(outputs[2].downgrade(), 9));
+    }
+
+    #[test]
+    fn only_the_holder_releasing_frees_an_output() {
+        let outputs = [output("eDP-1")];
+        let panel = outputs[0].downgrade();
+        let mut owners = Owners::new();
+        assert!(owners.claim(panel.clone(), 7));
+        assert!(!owners.claim(panel.clone(), 8), "a second controller is refused");
+        // The refused controller being destroyed frees nothing.
+        owners.release(&8);
+        assert_eq!(owners.owner(&panel), Some(&7));
+        owners.release(&7);
+        assert!(owners.claim(panel, 8));
     }
 }

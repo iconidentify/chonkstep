@@ -22,6 +22,13 @@
 //!   not leaves the user with an orange display and nothing running to
 //!   explain it.
 //!
+//! - **Hotplug.** `chonk-gamma-probe follow <kelvin> <kelvin>` holds
+//!   like `hold`, and re-sends its ramp every time the set of outputs
+//!   changes, the way a real daemon answers a dock or an undock. It
+//!   alternates between the two temperatures, so each re-send is a new
+//!   white point in the compositor's log; a compositor that silently
+//!   dropped ownership on the hotplug records none of them.
+//!
 //! It also answers the honest-absence case. Against the nested winit
 //! backend there is no crtc to program, so chonkstep advertises no
 //! global at all (see `wm-wayland/src/gamma.rs`), and the probe prints
@@ -35,10 +42,13 @@
 //! chonk-gamma-probe set <kelvin>        # claim, set one ramp, exit
 //! chonk-gamma-probe exclusive           # two claims, one output
 //! chonk-gamma-probe hold <kelvin>       # claim, set, wait to be killed
+//! chonk-gamma-probe follow <k1> <k2>    # hold, re-set on every output change
 //! chonk-gamma-probe bad-table <bytes>   # a deliberately wrong table
 //! ```
 //!
-//! Every mode takes an optional trailing output index (default 0).
+//! Every mode takes an optional trailing output index (default 0). A
+//! holding probe whose control is revoked prints `**control failed**`
+//! and exits.
 //! Checkpoints a test polls for are printed in `**bold**`, the same
 //! convention `chonk-lock-probe` uses.
 
@@ -78,6 +88,14 @@ struct Probe {
     /// order the modes below reason about ("the first claim", "the
     /// second claim").
     answers: Vec<Answer>,
+    /// The registry names of the `wl_output` globals currently
+    /// advertised, so a `global_remove` can be recognised as an output
+    /// leaving.
+    output_names: Vec<u32>,
+    /// Every `wl_output` global announced or removed so far, the
+    /// initial ones included. `follow` counts the changes since it
+    /// started holding.
+    output_events: usize,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
@@ -89,14 +107,25 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
-            match interface.as_str() {
-                "wl_output" => probe.outputs.push(registry.bind(name, version.min(4), qh, ())),
+        match event {
+            wl_registry::Event::Global { name, interface, version } => match interface.as_str() {
+                "wl_output" => {
+                    probe.outputs.push(registry.bind(name, version.min(4), qh, ()));
+                    probe.output_names.push(name);
+                    probe.output_events += 1;
+                }
                 "zwlr_gamma_control_manager_v1" => {
                     probe.manager = Some(registry.bind(name, 1, qh, ()))
                 }
                 _ => {}
+            },
+            wl_registry::Event::GlobalRemove { name } => {
+                if let Some(at) = probe.output_names.iter().position(|known| *known == name) {
+                    probe.output_names.remove(at);
+                    probe.output_events += 1;
+                }
             }
+            _ => {}
         }
     }
 }
@@ -210,6 +239,7 @@ fn main() {
     // The trailing output index, wherever it lands for this mode.
     let output_index = match mode {
         "set" | "hold" | "bad-table" => number(2, 0.0) as usize,
+        "follow" => number(3, 0.0) as usize,
         _ => number(1, 0.0) as usize,
     };
 
@@ -276,7 +306,7 @@ fn main() {
             }
             second.destroy();
         }
-        "set" | "hold" => {
+        "set" | "hold" | "follow" => {
             let kelvin = number(1, 3000.0);
             let file = table_file(&table(size, kelvin));
             first.set_gamma(file.as_fd());
@@ -288,16 +318,43 @@ fn main() {
                 return;
             }
             println!("**set_gamma accepted at {kelvin}K**");
-            if mode == "hold" {
+            if mode != "set" {
                 // A night-light daemon's steady state. The test kills
                 // this process from here and watches the compositor put
                 // the original ramp back.
                 println!("**holding**");
                 let _ = std::io::stdout().flush();
+                let temperatures = [kelvin, number(2, 4500.0)];
+                let baseline = probe.output_events;
+                let mut followed = 0;
                 loop {
                     if queue.blocking_dispatch(&mut probe).is_err() {
                         return;
                     }
+                    if probe.answers[0] == Answer::Failed {
+                        // Revoked: the output left, or the compositor
+                        // could not program the ramp.
+                        println!("**control failed**");
+                        let _ = std::io::stdout().flush();
+                        return;
+                    }
+                    let changes = probe.output_events - baseline;
+                    if mode != "follow" || changes == followed {
+                        continue;
+                    }
+                    // The temperature follows the count of changes, not
+                    // of re-sends, so two changes that arrive in one
+                    // dispatch still land on the temperature a test
+                    // expects after both.
+                    followed = changes;
+                    let again = temperatures[changes % 2];
+                    let file = table_file(&table(size, again));
+                    first.set_gamma(file.as_fd());
+                    queue
+                        .roundtrip(&mut probe)
+                        .unwrap_or_else(|e| fatal(&format!("set_gamma was refused after a change: {e}")));
+                    println!("**reapplied at {again}K after {changes} output change(s)**");
+                    let _ = std::io::stdout().flush();
                 }
             }
             // Dropping the connection here is the graceful half of the

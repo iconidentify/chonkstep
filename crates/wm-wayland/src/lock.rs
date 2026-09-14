@@ -89,8 +89,21 @@ use crate::state::Compositor;
 /// `Compositor::outputs`/the monitor list — the same positional
 /// identity everything else in this crate uses for outputs).
 pub(crate) struct LockSurfaceEntry {
-    pub output: usize,
+    /// `None` for a surface whose `wl_output` names no output this
+    /// compositor drives: it was unplugged before the request arrived, or
+    /// since. Such a surface stays the client's until it destroys it, and
+    /// renders nowhere and receives no input meanwhile.
+    pub output: Option<usize>,
     pub surface: LockSurface,
+}
+
+/// The position of the output a lock request names, if it is still one of
+/// `outputs`. Deliberately no fallback: a surface for a vanished output
+/// filed under another monitor would sit beside that monitor's own lock
+/// surface, and on a desk with no outputs there is nothing to fall back to.
+fn output_position<'a>(mut outputs: impl Iterator<Item = &'a Output>, named: Option<&Output>) -> Option<usize> {
+    let named = named?;
+    outputs.position(|output| output == named)
 }
 
 /// Lock configure, rendering and pointer input share the output's logical
@@ -407,23 +420,31 @@ impl SessionLockHandler for Compositor {
     }
 
     fn new_surface(&mut self, surface: LockSurface, wl_output: WlOutput) {
-        let index = Output::from_resource(&wl_output)
-            .and_then(|named| self.outputs.iter().position(|entry| entry.output == named))
-            .unwrap_or(0);
-        let entry = &self.outputs[index];
-        let logical = logical_size(entry.size, entry.scale);
+        let index = output_position(
+            self.outputs.iter().map(|entry| &entry.output),
+            Output::from_resource(&wl_output).as_ref(),
+        );
+        // The mandatory first configure still needs a size, even for a
+        // surface whose output is gone: the primary's when one remains.
+        let logical = index
+            .or(Some(0))
+            .and_then(|at| self.outputs.get(at))
+            .map_or((1, 1), |entry| logical_size(entry.size, entry.scale));
         prime_reused_lock_surface(&surface, logical);
         surface.with_pending_state(|state| {
             state.size = Some(logical.into());
         });
         // smithay sends the initial configure right after this handler
         // returns, carrying the size set above.
-        tracing::info!(output = index, w = logical.0, h = logical.1, "lock surface created");
+        tracing::info!(output = ?index, w = logical.0, h = logical.1, "lock surface created");
         // The locker types its password somewhere: the first lock
         // surface takes keyboard focus (a multi-output locker creates
         // one per output; the primary's usually arrives first, and any
         // of them reaches the same client).
-        let focus_target = self.wm.backend().lock_surfaces.is_empty();
+        // A surface whose output is gone never takes focus from one the
+        // user can see.
+        let focus_target =
+            index.is_some() && !self.wm.backend().lock_surfaces.iter().any(|entry| entry.output.is_some());
         self.wm.backend_mut().lock_surfaces.push(LockSurfaceEntry { output: index, surface: surface.clone() });
         self.session_lock.mark_dirty();
         self.wm.backend_mut().mark_damaged();
@@ -545,16 +566,18 @@ impl smithay::reexports::wayland_server::Dispatch<ExtSessionLockV1, SessionLockS
         // before upstream assigns the wl_surface role or grows its own
         // `locked_outputs` vector.
         if let ext_session_lock_v1::Request::GetLockSurface { output, .. } = &request {
-            let duplicate = Output::from_resource(output)
-                .and_then(|named| state.outputs.iter().position(|entry| entry.output == named))
-                .is_some_and(|index| {
-                    state
-                        .wm
-                        .backend()
-                        .lock_surfaces
-                        .iter()
-                        .any(|entry| entry.output == index)
-                });
+            let duplicate = output_position(
+                state.outputs.iter().map(|entry| &entry.output),
+                Output::from_resource(output).as_ref(),
+            )
+            .is_some_and(|index| {
+                state
+                    .wm
+                    .backend()
+                    .lock_surfaces
+                    .iter()
+                    .any(|entry| entry.output == Some(index))
+            });
             if duplicate {
                 lock.post_error(
                     ext_session_lock_v1::Error::DuplicateOutput,
@@ -636,7 +659,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
     {
         let Compositor { outputs, wm, .. } = comp;
         for lock in wm.backend().lock_surfaces.iter().filter(|entry| entry.surface.alive()) {
-            let Some(entry) = outputs.get(lock.output) else { continue };
+            let Some(entry) = lock.output.and_then(|index| outputs.get(index)) else { continue };
             let logical = logical_size(entry.size, entry.scale);
             lock.surface.with_pending_state(|state| {
                 state.size = Some(logical.into());
@@ -655,7 +678,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
         .get_keyboard()
         .and_then(|keyboard| keyboard.current_focus())
         .map(|surface| !comp.wm.backend().lock_surfaces.iter().any(|entry| {
-            entry.surface.alive() && entry.surface.wl_surface() == surface.surface()
+            entry.output.is_some() && entry.surface.alive() && entry.surface.wl_surface() == surface.surface()
         }))
         .unwrap_or(true);
     if focused_dead {
@@ -664,7 +687,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
             .backend()
             .lock_surfaces
             .iter()
-            .find(|entry| entry.surface.alive())
+            .find(|entry| entry.output.is_some() && entry.surface.alive())
             .map(|entry| entry.surface.wl_surface().clone());
         if let Some(keyboard) = comp.seat.get_keyboard() {
             let next = next.map(|surface| crate::input::keyboard::KeyboardFocus::new(comp, surface));
@@ -1044,6 +1067,29 @@ mod tests {
     // removed it blocks forever on the third lock's configure. What a
     // unit test CAN pin is the one assumption the guard's cheap read
     // rests on.
+
+    #[test]
+    fn a_lock_request_resolves_only_an_output_still_driven() {
+        let outputs: Vec<Output> = ["left", "middle", "right"]
+            .into_iter()
+            .map(|name| {
+                Output::new(
+                    name.into(),
+                    smithay::output::PhysicalProperties {
+                        size: (0, 0).into(),
+                        subpixel: smithay::output::Subpixel::Unknown,
+                        make: "test".into(),
+                        model: "test".into(),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(output_position(outputs.iter(), Some(&outputs[1])), Some(1));
+        let unplugged = outputs[2].clone();
+        assert_eq!(output_position(outputs[..2].iter(), Some(&unplugged)), None, "a vanished output is not the primary");
+        assert_eq!(output_position(std::iter::empty(), Some(&unplugged)), None, "an empty desk does not panic");
+        assert_eq!(output_position(outputs.iter(), None), None);
+    }
 
     #[test]
     fn the_restated_role_string_is_the_interface_smithay_names_lock_surfaces_with() {
