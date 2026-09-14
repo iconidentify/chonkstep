@@ -209,6 +209,9 @@ pub struct FakeBackend {
     /// claims only the modal cycling combos, everything else being
     /// config-driven from the binary).
     pub grabbed_keys: Vec<KeyCombo>,
+    /// What `session_locked` reports, so a test can deliver an
+    /// activation behind a session lock.
+    pub session_locked: bool,
 }
 
 impl FakeBackend {
@@ -332,6 +335,10 @@ impl Backend for FakeBackend {
     type WindowId = FakeWindowId;
     type FrameId = FakeFrameId;
     type ShellId = u32;
+
+    fn session_locked(&self) -> bool {
+        self.session_locked
+    }
 
     fn create_shell_surface(&mut self, geometry: wm_theme_api::Rect, _background: (u8, u8, u8), _above: bool) -> Option<Self::ShellId> {
         self.next_shell_id += 1;

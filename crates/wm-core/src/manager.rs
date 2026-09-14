@@ -1111,11 +1111,17 @@ impl<B: Backend> WindowManager<B> {
         if self.mac_client_hidden(id)
             || (self.separate_spaces() && self.monitors_ref().is_empty()) { return false; }
         self.clients.get(id).is_some_and(|client| {
-            client.lifecycle == Lifecycle::Normal
-                && (self.workspace_visible(client.workspace)
-                    || client.flags.contains(ClientFlags::STICKY))
-                && !client.flags.contains(ClientFlags::NO_FOCUS)
+            self.client_on_screen(client) && !client.flags.contains(ClientFlags::NO_FOCUS)
         })
+    }
+
+    /// Whether `client` is somewhere the user can see it: mapped
+    /// (neither miniaturized nor withdrawn) and on a visible workspace,
+    /// or pinned to all of them. The one condition keyboard focus is
+    /// never granted without.
+    fn client_on_screen(&self, client: &Client<B>) -> bool {
+        client.lifecycle == Lifecycle::Normal
+            && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
     }
 
     /// Every focusable client, most-recently-focused first, with any
@@ -1373,6 +1379,22 @@ impl<B: Backend> WindowManager<B> {
     /// clients remain unmapped. A no-op if already on `workspace` or if
     /// the index is out of range.
     pub fn switch_workspace(&mut self, workspace: usize) {
+        self.switch_workspace_to_focus(workspace, None);
+    }
+
+    /// [`Self::switch_workspace`], for a caller about to focus
+    /// `arriving` on the destination.
+    ///
+    /// A plain switch hands the keyboard to the destination's most
+    /// recent window, and an activation then took it straight back for
+    /// its own target. The seat and the Hyprland event stream only ever
+    /// saw the final answer, but `focus_history` kept the detour: an
+    /// unrelated window pushed in just before the activated one, so
+    /// Alt-Tab's "previous window" pointed at somewhere the user never
+    /// went. Focusing `arriving` directly leaves the history reading
+    /// the way the user moved. When it cannot take focus the ordinary
+    /// successor still does, so no hidden window keeps the keyboard.
+    fn switch_workspace_to_focus(&mut self, workspace: usize, arriving: Option<ClientId>) {
         if workspace >= MAX_WORKSPACES {
             return;
         }
@@ -1419,7 +1441,9 @@ impl<B: Backend> WindowManager<B> {
             .and_then(|id| self.clients.get(id))
             .is_some_and(|c| c.workspace == workspace || c.flags.contains(ClientFlags::STICKY));
         if !still_visible {
-            if let Some(prev) = self.focused {
+            if let Some(next) = arriving.filter(|&id| self.is_focusable(id)) {
+                self.focus_client(next);
+            } else if let Some(prev) = self.focused {
                 // `current_workspace` is already the new one, so
                 // `is_focusable` sees the left-behind window as
                 // ineligible and the successor comes from the
@@ -3565,18 +3589,29 @@ impl<B: Backend> WindowManager<B> {
         self.focus_client(id);
     }
 
-    /// `_NET_ACTIVE_WINDOW`: a pager/launcher/tool asked for this window
-    /// to be activated. Restored out of miniaturized/shaded first —
-    /// "activate" means "show me this window", and focusing one that's
-    /// unmapped or rolled up would visibly do nothing — then focused
-    /// (which raises). Same restore-before-focus order the Alt-Tab
-    /// commit path uses.
+    /// A pager, launcher, taskbar or application asked for this window
+    /// to be activated: `_NET_ACTIVE_WINDOW`, xdg-activation,
+    /// foreign-toplevel `activate`, IPC `focuswindow`, the Overview.
+    /// Restored out of miniaturized/shaded and brought onto a visible
+    /// workspace first — "activate" means "show me this window", and
+    /// focusing one that's unmapped, rolled up or parked elsewhere would
+    /// visibly do nothing — then focused (which raises). Same
+    /// restore-before-focus order the Alt-Tab commit path uses.
     fn handle_activate_request(&mut self, window: B::WindowId) {
         let Some(&id) = self.window_index.get(&window) else {
             return;
         };
         if self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::NO_ACTIVATE)) {
             tracing::debug!(?id, "window rule refused an activation focus request");
+            return;
+        }
+        // Behind a session lock the seat focus is parked anyway, but a
+        // workspace switch is not: the user would unlock onto a desktop
+        // they did not leave, with nothing to say why. Ask for attention
+        // instead, which the bar can show and the user can act on.
+        if self.backend.session_locked() && self.activation_changes_workspace(id) {
+            tracing::debug!(?id, "activation behind the session lock marked the window urgent");
+            self.set_urgent(id, true);
             return;
         }
         self.reveal_application(id);
@@ -3586,7 +3621,41 @@ impl<B: Backend> WindowManager<B> {
         if self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::SHADED)) {
             self.unshade(id);
         }
+        self.bring_workspace_into_view(id);
         self.focus_client(id);
+    }
+
+    /// Whether showing the window an activation of `id` focuses — its
+    /// modal blocker, if one is open — means leaving the workspace on
+    /// screen.
+    fn activation_changes_workspace(&self, id: ClientId) -> bool {
+        let target = self.modal_blocker(id).unwrap_or(id);
+        self.clients.get(target).is_some_and(|client| {
+            !client.flags.contains(ClientFlags::STICKY) && !self.workspace_visible(client.workspace)
+        })
+    }
+
+    /// Switches to the workspace holding the window that focusing `id`
+    /// will actually reach, when it is not already on screen.
+    ///
+    /// Desktop mode never had this step. Separate Spaces switches inside
+    /// `focus_client_with`, and single-row Spaces in `reveal_application`,
+    /// so by the time this runs there the workspace is already visible
+    /// and it does nothing. Pinned windows are on every workspace and
+    /// never cause a switch.
+    fn bring_workspace_into_view(&mut self, id: ClientId) {
+        let target = self.modal_blocker(id).unwrap_or(id);
+        let Some(client) = self.clients.get(target) else {
+            return;
+        };
+        if client.lifecycle != Lifecycle::Normal
+            || client.flags.contains(ClientFlags::STICKY)
+            || self.workspace_visible(client.workspace)
+        {
+            return;
+        }
+        let workspace = client.workspace;
+        self.switch_workspace_to_focus(workspace, Some(target));
     }
 
     /// Closes `id` — the config-driven keybinding entry point, routed
@@ -3851,6 +3920,12 @@ impl<B: Backend> WindowManager<B> {
                 if self.clients.get(id).is_some_and(|c| c.lifecycle == Lifecycle::Miniaturized) {
                     self.deminiaturize(id);
                 }
+                // The application switcher offers windows from every
+                // workspace, and outside Spaces `reveal_application`
+                // does not switch; the window-order switcher's own
+                // candidates are already on screen, so this is a no-op
+                // for it.
+                self.bring_workspace_into_view(id);
                 if let Some(client) = self.clients.get(id) {
                     let window = client.window;
                     let content_size = client.geometry.size;
@@ -4000,6 +4075,17 @@ impl<B: Backend> WindowManager<B> {
                 }
                 self.select_space_output(workspace);
             }
+        }
+        // Keyboard focus follows what is on screen, never the other way
+        // round. A window parked on a hidden workspace, or miniaturized,
+        // used to take focus here without anything showing it: the bar
+        // named it as the active window and the user's next keystrokes
+        // went into an application they could not see. Every caller with
+        // a legitimate reason to focus such a window shows it first, the
+        // way `handle_activate_request` and session restore do.
+        if self.clients.get(id).is_some_and(|client| !self.client_on_screen(client)) {
+            tracing::debug!(?id, "refused focus for a window that is not on screen");
+            return;
         }
         if self.focused == Some(id) {
             // Re-assert input focus rather than assume it landed. This
@@ -9263,6 +9349,208 @@ mod tests {
             Some(&(window, false, false, false, false, false, false)),
             "the restored client must be re-published as not hidden"
         );
+    }
+
+    /// Window A on workspace 0; B and C on workspace 1; workspace 0 on
+    /// screen with A focused. The desk an Omarchy launch-or-focus chord
+    /// or notification click meets, in the default Desktop interaction
+    /// mode.
+    fn desk_with_windows_elsewhere(
+        policy: Option<std::sync::Arc<dyn FloatPolicy>>,
+    ) -> (WindowManager<FakeBackend>, [FakeWindowId; 3], [ClientId; 3]) {
+        let mut backend = FakeBackend::new();
+        let windows = [backend.create_window(), backend.create_window(), backend.create_window()];
+        let mut wm = wm(backend);
+        assert!(!wm.spaces_mode(), "the default interaction mode is Desktop");
+        wm.set_float_policy(policy);
+        wm.dispatch(BackendEvent::MapRequest(windows[0]));
+        wm.switch_workspace(1);
+        wm.dispatch(BackendEvent::MapRequest(windows[1]));
+        wm.dispatch(BackendEvent::MapRequest(windows[2]));
+        wm.switch_workspace(0);
+        let ids = windows.map(|window| wm.client_for_window(window).unwrap());
+        assert_eq!(wm.current_workspace(), 0);
+        assert_eq!(wm.focused_client(), Some(ids[0]));
+        assert_eq!(wm.client(ids[1]).unwrap().workspace, 1);
+        assert_eq!(wm.client(ids[2]).unwrap().workspace, 1);
+        (wm, windows, ids)
+    }
+
+    fn frame_mapped(wm: &WindowManager<FakeBackend>, id: ClientId) -> bool {
+        wm.client(id)
+            .and_then(|client| client.frame)
+            .is_some_and(|frame| wm.backend().mapped_frames.contains(&frame))
+    }
+
+    /// The invariant the focus guard exists for: whatever holds
+    /// `FOCUSED` is a window the user can see.
+    fn assert_focus_is_on_screen(wm: &WindowManager<FakeBackend>) {
+        for (id, client) in wm.clients.iter() {
+            if client.flags.contains(ClientFlags::FOCUSED) {
+                assert!(frame_mapped(wm, id), "{id:?} holds focus with its frame unmapped");
+                assert_eq!(wm.focused_client(), Some(id));
+            }
+        }
+    }
+
+    /// IPC `focuswindow`, Lua `hl.dsp.focus({ window })`, xdg-activation,
+    /// foreign-toplevel `activate` and `_NET_ACTIVE_WINDOW` all arrive
+    /// as this event. In Desktop mode it used to focus B where it stood,
+    /// unmapped on workspace 1, while workspace 0 stayed on screen.
+    #[test]
+    fn activate_request_switches_to_the_workspace_holding_the_window() {
+        let (mut wm, [_, b_window, _], [a, b, c]) = desk_with_windows_elsewhere(None);
+
+        wm.dispatch(BackendEvent::ActivateRequested(b_window));
+
+        assert_eq!(wm.current_workspace(), 1, "activation must show the window it focuses");
+        assert_eq!(wm.backend().published_workspaces.last(), Some(&(2, 1)));
+        assert!(frame_mapped(&wm, b), "the activated window must be mapped");
+        assert!(!frame_mapped(&wm, a), "the workspace left behind must be hidden");
+        assert_eq!(wm.focused_client(), Some(b));
+        assert!(wm.client(b).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert_eq!(wm.backend().focused_window, Some(b_window));
+        assert_eq!(
+            wm.backend().published_active_windows.last(),
+            Some(&Some(b_window)),
+            "the bar's active window must be the one on screen"
+        );
+        assert!(
+            wm.focus_history().ends_with(&[a, b]),
+            "the workspace switch must not slip C into the history between A and B: {:?} (A {a:?}, B {b:?}, C {c:?})",
+            wm.focus_history()
+        );
+        assert_focus_is_on_screen(&wm);
+    }
+
+    #[test]
+    fn activate_request_on_a_pinned_window_stays_on_the_current_workspace() {
+        let (mut wm, [_, b_window, _], [_, b, _]) = desk_with_windows_elsewhere(None);
+        assert!(wm.set_client_pinned(b, true));
+        assert!(frame_mapped(&wm, b), "a pinned window is on every workspace");
+
+        wm.dispatch(BackendEvent::ActivateRequested(b_window));
+
+        assert_eq!(wm.current_workspace(), 0, "a pinned window is already on screen");
+        assert_eq!(wm.focused_client(), Some(b));
+        assert_focus_is_on_screen(&wm);
+    }
+
+    #[test]
+    fn a_refused_activation_neither_switches_workspace_nor_moves_focus() {
+        let (mut wm, [_, b_window, _], [a, b, _]) =
+            desk_with_windows_elsewhere(Some(std::sync::Arc::new(NoActivate)));
+        assert!(wm.client(b).unwrap().flags.contains(ClientFlags::NO_ACTIVATE));
+        let publishes = wm.backend().published_workspaces.len();
+
+        wm.dispatch(BackendEvent::ActivateRequested(b_window));
+
+        assert_eq!(wm.current_workspace(), 0);
+        assert_eq!(wm.backend().published_workspaces.len(), publishes);
+        assert_eq!(wm.focused_client(), Some(a));
+        assert_focus_is_on_screen(&wm);
+    }
+
+    /// A miniaturized window restores onto the workspace the user is
+    /// looking at (see `deminiaturize_one`), so activation shows it
+    /// here rather than switching away to where it was miniaturized.
+    #[test]
+    fn activate_request_restores_a_miniaturized_window_from_another_workspace() {
+        let (mut wm, [_, b_window, _], [_, b, _]) = desk_with_windows_elsewhere(None);
+        wm.switch_workspace(1);
+        wm.miniaturize(b);
+        wm.switch_workspace(0);
+        assert_eq!(wm.client(b).unwrap().lifecycle, Lifecycle::Miniaturized);
+
+        wm.dispatch(BackendEvent::ActivateRequested(b_window));
+
+        let client = wm.client(b).unwrap();
+        assert_eq!(client.lifecycle, Lifecycle::Normal);
+        assert_eq!(client.workspace, 0, "restored onto the workspace on screen");
+        assert_eq!(wm.current_workspace(), 0);
+        assert!(frame_mapped(&wm, b), "the restored window must be shown");
+        assert_eq!(wm.focused_client(), Some(b));
+        assert_eq!(wm.backend().published_active_windows.last(), Some(&Some(b_window)));
+        assert_focus_is_on_screen(&wm);
+    }
+
+    /// The application switcher offers windows from every workspace;
+    /// outside Spaces nothing on its commit path used to switch, and
+    /// the focus guard would otherwise turn that commit into a no-op.
+    #[test]
+    fn committing_the_application_switcher_shows_a_window_on_another_workspace() {
+        let (mut wm, [a_window, b_window, c_window], _) = desk_with_windows_elsewhere(None);
+        for (window, class) in [(a_window, "editor"), (b_window, "browser"), (c_window, "terminal")] {
+            wm.backend_mut().window_classes.insert(window, class.into());
+        }
+        wm.cycle_applications(1);
+        let (entries, selected) = wm.cycle_state().unwrap();
+        let selected = entries[selected].0;
+        assert_eq!(wm.client(selected).unwrap().workspace, 1, "the switcher selected a window elsewhere");
+
+        wm.cycle_end(true);
+
+        assert_eq!(wm.current_workspace(), 1);
+        assert_eq!(wm.focused_client(), Some(selected));
+        assert!(frame_mapped(&wm, selected), "the committed window must be shown");
+        assert_focus_is_on_screen(&wm);
+    }
+
+    /// The guard itself: nothing may hand the keyboard to a window the
+    /// user cannot see, whether asked directly or through a path that
+    /// focuses as a side effect.
+    #[test]
+    fn focus_is_refused_for_a_window_that_is_not_on_screen() {
+        let (mut wm, [a_window, b_window, c_window], [a, b, c]) = desk_with_windows_elsewhere(None);
+        let published = wm.backend().published_active_windows.len();
+
+        wm.focus_client(b);
+        wm.focus_client_with(b, false);
+        // A client turning modal takes focus; one on a hidden workspace
+        // must not.
+        wm.backend_mut().set_window_modal(c_window, true);
+        wm.dispatch(BackendEvent::ModalChanged { window: c_window, modal: true });
+
+        assert_eq!(wm.focused_client(), Some(a));
+        assert_eq!(wm.backend().focused_window, Some(a_window));
+        assert!(!wm.client(b).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert!(!wm.client(c).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert_eq!(wm.backend().published_active_windows.len(), published, "no active-window change may be published");
+        assert_focus_is_on_screen(&wm);
+
+        // Miniaturized is off screen too.
+        wm.switch_workspace(1);
+        wm.focus_client(c);
+        wm.miniaturize(b);
+        wm.focus_client(b);
+        assert_eq!(wm.focused_client(), Some(c));
+        assert_eq!(wm.backend().published_active_windows.last(), Some(&Some(c_window)));
+        assert_ne!(wm.backend().focused_window, Some(b_window));
+        assert_focus_is_on_screen(&wm);
+    }
+
+    /// Behind a session lock an activation must not change the
+    /// workspace the user unlocks onto. It asks for attention instead,
+    /// and the same request after unlock behaves normally.
+    #[test]
+    fn an_activation_behind_the_session_lock_marks_the_window_urgent_instead() {
+        let (mut wm, [_, b_window, _], [a, b, _]) = desk_with_windows_elsewhere(None);
+        wm.backend_mut().session_locked = true;
+
+        wm.dispatch(BackendEvent::ActivateRequested(b_window));
+
+        assert_eq!(wm.current_workspace(), 0, "no workspace switch behind the lock");
+        assert_eq!(wm.focused_client(), Some(a));
+        assert!(wm.client(b).unwrap().flags.contains(ClientFlags::URGENT));
+        assert_focus_is_on_screen(&wm);
+
+        wm.backend_mut().session_locked = false;
+        wm.dispatch(BackendEvent::ActivateRequested(b_window));
+
+        assert_eq!(wm.current_workspace(), 1);
+        assert_eq!(wm.focused_client(), Some(b));
+        assert!(!wm.client(b).unwrap().flags.contains(ClientFlags::URGENT), "focus dismisses the urgency");
+        assert_focus_is_on_screen(&wm);
     }
 
     #[test]
