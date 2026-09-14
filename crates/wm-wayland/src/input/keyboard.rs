@@ -5,7 +5,7 @@
 //! unchanged configuration must not reset a client's held-key repeat state, and
 //! skipping a reload must not bypass Smithay's virtual-keyboard restoration.
 
-use smithay::input::keyboard::XkbConfig;
+use smithay::input::keyboard::{KeyboardHandle, KeyboardTarget, XkbConfig};
 
 use crate::state::Compositor;
 
@@ -63,6 +63,27 @@ pub(crate) struct ResolvedKeyboard {
     pub options: Option<String>,
     pub repeat_delay: i32,
     pub repeat_rate: i32,
+    pub numlock_by_default: bool,
+}
+
+/// Whether installing `next` locks Num Lock. Only a request the session
+/// has not yet acted on does: the first keymap, a keymap that replaces
+/// the old one (libxkbcommon starts it with nothing locked), or a reload
+/// that newly turns the setting on. Any other reload leaves Num Lock
+/// where the user put it.
+fn forces_num_lock(previous: Option<&ResolvedKeyboard>, next: &ResolvedKeyboard, keymap_changed: bool) -> bool {
+    next.numlock_by_default && (keymap_changed || previous.is_none_or(|previous| !previous.numlock_by_default))
+}
+
+/// Locks Num Lock on the seat keyboard, returning whether it changed.
+/// Delivery to a focused client is the caller's job.
+pub(crate) fn lock_num_lock<D: smithay::input::SeatHandler + 'static>(keyboard: &KeyboardHandle<D>) -> bool {
+    let mut modifiers = keyboard.modifier_state();
+    if modifiers.num_lock {
+        return false;
+    }
+    modifiers.num_lock = true;
+    keyboard.set_modifier_state(modifiers) != 0
 }
 
 impl ResolvedKeyboard {
@@ -119,6 +140,7 @@ fn resolve_with_env(
         // inside the same bounds as Hyprland configuration, including zero.
         repeat_delay: config.repeat_delay.unwrap_or(200).clamp(0, 5000),
         repeat_rate: config.repeat_rate.unwrap_or(25).clamp(0, 1000),
+        numlock_by_default: config.numlock_by_default.unwrap_or(false),
     }
 }
 
@@ -158,6 +180,16 @@ impl Compositor {
         if repeat_changed {
             keyboard.change_repeat_info(resolved.repeat_rate, resolved.repeat_delay);
         }
+        if forces_num_lock(self.keyboard_config.as_ref(), &resolved, keymap_changed) && lock_num_lock(&keyboard) {
+            // `set_modifier_state` updates the seat's xkb state but tells
+            // no client, and a focused one would otherwise keep reading
+            // its keypad as arrows until some other modifier changed.
+            if let Some(focus) = keyboard.current_focus() {
+                let seat = self.seat.clone();
+                let modifiers = keyboard.modifier_state();
+                focus.modifiers(&seat, self, modifiers, smithay::utils::SERIAL_COUNTER.next_serial());
+            }
+        }
         let backend = self.wm.backend_mut();
         backend.repeat_rate = resolved.repeat_rate as u32;
         backend.repeat_delay = std::time::Duration::from_millis(resolved.repeat_delay as u64);
@@ -174,6 +206,7 @@ impl Compositor {
             options = ?resolved.options,
             repeat_rate = resolved.repeat_rate,
             repeat_delay = resolved.repeat_delay,
+            numlock_by_default = resolved.numlock_by_default,
             keymap_changed,
             "reload applied a new keyboard configuration"
         );
@@ -257,5 +290,23 @@ mod tests {
         next = initial.clone();
         next.options = Some("compose:caps".into());
         assert!(!initial.same_keymap(&next));
+    }
+
+    #[test]
+    fn num_lock_is_forced_only_when_a_keymap_or_the_request_is_new() {
+        let off = resolve_with_env(&wm_core::KeyboardConfig::default(), |_| None);
+        let on = ResolvedKeyboard { numlock_by_default: true, ..off.clone() };
+        assert!(forces_num_lock(None, &on, true), "the first keymap install");
+        assert!(forces_num_lock(Some(&off), &on, false), "a reload that newly asks for it");
+        assert!(forces_num_lock(Some(&on), &on, true), "a replaced keymap starts with nothing locked");
+        let retimed = ResolvedKeyboard { repeat_rate: 40, ..on.clone() };
+        assert!(
+            !forces_num_lock(Some(&on), &retimed, false),
+            "an unrelated reload must not undo the user turning Num Lock off"
+        );
+        assert!(!forces_num_lock(Some(&on), &off, false), "removing the key does not unlock it either");
+        assert!(!forces_num_lock(None, &off, true));
+        let config = wm_core::KeyboardConfig { numlock_by_default: Some(true), ..Default::default() };
+        assert!(resolve_with_env(&config, |_| None).numlock_by_default);
     }
 }

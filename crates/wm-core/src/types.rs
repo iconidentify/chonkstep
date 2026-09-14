@@ -399,6 +399,10 @@ pub struct KeyboardConfig {
     pub repeat_rate: Option<i32>,
     /// Initial delay in milliseconds; zero requests no initial delay.
     pub repeat_delay: Option<i32>,
+    /// `numlock_by_default`: Num Lock is locked when a keymap is
+    /// installed, not on every reload. A user who turns it off keeps it
+    /// off until the keymap itself is replaced.
+    pub numlock_by_default: Option<bool>,
 }
 
 /// When the compositor hides the pointer on its own: while the user types
@@ -415,11 +419,13 @@ pub struct CursorBehaviour {
     pub inactive_timeout: Option<f64>,
 }
 
-/// Scroll settings for one class of pointing device.
+/// Scroll and button settings for one class of pointing device.
 ///
 /// Mice and touchpads are configured apart because a setting written for
 /// one is wrong for the other: a touchpad's natural scrolling inverts a
 /// wheel, and a factor tuned for finger travel slows a detent to a crawl.
+/// The same holds for how motion becomes scrolling and for middle-button
+/// emulation, which a trackball and a touchpad each want differently.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScrollClass {
     /// `None` leaves each device on its libinput default.
@@ -427,6 +433,82 @@ pub struct ScrollClass {
     /// Multiplies axis motion after libinput, so it also applies on the
     /// nested backend. `None` is 1.
     pub scroll_factor: Option<f64>,
+    /// `scroll_method`. `None` restores the device default.
+    pub scroll_method: Option<ScrollMethod>,
+    /// `scroll_button`: the evdev button `OnButtonDown` scrolls with.
+    /// `None` and zero both restore the device default.
+    pub scroll_button: Option<u32>,
+    /// Pressing left and right together clicks the middle button.
+    pub middle_button_emulation: Option<bool>,
+}
+
+/// The highest `scroll_button` either reader accepts: past every evdev
+/// mouse button code, and the bound Hyprland documents.
+pub const MAX_SCROLL_BUTTON: u32 = 300;
+
+/// When libinput turns pointer motion into scrolling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollMethod {
+    /// Two fingers down on a touchpad.
+    TwoFinger,
+    /// One finger along a touchpad's edge.
+    Edge,
+    /// Moving while `scroll_button` is held, as trackpoints and trackballs do.
+    OnButtonDown,
+    /// Never; motion stays motion. Wheels still scroll.
+    NoScroll,
+}
+
+impl ScrollMethod {
+    /// Hyprland's spelling, which chonkstep's own config shares.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "2fg" => Some(Self::TwoFinger),
+            "edge" => Some(Self::Edge),
+            "on_button_down" => Some(Self::OnButtonDown),
+            "no_scroll" => Some(Self::NoScroll),
+            _ => None,
+        }
+    }
+}
+
+/// Which buttons one-, two- and three-finger taps press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TapButtonMap {
+    /// `lrm`: left, right, middle.
+    LeftRightMiddle,
+    /// `lmr`: left, middle, right.
+    LeftMiddleRight,
+}
+
+impl TapButtonMap {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "lrm" => Some(Self::LeftRightMiddle),
+            "lmr" => Some(Self::LeftMiddleRight),
+            _ => None,
+        }
+    }
+}
+
+/// `drag_3fg`: whether several fingers moving together drag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MultiFingerDrag {
+    Disabled,
+    ThreeFingers,
+    FourFingers,
+}
+
+impl MultiFingerDrag {
+    /// Hyprland's number: 0 disables, 1 is three fingers, 2 is four.
+    pub fn from_number(number: i64) -> Option<Self> {
+        match number {
+            0 => Some(Self::Disabled),
+            1 => Some(Self::ThreeFingers),
+            2 => Some(Self::FourFingers),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -446,6 +528,16 @@ pub struct PointerConfig {
     pub clickfinger_behavior: Option<bool>,
     pub left_handed: Option<bool>,
     pub accel_profile: Option<String>,
+    // Tapping exists only on touchpads, so the four settings below reach
+    // no other device. Unlike the settings above, removing one restores
+    // each touchpad's libinput default.
+    /// `touchpad:tap-and-drag`: tap, then move, drags.
+    pub tap_and_drag: Option<bool>,
+    /// `touchpad:drag_lock`: lifting a finger mid-drag keeps the drag for
+    /// libinput's timeout. Its sticky mode is newer than the binding.
+    pub drag_lock: Option<bool>,
+    pub tap_button_map: Option<TapButtonMap>,
+    pub drag_3fg: Option<MultiFingerDrag>,
 }
 
 

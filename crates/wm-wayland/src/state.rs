@@ -3816,7 +3816,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         options: config.input.options.clone(),
         repeat_rate: config.input.repeat_rate,
         repeat_delay: config.input.repeat_delay,
+        numlock_by_default: config.input.numlock_by_default,
     });
+    let numlock_by_default = resolved.numlock_by_default;
     let repeat_delay = resolved.repeat_delay;
     let repeat_rate = resolved.repeat_rate;
     let keyboard_config = if let Err(error) = seat.add_keyboard(resolved.xkb_config(), repeat_delay, repeat_rate) {
@@ -3839,6 +3841,14 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     } else {
         Some(resolved)
     };
+    // The first keymap install, and so the one start-of-session moment
+    // `numlock_by_default` names. Nothing has keyboard focus yet: the
+    // first client to receive it reads the lock in its `enter`.
+    if numlock_by_default {
+        if let Some(keyboard) = seat.get_keyboard() {
+            crate::input::keyboard::lock_num_lock(&keyboard);
+        }
+    }
     seat.add_pointer();
     // wl_touch is a seat capability, not a per-device global. Keeping
     // it present lets hot-plugged touchscreens work without changing

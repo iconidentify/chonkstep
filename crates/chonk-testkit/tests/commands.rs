@@ -13,8 +13,9 @@
 //! once rather than never or twice. So each test here checks the same
 //! way: give the command a side effect on disk, then look for the file.
 //!
-//! No `foot` or other client is needed — the commands under test write
-//! files, which keeps what is being proved narrow.
+//! Only the Num Lock test starts a client (`foot`), because whether a
+//! keypad key is a digit is a client's reading of it. Every other command
+//! under test writes a file, which keeps what is being proved narrow.
 
 use std::path::Path;
 use std::time::Duration;
@@ -140,6 +141,63 @@ fn a_keypad_binding_fires_with_num_lock_off_and_on() {
     .expect("kp1 should run its command with Num Lock on");
 
     assert_eq!(writes, 2, "one physical press in each Num Lock state must run exactly once");
+}
+
+/// Omarchy ships `numlock_by_default = true`, so a numpad has to type
+/// digits from the first key of a session. The lock is applied as the
+/// keymap is installed and not on every reload: a user who turns Num Lock
+/// off keeps it off when the configuration is next re-read.
+#[test]
+#[ignore = "needs a live Wayland session to nest inside"]
+fn num_lock_starts_locked_by_default_and_a_reload_does_not_lock_it_again() {
+    let dir = session_dir("commands-numlock-default");
+    let typed = dir.join("typed");
+    let mut session = Session::boot(
+        "commands-numlock-default",
+        SessionOptions { config_extra: "[input]\nnumlock_by_default = true\n".into(), ..Default::default() },
+    )
+    .expect("session boots with Num Lock on by default");
+    // Each line the terminal reads lands in `typed`, so the file holds
+    // exactly what the client made of the keys.
+    session
+        .launch(
+            "foot",
+            &[
+                "--title=numlock-typing",
+                "--override=locked-title=yes",
+                "sh",
+                "-c",
+                r#"while IFS= read -r line; do printf '%s\n' "$line" >> "$1"; done"#,
+                "numlock-typing",
+                typed.to_str().expect("a UTF-8 scratch path"),
+            ],
+        )
+        .expect("foot launches");
+    let window = session.wait_for_window("numlock-typing").expect("the terminal maps");
+    session.door().click(f64::from(window.x + 40), f64::from(window.y + 40)).expect("focus the terminal");
+
+    session.door().tap_key(keys::KP1).expect("keypad 1 at session start");
+    session.door().tap_key(keys::ENTER).expect("end the line");
+    poll_until(SPAWNED, "the first typed line", || marker_lines(&dir, "typed", 1))
+        .expect("the terminal should read the first line");
+
+    session.door().tap_key(keys::NUMLOCK).expect("the user turns Num Lock off");
+    let reloads = session.log().matches("reload requested").count();
+    session.request_reload().expect("request a reload");
+    poll_until(SPAWNED, "the requested reload", || {
+        (session.log().matches("reload requested").count() > reloads).then_some(())
+    })
+    .expect("the compositor should reload");
+    session.door().barrier().expect("the reload has applied");
+    session.door().tap_key(keys::KP1).expect("keypad 1 after the reload");
+    session.door().tap_key(keys::ENTER).expect("end the line");
+    poll_until(SPAWNED, "the second typed line", || marker_lines(&dir, "typed", 2))
+        .expect("the terminal should read the second line");
+
+    let text = std::fs::read_to_string(&typed).expect("typed lines readable");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "1", "keypad 1 types a digit from the first key of the session: {lines:?}");
+    assert_ne!(lines[1], "1", "a reload must not lock Num Lock again after the user turned it off: {lines:?}");
 }
 
 /// A switch binding runs its command when its own device toggles, and

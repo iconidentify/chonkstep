@@ -174,10 +174,22 @@
 # disable_while_typing defaults to each device’s libinput preference. Active
 # pointer locks/confinement temporarily disable it so games can accept keyboard
 # and touchpad input together; releasing capture restores the preference.
+#
+# `scroll_method` ("2fg", "edge", "on_button_down" or "no_scroll"),
+# `scroll_button` (an evdev button code up to 300; 0 is the device's own) and
+# `middle_button_emulation` follow the same class split as `natural_scroll`.
+# The tapping settings reach touchpads only: `tap_and_drag`, `drag_lock`,
+# `tap_button_map` ("lrm" or "lmr") and `drag_3fg` (0 off, 1 three fingers,
+# 2 four fingers; needs libinput 1.27). Removing any of these restores each
+# device's default. `numlock_by_default` locks Num Lock when the keymap is
+# installed, not on every reload.
 #[input]
 #sensitivity = 0.0
 #accel_profile = "adaptive"
 #left_handed = false
+#numlock_by_default = true
+#scroll_method = "on_button_down"
+#scroll_button = 274
 #
 #[input.touchpad]
 #natural_scroll = true
@@ -185,6 +197,11 @@
 #disable_while_typing = true
 #clickfinger_behavior = true
 #scroll_factor = 0.4
+#middle_button_emulation = true
+#tap_and_drag = true
+#drag_lock = false
+#tap_button_map = "lrm"
+#drag_3fg = 1
 
 # When the pointer gets out of the way on its own. `hide_on_key_press` hides it
 # while you type into a window (a bare modifier or a key bound to a desktop

@@ -50,6 +50,7 @@
 //! - **No DRM leasing.** A crtc is never handed to another process,
 //!   so a VR headset cannot take one over.
 
+mod pointer;
 mod scroll;
 mod touchpad;
 
@@ -1418,6 +1419,9 @@ pub(crate) fn init(
     libinput
         .udev_assign_seat(&seat_name)
         .map_err(|()| format!("libinput could not take seat {seat_name}; no keyboard or mouse would work"))?;
+    // Before the first `DeviceAdded` asks for them, and never again.
+    let multi_finger_drag = pointer::resolve_drag_calls();
+    tracing::debug!(available = multi_finger_drag, "looked up libinput's multi-finger drag calls");
     loop_handle
         .insert_source(LibinputInputBackend::new(libinput.clone()), |event, _, comp: &mut Compositor| {
             note_libinput_device(comp, &event);
@@ -2366,6 +2370,7 @@ fn configure_libinput_device(device: &mut libinput_crate::Device, config: &wm_co
         Ok(scroll::Outcome::Unchanged | scroll::Outcome::Changed) => {}
         Err(error) => rejected.push(format!("natural_scroll: {error:?}")),
     }
+    pointer::configure(device, config, &mut rejected);
     if let Some(enabled) = config.tap_to_click {
         if device.config_tap_finger_count() == 0 {
             rejected.push("tap_to_click: unsupported".to_string());

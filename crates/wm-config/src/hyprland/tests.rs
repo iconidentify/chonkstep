@@ -634,6 +634,99 @@ o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
     }
 }
 
+/// Omarchy sets `numlock_by_default`, and its user template offers
+/// `drag_3fg` beside the other documented touchpad keys. Each arrives from
+/// either syntax as a typed value, and each keeps to its device class: a
+/// touchpad's middle-button emulation is not a trackball's, and the
+/// trackball's scroll method is not the touchpad's.
+#[test]
+fn the_documented_touchpad_and_pointer_keys_are_carried_by_class() {
+    let lua = scratch("input-extras-lua");
+    write(
+        &lua.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.config({ input = {
+  numlock_by_default = true, scroll_method = "on_button_down", scroll_button = 274,
+  touchpad = {
+    tap_and_drag = false, drag_lock = 1, middle_button_emulation = true,
+    tap_button_map = "lmr", drag_3fg = 2,
+  },
+} })
+"#,
+    );
+    let conf = scratch("input-extras-conf");
+    write(
+        &conf.join(".config/hypr/hyprland.conf"),
+        concat!(
+            "input {\n",
+            "    numlock_by_default = true\n",
+            "    scroll_method = on_button_down\n",
+            "    scroll_button = 274\n",
+            "    touchpad {\n",
+            "        tap-and-drag = false\n",
+            "        drag_lock = 1\n",
+            "        middle_button_emulation = true\n",
+            "        tap_button_map = lmr\n",
+            "        drag_3fg = 2\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    for root in [lua, conf] {
+        let reading = read(&Roots::under(&root));
+        let input = &reading.input;
+        assert!(!reading.skipped.iter().any(|skip| skip.kind == "input"), "{root:?}: {:?}", reading.skipped);
+        assert_eq!(input.numlock_by_default, Some(true), "{root:?}");
+        assert_eq!(input.scroll_method, Some(wm_core::ScrollMethod::OnButtonDown));
+        assert_eq!(input.scroll_button, Some(274));
+        assert_eq!(input.touchpad_scroll_method, None, "a mouse's scroll method must not reach touchpads");
+        assert_eq!(input.touchpad_middle_button_emulation, Some(true));
+        assert_eq!(input.middle_button_emulation, None, "a touchpad's middle-button emulation must not reach mice");
+        assert_eq!(input.tap_and_drag, Some(false));
+        assert_eq!(input.drag_lock, Some(true));
+        assert_eq!(input.tap_button_map, Some(wm_core::TapButtonMap::LeftMiddleRight));
+        assert_eq!(input.drag_3fg, Some(wm_core::MultiFingerDrag::FourFingers));
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+        assert_eq!(config.input.numlock_by_default, Some(true), "{root:?}");
+        assert_eq!(config.input.drag_3fg, Some(wm_core::MultiFingerDrag::FourFingers));
+    }
+}
+
+#[test]
+fn out_of_range_touchpad_and_pointer_values_are_refused_by_name() {
+    for (name, value, reason) in [
+        ("touchpad:drag_lock", "2", "sticky"),
+        ("touchpad:drag_lock", "maybe", "true or false"),
+        ("touchpad:drag_3fg", "3", "four fingers"),
+        ("touchpad:drag_3fg", "-1", "four fingers"),
+        ("touchpad:tap_button_map", "rml", "lrm or lmr"),
+        ("touchpad:tap-and-drag", "sometimes", "true or false"),
+        ("touchpad:middle_button_emulation", "2", "true or false"),
+        ("scroll_method", "natural", "on_button_down"),
+        ("scroll_button", "301", "0 through 300"),
+        ("scroll_button", "-1", "0 through 300"),
+        ("scroll_button", "BTN_MIDDLE", "0 through 300"),
+        ("numlock_by_default", "on-ish", "true or false"),
+    ] {
+        let mut reading = Reading::default();
+        input(&mut reading, name, value);
+        assert_eq!(reading.input, crate::InputConfig::default(), "{name} = {value}");
+        assert_eq!(reading.skipped.len(), 1, "{name} = {value}");
+        let skip = &reading.skipped[0];
+        assert_eq!(skip.what, format!("{name} = {value}"), "the refusal names the key and the value");
+        assert!(skip.why.contains(reason), "{name} = {value}: {}", skip.why);
+    }
+    let mut reading = Reading::default();
+    input(&mut reading, "scroll_button", "0");
+    input(&mut reading, "scroll_button", "300");
+    input(&mut reading, "touchpad:drag_3fg", "0");
+    input(&mut reading, "scroll_method", "NO_SCROLL");
+    assert_eq!(reading.input.scroll_button, Some(300));
+    assert_eq!(reading.input.drag_3fg, Some(wm_core::MultiFingerDrag::Disabled));
+    assert_eq!(reading.input.scroll_method, Some(wm_core::ScrollMethod::NoScroll));
+    assert!(reading.skipped.is_empty(), "{:?}", reading.skipped);
+}
+
 /// Omarchy's look turns on `cursor:hide_on_key_press`. The keys that
 /// decide when the pointer hides arrive from either syntax, the warp key
 /// Omarchy sets beside it is declined by name, and the rest of the
@@ -2987,7 +3080,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        172,
+        171,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -2997,7 +3090,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=179 commands=120 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=172"),
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=171"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

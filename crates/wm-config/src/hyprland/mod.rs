@@ -1143,6 +1143,47 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
                 why: "acceleration profile must be flat or adaptive".into(),
             }),
         },
+        "numlock_by_default" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.numlock_by_default = Some(enabled))
+        }
+        // Hyprland's conf spells this one with hyphens and its Lua table
+        // with underscores.
+        "touchpad:tap-and-drag" | "touchpad:tap_and_drag" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.tap_and_drag = Some(enabled))
+        }
+        "touchpad:middle_button_emulation" => parse_input_bool(reading, name, &value, |input, enabled| {
+            input.touchpad_middle_button_emulation = Some(enabled)
+        }),
+        "touchpad:drag_lock" if value.trim() == "2" => refuse_input(
+            reading,
+            name,
+            &value,
+            "drag_lock 2 is libinput's sticky drag lock, which is newer than the libinput binding chonkstep is built with; 1 keeps a drag for a timeout",
+        ),
+        "touchpad:drag_lock" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.drag_lock = Some(enabled))
+        }
+        "touchpad:tap_button_map" => match wm_core::TapButtonMap::from_name(&value) {
+            Some(map) => reading.input.tap_button_map = Some(map),
+            None => refuse_input(reading, name, &value, "tap button map must be lrm or lmr"),
+        },
+        "touchpad:drag_3fg" => match value.trim().parse::<i64>().ok().and_then(wm_core::MultiFingerDrag::from_number) {
+            Some(drag) => reading.input.drag_3fg = Some(drag),
+            None => refuse_input(reading, name, &value, "drag_3fg must be 0 (off), 1 (three fingers) or 2 (four fingers)"),
+        },
+        "scroll_method" => match wm_core::ScrollMethod::from_name(&value) {
+            Some(method) => reading.input.scroll_method = Some(method),
+            None => refuse_input(reading, name, &value, "scroll method must be 2fg, edge, on_button_down or no_scroll"),
+        },
+        "scroll_button" => match value.trim().parse::<u32>() {
+            Ok(button) if button <= wm_core::MAX_SCROLL_BUTTON => reading.input.scroll_button = Some(button),
+            _ => refuse_input(
+                reading,
+                name,
+                &value,
+                "scroll button must be an evdev button code from 0 through 300 (0 is the device default)",
+            ),
+        },
         "follow_mouse" => reading.skipped.push(Skipped {
             kind: "input".into(),
             what: format!("follow_mouse = {value}"),
@@ -1170,6 +1211,15 @@ fn parse_input_bool(
             why: "input toggle must be true or false".into(),
         }),
     }
+}
+
+/// One `input` value refused by name, with what the setting accepts.
+fn refuse_input(reading: &mut Reading, name: &str, value: &str, why: &str) {
+    reading.skipped.push(Skipped {
+        kind: "input".into(),
+        what: format!("{name} = {value}"),
+        why: why.into(),
+    });
 }
 
 /// A Hyprland boolean, in any of the spellings its config accepts.

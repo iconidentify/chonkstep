@@ -244,6 +244,22 @@ pub struct InputConfig {
     pub cursor: wm_core::CursorBehaviour,
     pub left_handed: Option<bool>,
     pub accel_profile: Option<String>,
+    /// Num Lock when a keymap is installed; see [`wm_core::KeyboardConfig`].
+    pub numlock_by_default: Option<bool>,
+    /// Mouse-class `scroll_method`, `scroll_button` and middle-button
+    /// emulation (`[input]`, `input:scroll_method`).
+    pub scroll_method: Option<wm_core::ScrollMethod>,
+    pub scroll_button: Option<u32>,
+    pub middle_button_emulation: Option<bool>,
+    /// The touchpad-class trio (`[input.touchpad]`, `input:touchpad:*`).
+    pub touchpad_scroll_method: Option<wm_core::ScrollMethod>,
+    pub touchpad_scroll_button: Option<u32>,
+    pub touchpad_middle_button_emulation: Option<bool>,
+    /// Tapping settings, which only touchpads have.
+    pub tap_and_drag: Option<bool>,
+    pub drag_lock: Option<bool>,
+    pub tap_button_map: Option<wm_core::TapButtonMap>,
+    pub drag_3fg: Option<wm_core::MultiFingerDrag>,
 }
 
 /// The system's own keyboard configuration: the `XKB*` keys of
@@ -1277,6 +1293,43 @@ fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &s
                     config.accel_profile = Some("adaptive".into())
                 }
                 _ => tracing::warn!(key = %setting, value = ?value, "config: input accel_profile must be \"flat\" or \"adaptive\", ignoring it"),
+            },
+            "numlock_by_default" if prefix.is_empty() => match value.as_bool() {
+                Some(enabled) => config.numlock_by_default = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "middle_button_emulation" => match value.as_bool() {
+                Some(enabled) if prefix == "touchpad" => config.touchpad_middle_button_emulation = Some(enabled),
+                Some(enabled) => config.middle_button_emulation = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "scroll_method" => match value.as_str().and_then(wm_core::ScrollMethod::from_name) {
+                Some(method) if prefix == "touchpad" => config.touchpad_scroll_method = Some(method),
+                Some(method) => config.scroll_method = Some(method),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input scroll_method must be \"2fg\", \"edge\", \"on_button_down\" or \"no_scroll\", ignoring it"),
+            },
+            "scroll_button" => match value.as_integer().and_then(|button| u32::try_from(button).ok()) {
+                Some(button) if button <= wm_core::MAX_SCROLL_BUTTON && prefix == "touchpad" => {
+                    config.touchpad_scroll_button = Some(button)
+                }
+                Some(button) if button <= wm_core::MAX_SCROLL_BUTTON => config.scroll_button = Some(button),
+                _ => tracing::warn!(key = %setting, value = ?value, "config: input scroll_button must be an evdev button code from 0 through 300, ignoring it"),
+            },
+            "tap_and_drag" => match value.as_bool() {
+                Some(enabled) => config.tap_and_drag = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "drag_lock" => match value.as_bool() {
+                Some(enabled) => config.drag_lock = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input drag_lock must be a boolean, ignoring it"),
+            },
+            "tap_button_map" => match value.as_str().and_then(wm_core::TapButtonMap::from_name) {
+                Some(map) => config.tap_button_map = Some(map),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input tap_button_map must be \"lrm\" or \"lmr\", ignoring it"),
+            },
+            "drag_3fg" => match value.as_integer().and_then(wm_core::MultiFingerDrag::from_number) {
+                Some(drag) => config.drag_3fg = Some(drag),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input drag_3fg must be 0, 1 (three fingers) or 2 (four fingers), ignoring it"),
             },
             "touchpad" if prefix.is_empty() => match value.as_table() {
                 Some(touchpad) => apply_input_table(config, touchpad, "touchpad"),
@@ -2462,6 +2515,50 @@ scroll_factor = 0.4
             config.provenance.get("input").map(String::as_str),
             Some("config file")
         );
+    }
+
+    #[test]
+    fn native_input_tables_carry_num_lock_tapping_and_the_scroll_method_by_class() {
+        let config = parse(
+            r#"
+[input]
+numlock_by_default = true
+scroll_method = "on_button_down"
+scroll_button = 274
+middle_button_emulation = true
+
+[input.touchpad]
+scroll_method = "edge"
+middle_button_emulation = false
+tap_and_drag = false
+drag_lock = true
+tap_button_map = "lmr"
+drag_3fg = 1
+numlock_by_default = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.input.numlock_by_default, Some(true), "Num Lock is a keyboard setting, not a touchpad's");
+        assert_eq!(config.input.scroll_method, Some(wm_core::ScrollMethod::OnButtonDown));
+        assert_eq!(config.input.scroll_button, Some(274));
+        assert_eq!(config.input.middle_button_emulation, Some(true));
+        assert_eq!(config.input.touchpad_scroll_method, Some(wm_core::ScrollMethod::Edge));
+        assert_eq!(config.input.touchpad_scroll_button, None);
+        assert_eq!(config.input.touchpad_middle_button_emulation, Some(false));
+        assert_eq!(config.input.tap_and_drag, Some(false));
+        assert_eq!(config.input.drag_lock, Some(true));
+        assert_eq!(config.input.tap_button_map, Some(wm_core::TapButtonMap::LeftMiddleRight));
+        assert_eq!(config.input.drag_3fg, Some(wm_core::MultiFingerDrag::ThreeFingers));
+
+        let refused = parse(
+            "[input]\nscroll_method = \"sideways\"\nscroll_button = 301\ndrag_3fg = 3\ntap_button_map = 1\ndrag_lock = 2\n",
+        )
+        .unwrap();
+        assert_eq!(refused.input.scroll_method, None);
+        assert_eq!(refused.input.scroll_button, None);
+        assert_eq!(refused.input.drag_3fg, None);
+        assert_eq!(refused.input.tap_button_map, None);
+        assert_eq!(refused.input.drag_lock, None);
     }
 
     #[test]

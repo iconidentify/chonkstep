@@ -355,8 +355,12 @@ non-empty `XKB_DEFAULT_*` variable wins, then a value the configuration
 spells out (an empty one included), then `/etc/vconsole.conf`, then
 libxkbcommon's default. Omarchy's `us,` prefix for a layout with no
 Latin letters is not applied. `repeat_rate` and `repeat_delay` configure
-both client key repeat and `binde` actions. These hardware-facing values
-transfer; whole-desktop interaction policy does not. In particular,
+both client key repeat and `binde` actions. `numlock_by_default`, which
+Omarchy turns on, locks Num Lock when the session installs its keymap, when
+a later edit replaces the keymap, and when a reload newly turns the setting
+on. Any other reload leaves Num Lock where you put it, so pressing the key
+to turn it off is not undone by the next edit to your configuration. These
+hardware-facing values transfer; whole-desktop interaction policy does not. In particular,
 Hyprland's `follow_mouse` is logged and ignored—even when it is `1` in
 Omarchy's shipped defaults—so a stock Omarchy install retains
 chonkstep's click-to-focus default. Set `focus_follows_mouse = true` in
@@ -372,6 +376,22 @@ Pointer configuration is also carried from both classic `input {}` /
 `accel_profile` configure libinput acceleration; `tap_to_click`,
 `disable_while_typing`, `clickfinger_behavior`, and `left_handed` are applied
 where the device advertises them.
+
+The touchpad's tapping settings reach touchpads only: `touchpad:tap-and-drag`
+(`tap_and_drag` in a Lua table), `touchpad:drag_lock` (0 or 1; libinput's
+sticky mode 2 is newer than the libinput binding chonkstep is built with and
+is refused by name), `touchpad:tap_button_map` (`lrm` or `lmr`), and
+`touchpad:drag_3fg` (0 off, 1 three fingers, 2 four fingers). Three-finger
+drag needs libinput 1.27 or later. On an older libinput the session still
+starts, and each touchpad that was asked for it logs
+`drag_3fg: requires a newer libinput`. `touchpad:middle_button_emulation`
+applies to touchpads, while `input:scroll_method` (`2fg`, `edge`,
+`on_button_down` or `no_scroll`) and `input:scroll_button` (an evdev button
+code, 0 through 300, 0 meaning the device's own) apply to every other
+device, which is where a trackpoint or trackball wants them. `[input]` and
+`[input.touchpad]` in `config.toml` take the same scroll and middle-button
+keys for each class. Removing any of these keys restores each device's
+libinput default. A value out of range is logged with its key and skipped.
 
 Scrolling is configured per device class. `input:natural_scroll` and
 `input:scroll_factor` (or `[input]` in `config.toml`) apply to mice,
@@ -615,7 +635,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=179 commands=120 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=172
+      float_rules=47 monitors=1 skipped=171
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

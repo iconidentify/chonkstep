@@ -316,9 +316,12 @@ fn unchanged_and_timing_only_reload_preserve_caps_lock_and_the_selected_layout()
     const ALT: u32 = 56;
     const SHIFT: u32 = 42;
     const CAPS_LOCK: u32 = 58;
+    const NUM_LOCK: u32 = 69;
+    // The real modifiers Lock and Mod2 in the probe's `mods_locked`.
+    const CAPS_MASK: u32 = 1 << 1;
+    const NUM_MASK: u32 = 1 << 4;
     let name = "keyboard-repeat-locked-state";
-    let config =
-        "input {\n kb_layout = us,de\n kb_options = grp:alt_shift_toggle\n repeat_rate = 30\n repeat_delay = 150\n}\n";
+    let config = "input {\n kb_layout = us,de\n kb_options = grp:alt_shift_toggle\n repeat_rate = 30\n repeat_delay = 150\n numlock_by_default = true\n}\n";
     let mut session = Session::boot(name, options(config)).unwrap();
     probe(&mut session);
     let modifiers = |session: &Session| -> Option<(u32, u32)> {
@@ -327,12 +330,21 @@ fn unchanged_and_timing_only_reload_preserve_caps_lock_and_the_selected_layout()
         let fields: Vec<u32> = line.split_whitespace().map(str::parse).collect::<Result<_, _>>().ok()?;
         Some((*fields.get(2)?, *fields.get(3)?))
     };
+    // `numlock_by_default` locked Num Lock as the keymap was installed.
+    // Turning it off is the user's choice, which neither reload below may
+    // undo by locking it again.
+    poll_until(EVENT, "Num Lock locked by numlock_by_default", || {
+        modifiers(&session).filter(|(locked, _)| locked & NUM_MASK != 0)
+    })
+    .unwrap();
+    session.door().tap_key(NUM_LOCK).unwrap();
     session.door().tap_key(CAPS_LOCK).unwrap();
     session.door().key(ALT, true).unwrap();
     session.door().tap_key(SHIFT).unwrap();
     session.door().key(ALT, false).unwrap();
-    let initial = poll_until(EVENT, "Caps Lock and the second configured layout", || {
-        modifiers(&session).filter(|(locked, group)| *locked != 0 && *group == 1)
+    let initial = poll_until(EVENT, "Caps Lock, Num Lock off, and the second configured layout", || {
+        modifiers(&session)
+            .filter(|(locked, group)| locked & CAPS_MASK != 0 && locked & NUM_MASK == 0 && *group == 1)
     })
     .unwrap();
 

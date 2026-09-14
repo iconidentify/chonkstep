@@ -51,7 +51,7 @@ pub use snap::snap_position;
 pub use spatial::{LayoutMode, LayoutStatistics, WindowPlacement};
 pub use types::{
     BackendEvent, ClientChrome, DecorationRules, DragHandle, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetState,
-    CursorBehaviour, PointerConfig, ScrollClass,
+    CursorBehaviour, MultiFingerDrag, PointerConfig, ScrollClass, ScrollMethod, TapButtonMap, MAX_SCROLL_BUTTON,
     NetStateAction, NetStateSnapshot, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };
 pub use wm_theme_api::{Point, Rect, Size};

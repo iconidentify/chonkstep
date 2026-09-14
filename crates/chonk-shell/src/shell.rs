@@ -1337,16 +1337,23 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             options: next.input.options.clone(),
             repeat_rate: next.input.repeat_rate,
             repeat_delay: next.input.repeat_delay,
+            numlock_by_default: next.input.numlock_by_default,
         });
         wm.backend_mut().set_pointer_config(wm_core::PointerConfig {
             sensitivity: next.input.sensitivity,
             pointer: wm_core::ScrollClass {
                 natural_scroll: next.input.natural_scroll,
                 scroll_factor: next.input.scroll_factor,
+                scroll_method: next.input.scroll_method,
+                scroll_button: next.input.scroll_button,
+                middle_button_emulation: next.input.middle_button_emulation,
             },
             touchpad: wm_core::ScrollClass {
                 natural_scroll: next.input.touchpad_natural_scroll,
                 scroll_factor: next.input.touchpad_scroll_factor,
+                scroll_method: next.input.touchpad_scroll_method,
+                scroll_button: next.input.touchpad_scroll_button,
+                middle_button_emulation: next.input.touchpad_middle_button_emulation,
             },
             cursor: next.input.cursor.clone(),
             tap_to_click: next.input.tap_to_click,
@@ -1354,6 +1361,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             clickfinger_behavior: next.input.clickfinger_behavior,
             left_handed: next.input.left_handed,
             accel_profile: next.input.accel_profile.clone(),
+            tap_and_drag: next.input.tap_and_drag,
+            drag_lock: next.input.drag_lock,
+            tap_button_map: next.input.tap_button_map,
+            drag_3fg: next.input.drag_3fg,
         });
         // ...and then re-ask for every window already on the desk. A
         // rule that only reached windows opened after it was written
