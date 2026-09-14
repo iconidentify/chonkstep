@@ -2140,9 +2140,15 @@ pub(crate) fn apply_connector_hotplug(
         comp.outputs.push(OutputEntry::new(setup, &comp.display_handle));
     }
 
-    // Re-read monitor rules on the rare structural change so a docked
-    // connector lands at its configured position/scale immediately.
-    let config = wm_config::load();
+    // Place the new connector set by the monitor rules the running
+    // session already holds, from its last successful load, reload or
+    // Hyprland-file follow. Re-reading the file here replaced every rule
+    // with the defaults whenever `config.toml` did not parse, and applied
+    // edits nobody had reloaded.
+    let (monitor_rules, scale_override) = {
+        let session = comp.shell.session_state();
+        (session.monitor_rules.clone(), session.scale_override.map(f64::from))
+    };
     let mut setups: Vec<OutputSetup> = comp
         .outputs
         .iter()
@@ -2161,8 +2167,7 @@ pub(crate) fn apply_connector_hotplug(
             vrr_enabled: entry.vrr_enabled,
         })
         .collect();
-    let scale_override = chonk_shell::startup::read_scale_override(config.scale).map(f64::from);
-    let scales = apply_monitor_rules(&mut setups, &config.monitor_rules, scale_override);
+    let scales = apply_monitor_rules(&mut setups, &monitor_rules, scale_override);
     crate::session::apply_output_setups(&mut comp.graphics, &mut setups);
     for ((entry, setup), scale) in comp.outputs.iter_mut().zip(setups).zip(scales) {
         entry.position = setup.position;
@@ -3416,6 +3421,18 @@ impl Compositor {
     /// ledger, wl_output metadata, fractional-scale preference and the
     /// primary output's compositor chrome are updated as one action so
     /// an `ok` response cannot describe only half a change.
+    /// Restyles the session for a new primary-output scale from the
+    /// running session's own configuration, never from the file. Shared by
+    /// `hyprctl keyword monitor`/`hl.monitor` and wlr-output-management,
+    /// so the two routes to one user action cannot disagree about where
+    /// the configuration lives: a `config.toml` that stopped parsing, or an
+    /// edit nobody reloaded, stays out of the live session until a reload.
+    pub(crate) fn apply_primary_ui_scale(&mut self, scale: f32) {
+        let mut state = self.shell.session_state().clone();
+        state.scale = scale;
+        self.shell.apply_session_state(&mut self.wm, state);
+    }
+
     pub(crate) fn set_output_scale(&mut self, name: &str, scale: f64) -> bool {
         if !scale.is_finite() || !(0.5..=4.0).contains(&scale) {
             return false;
@@ -3431,9 +3448,7 @@ impl Compositor {
         self.sync_monitor_scales();
         self.layer_shell.needs_arrange = true;
         if index == 0 {
-            let mut state = self.shell.session_state().clone();
-            state.scale = scale as f32;
-            self.shell.apply_session_state(&mut self.wm, state);
+            self.apply_primary_ui_scale(scale as f32);
         }
         self.wm.backend_mut().mark_damaged();
         true
@@ -4273,10 +4288,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // Reload is almost always the one a user wants: it re-reads the
         // config and moves the running session onto it, where a restart
         // here costs every client on the screen (there is no SaveSet to
-        // hand them forward — see `restart_in_place`). `wm_config::load`
-        // cannot fail, so the worst a mistyped edit does to a live
-        // session is move it to the defaults, which is exactly what a
-        // restart with the same file would have done.
+        // hand them forward — see `restart_in_place`). A file that no
+        // longer parses keeps the configuration already running and
+        // reports why through `configerrors`, so a mistyped edit costs the
+        // session nothing.
         if requests.reload {
             tracing::info!("reload requested — re-reading the config and applying it in place");
             // Everything this reload touches — decoration rules and

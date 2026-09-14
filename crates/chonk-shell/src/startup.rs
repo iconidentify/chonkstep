@@ -109,6 +109,14 @@ pub struct SessionState {
     /// UI scale factor; always finite and positive (see
     /// [`resolve_scale`]).
     pub scale: f32,
+    /// The explicit scale the last successful load or reload resolved
+    /// (`CHONKSTEP_SCALE`, then the config's `scale`), or `None` when
+    /// neither set one. Kept beside [`Self::scale`] because hotplug needs
+    /// the difference: an output with no monitor rule takes an explicit
+    /// scale when there is one and its own automatic scale when there is
+    /// not, and re-reading the file to find out would apply edits nobody
+    /// reloaded.
+    pub scale_override: Option<f32>,
     pub focus: FocusPolicy,
     /// Whether focus also raises. Only the focus a pointer crossing
     /// hands out consults this; a click raises regardless.
@@ -234,6 +242,7 @@ impl SessionState {
             decoration_style_policy: config.decoration_style,
             following: look.following,
             scale: read_scale_factor_with_default(config.scale, scale_default),
+            scale_override: read_scale_override(config.scale),
             focus: if read_focus_follows_mouse(config.focus_follows_mouse) {
                 FocusPolicy::FocusFollowsMouse
             } else {
@@ -918,6 +927,7 @@ mod tests {
             decoration_style_policy: wm_theme_api::DecorationStyle::Auto,
             following: None,
             scale: 2.0,
+            scale_override: None,
             focus: FocusPolicy::ClickToFocus,
             autoraise: true,
             placement: PlacementPolicy::Smart,
@@ -952,6 +962,22 @@ mod tests {
         // scaled theme would drift a little further from the original
         // every time the scale changed.
         assert_eq!(state.base_theme, base);
+    }
+
+    #[test]
+    fn a_resolved_session_remembers_which_scale_was_explicit() {
+        // Hotplug places outputs from this rather than re-reading the file.
+        let env = std::env::var("CHONKSTEP_SCALE").ok();
+        for (text, config_scale) in [("scale = 1.5", Some(1.5)), ("", None)] {
+            let config = wm_config::parse(text).unwrap();
+            assert_eq!(
+                SessionState::resolve(&config).scale_override,
+                resolve_scale_override(env.as_deref(), config_scale)
+            );
+        }
+        assert_eq!(resolve_scale_override(Some("2"), Some(1.5)), Some(2.0), "the environment wins");
+        assert_eq!(resolve_scale_override(None, Some(1.5)), Some(1.5));
+        assert_eq!(resolve_scale_override(None, None), None);
     }
 
     #[test]

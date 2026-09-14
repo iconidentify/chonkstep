@@ -213,15 +213,14 @@ impl OutputManagement {
 pub(crate) fn refresh(comp: &mut Compositor) {
     perform_pending_apply(comp);
     if let Some(scale) = comp.output_mgmt.pending_primary_scale.take() {
-        // The same call, and the same resolved state, as the reload
-        // path in `run` — with only the scale overridden, so a
-        // wlr-randr scale change and a config-file scale change are one
-        // code path from here down (theme restyle, cursor rebuild,
-        // XSETTINGS, output re-advertisement, per-surface rescale).
-        let mut state = chonk_shell::startup::SessionState::resolve(&wm_config::load());
-        state.scale = scale;
+        // The running session's own state with only the scale changed,
+        // the same restyle `hyprctl keyword monitor` performs, so both
+        // routes share one code path from here down (theme restyle,
+        // cursor rebuild, XSETTINGS, output re-advertisement, per-surface
+        // rescale). A scale change is not a reload: it neither reads the
+        // file nor announces `configreloaded`.
         tracing::info!(scale, "primary output scale set via wlr-output-management; restyling the session");
-        comp.shell.apply_session_state(&mut comp.wm, state);
+        comp.apply_primary_ui_scale(scale);
     }
     publish(comp);
 }
