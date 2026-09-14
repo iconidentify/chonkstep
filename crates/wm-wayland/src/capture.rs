@@ -68,14 +68,14 @@ use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{Bind, Color32F, Offscreen};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Buffer as BufferCoords, Physical, Point as SPoint};
+use smithay::utils::{Buffer as BufferCoords, Physical, Point as SPoint, Scale};
 use smithay::utils::{Size as SSize, Transform};
 
 use wm_core::WindowType;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use crate::renderer::{build_scene, SceneElement};
-use crate::state::{Compositor, Graphics, WlWindowId};
+use crate::state::{Compositor, Graphics, WaylandBackend, WindowRecord, WlWindowId};
 
 /// Longest edge of a stored snapshot when nobody has asked for more.
 /// These feed 56-112px icon tiles and switcher thumbnails, both of
@@ -245,11 +245,11 @@ pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
     let Compositor { wm, graphics, snapshot_downloads, .. } = comp;
     let renderer = graphics_renderer(graphics);
     let edge = boost.unwrap_or(MAX_SNAPSHOT_EDGE);
-    for (window, surface, size, factor) in due {
+    for (window, surface, size, offset, factor) in due {
         if snapshot_downloads.pending.len() == MAX_SNAPSHOTS_PER_FRAME { break; }
         if snapshot_downloads.pending.iter().any(|pending| pending.window == window) { continue; }
         if let Some(record) = wm.backend_mut().windows.get_mut(&window) { record.snapshot_attempted_at = Some(now); }
-        let Some(image) = snapshot_window(renderer, &surface, size, factor, edge) else { continue; };
+        let Some(image) = snapshot_window(renderer, &surface, size, offset, factor, edge) else { continue; };
         if let Some(record) = wm.backend_mut().windows.get_mut(&window) { record.snapshot_dirty = false; }
         snapshot_downloads.pending.push(SnapshotDownload { window, image, canceled: false, boosted: boost.is_some() });
         snapshot_downloads.poll_after = now + Duration::from_millis(4);
@@ -371,9 +371,10 @@ pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window:
 
 /// The windows whose snapshot is stale - at most
 /// [`MAX_SNAPSHOTS_PER_FRAME`] of them - with everything the capture
-/// needs pulled out of the ledger up front (an owned surface handle
-/// and a size) so the render loop needs no further look-ups while the
-/// renderer is borrowed. Which windows a truncated batch picks is
+/// needs pulled out of the ledger up front (an owned surface handle, a
+/// size, and where [`WaylandBackend::window_presentation`] anchors the
+/// surface relative to that size) so the render loop needs no further
+/// look-ups while the renderer is borrowed. Which windows a truncated batch picks is
 /// unspecified (hash order), and it does not need to be fair:
 /// everything left over is still due on the very next frame.
 ///
@@ -397,8 +398,12 @@ fn due_windows(
     comp: &Compositor,
     now: Instant,
     boost: Option<u32>,
-) -> Vec<(WlWindowId, WlSurface, Size, f64)> {
+) -> Vec<(WlWindowId, WlSurface, Size, Point, Scale<f64>)> {
     let backend = comp.wm.backend();
+    let planned = |window: &WlWindowId, record: &WindowRecord| {
+        let (offset, scale) = presentation_offset(backend, *window, record);
+        Some((*window, record.surface.wl_surface()?, record.content.size, offset, scale))
+    };
     let eligible = backend.windows.iter().filter(|(_, record)| {
         record.mapped && record.window_type != WindowType::Unmanaged && record.surface.alive()
     });
@@ -408,14 +413,7 @@ fn due_windows(
                 let stored = record.snapshot.as_ref().map(|s| Size::new(s.width, s.height));
                 needs_upgrade(stored, record.content.size, edge)
             })
-            .filter_map(|(window, record)| {
-                Some((
-                    *window,
-                    record.surface.wl_surface()?,
-                    record.content.size,
-                    backend.window_surface_scale(record),
-                ))
-            })
+            .filter_map(|(window, record)| planned(window, record))
             .collect();
     }
     eligible
@@ -425,14 +423,7 @@ fn due_windows(
                 || needs_downgrade(stored, record.content.size, MAX_SNAPSHOT_EDGE);
             snapshot_refresh_due(stale, record.snapshot_attempted_at, now)
         })
-        .filter_map(|(window, record)| {
-            Some((
-                *window,
-                record.surface.wl_surface()?,
-                record.content.size,
-                backend.window_surface_scale(record),
-            ))
-        })
+        .filter_map(|(window, record)| planned(window, record))
         .take(MAX_SNAPSHOTS_PER_FRAME)
         .collect()
 }
@@ -480,15 +471,18 @@ fn needs_downgrade(stored: Option<Size>, source: Size, edge: u32) -> bool {
 ///
 /// `source` is the ledger's content rect, so the capture covers what
 /// `wm-core` believes the window occupies rather than what the client
-/// most recently committed: a buffer that overruns the content rect
-/// (an unacknowledged resize) is cropped to it, and one that falls
-/// short leaves the remainder transparent. Both beat rescaling the
-/// thumbnail's aspect ratio out from under the shell mid-resize.
+/// most recently committed. The surface is anchored exactly where the
+/// on-screen scene draws it: `offset` places the client's buffer so its
+/// window-geometry origin, not its shadow margin, lands on the target's
+/// corner, and `factor` fits an unacknowledged resize's buffer into the
+/// content rect as the scene does. A buffer that falls short leaves the
+/// remainder transparent.
 fn snapshot_window(
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
     source: Size,
-    factor: f64,
+    offset: Point,
+    factor: Scale<f64>,
     max_edge: u32,
 ) -> Option<PendingImage> {
     let (size, scale) = snapshot_target(source, max_edge)?;
@@ -500,14 +494,15 @@ fn snapshot_window(
     // client's thumbnail filling the content-rect-shaped target
     // instead of its top-left quarter.
     let mut elements: Vec<SceneElement> = Vec::new();
-    crate::renderer::push_surface_tree(
+    crate::renderer::push_surface_tree_alpha(
         &mut elements,
         renderer,
         surface,
-        SPoint::<i32, Physical>::from((0, 0)),
+        scaled_offset(offset, scale),
         factor,
         scale,
         Kind::Unspecified,
+        1.0,
     );
     if elements.is_empty() {
         // Nothing importable yet (a mapped window whose first buffer
@@ -530,13 +525,14 @@ pub(crate) fn capture_window_full(
     window: WlWindowId,
     paint_cursor: bool,
 ) -> Option<PendingImage> {
-    let (surface, viewport, factor) = {
+    let (surface, viewport, offset, factor) = {
         let backend = comp.wm.backend();
         let record = backend.windows.get(&window)?;
         if !record.mapped || !record.surface.alive() {
             return None;
         }
-        (record.surface.wl_surface()?, record.content, backend.window_surface_scale(record))
+        let (offset, factor) = presentation_offset(backend, window, record);
+        (record.surface.wl_surface()?, record.content, offset, factor)
     };
     let Compositor { wm, graphics, pointer_location, cursor_status, cursors, .. } = comp;
     let renderer = graphics_renderer(graphics);
@@ -553,14 +549,15 @@ pub(crate) fn capture_window_full(
         );
     }
     let surface_element_start = elements.len();
-    crate::renderer::push_surface_tree(
+    crate::renderer::push_surface_tree_alpha(
         &mut elements,
         renderer,
         &surface,
-        SPoint::<i32, Physical>::from((0, 0)),
+        scaled_offset(offset, 1.0),
         factor,
         1.0,
         Kind::Unspecified,
+        1.0,
     );
     if elements.len() == surface_element_start {
         return None;
@@ -572,6 +569,25 @@ pub(crate) fn capture_window_full(
         1.0,
         Color32F::new(0.0, 0.0, 0.0, 0.0),
     )
+}
+
+/// Where the on-screen scene anchors `record`'s surface tree, relative to
+/// its content rect, and at what scale. The scene subtracts the client's
+/// window-geometry offset (its drawn shadow) and fits an unacknowledged
+/// resize's buffer into the content rect; a capture must do the same or
+/// it shows the shadow band on two sides and loses the opposite edges.
+fn presentation_offset(backend: &WaylandBackend, window: WlWindowId, record: &WindowRecord) -> (Point, Scale<f64>) {
+    let framed = backend.frames.values().any(|frame| frame.window == window && frame.mapped);
+    let (origin, scale) = backend.window_presentation(record, framed);
+    (Point::new(origin.x - record.content.pos.x, origin.y - record.content.pos.y), scale)
+}
+
+/// A content-relative physical offset at a capture's render scale.
+fn scaled_offset(offset: Point, render_scale: f64) -> SPoint<i32, Physical> {
+    SPoint::from((
+        (f64::from(offset.x) * render_scale).round() as i32,
+        (f64::from(offset.y) * render_scale).round() as i32,
+    ))
 }
 
 /// Draws `elements` into a fresh offscreen texture and downloads the
@@ -801,6 +817,19 @@ fn snapshot_target(source: Size, max_edge: u32) -> Option<(Size, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_capture_anchors_at_its_window_geometry_origin() {
+        // No declared geometry: the buffer corner is the content corner.
+        assert_eq!(scaled_offset(Point::new(0, 0), 1.0), SPoint::from((0, 0)));
+        // A 25x30 shadow margin moves the buffer up and left of the target,
+        // at full size and in a half-size preview (rounded away from zero).
+        assert_eq!(scaled_offset(Point::new(-25, -30), 1.0), SPoint::from((-25, -30)));
+        assert_eq!(scaled_offset(Point::new(-25, -30), 0.5), SPoint::from((-13, -15)));
+        // A fractional-scale session already carries the offset in physical
+        // pixels, so only the capture's own render scale applies.
+        assert_eq!(scaled_offset(Point::new(-38, -45), 0.25), SPoint::from((-10, -11)));
+    }
 
     // The GPU halves of this module (the offscreen render, the
     // readback, the PNG encode of a real frame) are not unit-testable
