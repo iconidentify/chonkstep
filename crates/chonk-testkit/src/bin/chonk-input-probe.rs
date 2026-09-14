@@ -7,6 +7,9 @@
 //! enter, the way GTK 4, Qt 6 and Chromium set their cursors, and reports
 //! `cursor-shape applied <serial>` once the compositor has processed it.
 //! `resizable` drops the fixed maximum size so the frame offers resize edges.
+//! `--kde-bind-only` binds `org_kde_kwin_server_decoration_manager` and
+//! creates no decoration object, which is how a GTK4 header-bar window says
+//! it draws its own titlebar.
 
 #[path = "chonk-input-probe/constraints.rs"]
 mod constraints;
@@ -56,6 +59,7 @@ use wayland_protocols::xdg::shell::client::{
     xdg_toplevel::XdgToplevel,
     xdg_wm_base::{self, XdgWmBase},
 };
+use wayland_protocols_misc::server_decoration::client::org_kde_kwin_server_decoration_manager::OrgKdeKwinServerDecorationManager;
 use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2::{self, ZwpInputMethodKeyboardGrabV2},
     zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
@@ -98,6 +102,9 @@ struct Probe {
     cursor_shape: Option<Shape>,
     cursor_shape_manager: Option<WpCursorShapeManagerV1>,
     cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    /// Held for the client's lifetime and never used: binding it is the
+    /// whole of what `--kde-bind-only` says.
+    kde_decoration_manager: Option<OrgKdeKwinServerDecorationManager>,
     position: (f64, f64),
     sequence: u64,
     answer_with_old_buffer: bool,
@@ -150,6 +157,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                 "wl_subcompositor" => probe.subcompositor = Some(registry.bind(name, 1, qh, ())),
                 "zwp_pointer_gestures_v1" => probe.gestures = Some(registry.bind(name, version.min(3), qh, ())),
                 "wl_shm" => probe.shm = Some(registry.bind(name, 1, qh, ())),
+                "org_kde_kwin_server_decoration_manager"
+                    if std::env::args().any(|arg| arg == "--kde-bind-only") =>
+                {
+                    probe.kde_decoration_manager = Some(registry.bind(name, 1, qh, ()))
+                }
                 "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, version.min(3), qh, ())),
                 "wl_seat" => {
                     probe.seat = Some(registry.bind(name, version.min(probe.seat_version), qh, ()))
@@ -663,7 +675,8 @@ ignore_events!(
     WpViewporter,
     WpViewport,
     WpCursorShapeManagerV1,
-    WpCursorShapeDeviceV1
+    WpCursorShapeDeviceV1,
+    OrgKdeKwinServerDecorationManager
 );
 
 /// The `--csd-input-region` buffer, drawn the way a toolkit with client-side

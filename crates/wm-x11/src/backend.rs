@@ -2566,13 +2566,16 @@ impl Backend for X11Backend {
         self.decoration_rules = rules;
     }
 
-    fn client_draws_own_chrome(&self, window: Self::WindowId) -> bool {
+    fn client_chrome(&self, window: Self::WindowId) -> wm_core::ClientChrome {
+        use wm_core::ClientChrome;
         // A `[decorations]` rule outranks the property, in both
         // directions — the same override the compositor honors, on the
         // same strings, so a config file written for one session means
-        // the same thing in the other.
+        // the same thing in the other. An X11 client never gets edge
+        // chrome: a Motif hint declining decoration asks for none at
+        // all, which is how games ask.
         if let Some(force_server_side) = self.decoration_rules.decision_for(self.window_identity(window).as_deref()) {
-            return !force_server_side;
+            return if force_server_side { ClientChrome::Full } else { ClientChrome::Bare };
         }
 
         // Read as `AnyPropertyType`, not `CARDINAL`: Motif types this
@@ -2591,13 +2594,13 @@ impl Backend for X11Backend {
         // so the same window could be framed in one session and not the
         // other.
         let Ok(cookie) = self.conn.get_property(false, window.0, self.motif_wm_hints, AtomEnum::ANY, 0, 5) else {
-            return false;
+            return ClientChrome::Full;
         };
         let Ok(reply) = cookie.reply() else {
-            return false;
+            return ClientChrome::Full;
         };
         let Some(values) = reply.value32() else {
-            return false;
+            return ClientChrome::Full;
         };
         // Every way of failing to get an answer — property absent,
         // unreadable, not 32-bit format, truncated before the
@@ -2607,7 +2610,11 @@ impl Backend for X11Backend {
         // decorated for forty years, so "we could not tell" must mean
         // "decorate it"; the only thing that may un-frame a window is
         // the client explicitly asking.
-        wm_core::hints_say_client_decorates(&values.collect::<Vec<u32>>())
+        if wm_core::hints_say_client_decorates(&values.collect::<Vec<u32>>()) {
+            ClientChrome::Bare
+        } else {
+            ClientChrome::Full
+        }
     }
 
     fn window_geometry(&self, window: Self::WindowId) -> Rect {

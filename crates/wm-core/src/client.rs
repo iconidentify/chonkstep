@@ -146,7 +146,7 @@ pub struct Client<B: Backend> {
     pub placement: crate::WindowPlacement,
     pub(crate) layout_excluded: bool,
     pub(crate) layout_restore_order: Option<usize>,
-    /// Who drew this window's chrome. `ClientDrawn` means `frame` stays
+    /// Who draws this window's chrome. `Bare` means `frame` stays
     /// `None` for the window's whole life (or until the client changes
     /// its mind — see `WindowManager::refresh_client_chrome`) while
     /// everything else about being managed still applies: it is
@@ -213,7 +213,7 @@ impl<B: Backend> Client<B> {
             layout_restore_order: None,
             // Overwritten at map time from the backend's answer; the
             // default is what keeps a client that says nothing framed.
-            chrome: ClientChrome::ServerDrawn,
+            chrome: ClientChrome::Full,
             layout: DecorationLayout::default(),
             lifecycle: Lifecycle::Normal,
             flags: ClientFlags::empty(),

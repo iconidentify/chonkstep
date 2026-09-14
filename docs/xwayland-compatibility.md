@@ -129,24 +129,30 @@ display and the session backend needs a DRM device and a seat).
 
 **Native Wayland clients, the current rule** (`crates/wm-wayland/src/decoration.rs`,
 whose module comment carries the measured per-client evidence). The
-decision is made from what the client says on one of two protocols. Over
-`zxdg_decoration_manager_v1` every negotiation is concluded server-side,
-as Hyprland concludes it: a client that asked for client-side hears
-`server_side` back and, by the protocol it chose, draws no titlebar of its
-own — which is what frames Omarchy's `decorations = "None"` terminals.
-Over KDE's `org_kde_kwin_server_decoration` — the only decoration
-protocol GTK3 and GTK4 speak — a client-side declaration is believed,
-which is what keeps a libadwaita headerbar from wearing a second titlebar;
-a GTK4 client that binds the manager and creates nothing for a toplevel is
-read the same way, because GTK4 only creates the object when it wants
-*our* chrome. A client that binds neither protocol (SDL2, GLFW without
-libdecor) is framed, deliberately against the xdg preamble's default,
-because those clients are silent for the opposite reason to GTK's.
-`[decorations] client_side` and `server_side` in the config correct either
-direction. Earlier revisions of this section listed GTK4 double titlebars
-as **Known wrong**; that history is under "GTK double titlebars" below.
-Applications that route through XWayland are unaffected by any of it,
-since they answer in Motif hints.
+decision is made from what the client says on one of two protocols, and it
+has three outcomes: the full frame, edge chrome (borders and resize
+handles around a titlebar the client draws itself), or nothing. Over
+`zxdg_decoration_manager_v1` every negotiation is concluded server-side:
+a client that asked for client-side hears `server_side` back and, by the
+protocol it chose, draws no titlebar of its own — which is what frames
+Omarchy's `decorations = "None"` terminals. Over KDE's
+`org_kde_kwin_server_decoration` — the only decoration protocol GTK3 and
+GTK4 speak — a client-side declaration is believed, and so is a GTK4
+client that binds the manager and creates nothing for a toplevel, because
+GTK4 only creates the object when it wants *our* chrome. Those windows get
+edge chrome, which keeps a libadwaita header bar from wearing a second
+titlebar and still leaves the window resizable: the toplevel is told it
+is tiled on all four edges, so GTK draws no shadow or resize band of its
+own and the frame's borders do the resizing. A client that binds neither
+protocol (SDL2, GLFW without libdecor) is framed, deliberately against the
+xdg preamble's default, because those clients are silent for the opposite
+reason to GTK's. `[decorations] client_side` and `server_side` in the
+config correct either direction, and `frame_client_drawn = true` gives the
+silent GTK4 case the full frame instead of edges. Earlier revisions of
+this section listed GTK4 double titlebars as **Known wrong**; that history
+is under "GTK double titlebars" below. Applications that route through
+XWayland answer in Motif hints instead, and one that declines decoration
+there gets no chrome at all.
 
 ## UI scale and HiDPI
 
@@ -456,12 +462,17 @@ system and cannot tell a libadwaita headerbar from an SDL2 window that
 draws nothing.
 
 The desktop now advertises that second protocol with `default_mode =
-Server`, as KWin, Sway, labwc and Hyprland all do. GTK reads it through
-`gdk_wayland_display_prefers_ssd()`, and the split falls where it
-should: a GTK application with no header bar of its own (LibreOffice)
-stops drawing a titlebar and takes ours, while one whose header bar is
-part of its interface (Nautilus, anything libadwaita) keeps it and goes
-unframed. See `crates/wm-wayland/src/decoration.rs`.
+Server`. GTK reads it through `gdk_wayland_display_prefers_ssd()`, and
+the split falls where it should: a GTK application with no header bar of
+its own (LibreOffice) stops drawing a titlebar and takes ours, while one
+whose header bar is part of its interface (Nautilus, anything libadwaita)
+keeps it and wears edge chrome around it — this desktop's borders and
+resize handles, and no second titlebar. Going unframed, as such a window
+once did, left it with no usable resize edge: GTK's resize band sits in an
+invisible shadow and disappears once the window is tiled. Its header bar
+shows minimize and maximize because the session publishes GNOME's
+`button-layout` as `appmenu:minimize,maximize,close` wherever the stock
+`appmenu:close` is still in place. See `crates/wm-wayland/src/decoration.rs`.
 
 **Drag icons.** Not drawn during a native Wayland drag.
 

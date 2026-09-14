@@ -3190,6 +3190,13 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
             if let Some(hit) = content_hit(backend, Some(*frame), record.window, position) {
                 return hit;
             }
+            // Declined by an edge-framed client's own input region: a hole
+            // in the client, not a piece of our chrome, so the point falls
+            // through to whatever is behind, as it would for a frameless
+            // client.
+            if window.is_some_and(|window| window.chrome == wm_core::ClientChrome::Edges) {
+                continue;
+            }
         }
         return Hit::FrameChrome { frame: *frame, local: local_to(at, record.geometry.pos) };
     }
@@ -3432,8 +3439,11 @@ enum Hit {
 /// Resolves the exact wl_surface (subsurfaces included) to hand the seat.
 /// A frameless native window owns only points accepted by its surface tree's
 /// input regions, including resize handles outside its window geometry.
-/// Framed and X11 callers already bound the point to their content rectangle;
-/// those retain the root fallback during a buffer/configure size mismatch.
+/// An edge-framed native window is held to its input regions the same way,
+/// inside the content rectangle its caller already bounded: its client drew
+/// the titlebar there, and a hole it declared must not be filled in.
+/// Other framed and X11 callers retain the root fallback during a
+/// buffer/configure size mismatch.
 fn content_hit(
     backend: &WaylandBackend,
     frame: Option<WlFrameId>,
@@ -3459,7 +3469,8 @@ fn content_hit(
                 Some((surface, found)) => (surface, found.to_f64()),
                 // Do not undo an input-region rejection by focusing the
                 // root anyway: that steals clicks through shadows/holes.
-                None if frame.is_none() && matches!(&record.surface, ManagedSurface::Xdg(_)) => return None,
+                None if matches!(&record.surface, ManagedSurface::Xdg(_))
+                    && (frame.is_none() || record.chrome == wm_core::ClientChrome::Edges) => return None,
                 None => (root.clone(), anchor),
             };
             let (surface, origin) = SurfaceTarget::from_tree(surface, anchor, found, scale, position);

@@ -271,6 +271,82 @@ impl WaylandBackend {
     }
 }
 
+impl WaylandBackend {
+    /// Whether this toplevel should be told it is tiled on all four edges.
+    ///
+    /// Two reasons. A layout mode that clips a window into a tile says
+    /// so, because tiling is what it did. And a client that draws its own
+    /// chrome inside a frame of ours — edge chrome, or full chrome over a
+    /// header bar by `[decorations]` choice — has to stop drawing the
+    /// shadow and resize band it would otherwise put outside its window
+    /// geometry: those pixels would lie over this desktop's borders, and
+    /// its handles would sit where nothing can reach them. A header-bar
+    /// toolkit keys both off the tiled states, and draws square corners
+    /// within its geometry once they are set.
+    fn wants_tiled_states(&self, record: &crate::state::WindowRecord) -> bool {
+        use crate::decoration::DecorationEvidence;
+        record.layout_tiled
+            || match record.chrome {
+                wm_core::ClientChrome::Edges => true,
+                wm_core::ClientChrome::Full => matches!(
+                    self.decoration_evidence(record),
+                    DecorationEvidence::DeclaresClientSide | DecorationEvidence::ClientSideBySilence
+                ),
+                wm_core::ClientChrome::Bare => false,
+            }
+    }
+
+    /// Writes [`Self::wants_tiled_states`] onto an xdg toplevel's pending
+    /// state, answering whether that changed anything.
+    fn stage_tiled_states(&mut self, window: WlWindowId) -> bool {
+        let Some(record) = self.windows.get(&window) else {
+            return false;
+        };
+        let ManagedSurface::Xdg(surface) = &record.surface else {
+            return false;
+        };
+        let tiled = self.wants_tiled_states(record);
+        let mut changed = false;
+        surface.with_pending_state(|state| {
+            for edge in [XdgToplevelState::TiledLeft, XdgToplevelState::TiledRight,
+                XdgToplevelState::TiledTop, XdgToplevelState::TiledBottom] {
+                changed |= state.states.contains(edge) != tiled;
+                if tiled { state.states.set(edge); } else { state.states.unset(edge); }
+            }
+        });
+        changed
+    }
+
+    /// Restates the tiled states after either reason for them changed,
+    /// booking a configure when the client has something new to hear.
+    pub(crate) fn sync_tiled_states(&mut self, window: WlWindowId) {
+        if self.stage_tiled_states(window) {
+            self.note_configure(window);
+        }
+    }
+
+    /// Anticipates, before a toplevel's initial configure, the chrome
+    /// `wm-core` will give it at map, so a header-bar client hears it is
+    /// tiled in its very first configure and its first buffer already
+    /// has no shadow around our borders. `wm-core`'s own decision at map
+    /// (`set_window_chrome`) is authoritative, and corrects this if the
+    /// client negotiates differently in between.
+    pub(crate) fn anticipate_client_chrome(&mut self, window: WlWindowId) {
+        let Some(record) = self.windows.get(&window) else {
+            return;
+        };
+        if !matches!(record.surface, ManagedSurface::Xdg(_)) {
+            return;
+        }
+        let chrome = self.xdg_client_chrome(record);
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.chrome = chrome;
+        }
+        // No configure is booked: the initial one is about to carry it.
+        self.stage_tiled_states(window);
+    }
+}
+
 impl Backend for WaylandBackend {
     fn supports_mac_interaction(&self) -> bool { true }
     fn session_locked(&self) -> bool { self.locked }
@@ -289,17 +365,10 @@ impl Backend for WaylandBackend {
         clip: Option<Rect>,
         animate: bool,
     ) {
-        let mut changed = false;
-        if let Some(ManagedSurface::Xdg(surface)) = self.windows.get(&window).map(|r| &r.surface) {
-            surface.with_pending_state(|state| {
-                for edge in [XdgToplevelState::TiledLeft, XdgToplevelState::TiledRight,
-                    XdgToplevelState::TiledTop, XdgToplevelState::TiledBottom] {
-                    changed |= state.states.contains(edge) != clip.is_some();
-                    if clip.is_some() { state.states.set(edge); } else { state.states.unset(edge); }
-                }
-            });
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.layout_tiled = clip.is_some();
         }
-        if changed { self.note_configure(window); }
+        self.sync_tiled_states(window);
         crate::layout_scene::present(self, window, frame, source, destination, clip, animate);
     }
     fn show_layout_mode(&mut self, _mode: wm_core::LayoutMode, label: DecorationBuffer) {
@@ -2067,9 +2136,16 @@ impl Backend for WaylandBackend {
         self.decoration_rules = rules;
     }
 
-    fn client_draws_own_chrome(&self, window: Self::WindowId) -> bool {
+    fn set_window_chrome(&mut self, window: Self::WindowId, chrome: wm_core::ClientChrome) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.chrome = chrome;
+        }
+        self.sync_tiled_states(window);
+    }
+
+    fn client_chrome(&self, window: Self::WindowId) -> wm_core::ClientChrome {
         let Some(record) = self.windows.get(&window) else {
-            return false;
+            return wm_core::ClientChrome::Full;
         };
         match &record.surface {
             // `_MOTIF_WM_HINTS` with the decorations bit present and
@@ -2098,7 +2174,7 @@ impl Backend for WaylandBackend {
                 // from every XWayland window on the desk.
                 let identity = record.app_id.clone().or_else(|| x11_identity(surface));
                 if let Some(force_server_side) = self.decoration_rules.decision_for(identity.as_deref()) {
-                    return !force_server_side;
+                    return if force_server_side { wm_core::ClientChrome::Full } else { wm_core::ClientChrome::Bare };
                 }
                 // `_MOTIF_WM_HINTS` with the decorations bit present and
                 // clear: the client has *said* it draws its own
@@ -2118,14 +2194,17 @@ impl Backend for WaylandBackend {
                 // and resize bars — unnoticed for days because
                 // LibreOffice and Edge run native Wayland and never
                 // take this arm.
-                surface.is_decorated()
+                //
+                // Never edge chrome: a Motif hint declining decoration
+                // asks for none at all, which is how games ask.
+                if surface.is_decorated() { wm_core::ClientChrome::Bare } else { wm_core::ClientChrome::Full }
             }
             // Everything a native Wayland toplevel has told us, on
             // either decoration protocol, with a `[decorations]`
             // override above it. The reasoning — including why silence
             // is framed and why the KDE protocol has to be advertised
             // at all — lives in `crate::decoration`.
-            ManagedSurface::Xdg(_) => self.xdg_client_draws_own_chrome(record),
+            ManagedSurface::Xdg(_) => self.xdg_client_chrome(record),
         }
     }
 

@@ -358,6 +358,48 @@ impl ThemeEngine for RasterThemeEngine {
         if matches!(self.style, FrameStyle::Modern) { modern::layout(theme, request) } else { windowmaker::layout_decoration(theme, request) }
     }
 
+    fn edges_layout_at(&self, request: &DecorationRequest, scale: f32) -> DecorationLayout {
+        if matches!(self.style, FrameStyle::System7) {
+            if same_scale(scale, self.base_scale) {
+                return system7::layout_edges(request, self.system7_metrics);
+            }
+            let key = normalized_scale(scale).to_bits();
+            let mut metrics = self.scaled_system7_metrics.borrow_mut();
+            return system7::layout_edges(request, *metrics.entry(key).or_insert_with(|| system7::Metrics::new(scale)));
+        }
+        let edges = |theme: &crate::model::Theme| if matches!(self.style, FrameStyle::Modern) {
+            modern::layout_edges(theme, request)
+        } else {
+            windowmaker::layout_edges(theme, request)
+        };
+        if same_scale(scale, self.base_scale) {
+            return edges(&self.theme);
+        }
+        let key = normalized_scale(scale).to_bits();
+        let mut themes = self.scaled_themes.borrow_mut();
+        let theme = themes.entry(key).or_insert_with(|| self.theme.scaled(scale / self.base_scale));
+        edges(&*theme)
+    }
+
+    fn render_edges_at(&self, request: &DecorationRequest, layout: &DecorationLayout, scale: f32) -> DecorationSurface {
+        let same = same_scale(scale, self.base_scale);
+        if matches!(self.style, FrameStyle::System7) {
+            return system7::render_edges(self.system7_roles, if same { self.base_scale } else { normalized_scale(scale) }, layout);
+        }
+        let paint = |theme: &crate::model::Theme| if matches!(self.style, FrameStyle::Modern) {
+            modern::render_edges(theme, request, layout)
+        } else {
+            windowmaker::render_edges(theme, request, layout)
+        };
+        if same {
+            return paint(&self.theme);
+        }
+        let key = normalized_scale(scale).to_bits();
+        let mut themes = self.scaled_themes.borrow_mut();
+        let theme = themes.entry(key).or_insert_with(|| self.theme.scaled(scale / self.base_scale));
+        paint(&*theme)
+    }
+
     fn render_surface(&self, request: &DecorationRequest, layout: &DecorationLayout) -> DecorationSurface {
         match self.style { FrameStyle::WindowMaker => windowmaker::render_sparse_decoration(
             &self.theme,

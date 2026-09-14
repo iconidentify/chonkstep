@@ -47,18 +47,30 @@ impl Metrics {
 fn rounded(value: u32, scale: f32) -> u32 { (value as f32 * scale + 0.5).floor() as u32 }
 
 pub(crate) fn layout(request: &DecorationRequest, m: Metrics) -> DecorationLayout {
+    frame_layout(request, m, m.title)
+}
+
+/// The edge frame for a client that draws its own titlebar: the same ring,
+/// outline, drop shadow and L-shaped grips as [`layout`], with no title bar
+/// and so no close or zoom box.
+pub(crate) fn layout_edges(request: &DecorationRequest, m: Metrics) -> DecorationLayout {
+    frame_layout(request, m, 0)
+}
+
+fn frame_layout(request: &DecorationRequest, m: Metrics, title: u32) -> DecorationLayout {
     let content = wm_theme_api::clamp_client_size(request.content_size,
         Size::new(wm_theme_api::MAX_CLIENT_WINDOW_DIMENSION, wm_theme_api::MAX_CLIENT_WINDOW_DIMENSION));
     let margin = if request.resizable { m.margin } else { 0 };
     let size = Size::new(content.w.saturating_add(m.line * 3 + margin * 2),
-        content.h.saturating_add(m.title + m.line * 3 + margin * 2));
+        content.h.saturating_add(title + m.line * 3 + margin * 2));
     let mut result = DecorationLayout {
         frame_size: size,
         input_margin: margin,
-        client_offset: Point::new((margin + m.line) as i32, (margin + m.line + m.title) as i32),
-        titlebar_height: m.title,
-        shaded_frame_height: m.title + m.line * 2 + margin * 2,
-        button_hitboxes: Vec::with_capacity(2),
+        client_offset: Point::new((margin + m.line) as i32, (margin + m.line + title) as i32),
+        titlebar_height: title,
+        // Without a title bar there is nothing to roll up into.
+        shaded_frame_height: if title == 0 { size.h } else { title + m.line * 2 + margin * 2 },
+        button_hitboxes: Vec::with_capacity(if title == 0 { 0 } else { 2 }),
         resize_hitboxes: Vec::with_capacity(if request.resizable { 12 } else { 0 }),
     };
     let box_size = m.r(11).max(1);
@@ -67,7 +79,7 @@ pub(crate) fn layout(request: &DecorationRequest, m: Metrics) -> DecorationLayou
     let zoom_x = visible_w.saturating_sub(m.line + m.r(20));
     // Keep every hitbox inside the visible bar, and never overlap controls on
     // a client whose constraints allow a narrower-than-classic frame.
-    if close_x + box_size + m.line < visible_w {
+    if title > 0 && close_x + box_size + m.line < visible_w {
         result.button_hitboxes.push((ButtonKind::Close, Rect::new(
             Point::new((margin + close_x) as i32, (margin + m.r(4)) as i32), Size::new(box_size, box_size))));
         if request.resizable && zoom_x >= close_x + box_size + m.r(2) {
@@ -148,6 +160,36 @@ pub(crate) fn render_sparse(
         parts.push(DecorationPart { offset: Point::new(visual.pos.x, visual.pos.y + (visual.size.h - bottom_h) as i32), buffer: bottom });
     }
     let content_h = visual.size.h.saturating_sub(top_h + bottom_h);
+    if content_h > 0 {
+        for (x, width) in [(0, m.line), (w.saturating_sub(m.line * 2), m.line * 2)] {
+            parts.push(DecorationPart { offset: Point::new(visual.pos.x + x as i32, visual.pos.y + top_h as i32),
+                buffer: filled(width.min(w), content_h, roles.ink) });
+        }
+    }
+    DecorationSurface { frame_size: layout.frame_size, parts, solids: Vec::new(), shadow: None, shape: None }
+}
+
+/// Paints [`layout_edges`]: the one-line outline and its offset drop shadow,
+/// with no title bar. The shadow column still starts one outline below the
+/// frame's top edge, exactly as it does under a title bar.
+pub(crate) fn render_edges(roles: Roles, scale: f32, layout: &DecorationLayout) -> DecorationSurface {
+    let m = Metrics::new(scale);
+    let visual = layout.visual_bounds();
+    let (w, h) = (visual.size.w, visual.size.h);
+    let top_h = m.line.min(h);
+    let bottom_h = (m.line * 2).min(h.saturating_sub(top_h));
+    let mut parts = Vec::with_capacity(4);
+    if w > 0 && top_h > 0 {
+        let mut top = filled(w, top_h, roles.ink);
+        fill(&mut top, w.saturating_sub(m.line), 0, m.line.min(w), top_h, [0; 4]);
+        parts.push(DecorationPart { offset: visual.pos, buffer: top });
+    }
+    if w > 0 && bottom_h > 0 {
+        let mut bottom = filled(w, bottom_h, roles.ink);
+        fill(&mut bottom, 0, bottom_h.saturating_sub(m.line), m.line.min(w), m.line.min(bottom_h), [0; 4]);
+        parts.push(DecorationPart { offset: Point::new(visual.pos.x, visual.pos.y + (h - bottom_h) as i32), buffer: bottom });
+    }
+    let content_h = h.saturating_sub(top_h + bottom_h);
     if content_h > 0 {
         for (x, width) in [(0, m.line), (w.saturating_sub(m.line * 2), m.line * 2)] {
             parts.push(DecorationPart { offset: Point::new(visual.pos.x + x as i32, visual.pos.y + top_h as i32),

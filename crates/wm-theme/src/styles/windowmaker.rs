@@ -129,6 +129,75 @@ pub(crate) fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> D
     }
 }
 
+/// The edge frame for a client that draws its own titlebar: this recipe's
+/// border on all four sides and its resize bar along the bottom, with no
+/// titlebar and no buttons.
+///
+/// A one-pixel border is no target for a pointer, and the titlebar that
+/// catches a near miss on a full frame is not there, so the handles reach
+/// past the visible border through a transparent input margin: three
+/// tenths of the titlebar height, six pixels at the classic twenty, and
+/// scaled with it like every other grip in this recipe.
+pub(crate) fn layout_edges(theme: &Theme, request: &DecorationRequest) -> DecorationLayout {
+    let titlebar_height = theme.titlebar.height as u32;
+    let border = theme.border.width as u32;
+    let resize_bar_height = if request.resizable { theme.resize_bar.height as u32 } else { 0 };
+    let margin = if request.resizable { (titlebar_height * 3 / 10).max(3) } else { 0 };
+    let inset = margin + border;
+    let frame_size = Size::new(
+        request.content_size.w + inset * 2,
+        request.content_size.h + inset * 2 + resize_bar_height,
+    );
+    let resize_hitboxes = if request.resizable {
+        let corner = (theme.resize_bar.corner_width as u32).max(inset + resize_bar_height);
+        super::edge_ring(frame_size, inset, inset, inset + resize_bar_height, inset, corner)
+    } else {
+        Vec::new()
+    };
+    DecorationLayout {
+        input_margin: margin,
+        frame_size,
+        client_offset: Point::new(inset as i32, inset as i32),
+        titlebar_height: 0,
+        button_hitboxes: Vec::new(),
+        resize_hitboxes,
+        shaded_frame_height: frame_size.h,
+    }
+}
+
+/// Paints [`layout_edges`]: solid borders on three sides, and the same
+/// bottom band, resize bar and all, that a full frame wears.
+pub(crate) fn render_edges(theme: &Theme, request: &DecorationRequest, layout: &DecorationLayout) -> DecorationSurface {
+    let visual = layout.visual_bounds();
+    let (w, h) = (visual.size.w, visual.size.h);
+    let border = (theme.border.width as u32).min(w / 2);
+    let color = if request.focused { theme.border.color_active } else { theme.border.color_inactive };
+    let rgb = [color.r, color.g, color.b];
+    let top_h = ((layout.client_offset.y - visual.pos.y).max(0) as u32).min(h);
+    let bottom_h = h.saturating_sub(top_h).saturating_sub(request.content_size.h);
+    let side_h = h.saturating_sub(top_h + bottom_h);
+    let mut solids = Vec::with_capacity(3);
+    if w > 0 && top_h > 0 {
+        solids.push(wm_theme_api::DecorationSolid { rect: Rect::new(visual.pos, Size::new(w, top_h)), rgb });
+    }
+    if border > 0 && side_h > 0 {
+        for x in [visual.pos.x, visual.pos.x + (w - border) as i32] {
+            solids.push(wm_theme_api::DecorationSolid {
+                rect: Rect::new(Point::new(x, visual.pos.y + top_h as i32), Size::new(border, side_h)),
+                rgb,
+            });
+        }
+    }
+    let mut parts = Vec::with_capacity(1);
+    if w > 0 && bottom_h > 0 {
+        parts.push(DecorationPart {
+            offset: Point::new(visual.pos.x, visual.pos.y + (h - bottom_h) as i32),
+            buffer: render_bottom(theme, request, w, bottom_h),
+        });
+    }
+    DecorationSurface { frame_size: layout.frame_size, parts, solids, shadow: None, shape: None }
+}
+
 /// Paints only the four visible chrome bands. The frame interior is filled by
 /// each backend with a cheap solid element/window background, preserving the
 /// old mid-resize gap behavior without retaining a client-sized RGBA image.

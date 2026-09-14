@@ -645,11 +645,12 @@ pub struct Config {
     /// of the display it lands on. Not per-theme on purpose: a theme
     /// restyles the terminal's colors, never its metrics.
     pub terminal_font_px: f32,
-    /// Per-application decoration overrides, in both directions. Empty
-    /// by default: the compositor concludes every xdg-decoration
-    /// negotiation with its own chrome and believes the KDE protocol's
-    /// declarations, which is right for every client observed, and a
-    /// list is the exception, not the mechanism.
+    /// Decoration overrides: the per-application lists, in both
+    /// directions, and `frame_client_drawn`. Empty and off by default:
+    /// the compositor concludes every xdg-decoration negotiation with its
+    /// own chrome and answers a client that draws its own titlebar with
+    /// edge chrome around it, which is right for every client observed,
+    /// and a list is the exception, not the mechanism.
     pub decorations: DecorationRules,
     /// The modifier that turns a drag anywhere on a window into a move
     /// (left button) or a resize (right button), the way every stacking
@@ -1798,6 +1799,15 @@ pub fn parse_with(
                                 config.decorations.client_side =
                                     string_list(value, "decorations.client_side")
                             }
+                            "frame_client_drawn" => match value {
+                                toml::Value::Boolean(frame) => {
+                                    config.decorations.frame_client_drawn = *frame
+                                }
+                                other => tracing::warn!(
+                                    value = ?other,
+                                    "config: decorations.frame_client_drawn must be true or false, keeping default"
+                                ),
+                            },
                             unknown => tracing::warn!(
                                 key = %unknown,
                                 "config: unknown key in [decorations], ignoring it"
@@ -2564,6 +2574,36 @@ mod tests {
         assert_eq!(config.decorations.decision_for(None), None);
     }
 
+    /// The one decoration setting that is not a list. Off unless it is
+    /// exactly a boolean: a typo read as "on" would put a second titlebar
+    /// on every header-bar application at once.
+    #[test]
+    fn frame_client_drawn_is_a_boolean_that_defaults_off() {
+        assert!(!parse("").unwrap().decorations.frame_client_drawn);
+        let on = parse("[decorations]\nframe_client_drawn = true\n").unwrap();
+        assert!(on.decorations.frame_client_drawn);
+        assert!(!on.decorations.is_empty(), "it counts as an override");
+        assert!(on.decorations.server_side.is_empty() && on.decorations.client_side.is_empty());
+        for rejected in ["\"true\"", "1", "\"yes\"", "[true]"] {
+            let config = parse(&format!("[decorations]\nframe_client_drawn = {rejected}\n")).unwrap();
+            assert!(!config.decorations.frame_client_drawn, "{rejected} is warned about and ignored");
+        }
+        // Beside the lists, in any order, without disturbing them.
+        let both = parse(
+            "[decorations]\nclient_side = [\"kiosk\"]\nframe_client_drawn = true\nserver_side = [\"bare\"]\n",
+        )
+        .unwrap();
+        assert!(both.decorations.frame_client_drawn);
+        assert_eq!(both.decorations.decision_for(Some("kiosk")), Some(false));
+        assert_eq!(both.decorations.decision_for(Some("bare-app")), Some(true));
+        // A reload is a fresh parse of the edited file: it has to read
+        // back the same way however many times it is flipped.
+        for expected in [false, true, false] {
+            let config = parse(&format!("[decorations]\nframe_client_drawn = {expected}\n")).unwrap();
+            assert_eq!(config.decorations.frame_client_drawn, expected);
+        }
+    }
+
     #[test]
     fn native_input_table_overrides_imported_pointer_defaults() {
         let config = parse(
@@ -2755,6 +2795,7 @@ numlock_by_default = false
         let rules = DecorationRules {
             server_side: vec!["contested".to_string()],
             client_side: vec!["contested".to_string()],
+            ..Default::default()
         };
         assert_eq!(
             rules.decision_for(Some("contested")),
@@ -2779,6 +2820,7 @@ numlock_by_default = false
         let rules = DecorationRules {
             server_side: vec![String::new()],
             client_side: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(rules.decision_for(Some("anything")), None);
     }

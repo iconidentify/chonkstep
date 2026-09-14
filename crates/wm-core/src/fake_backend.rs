@@ -7,7 +7,7 @@ use wm_theme_api::{
 
 use crate::backend::Backend;
 use crate::client::MonitorInfo;
-use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, NetStateSnapshot, ScrollDelta, SizeHints, WindowType, WmClass, WmProtocol};
+use crate::types::{BackendEvent, ClientChrome, DragHandle, KeyCombo, MouseButton, NetStateSnapshot, ScrollDelta, SizeHints, WindowType, WmClass, WmProtocol};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FakeWindowId(pub u64);
@@ -34,10 +34,13 @@ pub struct FakeBackend {
     /// `WindowType::Normal`, matching both the trait default and the
     /// EWMH fallback for windows that declare no type.
     window_types: HashMap<FakeWindowId, WindowType>,
-    /// Which windows claim to draw their own chrome (the fake's stand-in
-    /// for `_MOTIF_WM_HINTS` and xdg-decoration alike). Absent means
-    /// they do not, which is what keeps an ordinary window framed.
-    client_drawn_chrome: HashMap<FakeWindowId, bool>,
+    /// The chrome each window's client asks for (the fake's stand-in for
+    /// `_MOTIF_WM_HINTS` and both decoration protocols alike). Absent
+    /// means full chrome, which is what keeps an ordinary window framed.
+    client_chrome: HashMap<FakeWindowId, ClientChrome>,
+    /// The chrome `wm-core` last told the backend it settled on, per
+    /// window, through `Backend::set_window_chrome`.
+    pub window_chrome: HashMap<FakeWindowId, ClientChrome>,
 
     /// Windows currently shown *without* a frame — the frameless
     /// counterpart of `mapped_frames`, recorded separately because a
@@ -282,11 +285,20 @@ impl FakeBackend {
         self.window_types.insert(window, window_type);
     }
 
-    /// Makes `window` claim it has already drawn its own titlebar — the
-    /// fake's `_MOTIF_WM_HINTS`. Settable after a map, because real
-    /// clients change their minds and the window manager has to follow.
+    /// Makes `window` claim it has already drawn its own chrome and wants
+    /// none of ours — the fake's `_MOTIF_WM_HINTS`, answered with
+    /// [`ClientChrome::Bare`] — or, given `false`, take that back.
+    /// Settable after a map, because real clients change their minds and
+    /// the window manager has to follow.
     pub fn set_client_draws_own_chrome(&mut self, window: FakeWindowId, draws: bool) {
-        self.client_drawn_chrome.insert(window, draws);
+        self.set_client_chrome(window, if draws { ClientChrome::Bare } else { ClientChrome::Full });
+    }
+
+    /// Makes `window`'s client ask for exactly `chrome` — how a test
+    /// stands in for a header-bar client, which gets
+    /// [`ClientChrome::Edges`].
+    pub fn set_client_chrome(&mut self, window: FakeWindowId, chrome: ClientChrome) {
+        self.client_chrome.insert(window, chrome);
     }
 
     /// Declares `child` a transient (dialog) child of `parent`, the way
@@ -538,8 +550,12 @@ impl Backend for FakeBackend {
         self.frame_extents.insert(window, (left, right, top, bottom));
     }
 
-    fn client_draws_own_chrome(&self, window: Self::WindowId) -> bool {
-        self.client_drawn_chrome.get(&window).copied().unwrap_or(false)
+    fn client_chrome(&self, window: Self::WindowId) -> ClientChrome {
+        self.client_chrome.get(&window).copied().unwrap_or_default()
+    }
+
+    fn set_window_chrome(&mut self, window: Self::WindowId, chrome: ClientChrome) {
+        self.window_chrome.insert(window, chrome);
     }
 
     fn position_client(&mut self, window: Self::WindowId, pos: Point) {
@@ -618,6 +634,7 @@ pub struct FakeTheme;
 const TITLEBAR_HEIGHT: u32 = 20;
 const BUTTON_SIZE: u32 = 14;
 const RESIZE_HANDLE: u32 = 10;
+const EDGE_BORDER: u32 = 4;
 
 impl ThemeEngine for FakeTheme {
     fn layout(&self, request: &DecorationRequest) -> DecorationLayout {
@@ -664,6 +681,35 @@ impl ThemeEngine for FakeTheme {
     fn render(&self, _request: &DecorationRequest, layout: &DecorationLayout) -> DecorationBuffer {
         let (w, h) = (layout.frame_size.w, layout.frame_size.h);
         DecorationBuffer { width: w, height: h, pixels: vec![128u8; (w * h * 4) as usize] }
+    }
+
+    /// A four-pixel border on every side, a handle at each corner and
+    /// along each edge, and nothing else: enough edge frame for the
+    /// core's own tests to grab.
+    fn edges_layout_at(&self, request: &DecorationRequest, _scale: f32) -> DecorationLayout {
+        let b = EDGE_BORDER;
+        let frame_size = Size::new(request.content_size.w + b * 2, request.content_size.h + b * 2);
+        let (w, h, e) = (frame_size.w as i32, frame_size.h as i32, b as i32);
+        let (inner_w, inner_h) = (request.content_size.w, request.content_size.h);
+        let corner = |x: i32, y: i32| Rect::new(Point::new(x, y), Size::new(b, b));
+        DecorationLayout {
+            input_margin: 0,
+            frame_size,
+            client_offset: Point::new(e, e),
+            titlebar_height: 0,
+            button_hitboxes: Vec::new(),
+            resize_hitboxes: vec![
+                (ResizeEdge::NorthWest, corner(0, 0)),
+                (ResizeEdge::NorthEast, corner(w - e, 0)),
+                (ResizeEdge::SouthWest, corner(0, h - e)),
+                (ResizeEdge::SouthEast, corner(w - e, h - e)),
+                (ResizeEdge::North, Rect::new(Point::new(e, 0), Size::new(inner_w, b))),
+                (ResizeEdge::South, Rect::new(Point::new(e, h - e), Size::new(inner_w, b))),
+                (ResizeEdge::West, Rect::new(Point::new(0, e), Size::new(b, inner_h))),
+                (ResizeEdge::East, Rect::new(Point::new(w - e, e), Size::new(b, inner_h))),
+            ],
+            shaded_frame_height: frame_size.h,
+        }
     }
 }
 

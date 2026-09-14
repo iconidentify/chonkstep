@@ -619,47 +619,65 @@
 # application:
 #"alt+shift+q" = "none"
 
-# Per-application decoration overrides. You should not need these.
+# Decoration overrides. You should not need these.
 #
 # Who draws a window's titlebar is settled on one of two protocols, and
 # the two mean different things by "client-side". The standard
 # xdg-decoration is a NEGOTIATION the compositor concludes, and this
 # desktop concludes every one of them the same way: server-side, its
-# own chrome, exactly as Hyprland does for every client. A client that
-# asked for client-side hears "server-side" back and, by the protocol
-# it chose, draws no titlebar of its own. That is what puts a frame on
-# Omarchy's terminals -- alacritty `decorations = "None"`, kitty
-# `hide_window_decorations yes`, every `org.omarchy.*` class Omarchy
-# invents -- which ask for chrome they would never draw. KDE's older
-# org_kde_kwin_server_decoration, the only decoration protocol GTK
-# speaks, is a DECLARATION: a client saying client-side there has
-# already laid itself out around its own headerbar, and is believed.
-# So is an X11 or XWayland client declaring the same through
-# _MOTIF_WM_HINTS. A client that speaks neither protocol is framed.
+# own chrome. A client that asked for client-side hears "server-side"
+# back and, by the protocol it chose, draws no titlebar of its own.
+# That is what puts a frame on Omarchy's terminals -- alacritty
+# `decorations = "None"`, kitty `hide_window_decorations yes`, every
+# `org.omarchy.*` class Omarchy invents -- which ask for chrome they
+# would never draw. KDE's older org_kde_kwin_server_decoration, the only
+# decoration protocol GTK speaks, is a DECLARATION: a client saying
+# client-side there has already laid itself out around its own header
+# bar, and is believed. So is a GTK4 window that binds the protocol and
+# says nothing, which is how a libadwaita header bar declares itself.
+# Those windows get EDGE chrome: this desktop's borders and resize
+# handles around the client, and no titlebar or buttons of ours, so
+# there is still exactly one titlebar and the window still resizes. An
+# X11 or XWayland client declining decoration through _MOTIF_WM_HINTS (a
+# game, usually) gets no chrome at all. A client that speaks neither
+# protocol is framed.
 #
-# These lists correct the two ways that can still come out wrong, and
-# each entry is a case-insensitive PREFIX of the application's app_id
+# The lists correct the ways that can still come out wrong, and each
+# entry is a case-insensitive PREFIX of the application's app_id
 # (Wayland) or its WM_CLASS (X11 and XWayland), so one entry covers a
 # family. Whichever session you log into, the same entry means the same
 # thing. The name to write is in the session log, on the line that
-# reports how the window was mapped -- "mapped and decorated window" or
-# "mapped window undecorated", each followed by `app=<the name>`.
+# reports how the window was mapped -- "mapped and decorated window",
+# "mapped window with edge chrome" or "mapped window undecorated", each
+# followed by `app=<the name>`.
+#
+# Strongest first: server_side, then client_side, then what the client
+# declared, then frame_client_drawn.
 #
 #[decorations]
-# Never draw chrome for these; the client's own is the only one. The
-# opt-out from the rule above, for an xdg client whose bare surface is
-# the point -- a borderless game, a kiosk -- and for a client that
-# speaks neither protocol and really does draw its own titlebar.
+# Never draw chrome for these, not even edges; the client's own is the
+# only one. For a client whose bare surface is the point -- a borderless
+# game, a kiosk -- and for a client that speaks neither protocol and
+# really does draw its own titlebar.
 #client_side = ["borderless-game"]
 #
-# Draw this desktop's chrome whatever the client says. Only matters for
-# the protocols where the client's word is otherwise final: a KDE-
-# protocol or X11 client that declares its own chrome and then draws
-# none is a bare rectangle, and one line here frames it. (A window with
-# no chrome from either side is still movable and resizable -- see
-# drag_modifier above -- just bare.) An xdg client never needs this;
-# it is framed already.
+# Draw this desktop's whole frame, titlebar included, whatever the
+# client says. Only matters where the client's word is otherwise final:
+# a KDE-protocol or X11 client that declares its own chrome and then
+# draws none is a bare rectangle, and one line here frames it. (A window
+# with no chrome from either side is still movable and resizable -- see
+# drag_modifier above -- just bare.) An xdg client never needs this; it
+# is framed already.
 #server_side = ["bare.kde.app"]
+#
+# Give every window that silently draws its own titlebar (a GTK4 or
+# libadwaita header bar) this desktop's full frame instead of edges: our
+# titlebar and buttons above its header bar. A client that declared its
+# chrome outright keeps its edges, and the lists above outrank this.
+# Header bars show minimize and maximize either way: the session
+# publishes the GNOME button layout "appmenu:minimize,maximize,close"
+# unless you have set a layout of your own.
+#frame_client_drawn = false
 # Native Wayland desktop swipes (left/right workspaces, up/down Overview).
 # See gestures.md. This table is independent of two-finger scrolling.
 #[input.gestures]

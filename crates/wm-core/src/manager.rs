@@ -591,11 +591,7 @@ impl<B: Backend> WindowManager<B> {
             if directions.is_empty() {
                 self.reflow_frame_internal(id, ReflowReason::Restyle);
             } else {
-                let layout = if client.chrome == ClientChrome::ClientDrawn {
-                    frameless_layout(client.geometry.size)
-                } else {
-                    self.theme.layout_at(&Self::decoration_request(client, None), self.client_decoration_scale(id))
-                };
+                let layout = self.chrome_layout(client.chrome, &Self::decoration_request(client, None), self.client_decoration_scale(id));
                 let changed = client.layout != layout;
                 self.refit_maximized_chrome(id, layout, directions, changed);
             }
@@ -1796,11 +1792,7 @@ impl<B: Backend> WindowManager<B> {
         // of window this is, but not whether its client has already
         // drawn a titlebar. Asking both is what stops Edge, LibreOffice
         // and every other client-decorated application from wearing two.
-        let chrome = if self.backend.client_draws_own_chrome(window) {
-            ClientChrome::ClientDrawn
-        } else {
-            ClientChrome::ServerDrawn
-        };
+        let chrome = self.backend.client_chrome(window);
 
         let title = self.backend.window_title(window).unwrap_or_default();
         let content = self.backend.window_geometry(window);
@@ -1847,13 +1839,13 @@ impl<B: Backend> WindowManager<B> {
         }
 
         let mut request = Self::decoration_request(&client, None);
-        // A client-decorated window is laid out as though the frame were
-        // exactly its content, so every placement and geometry
-        // calculation below reads the same for both kinds.
+        // A bare window is laid out as though the frame were exactly its
+        // content, so every placement and geometry calculation below
+        // reads the same for all three kinds.
         let mut decoration_scale = self.backend.decoration_scale(content);
         let mut layout = match chrome {
-            ClientChrome::ServerDrawn => self.theme.layout_at(&request, decoration_scale),
-            ClientChrome::ClientDrawn => frameless_layout(content.size),
+            ClientChrome::Bare => frameless_layout(content.size),
+            ClientChrome::Full | ClientChrome::Edges => self.chrome_layout(chrome, &request, decoration_scale),
         };
         // The one rule that keys on *who* the window is: Omarchy's own
         // windows (`org.omarchy.*`) map at one fixed size, centered,
@@ -1885,10 +1877,7 @@ impl<B: Backend> WindowManager<B> {
             // size the client asked for inside a layout sized to the
             // one it got is a frame with a seam in it.
             request = Self::decoration_request(&client, None);
-            layout = match chrome {
-                ClientChrome::ServerDrawn => self.theme.layout_at(&request, decoration_scale),
-                ClientChrome::ClientDrawn => frameless_layout(size),
-            };
+            layout = self.chrome_layout(chrome, &request, decoration_scale);
         }
         // Place the FRAME at the client's own requested position rather
         // than deriving it by subtracting the chrome offset from it.
@@ -1958,17 +1947,21 @@ impl<B: Backend> WindowManager<B> {
             size: layout.frame_size,
         };
         let target_scale = self.backend.decoration_scale(provisional_frame);
-        if chrome == ClientChrome::ServerDrawn && target_scale.to_bits() != decoration_scale.to_bits() {
+        if chrome.is_framed() && target_scale.to_bits() != decoration_scale.to_bits() {
             decoration_scale = target_scale;
-            layout = self.theme.layout_at(&request, decoration_scale);
+            layout = self.chrome_layout(chrome, &request, decoration_scale);
         }
         let frame_pos = Point::new(frame_pos.x - layout.input_margin as i32, frame_pos.y - layout.input_margin as i32);
         let frame_geom = Rect { pos: frame_pos, size: layout.frame_size };
         client.geometry.pos =
             Point::new(frame_geom.pos.x + layout.client_offset.x, frame_geom.pos.y + layout.client_offset.y);
 
+        // Before the frame exists or the window is shown, so whatever the
+        // backend tells the client about its framing rides on the same
+        // configure as the rest of the map.
+        self.backend.set_window_chrome(window, chrome);
         let frame = match chrome {
-            ClientChrome::ServerDrawn => {
+            ClientChrome::Full | ClientChrome::Edges => {
                 let frame = self.backend.create_decoration(window, &layout);
                 self.backend.set_frame_geometry(frame, frame_geom);
                 if floated.is_some() {
@@ -1982,7 +1975,7 @@ impl<B: Backend> WindowManager<B> {
                     // accompanies them").
                     self.backend.resize_client(window, client.geometry.size);
                 }
-                let surface = self.theme.render_surface_at(&request, &layout, decoration_scale);
+                let surface = self.chrome_surface(chrome, &request, &layout, decoration_scale);
                 self.backend.paint_decoration(frame, &surface);
                 client.last_decoration_request = Some(request.clone());
                 client.last_decoration_frame_size = layout.frame_size;
@@ -1990,7 +1983,7 @@ impl<B: Backend> WindowManager<B> {
                 self.backend.map_frame(frame);
                 Some(frame)
             }
-            ClientChrome::ClientDrawn => {
+            ClientChrome::Bare => {
                 // No frame is created, so nothing reparents the client
                 // or maps it as a side effect the way `create_decoration`
                 // does: it has to be placed and shown directly. The
@@ -2052,14 +2045,21 @@ impl<B: Backend> WindowManager<B> {
         // while naming nothing but an opaque `WlWindowId(102)`.
         let identity = self.clients.get(id).map(|c| c.class.clone()).unwrap_or_default();
         match chrome {
-            ClientChrome::ServerDrawn => {
+            ClientChrome::Full => {
                 tracing::info!(?window, app = %identity, "mapped and decorated window")
             }
-            ClientChrome::ClientDrawn => tracing::info!(
+            ClientChrome::Edges => tracing::info!(
                 ?window,
                 app = %identity,
-                "mapped window undecorated — its client says it draws its own chrome \
-                 (decorations.server_side = [\"…\"] overrides this)"
+                "mapped window with edge chrome — its client draws its own titlebar, so only the borders \
+                 and resize handles are ours (decorations.server_side = [\"…\"] adds our titlebar, \
+                 client_side = [\"…\"] removes the borders)"
+            ),
+            ClientChrome::Bare => tracing::info!(
+                ?window,
+                app = %identity,
+                "mapped window undecorated — a decorations.client_side rule or the client's own \
+                 no-decoration hint asked for no chrome (decorations.server_side = [\"…\"] overrides this)"
             ),
         }
 
@@ -3058,13 +3058,13 @@ impl<B: Backend> WindowManager<B> {
             self.publish_frame_extents(id);
             return;
         }
-        // A client-decorated window has no chrome to lay out and no
+        // A bare window has no chrome to lay out and no
         // frame to move: its content *is* the window, positioned in root
         // coordinates. Handled before the theme is consulted at all,
         // for the same reason the fullscreen branch above is — asking a
         // theme to describe chrome that is not drawn produces a layout
         // every consumer would then have to second-guess.
-        if client.chrome == ClientChrome::ClientDrawn {
+        if client.chrome == ClientChrome::Bare {
             let mut content = client.geometry;
             let anchor = Point::new(
                 content.pos.x + content.size.w as i32 / 2,
@@ -3084,7 +3084,7 @@ impl<B: Backend> WindowManager<B> {
         }
         let request = Self::decoration_request(client, None);
         let scale = self.client_decoration_scale(id);
-        let layout = self.theme.layout_at(&request, scale);
+        let layout = self.chrome_layout(client.chrome, &request, scale);
         if matches!(reason, ReflowReason::Restore(Some(saved)) if saved != TitleMetrics::of(&layout)) {
             let mut directions = MaximizeDirections::empty();
             directions.set(MaximizeDirections::HORIZONTAL, client.flags.contains(ClientFlags::MAXIMIZED_H));
@@ -3365,7 +3365,7 @@ impl<B: Backend> WindowManager<B> {
     /// shaded.
     pub fn shade(&mut self, id: ClientId) {
         self.cancel_client_layout_interaction(id);
-        if self.is_layout_managed(id) && self.clients[id].chrome == ClientChrome::ServerDrawn {
+        if self.is_layout_managed(id) && self.clients[id].chrome == ClientChrome::Full {
             self.set_floating(id, true);
         }
         let Some(client) = self.clients.get_mut(id) else {
@@ -3384,10 +3384,14 @@ impl<B: Backend> WindowManager<B> {
         // Alt+Tab or the Overview, neither of which is where a user
         // looks for a window they just watched vanish. Refusing is the
         // honest answer: there is no titlebar to leave behind.
-        if client.chrome == ClientChrome::ClientDrawn {
+        // An edge frame is refused for the same reason, one step removed:
+        // the only titlebar it has is the client's, and that is part of
+        // the content shading would hide.
+        if client.chrome != ClientChrome::Full {
             tracing::debug!(
                 ?id,
-                "shade refused: this client draws its own chrome, so there is no titlebar to roll up into"
+                chrome = ?client.chrome,
+                "shade refused: this window wears no titlebar of ours to roll up into"
             );
             return;
         }
@@ -4322,7 +4326,8 @@ impl<B: Backend> WindowManager<B> {
     /// not the frame: what the user is looking at is the application's
     /// own pixels, and those must not jump. The frame is created around
     /// them or taken away from around them — with one exception, when
-    /// the frame would land off the screen; see the `ServerDrawn` arm.
+    /// the frame would land off the screen; see the framed arm. Between
+    /// edge and full chrome the frame itself is kept and re-laid-out.
     fn handle_chrome_changed(&mut self, window: B::WindowId) {
         let Some(&id) = self.window_index.get(&window) else {
             // Not mapped yet, and that is the common case rather than
@@ -4334,11 +4339,7 @@ impl<B: Backend> WindowManager<B> {
             // the negotiation has settled on by then.
             return;
         };
-        let wants = if self.backend.client_draws_own_chrome(window) {
-            ClientChrome::ClientDrawn
-        } else {
-            ClientChrome::ServerDrawn
-        };
+        let wants = self.backend.client_chrome(window);
         let Some(client) = self.clients.get(id) else {
             return;
         };
@@ -4347,9 +4348,17 @@ impl<B: Backend> WindowManager<B> {
         }
         let content = client.geometry;
         let existing_frame = client.frame;
+        let shaded = client.flags.contains(ClientFlags::SHADED);
+        self.backend.set_window_chrome(window, wants);
+        // Shade rolls a window up into our titlebar, and neither edge
+        // chrome nor none has one: unroll first, or the content would
+        // stay hidden inside a frame that refuses to unshade it.
+        if shaded && wants != ClientChrome::Full {
+            self.unshade(id);
+        }
 
         match wants {
-            ClientChrome::ClientDrawn => {
+            ClientChrome::Bare => {
                 // `release_decoration`, never `destroy_decoration`: on
                 // X11 the client is a child of the frame, and destroying
                 // a parent destroys its children.
@@ -4359,18 +4368,28 @@ impl<B: Backend> WindowManager<B> {
                 }
                 if let Some(client) = self.clients.get_mut(id) {
                     client.frame = None;
-                    client.chrome = ClientChrome::ClientDrawn;
+                    client.chrome = ClientChrome::Bare;
                 }
             }
-            ClientChrome::ServerDrawn => {
+            // Gaining a frame, or trading one kind of frame for the other.
+            // A frame that already exists is kept and re-laid-out rather
+            // than replaced: between edge and full chrome only the frame's
+            // shape and pixels change, and the client never leaves it.
+            ClientChrome::Full | ClientChrome::Edges => {
                 let request = self
                     .clients
                     .get(id)
                     .map(|client| Self::decoration_request(client, None))
                     .unwrap_or_else(|| Self::decoration_request(&Client::new(window, String::new()), None));
                 let scale = self.backend.decoration_scale(content);
-                let layout = self.theme.layout_at(&request, scale);
-                let frame = self.backend.create_decoration(window, &layout);
+                let layout = self.chrome_layout(wants, &request, scale);
+                let frame = match existing_frame {
+                    Some(frame) => {
+                        self.backend.set_decoration_layout(frame, &layout);
+                        frame
+                    }
+                    None => self.backend.create_decoration(window, &layout),
+                };
                 // Anchor the *content* where it already is; the frame is
                 // built around it, extending up and left by the chrome's
                 // own offset.
@@ -4401,13 +4420,15 @@ impl<B: Backend> WindowManager<B> {
                     tracing::debug!(?window, ?shift, "moved a window so the frame it just gained is on screen");
                 }
                 self.backend.set_frame_geometry(frame, frame_geom);
-                let surface = self.theme.render_surface_at(&request, &layout, scale);
+                let surface = self.chrome_surface(wants, &request, &layout, scale);
                 self.backend.paint_decoration(frame, &surface);
-                self.backend.map_frame(frame);
-                self.frame_index.insert(frame, id);
+                if existing_frame.is_none() {
+                    self.backend.map_frame(frame);
+                    self.frame_index.insert(frame, id);
+                }
                 if let Some(client) = self.clients.get_mut(id) {
                     client.frame = Some(frame);
-                    client.chrome = ClientChrome::ServerDrawn;
+                    client.chrome = wants;
                     client.last_decoration_frame_size = layout.frame_size;
                     client.layout = layout;
                     client.last_decoration_request = Some(request);
@@ -4799,12 +4820,38 @@ impl<B: Backend> WindowManager<B> {
         {
             return;
         }
-        let surface = self.theme.render_surface_at(&paint_request, &paint_layout, scale);
+        let surface = self.chrome_surface(client.chrome, &paint_request, &paint_layout, scale);
         self.backend.paint_decoration(frame, &surface);
         if let Some(client) = self.clients.get_mut(id) {
             client.last_decoration_request = Some(paint_request);
             client.last_decoration_frame_size = paint_layout.frame_size;
             client.last_decoration_scale_bits = scale.to_bits();
+        }
+    }
+
+    /// The layout `chrome` wears around `request` at `scale`: the theme's
+    /// full frame, the theme's edge frame, or the frameless layout. The
+    /// one place the three answers become geometry.
+    fn chrome_layout(&self, chrome: ClientChrome, request: &DecorationRequest, scale: f32) -> DecorationLayout {
+        match chrome {
+            ClientChrome::Full => self.theme.layout_at(request, scale),
+            ClientChrome::Edges => self.theme.edges_layout_at(request, scale),
+            ClientChrome::Bare => frameless_layout(request.content_size),
+        }
+    }
+
+    /// The pixels for a [`Self::chrome_layout`] layout. A bare window has
+    /// no frame, so nothing ever asks for its pixels.
+    fn chrome_surface(
+        &self,
+        chrome: ClientChrome,
+        request: &DecorationRequest,
+        layout: &DecorationLayout,
+        scale: f32,
+    ) -> wm_theme_api::DecorationSurface {
+        match chrome {
+            ClientChrome::Edges => self.theme.render_edges_at(request, layout, scale),
+            ClientChrome::Full | ClientChrome::Bare => self.theme.render_surface_at(request, layout, scale),
         }
     }
 
@@ -4835,7 +4882,7 @@ impl<B: Backend> WindowManager<B> {
     }
 }
 
-/// The layout a window whose client draws its own chrome wears.
+/// The layout a bare window wears.
 ///
 /// Every consumer of `Client::layout` — hit-testing, drag math,
 /// placement, the frame geometry the backend is told — reads it
@@ -6731,7 +6778,7 @@ mod tests {
         let id = wm.client_for_window(window).expect("a client-decorated window is still managed");
         let client = wm.client(id).unwrap();
         assert!(client.frame.is_none(), "a client that drew its own chrome must not be framed");
-        assert_eq!(client.chrome, ClientChrome::ClientDrawn);
+        assert_eq!(client.chrome, ClientChrome::Bare);
         assert!(wm.backend().mapped_frameless.contains(&window), "it still has to be shown");
         // Its layout must describe having no chrome rather than being
         // left at whatever the theme would have said: every hit-test and
@@ -6775,7 +6822,7 @@ mod tests {
 
         let client = wm.client(id).unwrap();
         assert!(client.frame.is_none());
-        assert_eq!(client.chrome, ClientChrome::ClientDrawn);
+        assert_eq!(client.chrome, ClientChrome::Bare);
         assert_eq!(client.geometry, content_before, "the content must not move when the frame goes");
         // `release_decoration`, not `destroy_decoration`: on X11 the
         // client is a child of the frame, and destroying a parent
@@ -6806,13 +6853,137 @@ mod tests {
 
         let client = wm.client(id).unwrap();
         let frame = client.frame.expect("it must be framed again");
-        assert_eq!(client.chrome, ClientChrome::ServerDrawn);
+        assert_eq!(client.chrome, ClientChrome::Full);
         assert_eq!(client.geometry, content_before, "the content must not move when the frame arrives");
         assert!(client.layout.titlebar_height > 0, "it wears real chrome now");
         assert!(wm.backend().mapped_frames.contains(&frame));
         // The frame must be reachable by id again, or every later click
         // on this window's chrome resolves to no client.
         assert_eq!(wm.client_for_frame(frame), Some(id));
+    }
+
+    /// Maps a 400x300 window at (100, 100) whose client asks for `chrome`.
+    fn map_with_chrome(chrome: ClientChrome) -> (WindowManager<FakeBackend>, FakeWindowId, ClientId) {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(400, 300) });
+        backend.set_client_chrome(window, chrome);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        (wm, window, id)
+    }
+
+    #[test]
+    fn a_header_bar_client_wears_edges_with_resize_handles_but_no_titlebar() {
+        // A header-bar application draws its own titlebar and nothing a
+        // pointer can resize it by once it is tiled. Bare, it had one
+        // titlebar and no edges; framed in full, two titlebars. Edge
+        // chrome is the frame between.
+        let (wm, window, id) = map_with_chrome(ClientChrome::Edges);
+
+        let client = wm.client(id).unwrap();
+        let frame = client.frame.expect("edge chrome is a real frame");
+        assert_eq!(client.chrome, ClientChrome::Edges);
+        assert_eq!(client.layout.titlebar_height, 0, "the client's titlebar is the only one");
+        assert!(client.layout.button_hitboxes.is_empty(), "and its buttons are the only ones");
+        assert!(!client.layout.resize_hitboxes.is_empty(), "the frame is what resizes it");
+        // The frame goes where the client asked to be, and the content
+        // sits one border inside it.
+        assert_eq!(client.geometry, Rect { pos: Point::new(104, 104), size: Size::new(400, 300) });
+        assert_eq!(
+            wm.backend().frame_extents.get(&window),
+            Some(&(4, 4, 4, 4)),
+            "borders only, the top one exactly like the others"
+        );
+        assert!(wm.backend().mapped_frames.contains(&frame));
+        assert!(!wm.backend().mapped_frameless.contains(&window));
+        assert_eq!(wm.client_for_frame(frame), Some(id));
+        assert_eq!(
+            wm.backend().window_chrome.get(&window),
+            Some(&ClientChrome::Edges),
+            "the backend is told, so it can tell the client it is tiled"
+        );
+    }
+
+    #[test]
+    fn dragging_an_edge_frame_border_resizes_the_window() {
+        let (mut wm, _, id) = map_with_chrome(ClientChrome::Edges);
+        let client = wm.client(id).unwrap();
+        let frame = client.frame.unwrap();
+        let before = client.geometry;
+        let frame_right = before.pos.x - client.layout.client_offset.x + client.layout.frame_size.w as i32;
+        let east = client.layout.resize_hitboxes.iter().find(|(edge, _)| *edge == ResizeEdge::East).unwrap().1;
+
+        wm.dispatch(frame_press(frame, Point::new(east.pos.x + 1, east.pos.y + east.size.h as i32 / 2)));
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(frame_right + 50, 250), surface_local: None });
+        wm.dispatch(frame_release(frame, Point::new(0, 0)));
+
+        let client = wm.client(id).unwrap();
+        assert_eq!(client.geometry.size, Size::new(450, 300), "the border grows the window by the drag");
+        assert_eq!(client.geometry.pos, before.pos, "an east drag leaves the west edge where it was");
+        assert_eq!(client.layout.titlebar_height, 0, "and the reflowed frame is still edges");
+    }
+
+    #[test]
+    fn an_edge_framed_window_cannot_be_shaded() {
+        // Shade rolls a window up into its titlebar, and the only one
+        // this window has is part of the client content shading hides.
+        let (mut wm, window, id) = map_with_chrome(ClientChrome::Edges);
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let frame_size = wm.client(id).unwrap().layout.frame_size;
+
+        wm.shade(id);
+
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
+        assert_ne!(wm.backend().client_mapped.get(&window), Some(&false), "the content must stay on screen");
+        assert_eq!(wm.backend().last_frame_geometry[&frame].size, frame_size, "the frame keeps its full height");
+    }
+
+    #[test]
+    fn chrome_moves_between_full_edges_and_bare_without_moving_the_content() {
+        let (mut wm, window, id) = map_with_chrome(ClientChrome::Full);
+        let content = wm.client(id).unwrap().geometry;
+        let full_frame = wm.client(id).unwrap().frame.expect("an ordinary window starts with full chrome");
+        let change = |wm: &mut WindowManager<FakeBackend>, chrome: ClientChrome| {
+            wm.backend_mut().set_client_chrome(window, chrome);
+            wm.dispatch(BackendEvent::ChromeChanged(window));
+            let client = wm.client(id).unwrap();
+            assert_eq!(client.chrome, chrome);
+            assert_eq!(client.geometry, content, "{chrome:?}: the content is the fixed point");
+            assert_eq!(wm.backend().window_chrome.get(&window), Some(&chrome), "{chrome:?}: the backend hears it");
+        };
+
+        // Full to edges keeps the very same frame and only reshapes it.
+        change(&mut wm, ClientChrome::Edges);
+        let client = wm.client(id).unwrap();
+        assert_eq!(client.frame, Some(full_frame), "the frame is re-laid-out in place, not replaced");
+        assert_eq!(client.layout.titlebar_height, 0);
+        assert!(!wm.backend().released_frames.contains(&full_frame));
+        assert_eq!(wm.backend().frame_extents.get(&window), Some(&(4, 4, 4, 4)));
+        assert_eq!(wm.client_for_frame(full_frame), Some(id));
+
+        // Edges to bare lets the frame go without closing the window.
+        change(&mut wm, ClientChrome::Bare);
+        assert!(wm.client(id).unwrap().frame.is_none());
+        assert!(wm.backend().released_frames.contains(&full_frame));
+        assert!(wm.backend().mapped_frameless.contains(&window), "the window stays on screen");
+        assert_eq!(wm.backend().frame_extents.get(&window), Some(&(0, 0, 0, 0)));
+
+        // Bare to edges builds a frame around the content where it is.
+        change(&mut wm, ClientChrome::Edges);
+        let edge_frame = wm.client(id).unwrap().frame.expect("edges are a frame again");
+        assert_eq!(wm.client(id).unwrap().layout.titlebar_height, 0);
+        assert!(wm.backend().mapped_frames.contains(&edge_frame));
+        assert_eq!(wm.client_for_frame(edge_frame), Some(id));
+
+        // And edges back to full grows a titlebar on that same frame.
+        change(&mut wm, ClientChrome::Full);
+        let client = wm.client(id).unwrap();
+        assert_eq!(client.frame, Some(edge_frame));
+        assert!(client.layout.titlebar_height > 0, "full chrome has our titlebar");
+        assert!(!client.layout.button_hitboxes.is_empty(), "and our buttons");
+        assert_eq!(wm.backend().frame_extents.get(&window).map(|extents| extents.2), Some(client.layout.titlebar_height));
     }
 
     #[test]
@@ -7203,7 +7374,7 @@ mod tests {
         wm.refresh_client_chrome(id);
 
         assert!(wm.client(id).unwrap().frame.is_none(), "the frame must come off without closing the window");
-        assert_eq!(wm.client(id).unwrap().chrome, ClientChrome::ClientDrawn);
+        assert_eq!(wm.client(id).unwrap().chrome, ClientChrome::Bare);
     }
 
     #[test]
@@ -7521,7 +7692,7 @@ mod tests {
         wm.dispatch(BackendEvent::MapRequest(window));
 
         let client = wm.client(wm.client_for_window(window).unwrap()).unwrap();
-        assert_eq!(client.chrome, ClientChrome::ServerDrawn);
+        assert_eq!(client.chrome, ClientChrome::Full);
         assert!(client.frame.is_some());
     }
 
@@ -9179,7 +9350,7 @@ mod tests {
         // contents to identify the window by.
         //
         // Refused rather than unfullscreened, matching the
-        // `ClientChrome::ClientDrawn` refusal a few lines above it:
+        // `ClientChrome::Bare` refusal a few lines above it:
         // there is no titlebar to roll up into, and shade is the
         // request that came from us rather than from the client.
         let (mut wm, id, window) = shadeable_window();

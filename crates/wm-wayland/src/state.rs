@@ -199,7 +199,7 @@ impl FrameStats {
 pub(crate) enum StackEntry {
     Frame(WlFrameId),
     /// A managed window that owns no frame because its client drew its
-    /// own chrome (`wm_core::ClientChrome::ClientDrawn` — Edge,
+    /// own chrome (`wm_core::ClientChrome::Bare` — Edge,
     /// LibreOffice, anything that sets `_MOTIF_WM_HINTS` to ask not to
     /// be decorated). It sits in the *frame* band, not above it: such
     /// a window is managed in every other respect, so it has to layer
@@ -435,6 +435,16 @@ pub(crate) struct WindowRecord {
     /// Always default for XWayland surfaces, which answer the same
     /// question through `_MOTIF_WM_HINTS` instead.
     pub decoration: crate::decoration::DecorationNegotiation,
+    /// The chrome `wm-core` settled on for this window
+    /// (`Backend::set_window_chrome`), anticipated from the evidence
+    /// before the initial configure. Read by the tiled-state bookkeeping,
+    /// and by the hit-test, which holds an edge-framed client's content
+    /// to its own input regions.
+    pub chrome: wm_core::ClientChrome,
+    /// Whether a layout mode currently clips this window into a tile
+    /// (`Backend::present_layout`): one of the two reasons it is told it
+    /// is tiled, edge chrome being the other.
+    pub layout_tiled: bool,
     /// Where this surface's *window* starts inside its own buffer, from
     /// `xdg_surface.set_window_geometry`.
     ///
@@ -487,6 +497,8 @@ impl WindowRecord {
             snapshot_dirty: true,
             snapshot_attempted_at: None,
             decoration: crate::decoration::DecorationNegotiation::default(),
+            chrome: wm_core::ClientChrome::Full,
+            layout_tiled: false,
             content_offset: Point::new(0, 0),
             resize_scale: None,
         }
@@ -1067,17 +1079,17 @@ impl WaylandBackend {
         self.keyboard_grabbed || crate::capture_tool::modal(self)
     }
 
-    /// Whether this window's client draws its own chrome, from what it
-    /// has actually told us — the decoration protocols first, and a
-    /// `[decorations]` override above them.
+    /// The chrome this window's client should wear, from what it has
+    /// actually told us — the decoration protocols first, and the
+    /// `[decorations]` rules above them.
     ///
     /// The whole policy lives in [`crate::decoration`]; this is the
     /// lookup that feeds it the record's evidence and identity. The
     /// KDE-manager bind is a property of the *client*, not the surface,
     /// so it is folded in here rather than duplicated onto every
     /// record the client owns.
-    pub(crate) fn xdg_client_draws_own_chrome(&self, record: &WindowRecord) -> bool {
-        crate::decoration::client_draws_own_chrome(
+    pub(crate) fn xdg_client_chrome(&self, record: &WindowRecord) -> wm_core::ClientChrome {
+        crate::decoration::client_chrome(
             &self.decoration_rules,
             record.app_id.as_deref(),
             self.decoration_evidence(record),
