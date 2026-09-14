@@ -1066,6 +1066,13 @@ fn libreoffice_and_browser_exchange_document_text() {
     s.screenshot("writer-ready").unwrap();
     chord(&mut s, &[CMD], 30);
     chord(&mut s, &[CMD], 46);
+    // Copying is asynchronous as well: Writer publishes its selection after
+    // the chord, and a paste that beats it pastes the previous clipboard.
+    poll_until(WAIT, "Command-C publishes Writer's text", || {
+        let copied = clipboard_output(&s, &["--type", "text/plain;charset=utf-8", "--no-newline"])?;
+        (String::from_utf8(copied).ok()?.trim_end_matches('\n') == text).then_some(())
+    })
+    .unwrap();
     let mut b = browser(&mut s, "wayland", "office");
     focus(&mut s, &mut b, "target");
     chord(&mut s, &[CMD], 47);
@@ -1083,6 +1090,13 @@ fn libreoffice_and_browser_exchange_document_text() {
     focus(&mut s, &mut b, "source");
     chord(&mut s, &[CMD], 30);
     chord(&mut s, &[CMD], 46);
+    // The switch and paste follow at once; without this wait Writer can
+    // paste its own earlier copy back.
+    poll_until(WAIT, "Command-C publishes the browser's text", || {
+        let copied = clipboard_output(&s, &["--type", "text/plain;charset=utf-8", "--no-newline"])?;
+        String::from_utf8(copied).ok()?.contains("second line").then_some(())
+    })
+    .unwrap();
     chord(&mut s, &[CMD], 15); // return to Writer
     chord(&mut s, &[CMD], 30);
     chord(&mut s, &[CMD], 47);

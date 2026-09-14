@@ -765,10 +765,13 @@ impl Session {
 
     /// Most recently announced private XWayland display, including its colon.
     /// Never uses the caller's ambient DISPLAY, including after a restart.
+    /// Waits for the EWMH readiness line, not "XWayland ready": the server
+    /// accepts connections before the compositor watches the root window,
+    /// and a pager message sent in that gap is never seen.
     pub fn x11_display(&self) -> Result<String, String> {
         let display: u32 = poll_until(Duration::from_secs(10), "this session's XWayland display", || {
             let log = self.log();
-            let line = log.lines().rev().find(|line| line.contains("XWayland ready"))?;
+            let line = log.lines().rev().find(|line| line.contains("EWMH ready on the XWayland root"))?;
             line.split("display=").nth(1)?.trim().parse().ok()
         })?;
         Ok(format!(":{display}"))
