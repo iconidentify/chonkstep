@@ -78,6 +78,10 @@ pub enum Action {
     /// live session property used by Omarchy's screensaver, not a
     /// persisted Hyprland configuration mutation.
     SetCursorHidden(bool),
+    /// Move the pointer to a point in logical layout coordinates, the
+    /// units `cursorpos` and `clients` report. The host refuses it while
+    /// the session is locked or a client holds a pointer constraint.
+    WarpPointer { x: i32, y: i32 },
     ReloadConfig,
     SetDiagnostic { name: String, enabled: bool },
     SetLogFilter(String),
@@ -319,6 +323,13 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             })
             .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {rest:?}"))),
         "tagwindow" => classic_tag(rest, snapshot),
+        "movecursor" => {
+            let mut fields = rest.split_whitespace().map(str::parse::<i32>);
+            match (fields.next(), fields.next(), fields.next()) {
+                (Some(Ok(x)), Some(Ok(y)), None) => Outcome::Run(Action::WarpPointer { x, y }),
+                _ => Outcome::Unsupported("movecursor requires integer x and y".to_string()),
+            }
+        }
         "dpms" => parse_dpms(rest, snapshot),
         "focusmonitor" | "movecurrentworkspacetomonitor" | "focuswindowbyclass" => {
             Outcome::Unsupported(format!("{verb} is not implemented yet"))
@@ -412,7 +423,13 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
             Outcome::Run(Action::Fullscreen(if client == 0 { Fullscreen::Off } else { Fullscreen::On }))
         }
         "window.set_prop" => Outcome::Unsupported("window opacity and other dynamic properties are not modeled".to_string()),
-        "cursor.move" => Outcome::Unsupported("chonkstep does not warp the pointer from IPC".to_string()),
+        "cursor.move" => {
+            let coordinate = |key: &str| lua_field(&args, key).and_then(|value| value.trim().parse::<i32>().ok());
+            match (coordinate("x"), coordinate("y")) {
+                (Some(x), Some(y)) => Outcome::Run(Action::WarpPointer { x, y }),
+                _ => Outcome::Unsupported("hl.dsp.cursor.move requires integer x and y".to_string()),
+            }
+        }
         "dpms" => parse_dpms_lua(&args, snapshot),
         other => Outcome::Unknown(format!("unknown Lua dispatcher hl.dsp.{other}")),
     }

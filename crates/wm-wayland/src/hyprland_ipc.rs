@@ -727,6 +727,15 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             }
             true
         }
+        Action::WarpPointer { x, y } => {
+            // Logical layout units in, ledger pixels out, through the scale
+            // of the output that owns the point, so a mixed-DPI desk lands
+            // on the requested spot.
+            let logical = Point::new(x, y);
+            let index = logical_monitor_index(comp.wm.backend(), logical);
+            let physical = OutputCoordinates::for_output(comp.wm.backend(), index).physical_position(logical);
+            crate::input::warp_pointer(comp, physical)
+        }
         Action::ReloadConfig => {
             comp.shell.reload_config(&mut comp.wm);
             true

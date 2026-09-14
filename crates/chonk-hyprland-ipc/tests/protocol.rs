@@ -164,6 +164,29 @@ fn the_one_based_conversion_happens_exactly_once() {
     assert_eq!(actions, vec![Action::MoveToWorkspace { window: None, workspace: 2, follow: false }]);
 }
 
+/// `omarchy-capture-region --select-window` moves the pointer onto the next
+/// window with `hl.dsp.cursor.move`, in the logical units `cursorpos`
+/// reports. Both spellings reach one action; anything but two integers is
+/// refused by name rather than guessed at.
+#[test]
+fn a_pointer_warp_parses_in_both_spellings_and_refuses_anything_else() {
+    let snapshot = desktop();
+    for payload in [&b"/eval hl.dispatch(hl.dsp.cursor.move({ x = 10, y = 20 }))"[..], b"/dispatch movecursor 10 20"] {
+        let (_, actions) = answer_payload(payload, &snapshot);
+        assert_eq!(actions, vec![Action::WarpPointer { x: 10, y: 20 }], "{}", String::from_utf8_lossy(payload));
+    }
+    for payload in [
+        &b"/eval hl.dispatch(hl.dsp.cursor.move({ x = 1.5, y = 20 }))"[..],
+        b"/eval hl.dispatch(hl.dsp.cursor.move({ x = 10 }))",
+        b"/dispatch movecursor 10",
+        b"/dispatch movecursor ten 20",
+        b"/dispatch movecursor 10 20 30",
+    ] {
+        let (_, actions) = answer_payload(payload, &snapshot);
+        assert!(actions.is_empty(), "{} must be refused", String::from_utf8_lossy(payload));
+    }
+}
+
 /// Arriving on a workspace by a bare switch leaves nothing focused —
 /// a real wart on chonkstep's side, tracked separately. The IPC layer
 /// must report it rather than invent a focused window to fill the gap.

@@ -1628,10 +1628,29 @@ pub(crate) fn release_pointer_constraint(state: &mut Compositor) {
     });
     sync_touchpad_typing(state);
     if let Some(target) = warp_to {
-        let position = confine_to_outputs(&state.wm.backend().monitors, target);
-        let time = state.start_time.elapsed().as_millis() as u32;
-        pointer_moved(state, position, time, None, PointerDelivery::Motion);
+        move_pointer_to(state, target);
     }
+}
+
+/// Moves the pointer the way hardware motion would: confined to the
+/// outputs, with enter, leave, hover and cursor damage all coming from
+/// `pointer_moved`.
+fn move_pointer_to(state: &mut Compositor, target: LogicalPoint<f64, Logical>) {
+    let position = confine_to_outputs(&state.wm.backend().monitors, target);
+    let time = state.start_time.elapsed().as_millis() as u32;
+    pointer_moved(state, position, time, None, PointerDelivery::Motion);
+}
+
+/// Warps the pointer to a point in the compositor's global coordinates on a
+/// script's request (`hl.dsp.cursor.move`). Refused while the session is
+/// locked, because the lock surface owns the pointer, and while a client
+/// holds a pointer constraint, which is a promise to that client.
+pub(crate) fn warp_pointer(state: &mut Compositor, target: Point) -> bool {
+    if state.wm.backend().locked || constraints::is_captured(state) {
+        return false;
+    }
+    move_pointer_to(state, (f64::from(target.x), f64::from(target.y)).into());
+    true
 }
 
 /// Apply capture transitions before the next hardware dispatch. The settled

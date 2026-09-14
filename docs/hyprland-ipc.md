@@ -141,6 +141,11 @@ actions. Supported families include:
   group and emits `activelayout` with its human-readable name;
 - `eval hl.config({ cursor = { invisible = BOOL } })`, the live
   cursor-visibility property used by Omarchy's screensaver;
+- `eval hl.dispatch(hl.dsp.cursor.move({ x = X, y = Y }))` and
+  `dispatch movecursor X Y`, which warp the pointer to a logical layout point
+  as `cursorpos` reports it (Omarchy's screenshot picker moves its highlight
+  this way). A warp is refused while the session is locked or a client holds
+  a pointer constraint;
 - `reload`, which re-reads chonkstep/Hyprland configuration and emits
   `configreloaded` only after it has applied.
 

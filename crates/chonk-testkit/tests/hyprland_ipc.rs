@@ -424,6 +424,46 @@ fn screensaver_cursor_visibility_is_live_and_owned() {
     );
 }
 
+/// Omarchy's screenshot picker moves slurp's highlight between windows by
+/// warping the pointer with `hl.dsp.cursor.move`, in the logical units
+/// `cursorpos` reports, and reads the result back the same way. A script
+/// must never move the pointer behind the lock.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn a_scripted_pointer_warp_lands_where_cursorpos_reports_and_never_behind_the_lock() {
+    for (scale, name) in [(1.0, "hypr-ipc-warp-1x"), (1.5, "hypr-ipc-warp-1.5x")] {
+        let mut options = SessionOptions { scale: Some(scale), ..SessionOptions::default() };
+        options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+        let mut session = Session::boot(name, options).expect("nested session");
+        let dir = socket_dir(&session);
+        for (warp, x, y) in [
+            ("/eval hl.dispatch(hl.dsp.cursor.move({ x = 300, y = 200 }))", 300, 200),
+            ("/dispatch movecursor 120 90", 120, 90),
+        ] {
+            assert_eq!(request(&dir, warp).trim(), "ok", "{warp} at scale {scale}");
+            session.door().barrier().unwrap();
+            assert_eq!(json(&dir, "j/cursorpos"), serde_json::json!({ "x": x, "y": y }), "{warp} at scale {scale}");
+        }
+        if scale != 1.0 {
+            continue;
+        }
+        let probe = profile_binary("chonk-lock-probe").expect("cargo build -p chonk-testkit builds the probe");
+        session.launch(probe.to_str().unwrap(), &["--hold"]).expect("the locker launches");
+        poll_until(EVENT, "the locker to hold the lock", || {
+            session.client_log("chonk-lock-probe").contains("holding the lock").then_some(())
+        })
+        .unwrap();
+        let before = json(&dir, "j/cursorpos");
+        assert_ne!(
+            request(&dir, "/eval hl.dispatch(hl.dsp.cursor.move({ x = 40, y = 40 }))").trim(),
+            "ok",
+            "a script cannot move the pointer behind the lock"
+        );
+        session.door().barrier().unwrap();
+        assert_eq!(json(&dir, "j/cursorpos"), before);
+    }
+}
+
 /// Omarchy's look turns on `cursor:hide_on_key_press`: typing into a window
 /// gets the pointer out of the way until it next moves, and a touch does the
 /// same with `hide_on_touch`. The compositor's own hide must not disturb the
