@@ -337,22 +337,28 @@ fn a_live_monitor_reports_its_real_modes_and_identity() {
     );
 }
 
-/// `keyword` is refused, and the refusal is the only diagnostic there
-/// is: `hyprctl` exits zero for it. The old sentence denied the
-/// compositor's headline feature.
+/// `keyword` outside the served forms is refused, and the refusal is
+/// the only diagnostic there is: `hyprctl` exits zero for it. The old
+/// sentence denied the compositor's headline feature. `keyword monitor
+/// NAME,disable` is served now, so on a desk with no `eDP-1` its refusal
+/// names the output it could not find rather than a missing feature.
 #[test]
 #[ignore = "needs a Wayland session to nest inside"]
 fn the_live_keyword_refusal_does_not_deny_reading_a_hyprland_config() {
     let session = boot("hypr-ipc-keyword");
     let dir = socket_dir(&session);
 
-    let answer = request(&dir, "keyword monitor eDP-1,disable");
+    let answer = request(&dir, "keyword general:gaps_in 5");
     assert!(answer.starts_with("Invalid dispatcher:"), "still a refusal: {answer}");
     assert!(
         !answer.contains("does not read a Hyprland config"),
         "chonkstep reads one; the refusal must not say otherwise: {answer}"
     );
     assert!(answer.contains("~/.config/hypr"), "point at the route that works: {answer}");
+
+    let answer = request(&dir, "keyword monitor eDP-1,disable");
+    assert!(answer.starts_with("Invalid dispatcher:"), "no such output on a nested desk: {answer}");
+    assert!(answer.contains("unknown output"), "the refusal names the missing output, not a missing feature: {answer}");
 }
 
 fn changed_cursor_pixels(left: &chonk_testkit::Screenshot, right: &chonk_testkit::Screenshot, x: u32, y: u32) -> usize {
@@ -1434,4 +1440,56 @@ fn inapplicable_layout_messages_are_quiet_and_unavailable_groups_still_fail() {
     // An unknown verb is answered, not dropped — a client that gets no
     // reply blocks in read() forever.
     assert!(request(&dir, "/nonsense").starts_with("unknown request"));
+}
+
+/// Disabling an output takes it out of `monitors` and into `monitors
+/// all` with `disabled: true`, fires `monitorremoved`, and enabling it
+/// again reverses each. The last output in the layout is refused.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn a_disabled_output_leaves_monitors_and_is_listed_by_monitors_all() {
+    let mut session = boot("hypr-ipc-monitor-disable");
+    let dir = socket_dir(&session);
+    let names = |request: &str| -> Vec<String> {
+        json(&dir, request)
+            .as_array()
+            .expect("monitors is an array")
+            .iter()
+            .map(|monitor| monitor["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    session.door().set_virtual_outputs("split").expect("the nested output splits");
+    poll_until(EVENT, "both split outputs to be reported", || (names("j/monitors").len() == 2).then_some(()))
+        .expect("two outputs");
+    let mut events = Events::connect(&dir);
+
+    assert_eq!(request(&dir, "keyword monitor chonkstep-right,disable").trim(), "ok");
+    assert_eq!(events.wait_for("monitorremoved"), "chonkstep-right");
+    assert_eq!(names("j/monitors"), ["chonkstep"], "plain monitors is the layout");
+    let all = json(&dir, "j/monitors all");
+    assert_eq!(names("j/monitors all"), ["chonkstep", "chonkstep-right"]);
+    assert_eq!(all[0]["disabled"], serde_json::json!(false));
+    assert_eq!(all[1]["disabled"], serde_json::json!(true), "{all}");
+    assert_eq!(all[1]["dpmsStatus"], serde_json::json!(false), "{all}");
+    assert!(request(&dir, "monitors all").contains("Monitor chonkstep-right (ID -1):"));
+
+    // Never zero outputs: the survivor cannot be disabled by any route.
+    let refused = request(&dir, "keyword monitor chonkstep,disable");
+    assert!(refused.starts_with("Invalid dispatcher"), "the last output is refused: {refused}");
+    let refused = request(&dir, "eval hl.monitor({ output = \"chonkstep\", disabled = true })");
+    assert!(refused.starts_with("Invalid dispatcher"), "the last output is refused: {refused}");
+    assert_eq!(names("j/monitors"), ["chonkstep"]);
+
+    // Omarchy's own re-enable, then the Display panel's spelling of both.
+    assert_eq!(request(&dir, "eval hl.monitor({ output = \"chonkstep-right\", disabled = false })").trim(), "ok");
+    assert_eq!(events.wait_for("monitoradded"), "chonkstep-right");
+    assert_eq!(names("j/monitors"), ["chonkstep", "chonkstep-right"]);
+    assert!(json(&dir, "j/monitors all").as_array().unwrap().iter().all(|m| m["disabled"] == serde_json::json!(false)));
+
+    assert_eq!(request(&dir, "keyword monitor chonkstep-right,disable").trim(), "ok");
+    assert_eq!(events.wait_for("monitorremoved"), "chonkstep-right");
+    assert_eq!(request(&dir, "keyword monitor chonkstep-right,preferred,auto,auto").trim(), "ok");
+    assert_eq!(events.wait_for("monitoradded"), "chonkstep-right");
+    assert_eq!(names("j/monitors"), ["chonkstep", "chonkstep-right"]);
+    assert!(session.compositor_alive());
 }

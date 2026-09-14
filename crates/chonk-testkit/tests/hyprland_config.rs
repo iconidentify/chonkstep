@@ -721,3 +721,217 @@ fn tail(log: &str) -> String {
     let lines: Vec<&str> = log.lines().collect();
     lines[lines.len().saturating_sub(25)..].join("\n")
 }
+
+// ---- monitor rules on reload -------------------------------------------
+
+/// One request to the session's Hyprland socket, in `hyprctl`'s shape.
+fn hyprland_request(session: &Session, request: &str) -> String {
+    use std::io::{Read, Write};
+    let log = session.log();
+    let directory = log
+        .lines()
+        .find(|line| line.contains("hyprland ipc listening"))
+        .and_then(|line| line.split("directory=\"").nth(1)?.split('"').next())
+        .expect("the compositor announces its Hyprland IPC directory")
+        .to_string();
+    let mut socket = std::os::unix::net::UnixStream::connect(Path::new(&directory).join(".socket.sock")).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    socket.write_all(request.as_bytes()).unwrap();
+    socket.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn hyprland_json(session: &Session, request: &str) -> serde_json::Value {
+    let response = hyprland_request(session, request);
+    serde_json::from_str(&response).unwrap_or_else(|error| panic!("{request}: {error}: {response}"))
+}
+
+/// The outputs in the layout, by name, as `monitors` lists them.
+fn layout_names(session: &Session) -> Vec<String> {
+    hyprland_json(session, "j/monitors")
+        .as_array()
+        .expect("monitors is an array")
+        .iter()
+        .map(|monitor| monitor["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The outputs `monitors all` reports as disabled, by name.
+fn disabled_names(session: &Session) -> Vec<String> {
+    hyprland_json(session, "j/monitors all")
+        .as_array()
+        .expect("monitors all is an array")
+        .iter()
+        .filter(|monitor| monitor["disabled"] == serde_json::json!(true))
+        .map(|monitor| monitor["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A split desk, read through a real Omarchy configuration tree, with
+/// the user's `monitors.lua` as the fixture ships it.
+fn split_desk(name: &str) -> (PathBuf, Session) {
+    let (omarchy_root, mut options) = scratch_machine(name, FIRST_SIZE, "SUPER + SHIFT + K");
+    // Omarchy's template ends by loading its toggle directory; the
+    // captured user file above stops short of that line, and this is
+    // the test that needs it.
+    let user = options
+        .config_root_files
+        .iter_mut()
+        .find(|(path, _)| path == "hypr/hyprland.lua")
+        .expect("scratch machine has its user entry point");
+    user.1.push_str("\n-- Toggle config flags dynamically.\nrequire(\"default.hypr.toggles\")\n");
+    let mut session = Session::boot(name, options).expect("session boots");
+    session.door().set_virtual_outputs("split").expect("the nested output splits");
+    poll_until(Duration::from_secs(10), "both split outputs to be in the layout", || {
+        (layout_names(&session).len() == 2).then_some(())
+    })
+    .expect("two outputs");
+    (omarchy_root, session)
+}
+
+fn monitors_lua(session: &Session) -> PathBuf {
+    session.dir.join("config/hypr/monitors.lua")
+}
+
+/// Waits for the one-second file watch to notice an edit and re-resolve
+/// through it, which is the path that must *not* touch an output.
+fn wait_for_file_watch(session: &mut Session, seen_before: usize) {
+    let log_path = session.dir.join("compositor.log");
+    poll_until(Duration::from_secs(15), "the session to notice the edited Hyprland config", || {
+        let log = std::fs::read_to_string(&log_path).ok()?;
+        (log.matches("Hyprland configuration changed").count() > seen_before).then_some(())
+    })
+    .expect("the watch should have noticed the edit");
+    // The re-resolve runs on the compositor thread in the same tick as
+    // the line above; two door round trips are after it.
+    session.door().barrier().unwrap();
+    session.door().barrier().unwrap();
+}
+
+/// Requests a reload through the marker file and waits until the
+/// compositor has taken it.
+fn reload(session: &mut Session) {
+    let before = session.log().matches("reload requested").count();
+    session.request_reload().unwrap();
+    poll_until(Duration::from_secs(15), "the reload marker to be taken", || {
+        (session.log().matches("reload requested").count() > before).then_some(())
+    })
+    .expect("the reload marker is consumed");
+    session.door().barrier().unwrap();
+    session.door().barrier().unwrap();
+}
+
+/// `hl.monitor({ output = NAME, disabled = true })` — the line Omarchy's
+/// clamshell and laptop-display toggles write — parks its output on
+/// `hyprctl reload`, from the user's `monitors.lua` and from the toggle
+/// directory alike, and the one-second file watch that re-reads the
+/// same line leaves the output where it is until that reload.
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn a_disabled_monitor_line_parks_its_output_on_an_explicit_reload_only() {
+    let (_omarchy_root, mut session) = split_desk("hyprland-monitor-disable");
+    let original = std::fs::read_to_string(monitors_lua(&session)).expect("the fixture's monitors.lua");
+
+    // ---- the file watch re-reads the rule and moves nothing ---------
+    let watched_before = session.log().matches("Hyprland configuration changed").count();
+    std::fs::write(
+        monitors_lua(&session),
+        format!("{original}\nhl.monitor({{ output = \"chonkstep-right\", disabled = true }})\n"),
+    )
+    .unwrap();
+    wait_for_file_watch(&mut session, watched_before);
+    assert_eq!(layout_names(&session), ["chonkstep", "chonkstep-right"], "the file watch must not park an output");
+    assert!(!session.log().contains("monitor rules reconciled"), "no reconcile without an explicit reload");
+
+    // ---- the explicit reload parks it --------------------------------
+    reload(&mut session);
+    poll_until(Duration::from_secs(10), "the disabled output to leave the layout", || {
+        (layout_names(&session) == ["chonkstep"]).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", tail(&session.log())));
+    assert_eq!(disabled_names(&session), ["chonkstep-right"], "monitors all lists the parked output as disabled");
+    assert!(session.log().contains("monitor rules reconciled after reload"));
+
+    // ---- and removing the line, reloaded, puts it back ---------------
+    std::fs::write(monitors_lua(&session), &original).unwrap();
+    reload(&mut session);
+    poll_until(Duration::from_secs(10), "the output to return to the layout", || {
+        (layout_names(&session).len() == 2).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", tail(&session.log())));
+    assert!(disabled_names(&session).is_empty());
+
+    // ---- Omarchy's toggle directory is the same rule -----------------
+    let toggle = session.dir.join("state/omarchy/toggles/hypr/internal-monitor-disable.lua");
+    std::fs::create_dir_all(toggle.parent().unwrap()).unwrap();
+    std::fs::write(&toggle, "hl.monitor({ output = \"chonkstep-right\", disabled = true })\n").unwrap();
+    reload(&mut session);
+    poll_until(Duration::from_secs(10), "the toggle's rule to park the output", || {
+        (layout_names(&session) == ["chonkstep"]).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", tail(&session.log())));
+    std::fs::remove_file(&toggle).unwrap();
+    reload(&mut session);
+    poll_until(Duration::from_secs(10), "the removed toggle to bring the output back", || {
+        (layout_names(&session).len() == 2).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", tail(&session.log())));
+    assert!(session.compositor_alive());
+}
+
+/// A reload that changes one monitor rule's scale applies it to that
+/// live output; a reload that changes no monitor rule reconciles
+/// nothing and moves no output.
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn a_reload_applies_a_changed_scale_and_an_unchanged_reload_moves_nothing() {
+    let (_omarchy_root, mut session) = split_desk("hyprland-monitor-reload-scale");
+    let original = std::fs::read_to_string(monitors_lua(&session)).expect("the fixture's monitors.lua");
+    let geometry = |session: &Session| -> Vec<(String, i64, i64, f64)> {
+        hyprland_json(session, "j/monitors")
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|monitor| {
+                (
+                    monitor["name"].as_str().unwrap().to_string(),
+                    monitor["x"].as_i64().unwrap(),
+                    monitor["y"].as_i64().unwrap(),
+                    monitor["scale"].as_f64().unwrap(),
+                )
+            })
+            .collect()
+    };
+
+    let watched_before = session.log().matches("Hyprland configuration changed").count();
+    std::fs::write(
+        monitors_lua(&session),
+        format!("{original}\nhl.monitor({{ output = \"chonkstep-right\", mode = \"preferred\", position = \"auto\", scale = 2 }})\n"),
+    )
+    .unwrap();
+    wait_for_file_watch(&mut session, watched_before);
+    reload(&mut session);
+    poll_until(Duration::from_secs(10), "the changed scale to reach the live output", || {
+        geometry(&session)
+            .iter()
+            .any(|(name, _, _, scale)| name == "chonkstep-right" && (*scale - 2.0).abs() < f64::EPSILON)
+            .then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", tail(&session.log())));
+    assert_eq!(session.log().matches("monitor rules reconciled after reload").count(), 1);
+    let placed = geometry(&session);
+    assert_eq!(placed.len(), 2, "{placed:?}");
+
+    // The same file again: nothing to reconcile, nothing moved.
+    reload(&mut session);
+    assert_eq!(
+        session.log().matches("monitor rules reconciled after reload").count(),
+        1,
+        "a reload that changes no monitor rule must not reconcile the outputs:\n{}",
+        tail(&session.log())
+    );
+    assert_eq!(geometry(&session), placed, "no output moved");
+    assert!(session.compositor_alive());
+}

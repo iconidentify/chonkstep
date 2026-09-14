@@ -91,7 +91,13 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
             .to_string(),
             None,
         ),
-        "monitors" => (encode(json, &snapshot.monitors_json(), plain_monitors(snapshot)), None),
+        // `monitors all` is where a disabled output is listed, with
+        // `disabled: true`; plain `monitors` is the layout, which is what
+        // every workspace and geometry answer is measured against.
+        "monitors" => {
+            let all = request.args.trim().eq_ignore_ascii_case("all");
+            (encode(json, &snapshot.monitors_json(all), plain_monitors(snapshot, all)), None)
+        }
         "workspaces" => (encode(json, &snapshot.workspaces_json(), plain_workspaces(snapshot)), None),
         "clients" => (encode(json, &snapshot.clients_json(), plain_clients(snapshot)), None),
         "activewindow" => {
@@ -216,7 +222,7 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
         // equivalent `hl.config` property, and the compositor can
         // honour it exactly.
         "keyword" => {
-            let outcome = dispatch::parse_keyword(&request.args);
+            let outcome = dispatch::parse_keyword(&request.args, snapshot);
             let response = outcome.response();
             match outcome {
                 Outcome::Run(action) => (response, Some(action)),
@@ -251,11 +257,12 @@ fn encode<T: serde::Serialize>(json: bool, value: &T, plain: String) -> String {
     }
 }
 
-fn plain_monitors(snapshot: &Snapshot) -> String {
+fn plain_monitors(snapshot: &Snapshot, all: bool) -> String {
     let mut out = String::new();
-    for monitor in &snapshot.monitors {
+    let disabled = if all { snapshot.disabled_monitors.as_slice() } else { &[] };
+    for (monitor, disabled) in snapshot.monitors.iter().map(|m| (m, false)).chain(disabled.iter().map(|m| (m, true))) {
         out.push_str(&format!(
-            "Monitor {} (ID {}):\n\t{}x{} at {}x{}\n\tscale: {:.2}\n\tfocused: {}\n\n",
+            "Monitor {} (ID {}):\n\t{}x{} at {}x{}\n\tscale: {:.2}\n\tfocused: {}\n\tdisabled: {}\n\n",
             monitor.name,
             monitor.id,
             monitor.width,
@@ -264,6 +271,7 @@ fn plain_monitors(snapshot: &Snapshot) -> String {
             monitor.y,
             monitor.scale,
             if monitor.focused { "yes" } else { "no" },
+            disabled,
         ));
     }
     out

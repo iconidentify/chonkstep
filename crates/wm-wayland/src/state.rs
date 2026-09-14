@@ -888,6 +888,9 @@ pub struct WaylandBackend {
     /// Hyprland IPC snapshot and `zwlr_output_management` are the only
     /// readers, and both live on this side of the boundary.
     pub(crate) monitor_outputs: Vec<MonitorOutput>,
+    /// Connected outputs kept out of the layout (see
+    /// [`Compositor::parked_outputs`]), mirrored for `monitors all`.
+    pub(crate) parked_monitors: Vec<ParkedMonitor>,
     /// Live input devices, maintained from backend hotplug events and
     /// served through Hyprland-compatible IPC.
     pub(crate) input_devices: Vec<InputDeviceRecord>,
@@ -1173,6 +1176,7 @@ impl WaylandBackend {
             monitors,
             monitor_scales,
             monitor_outputs,
+            parked_monitors: Vec::new(),
             stacking_dirty: false,
             xwayland_keyboard_grab: None,
             pending_keyboard: None,
@@ -1791,6 +1795,25 @@ pub(crate) struct MonitorOutput {
     pub vrr_enabled: bool,
 }
 
+/// A parked output as the Hyprland IPC snapshot lists it under
+/// `monitors all`: its name, its EDID description and the hardware facts
+/// a driven output carries in [`MonitorOutput`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParkedMonitor {
+    pub name: String,
+    pub identity: Option<String>,
+    pub hardware: MonitorOutput,
+}
+
+/// A connected output outside the layout: no `wl_output` global, no
+/// entry in [`Compositor::outputs`], nothing positional. Everything
+/// needed to put it back is the [`OutputSetup`] hotplug adds an output
+/// from, kept here rather than rebuilt. The session backend keeps the
+/// connector's scanout state beside it (`session::park_output`).
+pub(crate) struct ParkedOutput {
+    pub setup: OutputSetup,
+}
+
 /// One output the compositor drives, everything the session needs to
 /// know about it in one place.
 ///
@@ -1989,8 +2012,25 @@ pub(crate) fn apply_monitor_rules(
             auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
             continue;
         };
-        let transform = match monitor_transform(&rule.extra) {
-            Ok(transform) => transform,
+        let transform = match monitor_intent(rule) {
+            Ok(MonitorIntent::Enabled { transform }) => transform,
+            // A disabled output is parked before this runs. One still
+            // here is the last output in the layout, kept by the
+            // never-zero rule: it takes the automatic slot and no
+            // geometry from a line that asked for none.
+            Ok(MonitorIntent::Disabled) => {
+                auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
+                continue;
+            }
+            Ok(MonitorIntent::Mirror { source }) => {
+                tracing::warn!(
+                    output = %setup.output.name(),
+                    source,
+                    "hyprland-config: monitor line refused whole; mirroring an output is not supported yet"
+                );
+                auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
+                continue;
+            }
             Err(field) => {
                 tracing::warn!(
                     output = %setup.output.name(),
@@ -2001,19 +2041,6 @@ pub(crate) fn apply_monitor_rules(
                 continue;
             }
         };
-        let unsupported = {
-            let mode = rule.mode.trim().to_ascii_lowercase();
-            (mode == "disable" || mode.starts_with("mirror")).then_some(rule.mode.as_str())
-        };
-        if let Some(field) = unsupported {
-            tracing::warn!(
-                output = %setup.output.name(),
-                field,
-                "hyprland-config: monitor line refused whole because this field is unsupported"
-            );
-            auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
-            continue;
-        }
 
         let mode = rule.mode.trim();
         let Some(mode_index) = resolve_monitor_mode(&setup.output, &setup.modes, mode) else {
@@ -2129,12 +2156,97 @@ pub(crate) fn apply_monitor_rules(
 /// Connector matching remains available for configs that intentionally
 /// target a particular port.
 fn monitor_rule_matches(setup: &OutputSetup, selector: &str) -> bool {
+    selector_matches(&setup.output.name(), setup.identity.as_deref(), selector)
+}
+
+fn selector_matches(name: &str, identity: Option<&str>, selector: &str) -> bool {
     let selector = selector.trim();
     if let Some(description) = selector.strip_prefix("desc:") {
         let description = description.trim();
-        return !description.is_empty() && setup.identity.as_deref() == Some(description);
+        return !description.is_empty() && identity == Some(description);
     }
-    selector == setup.output.name()
+    selector == name
+}
+
+/// The monitor rule that applies to one connector: the last exact match
+/// by name or description, else the last catch-all `monitor=,…` line —
+/// the precedence [`apply_monitor_rules`] uses, shared so the startup,
+/// hotplug and reload paths cannot resolve the same line differently.
+pub(crate) fn resolve_monitor_rule<'a>(
+    name: &str,
+    identity: Option<&str>,
+    rules: &'a [wm_config::hyprland::directive::Monitor],
+) -> Option<&'a wm_config::hyprland::directive::Monitor> {
+    rules
+        .iter()
+        .rev()
+        .find(|rule| selector_matches(name, identity, &rule.output))
+        .or_else(|| rules.iter().rev().find(|rule| rule.output.trim().is_empty()))
+}
+
+/// Whether a connector's rule takes it out of the layout.
+fn rule_disables(name: &str, identity: Option<&str>, rules: &[wm_config::hyprland::directive::Monitor]) -> bool {
+    resolve_monitor_rule(name, identity, rules).is_some_and(|rule| matches!(monitor_intent(rule), Ok(MonitorIntent::Disabled)))
+}
+
+/// Which of `setups` the rules take out of the layout, as ascending
+/// indices, with `others` outputs already in the layout that stay.
+/// Never all of them: the desktop is never without an output, so when
+/// nothing else stays the first is kept and the log says so. Startup
+/// calls this with `others == 0` over every connected output; hotplug
+/// with the outputs that survive the unplug.
+pub(crate) fn disabled_by_rules(
+    setups: &[OutputSetup],
+    rules: &[wm_config::hyprland::directive::Monitor],
+    others: usize,
+) -> Vec<usize> {
+    let mut disabled: Vec<usize> = setups
+        .iter()
+        .enumerate()
+        .filter(|(_, setup)| rule_disables(&setup.output.name(), setup.identity.as_deref(), rules))
+        .map(|(index, _)| index)
+        .collect();
+    if others == 0 && !setups.is_empty() && disabled.len() == setups.len() {
+        let kept = disabled.remove(0);
+        tracing::warn!(
+            output = %setups[kept].output.name(),
+            "hyprland-config: every connected output is disabled by a monitor rule; keeping this one, the desktop is never without an output"
+        );
+    }
+    disabled
+}
+
+/// The connectors — driven or parked — whose resolved monitor rule
+/// differs from the one last applied, which is what a reload acts on.
+/// Every other connector is left exactly as it is: a save of an
+/// unrelated key, or a runtime disable the rule never asked for, must
+/// not cost a modeset or move an output.
+fn changed_monitor_rules<'a>(
+    connectors: impl Iterator<Item = (String, Option<&'a str>)>,
+    rules: &[wm_config::hyprland::directive::Monitor],
+    applied: &HashMap<String, Option<wm_config::hyprland::directive::Monitor>>,
+) -> Vec<String> {
+    connectors
+        .filter(|(name, identity)| {
+            let now = resolve_monitor_rule(name, *identity, rules);
+            applied.get(name).is_none_or(|last| last.as_ref() != now)
+        })
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Shifts a layout so its top-left corner sits at the origin. Only the
+/// outputs whose rule set a position are normalized inside
+/// [`apply_monitor_rules`]; when the output at the origin leaves — a
+/// laptop panel disabled with the dock to its right — the survivors
+/// keep their coordinates and the desktop would start at x = 1920.
+fn normalize_setups(setups: &mut [OutputSetup]) {
+    let min_x = setups.iter().map(|setup| setup.position.x).min().unwrap_or(0);
+    let min_y = setups.iter().map(|setup| setup.position.y).min().unwrap_or(0);
+    for setup in setups {
+        setup.position.x -= min_x;
+        setup.position.y -= min_y;
+    }
 }
 
 const MODE_REFRESH_TOLERANCE_MHZ: i32 = 1_000;
@@ -2206,23 +2318,70 @@ pub(crate) fn resolve_monitor_mode(output: &Output, modes: &[Mode], request: &st
     }
 }
 
+/// What one `monitor =` line asks of its output, beyond mode, position
+/// and scale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MonitorIntent {
+    /// In the layout, at this orientation.
+    Enabled { transform: Transform },
+    /// Out of the layout: conf `monitor = NAME, disable`, Lua
+    /// `hl.monitor({ output = NAME, disabled = true })`.
+    Disabled,
+    /// A copy of another output. Refused until mirroring exists
+    /// (<https://github.com/iconidentify/chonkstep/issues/186>).
+    Mirror { source: String },
+}
+
+/// Reads the whole of a monitor line's intent, refusing any field it
+/// does not know as it did before: half a line is never applied.
+///
 /// `1`/`3` map directly onto Smithay's `_90`/`_270`. The rendered
 /// direction still needs native DRM validation; the nested test backend
 /// refuses non-normal transforms. See the outstanding hardware check in
 /// <https://github.com/iconidentify/chonkstep/issues/144>.
-fn monitor_transform(extra: &[String]) -> Result<Transform, &str> {
-    if extra.is_empty() {
-        return Ok(Transform::Normal);
+pub(crate) fn monitor_intent(rule: &wm_config::hyprland::directive::Monitor) -> Result<MonitorIntent, &str> {
+    let mode = rule.mode.trim();
+    if mode.eq_ignore_ascii_case("disable") || mode.eq_ignore_ascii_case("disabled") {
+        return Ok(MonitorIntent::Disabled);
     }
-    if extra.len() != 2 || !extra[0].eq_ignore_ascii_case("transform") {
-        return Err(extra.first().map(String::as_str).unwrap_or("extra field"));
+    if mode.eq_ignore_ascii_case("mirror") {
+        return Ok(MonitorIntent::Mirror { source: rule.position.trim().to_string() });
     }
-    match extra[1].trim() {
-        "0" => Ok(Transform::Normal),
-        "1" => Ok(Transform::_90),
-        "2" => Ok(Transform::_180),
-        "3" => Ok(Transform::_270),
-        _ => Err(extra[1].as_str()),
+    let mut transform = Transform::Normal;
+    let mut disabled = false;
+    let mut mirror = None;
+    let mut extra = rule.extra.iter();
+    while let Some(key) = extra.next() {
+        let Some(value) = extra.next().map(|value| value.trim()) else {
+            return Err(key.as_str());
+        };
+        match key.trim().to_ascii_lowercase().as_str() {
+            "transform" => {
+                transform = match value {
+                    "0" => Transform::Normal,
+                    "1" => Transform::_90,
+                    "2" => Transform::_180,
+                    "3" => Transform::_270,
+                    _ => return Err(value),
+                }
+            }
+            // The Lua reader spells a boolean `on`/`off`; a conf line
+            // written by hand says `true`/`false`.
+            "disabled" | "disable" => match value.to_ascii_lowercase().as_str() {
+                "true" | "on" | "yes" | "1" => disabled = true,
+                "false" | "off" | "no" | "0" => {}
+                _ => return Err(value),
+            },
+            "mirror" => mirror = Some(value.to_string()),
+            _ => return Err(key.as_str()),
+        }
+    }
+    if disabled {
+        Ok(MonitorIntent::Disabled)
+    } else if let Some(source) = mirror {
+        Ok(MonitorIntent::Mirror { source })
+    } else {
+        Ok(MonitorIntent::Enabled { transform })
     }
 }
 
@@ -2266,7 +2425,228 @@ pub(crate) fn output_index_in<'a>(
     outputs.into_iter().position(|candidate| *candidate == output)
 }
 
+/// The monitor rules and scale override the running session holds, from
+/// its last successful load, reload or Hyprland-file follow. Every
+/// output change reads them from here rather than from the file: a
+/// `config.toml` that stopped parsing must not replace every rule with
+/// the defaults, and an edit nobody reloaded must wait for the reload.
+fn session_rules(comp: &Compositor) -> (Vec<wm_config::hyprland::directive::Monitor>, Option<f64>) {
+    let session = comp.shell.session_state();
+    (session.monitor_rules.clone(), session.scale_override.map(f64::from))
+}
+
+/// An [`OutputSetup`] describing a driven output as it stands, the form
+/// [`apply_monitor_rules`] lays out and a parked output is kept in.
+fn setup_from_entry(entry: &OutputEntry) -> OutputSetup {
+    OutputSetup {
+        output: entry.output.clone(),
+        identity: entry.identity.clone(),
+        serial: entry.serial.clone(),
+        position: entry.position,
+        size: entry.size,
+        transform: entry.transform,
+        requested_mode: None,
+        modes: entry.modes.clone(),
+        powered: entry.powered,
+        vrr_supported: entry.vrr_supported,
+        vrr_requested: entry.vrr_requested,
+        vrr_enabled: entry.vrr_enabled,
+    }
+}
+
+/// Remembers, per connector, the monitor rule the layout was last built
+/// from, so a reload can act on the connectors whose rule changed and
+/// leave the rest alone. Rebuilt whole from the connectors present so an
+/// unplugged one leaves no stale record.
+fn record_applied_monitor_rules(comp: &mut Compositor, rules: &[wm_config::hyprland::directive::Monitor]) {
+    comp.applied_monitor_rules = comp
+        .outputs
+        .iter()
+        .map(|entry| (entry.output.name(), entry.identity.as_deref()))
+        .chain(comp.parked_outputs.iter().map(|parked| (parked.setup.output.name(), parked.setup.identity.as_deref())))
+        .map(|(name, identity)| {
+            let rule = resolve_monitor_rule(&name, identity, rules).cloned();
+            (name, rule)
+        })
+        .collect();
+}
+
+/// Mirrors a DRM connector delta into the compositor. Session outputs
+/// have already been inserted/removed when this is called. A newly
+/// plugged connector whose monitor rule disables it is parked here,
+/// before it ever gets a `wl_output`, so a docked laptop's closed panel
+/// coming back from a rescan lands outside the layout as it did at
+/// startup. Everything else is [`apply_output_change`].
 pub(crate) fn apply_connector_hotplug(
+    comp: &mut Compositor,
+    removed: &[usize],
+    added: Vec<OutputSetup>,
+) {
+    let (rules, _) = session_rules(comp);
+    let surviving = comp.outputs.len() - removed.iter().filter(|&&index| index < comp.outputs.len()).count();
+    let park = disabled_by_rules(&added, &rules, surviving);
+    let mut added: Vec<Option<OutputSetup>> = added.into_iter().map(Some).collect();
+    // The session backend already holds the added outputs after the
+    // survivors, so `added[j]` sits at session index `surviving + j`
+    // until one is parked; walking down keeps every lower index valid.
+    for j in (0..added.len()).rev() {
+        if !park.contains(&j) {
+            continue;
+        }
+        match crate::session::park_output(&mut comp.graphics, surviving + j) {
+            Ok(()) => {
+                let Some(setup) = added[j].take() else { continue };
+                tracing::info!(output = %setup.output.name(), "hyprland-config: monitor line disables this output; parked as it was plugged in");
+                comp.parked_outputs.push(ParkedOutput { setup });
+            }
+            Err(error) => {
+                let name = added[j].as_ref().map(|setup| setup.output.name()).unwrap_or_default();
+                tracing::warn!(output = %name, %error, "could not park the plugged output; it stays in the layout");
+            }
+        }
+    }
+    apply_output_change(comp, removed, added.into_iter().flatten().collect());
+}
+
+/// Takes one output out of the layout: the session backend clears its
+/// crtc and keeps the connector, the compositor keeps its [`OutputSetup`]
+/// and runs the unplug half of the hotplug path — global withdrawn,
+/// layer and lock records reindexed, windows rescued, rules reapplied
+/// to what remains. The last output in the layout is never parked: the
+/// desktop is never without an output, and a caller that asks is told
+/// so and logged.
+pub(crate) fn park_output(comp: &mut Compositor, index: usize) -> Result<(), String> {
+    let Some(entry) = comp.outputs.get(index) else {
+        return Err(format!("no output at index {index}"));
+    };
+    let name = entry.output.name();
+    if comp.outputs.len() <= 1 {
+        tracing::warn!(output = %name, "refusing to disable the last output in the layout");
+        return Err(format!("refusing to disable {name}: it is the last output in the layout"));
+    }
+    crate::session::park_output(&mut comp.graphics, index)?;
+    let setup = setup_from_entry(&comp.outputs[index]);
+    comp.parked_outputs.push(ParkedOutput { setup });
+    apply_output_change(comp, &[index], Vec::new());
+    tracing::info!(output = %name, outputs = comp.outputs.len(), parked = comp.parked_outputs.len(), "output disabled: out of the layout");
+    Ok(())
+}
+
+/// Puts a parked output back through the plug half of the hotplug
+/// path, at the end of the layout, where the rules the session holds
+/// place it. While the session is locked that path presents the locked
+/// scene on the returning output before any client content, as it does
+/// for a plugged connector.
+pub(crate) fn unpark_output(comp: &mut Compositor, name: &str) -> Result<(), String> {
+    let at = comp
+        .parked_outputs
+        .iter()
+        .position(|parked| parked.setup.output.name() == name)
+        .ok_or_else(|| format!("{name} is not a disabled output"))?;
+    let fresh = crate::session::unpark_output(&mut comp.graphics, name)?;
+    let parked = comp.parked_outputs.remove(at);
+    let mut setup = fresh.unwrap_or(parked.setup);
+    setup.powered = true;
+    apply_output_change(comp, &[], vec![setup]);
+    tracing::info!(output = %name, outputs = comp.outputs.len(), parked = comp.parked_outputs.len(), "output enabled: back in the layout");
+    Ok(())
+}
+
+/// Forgets parked outputs whose connectors were unplugged: no layout
+/// work, only the records that listed them as disabled.
+pub(crate) fn drop_parked_outputs(comp: &mut Compositor, names: &[String]) {
+    comp.parked_outputs.retain(|parked| !names.contains(&parked.setup.output.name()));
+    for name in names {
+        comp.applied_monitor_rules.remove(name);
+    }
+    comp.sync_monitor_outputs();
+    comp.output_mgmt.mark_dirty();
+    comp.hyprland_state_dirty = true;
+}
+
+/// Brings the outputs into line with the monitor rules an explicit
+/// reload resolved, touching only the connectors whose rule changed:
+/// those a changed rule now disables are parked, those a changed rule
+/// no longer disables come back, and one pass of the hotplug tail
+/// re-lays the layout by the new rules. Nothing changed means nothing
+/// happens — no modeset, no output moved — which is what lets a reload
+/// after a save of an unrelated key cost the desk nothing.
+pub(crate) fn reconcile_monitor_rules(comp: &mut Compositor) {
+    let (rules, _) = session_rules(comp);
+    let changed = changed_monitor_rules(
+        comp.outputs
+            .iter()
+            .map(|entry| (entry.output.name(), entry.identity.as_deref()))
+            .chain(comp.parked_outputs.iter().map(|parked| (parked.setup.output.name(), parked.setup.identity.as_deref()))),
+        &rules,
+        &comp.applied_monitor_rules,
+    );
+    if changed.is_empty() {
+        tracing::debug!("reload changed no monitor rule; outputs left as they are");
+        return;
+    }
+    // Enables first, so a reload that swaps which output is disabled
+    // never meets the last-output refusal on the way.
+    let returning: Vec<String> = comp
+        .parked_outputs
+        .iter()
+        .filter(|parked| changed.contains(&parked.setup.output.name()))
+        .filter(|parked| !rule_disables(&parked.setup.output.name(), parked.setup.identity.as_deref(), &rules))
+        .map(|parked| parked.setup.output.name())
+        .collect();
+    let mut added = Vec::new();
+    for name in &returning {
+        let Some(at) = comp.parked_outputs.iter().position(|parked| parked.setup.output.name() == *name) else { continue };
+        match crate::session::unpark_output(&mut comp.graphics, name) {
+            Ok(fresh) => {
+                let parked = comp.parked_outputs.remove(at);
+                let mut setup = fresh.unwrap_or(parked.setup);
+                setup.powered = true;
+                added.push(setup);
+            }
+            Err(error) => tracing::warn!(output = %name, %error, "reload could not re-enable this output"),
+        }
+    }
+    let leaving: Vec<usize> = comp
+        .outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| changed.contains(&entry.output.name()))
+        .filter(|(_, entry)| rule_disables(&entry.output.name(), entry.identity.as_deref(), &rules))
+        .map(|(index, _)| index)
+        .collect();
+    let mut removed = Vec::new();
+    for index in leaving.into_iter().rev() {
+        let name = comp.outputs[index].output.name();
+        if comp.outputs.len() - removed.len() + added.len() <= 1 {
+            tracing::warn!(output = %name, "refusing to disable the last output in the layout");
+            continue;
+        }
+        match crate::session::park_output(&mut comp.graphics, index) {
+            Ok(()) => {
+                let setup = setup_from_entry(&comp.outputs[index]);
+                comp.parked_outputs.push(ParkedOutput { setup });
+                removed.push(index);
+            }
+            Err(error) => tracing::warn!(output = %name, %error, "reload could not disable this output"),
+        }
+    }
+    let (parked, unparked) = (removed.len(), added.len());
+    apply_output_change(comp, &removed, added);
+    tracing::info!(
+        changed = %changed.join(", "),
+        parked,
+        unparked,
+        "monitor rules reconciled after reload"
+    );
+}
+
+/// Mirrors an output delta into every positional ledger: session
+/// outputs have already been inserted/removed when this is called; this
+/// half owns protocol globals, monitor policy, shell resize, and the
+/// index-bearing layer/lock records. Connector hotplug, parking and
+/// unparking, and a reload's reconcile all end here.
+fn apply_output_change(
     comp: &mut Compositor,
     removed: &[usize],
     added: Vec<OutputSetup>,
@@ -2309,33 +2689,11 @@ pub(crate) fn apply_connector_hotplug(
     }
 
     // Place the new connector set by the monitor rules the running
-    // session already holds, from its last successful load, reload or
-    // Hyprland-file follow. Re-reading the file here replaced every rule
-    // with the defaults whenever `config.toml` did not parse, and applied
-    // edits nobody had reloaded.
-    let (monitor_rules, scale_override) = {
-        let session = comp.shell.session_state();
-        (session.monitor_rules.clone(), session.scale_override.map(f64::from))
-    };
-    let mut setups: Vec<OutputSetup> = comp
-        .outputs
-        .iter()
-        .map(|entry| OutputSetup {
-            output: entry.output.clone(),
-            identity: entry.identity.clone(),
-            serial: entry.serial.clone(),
-            position: entry.position,
-            size: entry.size,
-            transform: entry.transform,
-            requested_mode: None,
-            modes: entry.modes.clone(),
-            powered: entry.powered,
-            vrr_supported: entry.vrr_supported,
-            vrr_requested: entry.vrr_requested,
-            vrr_enabled: entry.vrr_enabled,
-        })
-        .collect();
+    // session already holds (see `session_rules`).
+    let (monitor_rules, scale_override) = session_rules(comp);
+    let mut setups: Vec<OutputSetup> = comp.outputs.iter().map(setup_from_entry).collect();
     let scales = apply_monitor_rules(&mut setups, &monitor_rules, scale_override);
+    normalize_setups(&mut setups);
     crate::session::apply_output_setups(&mut comp.graphics, &mut setups);
     for ((entry, setup), scale) in comp.outputs.iter_mut().zip(setups).zip(scales) {
         entry.position = setup.position;
@@ -2392,7 +2750,8 @@ pub(crate) fn apply_connector_hotplug(
     comp.layer_shell.needs_arrange = true;
     comp.hyprland_state_dirty = true;
     comp.foreign_toplevel_dirty = true;
-    tracing::info!(outputs = comp.outputs.len(), "connector hotplug reconciled across the desktop");
+    record_applied_monitor_rules(comp, &monitor_rules);
+    tracing::info!(outputs = comp.outputs.len(), parked = comp.parked_outputs.len(), "connector hotplug reconciled across the desktop");
 }
 
 pub(crate) fn parse_monitor_position(value: &str) -> Option<Point> {
@@ -2440,6 +2799,38 @@ fn internal_panel_scale(name: &str, size: Size) -> Option<f64> {
     } else {
         1.0
     })
+}
+
+/// The hardware facts of one output as the IPC snapshot reports them,
+/// read straight off the `Output` that answers `wl_output`.
+fn monitor_output_of(
+    output: &Output,
+    serial: &str,
+    transform: Transform,
+    modes: &[Mode],
+    powered: bool,
+    vrr_supported: bool,
+    vrr_enabled: bool,
+) -> MonitorOutput {
+    let properties = output.physical_properties();
+    MonitorOutput {
+        make: properties.make,
+        model: properties.model,
+        serial: serial.to_string(),
+        refresh_millihertz: output.current_mode().and_then(|mode| u32::try_from(mode.refresh).ok()).unwrap_or(0),
+        transform: transform_number(transform),
+        modes: modes
+            .iter()
+            .map(|mode| MonitorMode {
+                width: mode.size.w,
+                height: mode.size.h,
+                refresh_millihertz: u32::try_from(mode.refresh).unwrap_or(0),
+            })
+            .collect(),
+        powered,
+        vrr_supported,
+        vrr_enabled,
+    }
 }
 
 /// Re-advertises ONE output's own fractional scale: the integer ceiling
@@ -2599,6 +2990,14 @@ pub struct Compositor {
     /// order binds together. Startup requires one, though DRM hot-unplug
     /// may leave this briefly empty until a connector returns.
     pub(crate) outputs: Vec<OutputEntry>,
+    /// Connected outputs a monitor rule, an IPC request or
+    /// wlr-output-management took out of the layout. Not indexed by
+    /// anything: every positional ledger covers `outputs` alone.
+    pub(crate) parked_outputs: Vec<ParkedOutput>,
+    /// Per connector, the monitor rule the layout was last built from;
+    /// what a reload diffs the freshly resolved rules against. See
+    /// [`reconcile_monitor_rules`].
+    pub(crate) applied_monitor_rules: HashMap<String, Option<wm_config::hyprland::directive::Monitor>>,
     /// Every live `wl_surface`, including role-less surfaces and hidden
     /// subsurfaces. Commit-timing blockers can be installed before a role is
     /// assigned, so the ordinary scene ledgers are not a complete registry.
@@ -2812,6 +3211,12 @@ impl Compositor {
         crate::input::flush_pointer_warp(self);
         tracing::debug_span!("dispatch_phase", phase = "connector_hotplug")
             .in_scope(|| crate::session::service_connector_hotplug(self));
+        // Drained here, in the dispatch pass, and not inside
+        // `service_hyprland_ipc`: that returns early with no IPC server
+        // or client, and a reload from the marker file has neither.
+        if self.shell.take_monitor_rules_pending() {
+            tracing::debug_span!("dispatch_phase", phase = "monitor_rules").in_scope(|| reconcile_monitor_rules(self));
+        }
         let phase_started = Instant::now();
         tracing::debug_span!("dispatch_phase", phase = "input")
             .in_scope(|| crate::input::tick_repeating_binding(self));
@@ -3634,33 +4039,37 @@ impl Compositor {
             .outputs
             .iter()
             .map(|entry| {
-                let properties = entry.output.physical_properties();
-                MonitorOutput {
-                    make: properties.make,
-                    model: properties.model,
-                    serial: entry.serial.clone(),
-                    refresh_millihertz: entry
-                        .output
-                        .current_mode()
-                        .and_then(|mode| u32::try_from(mode.refresh).ok())
-                        .unwrap_or(0),
-                    transform: transform_number(entry.transform),
-                    modes: entry
-                        .modes
-                        .iter()
-                        .map(|mode| MonitorMode {
-                            width: mode.size.w,
-                            height: mode.size.h,
-                            refresh_millihertz: u32::try_from(mode.refresh).unwrap_or(0),
-                        })
-                        .collect(),
-                    powered: entry.powered,
-                    vrr_supported: entry.vrr_supported,
-                    vrr_enabled: entry.vrr_enabled,
-                }
+                monitor_output_of(
+                    &entry.output,
+                    &entry.serial,
+                    entry.transform,
+                    &entry.modes,
+                    entry.powered,
+                    entry.vrr_supported,
+                    entry.vrr_enabled,
+                )
             })
             .collect();
-        self.wm.backend_mut().monitor_outputs = outputs;
+        let parked: Vec<ParkedMonitor> = self
+            .parked_outputs
+            .iter()
+            .map(|parked| ParkedMonitor {
+                name: parked.setup.output.name(),
+                identity: parked.setup.identity.clone(),
+                hardware: monitor_output_of(
+                    &parked.setup.output,
+                    &parked.setup.serial,
+                    parked.setup.transform,
+                    &parked.setup.modes,
+                    false,
+                    parked.setup.vrr_supported,
+                    false,
+                ),
+            })
+            .collect();
+        let backend = self.wm.backend_mut();
+        backend.monitor_outputs = outputs;
+        backend.parked_monitors = parked;
     }
 
     /// Change one live output's advertised scale from IPC. The scale
@@ -4106,6 +4515,25 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         (init.graphics, init.outputs)
     };
     let scale_override = chonk_shell::startup::read_scale_override(config.scale);
+    // Outputs a monitor rule disables are parked before any global is
+    // published, and before the layout is built without them. Walked
+    // downwards so each removal leaves the lower indices — the session
+    // backend's and this list's alike — where they were.
+    let mut parked_outputs = Vec::new();
+    for index in disabled_by_rules(&output_setups, &config.monitor_rules, 0).into_iter().rev() {
+        match crate::session::park_output(&mut graphics, index) {
+            Ok(()) => {
+                let setup = output_setups.remove(index);
+                tracing::info!(output = %setup.output.name(), "hyprland-config: monitor line disables this output; parked at startup");
+                parked_outputs.push(ParkedOutput { setup });
+            }
+            Err(error) => tracing::warn!(
+                output = %output_setups[index].output.name(),
+                %error,
+                "could not disable this output at startup; it stays in the layout"
+            ),
+        }
+    }
     let monitor_scales = apply_monitor_rules(
         &mut output_setups,
         &config.monitor_rules,
@@ -4440,6 +4868,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         hyprland_source_scratch: HashSet::new(),
         seat,
         outputs,
+        parked_outputs,
+        applied_monitor_rules: HashMap::new(),
         surface_outputs: crate::surface_outputs::SurfaceOutputs::default(),
         pacing_surfaces: HashMap::new(),
         pacing_scratch: crate::xdg::PacingScratch::default(),
@@ -4534,6 +4964,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // the backend was *constructed* with and flatten a 2x session to 1x
     // until something happened to change a scale.
     comp.sync_monitor_outputs();
+    let (rules, _) = session_rules(&comp);
+    record_applied_monitor_rules(&mut comp, &rules);
 
     // The end-to-end test door: a control socket for injected input,
     // opened only when CHONKSTEP_TEST_SOCKET is set (a user session
@@ -5262,14 +5694,123 @@ mod tests {
     #[test]
     fn unsupported_monitor_fields_still_refuse_the_whole_line() {
         let original = Point::new(77, 88);
+        for extra in [&["cm", "srgb"][..], &["bitdepth", "10"][..], &["transform", "1", "cm", "srgb"][..]] {
+            let mut setups = vec![output_setup("DP-1", (600, 340), Size::new(1920, 1080), original)];
+            let rules = vec![monitor_rule("DP-1", "preferred", "0x0", "2", extra)];
+            let scales = apply_monitor_rules(&mut setups, &rules, Some(1.25));
+            assert_eq!(scales, vec![1.25], "{extra:?}");
+            assert_eq!(setups[0].position, original, "position was not partially applied: {extra:?}");
+            assert_eq!(setups[0].size, Size::new(1920, 1080));
+            assert_eq!(setups[0].transform, Transform::Normal);
+            assert_eq!(setups[0].requested_mode, None);
+            assert!(disabled_by_rules(&setups, &rules, 1).is_empty(), "a refused line disables nothing: {extra:?}");
+        }
+        // `disabled` is a field this compositor honours: the line parks
+        // its output rather than being refused, and the geometry beside
+        // it is not applied to an output that is leaving the layout.
         let mut setups = vec![output_setup("DP-1", (600, 340), Size::new(1920, 1080), original)];
-        let rules = vec![monitor_rule("DP-1", "preferred", "0x0", "2", &["cm", "srgb"])];
+        let rules = vec![monitor_rule("DP-1", "preferred", "0x0", "2", &["disabled", "on"])];
+        assert_eq!(disabled_by_rules(&setups, &rules, 1), vec![0]);
         let scales = apply_monitor_rules(&mut setups, &rules, Some(1.25));
         assert_eq!(scales, vec![1.25]);
-        assert_eq!(setups[0].position, original, "position was not partially applied");
-        assert_eq!(setups[0].size, Size::new(1920, 1080));
-        assert_eq!(setups[0].transform, Transform::Normal);
+        assert_eq!(setups[0].position, original);
         assert_eq!(setups[0].requested_mode, None);
+    }
+
+    /// Every spelling of a monitor line's intent, and the whole-line
+    /// refusal of anything else, in one place.
+    #[test]
+    fn monitor_intent_reads_disable_transform_and_mirror_and_refuses_the_rest() {
+        let intent = |mode: &str, position: &str, extra: &[&str]| {
+            monitor_intent(&monitor_rule("eDP-1", mode, position, "1", extra)).map_err(str::to_string)
+        };
+        assert_eq!(intent("preferred", "auto", &[]), Ok(MonitorIntent::Enabled { transform: Transform::Normal }));
+        assert_eq!(intent("preferred", "auto", &["transform", "3"]), Ok(MonitorIntent::Enabled { transform: Transform::_270 }));
+        // conf: `monitor = eDP-1, disable`; Lua: `disabled = true` as the reader spells it.
+        assert_eq!(intent("disable", "", &[]), Ok(MonitorIntent::Disabled));
+        assert_eq!(intent("", "", &["disabled", "on"]), Ok(MonitorIntent::Disabled));
+        assert_eq!(intent("", "", &["disabled", "true"]), Ok(MonitorIntent::Disabled));
+        assert_eq!(intent("", "", &["disabled", "off"]), Ok(MonitorIntent::Enabled { transform: Transform::Normal }));
+        assert_eq!(intent("", "", &["disabled", "false", "transform", "1"]), Ok(MonitorIntent::Enabled { transform: Transform::_90 }));
+        assert_eq!(intent("", "", &["disabled", "maybe"]), Err("maybe".to_string()));
+        assert_eq!(intent("preferred", "auto", &["mirror", "DP-1"]), Ok(MonitorIntent::Mirror { source: "DP-1".into() }));
+        assert_eq!(intent("mirror", "DP-1", &[]), Ok(MonitorIntent::Mirror { source: "DP-1".into() }));
+        assert_eq!(intent("preferred", "auto", &["cm", "srgb"]), Err("cm".to_string()));
+        assert_eq!(intent("preferred", "auto", &["bitdepth", "10"]), Err("bitdepth".to_string()));
+        assert_eq!(intent("preferred", "auto", &["transform"]), Err("transform".to_string()));
+        assert_eq!(intent("preferred", "auto", &["transform", "9"]), Err("9".to_string()));
+    }
+
+    /// A rule that disables every connected output keeps the first one:
+    /// the desktop is never without an output, from config any more
+    /// than from IPC or output management (`park_output` refuses the
+    /// last output on those routes).
+    #[test]
+    fn rules_that_disable_every_output_keep_the_first_and_the_last_output_is_never_disabled() {
+        let setups = vec![
+            output_setup("eDP-1", (300, 190), Size::new(2560, 1600), Point::new(0, 0)),
+            output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(2560, 0)),
+        ];
+        let both = vec![monitor_rule("eDP-1", "disable", "", "", &[]), monitor_rule("DP-1", "", "", "", &["disabled", "on"])];
+        assert_eq!(disabled_by_rules(&setups, &both, 0), vec![1], "startup keeps the first when every rule disables");
+        assert_eq!(disabled_by_rules(&setups, &both, 1), vec![0, 1], "with another output staying, both may leave");
+        let catch_all = vec![monitor_rule("", "disable", "", "", &[])];
+        assert_eq!(disabled_by_rules(&setups, &catch_all, 0), vec![1]);
+        let one = vec![monitor_rule("eDP-1", "disable", "", "", &[])];
+        assert_eq!(disabled_by_rules(&setups, &one, 0), vec![0]);
+        assert_eq!(disabled_by_rules(&setups[..1], &one, 0), Vec::<usize>::new(), "the only output is kept");
+        assert_eq!(disabled_by_rules(&setups[..1], &one, 1), vec![0], "the only *new* output may leave beside a survivor");
+        let exact_over_catch_all = vec![monitor_rule("", "disable", "", "", &[]), monitor_rule("eDP-1", "preferred", "auto", "1", &[])];
+        assert_eq!(disabled_by_rules(&setups, &exact_over_catch_all, 0), vec![1], "an exact line wins over the catch-all");
+    }
+
+    /// A reload acts on the connectors whose resolved rule changed and
+    /// on no other: a save of an unrelated key touches nothing, and a
+    /// runtime disable of an output whose rule did not change survives.
+    #[test]
+    fn a_reload_reconciles_only_the_connectors_whose_rule_changed() {
+        let connectors = || {
+            [("eDP-1".to_string(), None), ("DP-1".to_string(), Some("Dell U2720Q ABC123"))].into_iter()
+        };
+        let before = vec![monitor_rule("", "preferred", "auto", "auto", &[]), monitor_rule("eDP-1", "preferred", "auto", "2", &[])];
+        let applied: HashMap<String, Option<wm_config::hyprland::directive::Monitor>> = connectors()
+            .map(|(name, identity)| {
+                let rule = resolve_monitor_rule(&name, identity, &before).cloned();
+                (name, rule)
+            })
+            .collect();
+        assert!(changed_monitor_rules(connectors(), &before, &applied).is_empty(), "the same rules change nothing");
+
+        let scale = vec![monitor_rule("", "preferred", "auto", "auto", &[]), monitor_rule("eDP-1", "preferred", "auto", "1.5", &[])];
+        assert_eq!(changed_monitor_rules(connectors(), &scale, &applied), vec!["eDP-1"]);
+
+        let disable = vec![monitor_rule("", "preferred", "auto", "auto", &[]), monitor_rule("eDP-1", "preferred", "auto", "2", &[]), monitor_rule("eDP-1", "", "", "", &["disabled", "on"])];
+        assert_eq!(changed_monitor_rules(connectors(), &disable, &applied), vec!["eDP-1"]);
+        assert!(rule_disables("eDP-1", None, &disable));
+        assert!(!rule_disables("DP-1", Some("Dell U2720Q ABC123"), &disable));
+
+        let by_description = vec![monitor_rule("", "preferred", "auto", "auto", &[]), monitor_rule("eDP-1", "preferred", "auto", "2", &[]), monitor_rule("desc:Dell U2720Q ABC123", "disable", "", "", &[])];
+        assert_eq!(changed_monitor_rules(connectors(), &by_description, &applied), vec!["DP-1"]);
+
+        let catch_all_gone = vec![monitor_rule("eDP-1", "preferred", "auto", "2", &[])];
+        assert_eq!(changed_monitor_rules(connectors(), &catch_all_gone, &applied), vec!["DP-1"]);
+
+        let unknown: HashMap<String, Option<wm_config::hyprland::directive::Monitor>> = HashMap::new();
+        assert_eq!(changed_monitor_rules(connectors(), &before, &unknown).len(), 2, "a connector never recorded counts as changed");
+    }
+
+    /// When the output at the origin leaves, the survivors are shifted
+    /// back to the origin rather than left at x = 1920 with a hole the
+    /// pointer and every rect would still count.
+    #[test]
+    fn a_layout_whose_first_output_left_is_shifted_back_to_the_origin() {
+        let mut setups = vec![
+            output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(2560, 120)),
+            output_setup("DP-2", (600, 340), Size::new(1920, 1080), Point::new(4480, 0)),
+        ];
+        normalize_setups(&mut setups);
+        assert_eq!((setups[0].position, setups[1].position), (Point::new(0, 120), Point::new(1920, 0)));
+        normalize_setups(&mut []);
     }
 
     #[test]

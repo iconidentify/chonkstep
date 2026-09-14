@@ -91,6 +91,11 @@ pub enum Action {
     /// and the compositor resolves them exactly as a reload of the same
     /// line would.
     ConfigureMonitor { output: String, scale_120: Option<u32>, mode: Option<String>, position: Option<String> },
+    /// Take one named output out of the desktop layout, or put it back:
+    /// `keyword monitor NAME,disable`, its `NAME,preferred,auto,auto`
+    /// re-enable, and `hl.monitor({ output = NAME, disabled = BOOL })`.
+    /// The host refuses to disable the last output in the layout.
+    SetMonitorEnabled { output: String, enabled: bool },
     /// Power one named output, or every output when `output` is `None`.
     SetDpms { output: Option<String>, powered: bool },
     /// Select a group from the seat keymap. Hyprland accepts next,
@@ -587,18 +592,18 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
             Err(error) => return Outcome::Unsupported(format!("hl.monitor: invalid Lua arguments: {error}")),
         };
         // Every key is accounted for before anything changes. A request that
-        // also asked to disable or mirror the output must not come back `ok`
-        // having applied only its scale.
+        // also asked to mirror the output must not come back `ok` having
+        // applied only its scale.
         for arg in &args {
             let Literal::Table(fields) = arg else {
                 return Outcome::Unsupported("hl.monitor takes one table of named keys".to_string());
             };
             for (key, _) in fields {
                 match key.as_deref() {
-                    Some("output" | "mode" | "position" | "scale") => {}
+                    Some("output" | "mode" | "position" | "scale" | "disabled") => {}
                     Some(other) => {
                         return Outcome::Unsupported(format!(
-                            "hl.monitor key {other:?} is not supported; output, mode, position and scale are"
+                            "hl.monitor key {other:?} is not supported; output, mode, position, scale and disabled are"
                         ))
                     }
                     None => return Outcome::Unsupported("hl.monitor takes named keys only".to_string()),
@@ -608,8 +613,32 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         let Some(output) = lua_field(&args, "output") else {
             return Outcome::Unsupported("hl.monitor requires a named output".to_string());
         };
+        // `disabled` is the whole request: Omarchy's clamshell and
+        // laptop-display toggles write exactly `{ output, disabled = true }`,
+        // and a geometry given beside it would describe an output that is
+        // about to leave the layout. The name may be a disabled output's,
+        // which plain `monitors` omits.
+        if let Some(value) = lua_field(&args, "disabled") {
+            let Some(disabled) = parse_bool(&value) else {
+                return Outcome::Unsupported("hl.monitor disabled must be true or false".to_string());
+            };
+            if ["mode", "position", "scale"].iter().any(|key| lua_field(&args, key).is_some()) {
+                return Outcome::Unsupported(
+                    "hl.monitor disabled combines with output only; enable the output first, then configure it"
+                        .to_string(),
+                );
+            }
+            if !monitor_known(snapshot, &output) {
+                return Outcome::Unsupported(format!("hl.monitor names unknown output {output:?}"));
+            }
+            return Outcome::Run(Action::SetMonitorEnabled { output, enabled: !disabled });
+        }
         let Some(monitor) = snapshot.monitors.iter().find(|monitor| monitor.name == output) else {
-            return Outcome::Unsupported(format!("hl.monitor names unknown output {output:?}"));
+            return Outcome::Unsupported(if snapshot.disabled_monitors.iter().any(|monitor| monitor.name == output) {
+                format!("hl.monitor: output {output:?} is disabled; enable it with disabled = false first")
+            } else {
+                format!("hl.monitor names unknown output {output:?}")
+            });
         };
         let scale_120 = match lua_field(&args, "scale") {
             None => None,
@@ -745,8 +774,72 @@ fn layout_action(workspace: usize, mode: &str) -> Outcome {
     }
 }
 
+/// Whether `name` is an output in the layout or a disabled one.
+fn monitor_known(snapshot: &Snapshot, name: &str) -> bool {
+    snapshot.monitors.iter().chain(&snapshot.disabled_monitors).any(|monitor| monitor.name == name)
+}
+
+/// `keyword monitor NAME,…`: Omarchy's Display panel toggles a row off with
+/// `NAME,disable` and back on with `NAME,preferred,auto,auto`. The first
+/// takes the output out of the layout; the second puts a disabled output
+/// back, and on an output already in the layout means what the same
+/// monitor line means in the configuration. Anything past the scale —
+/// a transform, a colour depth — belongs in the configuration.
+fn parse_keyword_monitor(spec: &str, snapshot: &Snapshot) -> Outcome {
+    let fields: Vec<&str> = spec.split(',').map(str::trim).collect();
+    let (Some(&name), Some(&mode)) = (fields.first(), fields.get(1)) else {
+        return Outcome::Unsupported("keyword monitor requires NAME,disable or NAME,MODE,POSITION,SCALE".to_string());
+    };
+    if name.is_empty() {
+        return Outcome::Unsupported("keyword monitor requires an output name".to_string());
+    }
+    if mode.eq_ignore_ascii_case("disable") {
+        if fields.len() > 2 {
+            return Outcome::Unsupported("keyword monitor NAME,disable takes nothing after disable".to_string());
+        }
+        if !monitor_known(snapshot, name) {
+            return Outcome::Unsupported(format!("keyword monitor names unknown output {name:?}"));
+        }
+        return Outcome::Run(Action::SetMonitorEnabled { output: name.to_string(), enabled: false });
+    }
+    if fields.len() > 4 {
+        return Outcome::Unsupported(format!(
+            "keyword monitor {name}: {:?} belongs in the configuration; mode, position and scale apply live",
+            fields[4]
+        ));
+    }
+    if snapshot.disabled_monitors.iter().any(|monitor| monitor.name == name) {
+        // Back into the layout, where the configuration's own rule for it
+        // and the automatic placement apply, which is what
+        // `preferred,auto,auto` asks for.
+        return Outcome::Run(Action::SetMonitorEnabled { output: name.to_string(), enabled: true });
+    }
+    let Some(monitor) = snapshot.monitors.iter().find(|monitor| monitor.name == name) else {
+        return Outcome::Unsupported(format!("keyword monitor names unknown output {name:?}"));
+    };
+    let mode = mode.to_string();
+    if !monitor_advertises(monitor, &mode) {
+        return Outcome::Unsupported(format!("keyword monitor mode {mode:?} is not one {name} advertises"));
+    }
+    let position = fields.get(2).map(|value| value.to_string()).filter(|value| !value.is_empty());
+    if let Some(position) = &position {
+        if !position.eq_ignore_ascii_case("auto") && monitor_position(position).is_none() {
+            return Outcome::Unsupported(format!("keyword monitor position {position:?} must be auto or XxY"));
+        }
+    }
+    let scale_120 = match fields.get(3).map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        None => None,
+        Some(value) if value.eq_ignore_ascii_case("auto") => None,
+        Some(value) => match value.parse::<f64>() {
+            Ok(scale) if scale.is_finite() && (0.5..=4.0).contains(&scale) => Some((scale * 120.0).round() as u32),
+            _ => return Outcome::Unsupported("keyword monitor scale must be auto or a number between 0.5 and 4".to_string()),
+        },
+    };
+    Outcome::Run(Action::ConfigureMonitor { output: name.to_string(), scale_120, mode: Some(mode), position })
+}
+
 /// Parse the supported workspace, monitor and diagnostic keyword mutations.
-pub fn parse_keyword(source: &str) -> Outcome {
+pub fn parse_keyword(source: &str, snapshot: &Snapshot) -> Outcome {
     if let Some(spec) = source.trim().strip_prefix("workspace ") {
         if let Some((workspace, mode)) = spec.split_once(',') {
             if let Some(index) = workspace
@@ -765,14 +858,7 @@ pub fn parse_keyword(source: &str) -> Outcome {
     }
     let source = source.trim();
     if let Some(spec) = source.strip_prefix("monitor ") {
-        if let Some((name, operation)) = spec.split_once(',') {
-            if operation.trim().eq_ignore_ascii_case("disable") {
-                return Outcome::Unsupported(format!(
-                    "output {:?} cannot be disabled: chonkstep keeps every connected output in the desktop layout; configure persistent layout in ~/.config/hypr with hl.monitor, or use `hyprctl dispatch dpms off {}` for temporary power-off",
-                    name.trim(), name.trim()
-                ));
-            }
-        }
+        return parse_keyword_monitor(spec, snapshot);
     }
     let mut fields = source.split_whitespace();
     match (fields.next(), fields.next(), fields.next()) {
@@ -786,8 +872,8 @@ pub fn parse_keyword(source: &str) -> Outcome {
             "keyword does not mutate chonkstep's configuration. \
              chonkstep reads ~/.config/hypr and re-reads it within a second of an edit, \
              so edit the file instead, or use `hyprctl eval hl.monitor({...})` for a live \
-             scale change. `keyword monitor NAME,disable` cannot work at all: chonkstep \
-             drives every connected output and has no disable path."
+             mode, position, scale or disable change. `keyword monitor NAME,disable` and \
+             `keyword monitor NAME,MODE,POSITION,SCALE` are the two keyword forms served."
                 .to_string(),
         ),
     }

@@ -303,7 +303,15 @@ impl Window {
 /// Everything the protocol can be asked about, as of one instant.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Snapshot {
+    /// The outputs in the desktop layout, in layout order: what plain
+    /// `monitors` lists and what every geometry answer is measured against.
     pub monitors: Vec<Monitor>,
+    /// Connected outputs a configuration rule, `keyword monitor
+    /// NAME,disable`, `hl.monitor({ disabled = true })` or
+    /// wlr-output-management took out of the layout. Listed by `monitors
+    /// all` alone, with `disabled: true`, so Omarchy's display scripts see
+    /// the panel they disabled as disabled rather than gone.
+    pub disabled_monitors: Vec<Monitor>,
     pub workspaces: Vec<Workspace>,
     /// The special workspaces the session has created, in core index
     /// order.
@@ -559,10 +567,13 @@ pub struct ClientJson {
 
 impl Snapshot {
     /// `j/monitors`.
-    pub fn monitors_json(&self) -> Vec<MonitorJson> {
+    pub fn monitors_json(&self, all: bool) -> Vec<MonitorJson> {
+        let disabled = if all { self.disabled_monitors.as_slice() } else { &[] };
         self.monitors
             .iter()
-            .map(|monitor| {
+            .map(|monitor| (monitor, false))
+            .chain(disabled.iter().map(|monitor| (monitor, true)))
+            .map(|(monitor, disabled)| {
                 let workspace = self.workspaces.iter().find(|workspace| workspace.index == monitor.active_workspace);
                 MonitorJson {
                     id: monitor.id,
@@ -610,7 +621,7 @@ impl Snapshot {
                     solitary_blocked_by: self.locked.then(|| "LOCK".to_string()).into_iter().collect(),
                     actively_tearing: false,
                     direct_scanout_to: None,
-                    disabled: false,
+                    disabled,
                     current_format: "XRGB8888".to_string(),
                     mirror_of: "none".to_string(),
                     available_modes: monitor.modes.iter().map(|mode| mode.to_hyprland()).collect(),

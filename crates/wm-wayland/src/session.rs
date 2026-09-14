@@ -926,6 +926,27 @@ pub(crate) struct SessionGraphics {
     /// logs each newly reserved headset once rather than per rescan,
     /// and so a lease path can advertise the same set startup skipped.
     non_desktop: Vec<connector::Handle>,
+    /// Connected connectors kept out of the layout — a laptop panel
+    /// behind a closed lid. Not in `outputs`, so nothing positional
+    /// reaches them; a rescan treats them as present, and an unplug
+    /// drops them without any layout work. See [`park_output`].
+    parked: Vec<ParkedConnector>,
+}
+
+/// A connected connector this session keeps but does not drive: the
+/// output was taken out of the layout by a monitor rule, `keyword
+/// monitor NAME,disable`, `hl.monitor({ disabled = true })` or
+/// wlr-output-management. Its crtc is cleared the way DPMS-off clears
+/// one, and kept, so putting the output back is the DPMS-on path rather
+/// than a fresh surface — until a newer connector finds no free crtc,
+/// when [`release_parked_crtc`] gives this one up and the return goes
+/// through [`attach_output`] instead.
+struct ParkedConnector {
+    /// Connector name, which is what every route names the output by.
+    name: String,
+    connector: connector::Handle,
+    /// `Some` while the crtc is kept.
+    output: Option<SessionOutput>,
 }
 
 /// One output being scanned out: its crtc, its place in the global
@@ -1367,12 +1388,13 @@ pub(crate) fn graphics_diagnostics(graphics: &Graphics) -> String {
     match graphics {
         Graphics::Winit(_) => "backend=nested-winit renderer=GLES host_output=true".to_string(),
         Graphics::Session(session) => format!(
-            "backend=drm-session kms_device={} drm_driver={} render_node={} {}",
+            "backend=drm-session kms_device={} drm_driver={} render_node={} parked_outputs={} {}",
             session.device_path.display(),
             session.driver_name,
             session
                 .render_node
                 .map_or_else(|| "unknown".to_string(), |node| node.to_string()),
+            session.parked.len(),
             session.render_stack.diagnostics(),
         ),
     }
@@ -1820,6 +1842,28 @@ pub(crate) fn init(
                         // was failing before the switch is history.
                         output.commit_health = CommitHealth::default();
                     }
+                    // `activate(true)` reset the parked crtcs too; left
+                    // alone, a panel behind a closed lid would come back
+                    // from a VT switch in whatever state the reset left
+                    // it. Re-clear each one the way a powered-off
+                    // output is re-cleared above.
+                    for parked in session.parked.iter_mut() {
+                        let Some(output) = parked.output.as_mut() else { continue };
+                        if let Err(error) = output.drm_compositor.reset_state() {
+                            tracing::error!(?error, output = %parked.name, "could not reset a parked crtc after resuming");
+                        }
+                        output.drm_compositor.reset_buffers();
+                        if let Err(error) = output.drm_compositor.clear() {
+                            tracing::warn!(?error, output = %parked.name, "could not re-clear a parked output after VT resume");
+                        }
+                        output.frame_pending = None;
+                        output.last_vblank = None;
+                        clear_scene_holds(
+                            &mut output.pending_scene,
+                            &mut output.scanout_scene,
+                            &mut output.client_scanout_active,
+                        );
+                    }
                     // Marks every output dirty on the next render pass
                     // (see `render_frame_session`), which is what
                     // repaints the screens the other session scribbled
@@ -1882,6 +1926,7 @@ pub(crate) fn init(
             strict_release,
             hotplug_due: None,
             non_desktop,
+            parked: Vec::new(),
         })),
         outputs: setups,
     })
@@ -2221,10 +2266,19 @@ pub(crate) fn service_connector_hotplug(comp: &mut Compositor) {
     // is still present, still driven, and skipped by the diff below.
     retrain_bad_links(session);
     match rescan_session_outputs(session) {
-        Ok((removed, added)) if removed.is_empty() && added.is_empty() => {
-            tracing::debug!("connector rescan found no output changes");
+        Ok(RescanDelta { removed, added, unplugged }) => {
+            // A parked connector that left needs no layout work, only
+            // its record dropped, so its disabled head and `monitors
+            // all` entry go with it.
+            if !unplugged.is_empty() {
+                crate::state::drop_parked_outputs(comp, &unplugged);
+            }
+            if removed.is_empty() && added.is_empty() {
+                tracing::debug!("connector rescan found no output changes");
+            } else {
+                crate::state::apply_connector_hotplug(comp, &removed, added);
+            }
         }
-        Ok((removed, added)) => crate::state::apply_connector_hotplug(comp, &removed, added),
         Err(error) => tracing::warn!(%error, "connector rescan failed; keeping the current output set"),
     }
 }
@@ -2276,6 +2330,25 @@ pub(crate) fn note_system_resumed(comp: &mut Compositor) {
     crate::gamma::note_session_resumed(gamma);
 }
 
+/// What one connector rescan changed.
+struct RescanDelta {
+    /// Outputs removed from the layout, by index, descending.
+    removed: Vec<usize>,
+    /// Connectors newly adopted into the layout.
+    added: Vec<OutputSetup>,
+    /// Parked connectors that were unplugged and are no longer kept.
+    unplugged: Vec<String>,
+}
+
+/// What a connector rescan does about the parked connectors: which are
+/// still plugged in (and so must not be re-adopted), and which have gone.
+/// Pure, so the diff a docked laptop performs on every lid event is
+/// testable without a DRM device. `parked` and `connected` are anything
+/// comparable — connector handles in production.
+fn plan_parked<H: PartialEq + Copy>(parked: &[H], connected: &[H]) -> (Vec<H>, Vec<H>) {
+    parked.iter().copied().partition(|handle| connected.contains(handle))
+}
+
 /// Walks every connector after a hotplug or VT resume and applies the
 /// [`rescan_plan`]: outputs whose connector stopped being
 /// [`ConnectorUse::Drive`] leave through the same removal the unplug
@@ -2284,7 +2357,7 @@ pub(crate) fn note_system_resumed(comp: &mut Compositor) {
 /// newly drivable connectors are adopted. The non-desktop property is
 /// read fresh after every forced probe — never cached — because the
 /// kernel rewrites it from each new sink's EDID.
-fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, Vec<OutputSetup>), String> {
+fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<RescanDelta, String> {
     let resources = session
         .drm
         .resource_handles()
@@ -2313,8 +2386,19 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, 
         }
     }
 
+    // Parked connectors: still plugged in means still parked, kept out
+    // of the plan so it neither adopts nor removes them; unplugged
+    // means dropped below, with no layout work because a parked output
+    // was never in the layout.
+    let connected_handles: Vec<connector::Handle> = probed
+        .iter()
+        .filter(|(_, use_)| *use_ == ConnectorUse::Drive)
+        .map(|(handle, _)| *handle)
+        .collect();
+    let parked_handles: Vec<connector::Handle> = session.parked.iter().map(|parked| parked.connector).collect();
+    let (parked_present, parked_gone) = plan_parked(&parked_handles, &connected_handles);
     let driven: Vec<connector::Handle> = session.outputs.iter().map(|output| output.connector).collect();
-    let plan = rescan_plan(&driven, &probed, &[]);
+    let plan = rescan_plan(&driven, &probed, &parked_present);
     session.non_desktop = plan.reserved;
     let removed = plan.remove;
     for index in &removed {
@@ -2324,6 +2408,21 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, 
         }
         tracing::info!(output = %output.name, "connector unplugged; output removed from scanout");
     }
+    let mut unplugged = Vec::new();
+    session.parked.retain_mut(|parked| {
+        if parked_gone.contains(&parked.connector) {
+            if let Some(mut output) = parked.output.take() {
+                if let Some(mut feedback) = output.presentation.take() {
+                    feedback.discarded();
+                }
+            }
+            tracing::info!(output = %parked.name, "parked connector unplugged; dropped");
+            unplugged.push(parked.name.clone());
+            false
+        } else {
+            true
+        }
+    });
 
     let mut next_x = session
         .outputs
@@ -2340,8 +2439,18 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, 
             continue;
         }
         let Some(mode) = preferred_mode(&info) else { continue };
-        let taken: Vec<crtc::Handle> = session.outputs.iter().map(|output| output.crtc).collect();
-        let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken) else {
+        // A parked output keeps its crtc, so it is spoken for here —
+        // unless nothing else can drive the new connector, when the
+        // parked one gives its crtc up (see `release_parked_crtc`).
+        let taken: Vec<crtc::Handle> = session
+            .outputs
+            .iter()
+            .map(|output| output.crtc)
+            .chain(session.parked.iter().filter_map(|parked| parked.output.as_ref().map(|output| output.crtc)))
+            .collect();
+        let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken)
+            .or_else(|| release_parked_crtc(session, &resources, &info))
+        else {
             tracing::warn!(output = %connector_name(&info), "hot-plugged connector has no free crtc");
             continue;
         };
@@ -2364,7 +2473,157 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, 
             Err(error) => tracing::warn!(output = %connector_name(&target.info), %error, "could not adopt hot-plugged connector"),
         }
     }
-    Ok((removed, added))
+    Ok(RescanDelta { removed, added, unplugged })
+}
+
+/// The crtcs `connector` could be driven from, in the kernel's order.
+fn candidate_crtcs(drm: &DrmDevice, resources: &ResourceHandles, connector: &connector::Info) -> Vec<crtc::Handle> {
+    connector
+        .encoders()
+        .iter()
+        .filter_map(|handle| drm.get_encoder(*handle).ok())
+        .flat_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()))
+        .collect()
+}
+
+/// Gives up a parked output's crtc for a connector that found no free
+/// one: hardware with few crtcs needs the closed lid's crtc when a dock
+/// adds monitors. The parked output's `DrmCompositor` is dropped with
+/// it; if the output is put back later, [`unpark_output`] re-adopts it
+/// through [`attach_output`] with whatever crtc is free then.
+fn release_parked_crtc(
+    session: &mut SessionGraphics,
+    resources: &ResourceHandles,
+    connector: &connector::Info,
+) -> Option<crtc::Handle> {
+    let candidates = candidate_crtcs(&session.drm, resources, connector);
+    let parked = session
+        .parked
+        .iter_mut()
+        .find(|parked| parked.output.as_ref().is_some_and(|output| candidates.contains(&output.crtc)))?;
+    let mut output = parked.output.take()?;
+    if let Some(mut feedback) = output.presentation.take() {
+        feedback.discarded();
+    }
+    let crtc = output.crtc;
+    drop(output);
+    tracing::info!(
+        parked = %parked.name,
+        new = %connector_name(connector),
+        ?crtc,
+        "a parked output released its crtc to a newly plugged connector"
+    );
+    Some(crtc)
+}
+
+/// Takes the output at `index` out of scanout without forgetting the
+/// connector: the crtc is cleared exactly as DPMS-off clears it, the
+/// `SessionOutput` moves to the parked list, and the caller removes the
+/// matching entry from `Compositor::outputs` through the connector
+/// hotplug tail, keeping the two lists index-aligned. On the nested
+/// backend a virtual output has nothing to clear; parking it is the
+/// layout half alone, which the caller performs.
+pub(crate) fn park_output(graphics: &mut Graphics, index: usize) -> Result<(), String> {
+    let Graphics::Session(session) = graphics else {
+        return Ok(());
+    };
+    let output = session.outputs.get_mut(index).ok_or_else(|| format!("output index {index} does not exist"))?;
+    if output.drm_compositor.vrr_enabled() {
+        if let Err(error) = output.drm_compositor.use_vrr(false) {
+            tracing::warn!(?error, output = %output.name, "could not disable adaptive sync before parking");
+        }
+    }
+    output.drm_compositor.clear().map_err(|error| format!("disable failed: {error}"))?;
+    let mut output = session.outputs.remove(index);
+    output.powered = false;
+    output.dirty = false;
+    output.frame_pending = None;
+    output.last_vblank = None;
+    output.frame_clock.disarm();
+    clear_scene_holds(&mut output.pending_scene, &mut output.scanout_scene, &mut output.client_scanout_active);
+    if let Some(mut feedback) = output.presentation.take() {
+        feedback.discarded();
+    }
+    tracing::info!(output = %output.name, "output parked: connector kept, crtc cleared, out of the layout");
+    session.parked.push(ParkedConnector { name: output.name.clone(), connector: output.connector, output: Some(output) });
+    Ok(())
+}
+
+/// Puts a parked output back at the end of the scanout list — the
+/// caller appends the matching entry to `Compositor::outputs`, so the
+/// two lists stay aligned. `Ok(None)` when the retained `SessionOutput`
+/// came back as DPMS-on would bring it; `Ok(Some(setup))` when its crtc
+/// had been released and the connector was adopted afresh through
+/// [`attach_output`], whose new `Output` replaces the caller's.
+pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Option<OutputSetup>, String> {
+    let Graphics::Session(session) = graphics else {
+        return Ok(None);
+    };
+    let at = session
+        .parked
+        .iter()
+        .position(|parked| parked.name == name)
+        .ok_or_else(|| format!("{name} is not a parked output"))?;
+    let parked = session.parked.remove(at);
+    if let Some(mut output) = parked.output {
+        output.powered = true;
+        output.dirty = true;
+        output.full_damage_required = true;
+        output.drm_compositor.reset_buffer_ages();
+        output.frame_clock.disarm();
+        tracing::info!(output = %parked.name, "output unparked: back in the layout on its kept crtc");
+        session.outputs.push(output);
+        return Ok(None);
+    }
+    // The crtc went to a newer connector; find another and start over.
+    let resources = session
+        .drm
+        .resource_handles()
+        .map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
+    let info = session
+        .drm
+        .get_connector(parked.connector, false)
+        .map_err(|error| format!("could not read connector {name}: {error}"))?;
+    let restore = |session: &mut SessionGraphics| session.parked.push(ParkedConnector {
+        name: parked.name.clone(),
+        connector: parked.connector,
+        output: None,
+    });
+    let Some(mode) = preferred_mode(&info) else {
+        restore(session);
+        return Err(format!("{name} reports no modes"));
+    };
+    let taken: Vec<crtc::Handle> = session
+        .outputs
+        .iter()
+        .map(|output| output.crtc)
+        .chain(session.parked.iter().filter_map(|parked| parked.output.as_ref().map(|output| output.crtc)))
+        .collect();
+    let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken) else {
+        restore(session);
+        return Err(format!("{name} has no free crtc to come back on"));
+    };
+    let target = ConnectorTarget { info, crtc, mode };
+    let next_x = session
+        .outputs
+        .iter()
+        .map(|output| {
+            let width = output.drm_modes.first().map(|mode| mode.size().0 as i32).unwrap_or(0);
+            output.position.x.saturating_add(width)
+        })
+        .max()
+        .unwrap_or(0);
+    match attach_output(&mut session.drm, &session.gbm, session.render_node, &session.render_formats, &target, Point::new(next_x, 0)) {
+        Ok((output, setup)) => {
+            tracing::info!(output = %parked.name, ?crtc, "output unparked: re-adopted on a fresh crtc");
+            session.outputs.push(output);
+            Ok(Some(setup))
+        }
+        Err(error) => {
+            restore(session);
+            Err(format!("could not re-adopt {name}: {error}"))
+        }
+    }
 }
 
 /// Services every page flip in flight: names the ones that have overrun
@@ -2618,10 +2877,24 @@ pub(crate) fn apply_transform(graphics: &mut Graphics, index: usize, transform: 
 pub(crate) fn apply_output_setups(graphics: &mut Graphics, setups: &mut [OutputSetup]) {
     for (index, setup) in setups.iter_mut().enumerate() {
         let requested_transform = setup.transform;
+        // A mode or orientation the crtc already drives is left alone:
+        // `apply_mode` is a modeset whatever the mode, and this runs on
+        // every hotplug and every monitor-rule reconcile, where the
+        // outputs whose rule did not change must not flicker.
+        let (mode_current, transform_current) = match graphics {
+            Graphics::Winit(_) => (false, false),
+            Graphics::Session(session) => session.outputs.get(index).map_or((false, false), |output| {
+                (
+                    setup.requested_mode.is_some_and(|mode_index| mode_index == output.mode_index),
+                    requested_transform == output.transform,
+                )
+            }),
+        };
         let result = setup
             .requested_mode
+            .filter(|_| !mode_current)
             .map_or(Ok(()), |mode_index| apply_mode(graphics, index, mode_index))
-            .and_then(|()| apply_transform(graphics, index, requested_transform));
+            .and_then(|()| if transform_current { Ok(()) } else { apply_transform(graphics, index, requested_transform) });
         if let Err(error) = result {
             tracing::warn!(
                 %error,
@@ -3945,6 +4218,31 @@ mod tests {
         assert!(pending.is_empty());
         assert!(scanout.is_empty());
         assert!(!active);
+    }
+
+    /// A docked laptop's closed panel is parked, not gone: a rescan
+    /// must keep treating its connector as present (never re-adopting
+    /// it into the layout) until the connector actually leaves, and
+    /// then drop it with no layout work.
+    #[test]
+    fn a_rescan_keeps_a_parked_connector_present_and_drops_an_unplugged_one() {
+        let (present, gone) = plan_parked(&[handle(7), handle(9)], &[handle(7), handle(3)]);
+        assert_eq!(present, vec![handle(7)]);
+        assert_eq!(gone, vec![handle(9)]);
+        // The present parked connector is the plan's kept list: neither
+        // re-adopted nor removed. The driven one stays, a new one is
+        // adopted, and the unplugged parked one is free to come back new.
+        let probed = [
+            (handle(7), ConnectorUse::Drive),
+            (handle(3), ConnectorUse::Drive),
+            (handle(9), ConnectorUse::Drive),
+            (handle(11), ConnectorUse::Drive),
+        ];
+        let plan = rescan_plan(&[handle(3)], &probed, &present);
+        assert!(plan.remove.is_empty(), "the driven connector stays");
+        assert_eq!(plan.adopt, vec![handle(9), handle(11)], "parked-present is skipped; new and returning are adopted");
+        let (present, gone) = plan_parked::<u32>(&[], &[1, 2]);
+        assert!(present.is_empty() && gone.is_empty());
     }
 
     #[test]

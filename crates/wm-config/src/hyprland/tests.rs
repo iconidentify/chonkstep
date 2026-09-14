@@ -4037,7 +4037,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        162,
+        161,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -4047,7 +4047,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=188 commands=121 env=8 autostart=4")
-            && GUIDE.contains("float_rules=49 monitors=1 skipped=162"),
+            && GUIDE.contains("float_rules=49 monitors=1 skipped=161"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }
@@ -4066,4 +4066,120 @@ fn screensaver_defaults_survive_unrelated_rules_and_allow_explicit_opt_out() {
     write(&path, "windowrule = fullscreen off, match:class ^org\\.omarchy\\.screensaver$\n");
     let reading = read(&Roots::under(&root));
     assert!(!reading.float_rules.window_decision_for("org.omarchy.screensaver", "foot").fullscreen);
+}
+
+// ---- Omarchy's toggle directory ---------------------------------------
+
+/// A scratch home wearing the fixture's Omarchy defaults, so the real
+/// `toggles.lua` — `require_all.files(toggles_dir, nil, { exclude = … })`
+/// over `paths.state_home .. "/omarchy/toggles/hypr"` — is what the
+/// reader meets.
+fn scratch_with_omarchy_defaults(tag: &str) -> PathBuf {
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+    let root = scratch(tag);
+    copy_tree(&fixtures().join("machine/omarchy"), &root.join("omarchy"));
+    root
+}
+
+/// Omarchy's clamshell and laptop-display toggles each write one
+/// `hl.monitor({ output = …, disabled = true })` line into the toggle
+/// directory and reload. Those two files are read; the two legacy names
+/// Omarchy's own loader excludes are not, whatever they contain.
+#[test]
+fn omarchys_toggle_directory_is_read_and_its_excluded_names_are_not() {
+    let root = scratch_with_omarchy_defaults("toggles-dir");
+    write(&root.join(".config/hypr/hyprland.lua"), "require(\"default.hypr.toggles\")\n");
+    let toggles = root.join(".local/state/omarchy/toggles/hypr");
+    write(
+        &toggles.join("internal-monitor-clamshell.lua"),
+        "hl.monitor({ output = \"eDP-1\", disabled = true })\n",
+    );
+    write(
+        &toggles.join("internal-monitor-disable.lua"),
+        "hl.monitor({ output = \"DP-3\", disabled = true })\n",
+    );
+    for legacy in ["touchpad-disabled", "touchscreen-disabled"] {
+        write(
+            &toggles.join(format!("{legacy}.lua")),
+            "hl.monitor({ output = \"NEVER\", disabled = true })\no.bind(\"SUPER + F11\", nil, \"never\")\n",
+        );
+    }
+    // Not a toggle: the loader takes `*.lua` only, as Omarchy's does.
+    write(&toggles.join("notes.txt"), "hl.monitor({ output = \"NEVER\", disabled = true })\n");
+
+    let reading = read(&Roots::under(&root));
+    let disabled: Vec<(&str, &[String])> = reading
+        .monitors
+        .lines
+        .iter()
+        .map(|line| (line.output.as_str(), line.extra.as_slice()))
+        .collect();
+    assert_eq!(
+        disabled,
+        [("eDP-1", &["disabled".to_string(), "on".to_string()][..]), ("DP-3", &["disabled".to_string(), "on".to_string()][..])],
+        "{:?}",
+        reading.skipped
+    );
+    assert!(
+        reading.files.iter().any(|file| file.ends_with("internal-monitor-clamshell.lua"))
+            && reading.files.iter().any(|file| file.ends_with("internal-monitor-disable.lua")),
+        "{:?}",
+        reading.files
+    );
+    assert!(
+        !reading.files.iter().any(|file| file.ends_with("touchpad-disabled.lua") || file.ends_with("touchscreen-disabled.lua")),
+        "an excluded name must never be read: {:?}",
+        reading.files
+    );
+    assert!(action_for(&reading, "super+f11").is_none());
+    assert!(
+        !reading.skipped.iter().any(|skip| skip.what.contains("no module prefix")),
+        "the toggle fan-out is followed, not recorded as ignored: {:?}",
+        reading.skipped
+    );
+}
+
+/// Only the one shape Omarchy writes is followed. A nil-prefix fan-out
+/// over any other directory expression is still recorded as ignored,
+/// and a suffix that would climb out of the state home is refused.
+#[test]
+fn only_omarchys_toggle_fan_out_is_followed_without_a_module_prefix() {
+    let root = scratch_with_omarchy_defaults("toggles-dir-shape");
+    write(
+        &root.join(".local/state/etc/marker.lua"),
+        "o.bind(\"SUPER + F11\", nil, \"never\")\n",
+    );
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        concat!(
+            "local paths = require(\"default.hypr.paths\")\n",
+            "local require_all = require(\"default.hypr.require_all\")\n",
+            "local elsewhere = require(\"default.hypr.helpers\")\n",
+            "require_all.files(paths.config_home .. \"/hypr\", nil, {})\n",
+            "require_all.files(\"/etc\", nil)\n",
+            "require_all.files(elsewhere.state_home .. \"/etc\", nil)\n",
+            "require_all.files(paths.state_home .. \"/omarchy/../etc\", nil)\n",
+            "require_all.files(paths.state_home .. \"etc\", nil)\n",
+            "require_all.files(paths.state_home .. \"/etc\", nil, { exclude = { [\"marker\"] = true } })\n",
+        ),
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(
+        reading.skipped.iter().filter(|skip| skip.what.contains("require_all.files with no module prefix")).count(),
+        5,
+        "{:?}",
+        reading.skipped
+    );
+    assert!(action_for(&reading, "super+f11").is_none(), "an excluded file is skipped");
+    assert!(!reading.files.iter().any(|file| file.ends_with("marker.lua")), "{:?}", reading.files);
 }

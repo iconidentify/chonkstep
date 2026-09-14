@@ -180,10 +180,16 @@ actions. Supported families include:
 - `eval hl.monitor({ output=..., mode=..., position=..., scale=... })` for a live
   output. `mode` is `preferred`, `highrr`, `highres` or an advertised
   `WxH@RATE`, and `position` is `auto` or `XxY`, each meaning what it means in a
-  monitor rule. Any other key, `disabled` and `mirror` included, refuses the
-  whole request, and a mode the output does not advertise is refused before
-  anything changes. The mode is set first; if the connector refuses it, the
-  reply is a refusal and the position and scale are left as they were;
+  monitor rule. Any other key, `mirror` included, refuses the whole request,
+  and a mode the output does not advertise is refused before anything changes.
+  The mode is set first; if the connector refuses it, the reply is a refusal
+  and the position and scale are left as they were;
+- `eval hl.monitor({ output=..., disabled=BOOL })`, the line Omarchy's
+  clamshell and laptop-display toggles write. `disabled = true` takes the
+  output out of the desktop layout (see below); `disabled = false` puts it
+  back. It is the whole request: a mode, position or scale beside it is
+  refused rather than half applied, and disabling the last output in the
+  layout is refused with a log line;
 - `dispatch dpms on|off|toggle [OUTPUT]` for temporary connector power;
 - `switchxkblayout DEVICE next|prev|INDEX`, which changes the live XKB
   group and emits `activelayout` with its human-readable name;
@@ -215,23 +221,40 @@ not reported as unknown syntax. Monitor scaling validates the output
 and range before changing anything, so an Omarchy script cannot record
 a scale that the compositor said it applied but did not.
 
-`keyword` supports workspace layouts and the named
+`keyword` supports workspace layouts, the named
 `keyword cursor:invisible BOOL` screensaver fallback, which reaches the
-same live cursor flag as `hl.config`. If the focused client that hid
-the cursor disconnects without restoring it, chonkstep restores the
-cursor automatically. Every other refusal names what does work instead:
+same live cursor flag as `hl.config`, and the two `keyword monitor`
+forms Omarchy's Display panel sends from its row toggle:
+`keyword monitor NAME,disable` and `keyword monitor
+NAME,MODE,POSITION,SCALE`. If the focused client that hid the cursor
+disconnects without restoring it, chonkstep restores the cursor
+automatically. Every other refusal names what does work instead:
 chonkstep re-reads `~/.config/hypr` within a second of an edit, and
-`hyprctl eval hl.monitor({ output=..., scale=... })` changes a live
-scale. The one shipped Omarchy caller is the monitor panel's row toggle
-(`hyprctl keyword monitor NAME,disable` / `NAME,preferred,auto,auto`),
-and that specific form is refused by name for a reason the user can act
-on: chonkstep keeps every connected output in the layout and has no
-remove/disable path, so
-its `disabled` field is honestly `false` for every head and the panel's
-checkmark will not move. The refusal names `dispatch dpms off OUTPUT`
-as the temporary blanking alternative. A powered-down head remains in
-`monitors` and in the workspace geometry by design; `monitors all`
-therefore returns the same set as `monitors`.
+`hyprctl eval hl.monitor({ ... })` changes a live output.
+
+`NAME,disable` takes a connected output out of the desktop layout. The
+output is *parked*: its `wl_output` global is withdrawn, its workspaces
+and windows move to the remaining outputs, the pointer can no longer
+reach it, and on the DRM session its crtc is cleared the way DPMS-off
+clears it while the connector is kept. `NAME,preferred,auto,auto` (any
+mode, position and scale) puts a parked output back at the end of the
+layout, where the configuration's own rule for it applies; on an output
+already in the layout the same form means what the same monitor line
+means in the configuration, and anything past the scale is refused as
+belonging there. Disabling the last output in the layout is refused,
+with a log line: the desktop is never without an output. Powering a
+connector down remains `dispatch dpms off OUTPUT`, which keeps the head
+in the layout.
+
+The IPC is honest about which outputs are in the layout. Plain
+`monitors` lists the layout alone, so a bar never draws a workspace row
+for a panel inside a closed lid; `monitors all` lists the parked outputs
+after it with `disabled: true` and `dpmsStatus: false` (and `id: -1`,
+since ids are layout positions), which is where Omarchy's monitor
+scripts look for the panel they disabled. `monitorremoved` and
+`monitoradded` fire on disable and enable, and name the output that
+moved: the diff goes by name, because disabling the first output hands
+its id to the second.
 
 The monitor object reports measured values, not conventional ones.
 `refreshRate` is the driven mode's rate, `availableModes` is the

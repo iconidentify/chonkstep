@@ -486,3 +486,78 @@ fn a_client_that_does_not_hold_the_lock_cannot_unlock_the_session() {
     session.kill_client("chonk-lock-thief");
     session.kill_client("chonk-lock-probe");
 }
+
+/// One request to the session's Hyprland socket, in `hyprctl`'s shape.
+fn hypr_request(session: &Session, command: &str) -> String {
+    use std::io::{Read, Write};
+    let signature = poll_until(Duration::from_secs(10), "the Hyprland instance signature", || session.hyprland_signature())
+        .expect("the IPC server reports its instance signature");
+    let path = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap())
+        .join("hypr")
+        .join(signature)
+        .join(".socket.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.write_all(command.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn a_locked_session_stays_locked_while_an_output_is_disabled_and_enabled() {
+    // A laptop lid closing under a locked session: the panel leaves the
+    // layout, its lock surface stays its client's and names no output,
+    // the rest of the desk stays covered, and when the panel comes back
+    // it shows the locked scene before any client content.
+    let mut session =
+        Session::boot("session-lock-park", SessionOptions { scale: Some(1.0), ..Default::default() }).unwrap();
+    session.door().set_virtual_outputs("split").unwrap();
+    let marker = launch_stale_output_locker(&mut session, "chonkstep-right", "chonkstep, chonkstep-right");
+    assert_eq!(session.door().protocol_ledgers().unwrap().lock, 2, "one lock surface per output");
+
+    // -- the right-hand output is disabled under the lock -------------------
+    assert_eq!(hypr_request(&session, "keyword monitor chonkstep-right,disable").trim(), "ok");
+    session.door().barrier().unwrap();
+    assert_eq!(session.door().protocol_ledgers().unwrap().lock, 2, "the parked output's lock surface stays its client's");
+    assert!(!session.log().contains("session unlocked"), "disabling an output must not unlock the session");
+
+    // A lock surface that names the parked output's withdrawn wl_output
+    // is filed under no other output.
+    std::fs::write(&marker, "").unwrap();
+    checkpoint(&session, "stale lock surface configured");
+    assert_eq!(session.door().protocol_ledgers().unwrap().lock, 3);
+    let shot = poll_until(Duration::from_secs(15), "the primary's lock surface to cover the whole desk", || {
+        session.door().barrier().ok()?;
+        let shot = session.screenshot("park-locked-primary").ok()?;
+        let navy = (5..shot.height).step_by(61).all(|y| {
+            (5..shot.width).step_by(67).all(|x| shot.pixel(x, y)[..3] == LOCK_NAVY_RGB)
+        });
+        navy.then_some(shot)
+    })
+    .unwrap_or_else(|timeout| panic!("{timeout}\n-- chonk-lock-probe log --\n{}", probe_log(&session)));
+    assert_ne!(shot.pixel(shot.width - 1, shot.height - 1)[..3], STALE_MAGENTA_RGB);
+    assert_eq!(session.door().hit(shot.width as i32 * 3 / 4, shot.height as i32 / 2).unwrap(), "lock");
+
+    // -- and re-enabled: the locked scene first, never the desktop ---------
+    assert_eq!(hypr_request(&session, "keyword monitor chonkstep-right,preferred,auto,auto").trim(), "ok");
+    session.door().barrier().unwrap();
+    let returned = session
+        .screenshot_output("park-locked-returned", "chonkstep-right")
+        .expect("grim captures the returned output");
+    for y in (5..returned.height).step_by(97) {
+        for x in (5..returned.width).step_by(89) {
+            assert_eq!(
+                returned.pixel(x, y)[..3],
+                [0, 0, 0],
+                "the returned output should show the uncovered locked scene at ({x}, {y}) in {}",
+                returned.path.display()
+            );
+        }
+    }
+    assert_eq!(session.door().hit(shot.width as i32 * 3 / 4, shot.height as i32 / 2).unwrap(), "lock");
+    assert!(!session.log().contains("session unlocked"), "the session must still be locked after the output returned");
+    assert!(session.compositor_alive(), "the compositor must outlive the disable and enable");
+    session.kill_client("chonk-lock-probe");
+}

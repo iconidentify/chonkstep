@@ -109,9 +109,10 @@
 //!   carried. Whole-desktop behavior such as `follow_mouse`, touchpad
 //!   policy, and gestures belongs to chonkstep and is named and skipped.
 //! - **Unsupported `monitor =` lines.** Preferred and explicit modes,
-//!   position, scale, and 0/90/180/270-degree transforms are applied
-//!   once outputs exist. Disable, mirror, and other extras refuse their
-//!   whole line.
+//!   position, scale, 0/90/180/270-degree transforms and `disable`
+//!   (Lua `disabled = true`) are applied once outputs exist, at
+//!   startup, at hotplug and on an explicit reload. Mirror and other
+//!   extras refuse their whole line.
 //! - **Hyprland requests chonkstep does not serve.** `hyprctl` and any
 //!   `omarchy-hyprland-*` script outside
 //!   [`dispatch::SERVED_OMARCHY_SCRIPTS`] stay unbound, with a reason
@@ -412,7 +413,8 @@ impl Reading {
                 mode = %line.mode,
                 position = %line.position,
                 scale = %line.scale,
-                "hyprland-config: monitor line applied at startup and on connector hotplug only; a reload does not re-apply it (see docs/hyprland-config.md)"
+                extra = %line.extra.join(","),
+                "hyprland-config: monitor line read; applied at startup, on connector hotplug and on an explicit reload, never from the file watch (see docs/hyprland-config.md)"
             );
         }
     }
@@ -452,7 +454,7 @@ pub fn read(roots: &Roots) -> Reading {
         // bindings shipped in `/usr/share`, and reading them is better
         // than reading nothing. The defaults are what the entry file
         // would have required anyway.
-        loader.directory(&roots.defaults.join("bindings"), &mut stream, 0);
+        loader.directory(&roots.defaults.join("bindings"), &[], &mut stream, 0);
     }
     let mut reading = lower(stream, loader.finish());
     // Any xkb setting the configuration leaves unset — including one it
@@ -740,20 +742,34 @@ impl<'a> Loader<'a> {
                 ),
             },
             Include::ModuleDirectory { prefix } => match self.resolve_directory(prefix) {
-                Some(dir) => self.directory(&dir, out, depth + 1),
+                Some(dir) => self.directory(&dir, &[], out, depth + 1),
                 None => self.note(
                     "include",
                     format!("require_all.files(…, \"{prefix}\")"),
                     "no directory of that name on the search path",
                 ),
             },
+            // Omarchy's toggle directory, under the state home. Absent
+            // until the first toggle is written, and `require_all`
+            // itself reads nothing from a directory that is not there,
+            // so a missing one is the ordinary case of nothing toggled.
+            Include::StateDirectory { relative, exclude } => {
+                let Some(root) = self.roots.facts.state_root() else {
+                    return;
+                };
+                let dir = root.join(relative);
+                if dir.is_dir() {
+                    self.directory(&dir, exclude, out, depth + 1);
+                }
+            }
         }
     }
 
     /// Every `*.lua`/`*.conf` directly under a directory, sorted —
     /// Omarchy's own `require_all.files` sorts, and so does the shell
-    /// glob its conf-syntax equivalent expands.
-    fn directory(&mut self, dir: &Path, out: &mut Vec<Directive>, depth: u32) {
+    /// glob its conf-syntax equivalent expands. A base name in
+    /// `exclude` is skipped, as Omarchy's own loader skips it.
+    fn directory(&mut self, dir: &Path, exclude: &[String], out: &mut Vec<Directive>, depth: u32) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             self.note("include", dir.display().to_string(), "unreadable directory");
             return;
@@ -767,6 +783,10 @@ impl<'a> Loader<'a> {
                         p.extension().and_then(|e| e.to_str()),
                         Some("lua") | Some("conf")
                     )
+                    && !p
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .is_some_and(|stem| exclude.iter().any(|name| name == stem))
             })
             .collect();
         paths.sort();

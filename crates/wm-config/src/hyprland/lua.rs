@@ -285,12 +285,18 @@ impl Facts {
         }
     }
 
+    /// `$XDG_STATE_HOME`, or `~/.local/state` — what Omarchy's
+    /// `paths.state_home` resolves to.
+    pub(crate) fn state_root(&self) -> Option<std::path::PathBuf> {
+        if let Some(state) = &self.state_home {
+            return Some(state.clone());
+        }
+        Some(self.home.as_ref()?.join(".local/state"))
+    }
+
     /// `~/.local/state/omarchy` — where the preinstalls marker lives.
     fn omarchy_state(&self) -> Option<std::path::PathBuf> {
-        if let Some(state) = &self.state_home {
-            return Some(state.join("omarchy"));
-        }
-        Some(self.home.as_ref()?.join(".local/state/omarchy"))
+        Some(self.state_root()?.join("omarchy"))
     }
 
     fn cmd_present(&self, command: &str) -> bool {
@@ -1184,10 +1190,19 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
         // evaluate `require` for a value.
         "require_all.files" => match as_string(&arg(1)) {
             Some(prefix) => out.push(Directive::Include(Include::ModuleDirectory { prefix })),
-            None => out.push(Directive::Ignored {
-                kind: "include",
-                detail: "require_all.files with no module prefix: the directory is built from a value this reader cannot evaluate".into(),
-            }),
+            // No prefix: Omarchy's `toggles.lua` puts the directory
+            // itself on `package.path`. Its directory is
+            // `paths.state_home .. "/omarchy/toggles/hypr"`, and that
+            // one shape — the state home from `default.hypr.paths` plus
+            // a literal — resolves without evaluating `require` for a
+            // value. Any other nil-prefix fan-out stays ignored.
+            None => match state_directory(&arg(0), &arg(2), env) {
+                Some(include) => out.push(Directive::Include(include)),
+                None => out.push(Directive::Ignored {
+                    kind: "include",
+                    detail: "require_all.files with no module prefix: the directory is built from a value this reader cannot evaluate".into(),
+                }),
+            },
         },
         // `dofile` is Omarchy's bootstrap, whose whole job is to set
         // `package.path` — which `super::Roots` already models, so
@@ -1209,6 +1224,68 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
 
 /// Omarchy's module whose function re-applies a persisted device disable.
 const DISABLED_INPUT_DEVICE: &str = "default.hypr.disabled-input-device";
+
+/// Omarchy's module of path constants, whose `state_home` field is
+/// `$XDG_STATE_HOME` or `~/.local/state`.
+const PATHS_MODULE: &str = "default.hypr.paths";
+
+/// The most exclusions a toggle fan-out may name. Omarchy names two.
+const MAX_EXCLUDES: usize = 64;
+
+/// Whether `name` is bound by `require` to `module`, the way
+/// `local paths = require("default.hypr.paths")` binds `paths`.
+fn is_required_module(name: &str, module: &str, env: &Env) -> bool {
+    matches!(
+        env.get(name),
+        Some(Value::Call { path: callee, args })
+            if callee == "require" && matches!(args.first(), Some(Value::Str(required)) if required == module)
+    )
+}
+
+/// The toggle-directory fan-out of Omarchy's `toggles.lua`, or `None`
+/// for any other nil-prefix `require_all.files`. `dir` has to be
+/// `<paths>.state_home .. "<literal>"` with `<paths>` bound to
+/// `default.hypr.paths`, and the literal a plain relative path — a
+/// value this reader can place under `$XDG_STATE_HOME` without
+/// evaluating anything, and one that cannot climb out of it. The
+/// `exclude` table is honoured so a base name Omarchy refuses to load
+/// as code is never read here either.
+fn state_directory(dir: &Value, options: &Value, env: &Env) -> Option<Include> {
+    let Value::Binary { op: "..", left, right } = dir else {
+        return None;
+    };
+    let (Value::Name(field), Value::Str(suffix)) = (&**left, &**right) else {
+        return None;
+    };
+    let receiver = field.strip_suffix(".state_home")?;
+    if !is_required_module(receiver, PATHS_MODULE, env) {
+        return None;
+    }
+    if suffix.len() > 200 || !suffix.starts_with('/') {
+        return None;
+    }
+    let relative = suffix.trim_matches('/');
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if relative.is_empty() || !relative.split('/').all(plain) {
+        return None;
+    }
+    let mut exclude = Vec::new();
+    if let Value::Table(fields) = options {
+        if let Some((_, Value::Table(names))) = fields.iter().find(|(key, _)| key.as_deref() == Some("exclude")) {
+            for (name, value) in names.iter().take(MAX_EXCLUDES) {
+                if let (Some(name), Value::Bool(true)) = (name, value) {
+                    exclude.push(name.clone());
+                }
+            }
+        }
+    }
+    Some(Include::StateDirectory { relative: relative.to_string(), exclude })
+}
 
 /// Whether `path` is a name bound by `require` to Omarchy's
 /// `disabled-input-device` module, which returns the one function it holds.

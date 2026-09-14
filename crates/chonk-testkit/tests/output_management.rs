@@ -241,3 +241,71 @@ fn a_listing_yields_its_scale_as_a_number() {
     assert_eq!(reported_scale("  Position: 0,0\n"), None);
     assert_eq!(reported_scale(""), None);
 }
+
+/// Whether a listing reports `head` as enabled: the `Enabled:` line in
+/// the indented block under the head's own line.
+fn enabled_state(report: &str, head: &str) -> Option<bool> {
+    let mut in_head = false;
+    for line in report.lines() {
+        if !line.is_empty() && !line.starts_with(char::is_whitespace) {
+            in_head = line.split_whitespace().next() == Some(head);
+            continue;
+        }
+        if in_head {
+            if let Some(value) = line.trim().strip_prefix("Enabled:") {
+                return Some(value.trim() == "yes");
+            }
+        }
+    }
+    None
+}
+
+/// `wlr-randr --off` takes one of two heads out of the layout, the
+/// listing then announces it as a disabled head, and `--on` puts it
+/// back — what `kanshi` does with a laptop lid. The last head is still
+/// refused.
+#[test]
+#[ignore = "needs a live Wayland session and wlr-randr"]
+fn wlr_randr_disables_and_re_enables_a_head_on_a_split_desk() {
+    if !chonk_testkit::require_client(CLIENT) {
+        return;
+    }
+    let mut session = Session::boot("output-management-disable", SessionOptions::default()).unwrap();
+    session.door().set_virtual_outputs("split").unwrap();
+    let layout = |session: &Session| -> usize { hyprland_json(session, "j/monitors").as_array().map_or(0, Vec::len) };
+    poll_until(WAIT, "both split heads to be reported", || (layout(&session) == 2).then_some(())).unwrap();
+    let listing = run(&mut session, &[]).expect("listing succeeds");
+    assert_eq!(enabled_state(&listing, "chonkstep-right"), Some(true), "{listing:?}");
+
+    run(&mut session, &["--output", "chonkstep-right", "--off"]).expect("disabling one of two heads succeeds");
+    let off = run(&mut session, &[]).expect("listing succeeds");
+    assert_eq!(enabled_state(&off, "chonkstep-right"), Some(false), "a parked output is announced as a disabled head: {off:?}");
+    assert_eq!(enabled_state(&off, "chonkstep"), Some(true), "{off:?}");
+    assert_eq!(layout(&session), 1, "the disabled head left the layout");
+
+    run(&mut session, &["--output", "chonkstep-right", "--on"]).expect("enabling the disabled head succeeds");
+    let on = run(&mut session, &[]).expect("listing succeeds");
+    assert_eq!(enabled_state(&on, "chonkstep-right"), Some(true), "{on:?}");
+    assert_eq!(layout(&session), 2, "the head is back in the layout");
+
+    // Never zero outputs.
+    run(&mut session, &["--output", "chonkstep-right", "--off"]).expect("disabling again succeeds");
+    session.launch(CLIENT, &["--output", "chonkstep", "--off"]).unwrap();
+    let status = poll_until(WAIT, "the last-head disable to be answered", || {
+        session.client_status(CLIENT).ok().flatten()
+    })
+    .unwrap();
+    assert!(!status.success(), "the last head in the layout is refused");
+    assert!(session.client_log(CLIENT).contains("failed"));
+    assert_eq!(layout(&session), 1);
+    assert!(session.compositor_alive());
+}
+
+#[test]
+fn a_listing_yields_each_heads_enabled_state() {
+    assert_eq!(enabled_state(SAMPLE_LISTING, "chonkstep"), Some(true));
+    let two = format!("{SAMPLE_LISTING}HDMI-A-1 \"Other\"\n  Enabled: no\n");
+    assert_eq!(enabled_state(&two, "HDMI-A-1"), Some(false));
+    assert_eq!(enabled_state(&two, "chonkstep"), Some(true));
+    assert_eq!(enabled_state(&two, "DP-9"), None);
+}

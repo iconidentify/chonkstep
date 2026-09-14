@@ -193,6 +193,15 @@ pub enum Include {
     /// directly under a directory, in sorted order — the fan-out
     /// Omarchy uses for its `bindings/` and `apps/` folders.
     ModuleDirectory { prefix: String },
+    /// `require_all.files(toggles_dir, nil, { exclude = { … } })` in
+    /// Omarchy's `toggles.lua`, where `toggles_dir` is
+    /// `paths.state_home .. "/omarchy/toggles/hypr"`: every `*.lua`
+    /// directly under that directory of `$XDG_STATE_HOME`, in sorted
+    /// order, except the base names in `exclude`. The only fan-out
+    /// without a module prefix this reader follows, because it is the
+    /// directory Omarchy's display and clamshell toggles write their
+    /// monitor rules into.
+    StateDirectory { relative: String, exclude: Vec<String> },
 }
 
 /// The most bytes a workspace selector may be before it is refused

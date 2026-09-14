@@ -135,11 +135,13 @@ configuration holds at most 32 switch bindings.
 On a stock Omarchy install, closing the lid runs
 `omarchy-system-lid-close`, which locks the session straight away when
 no external monitor is connected. The clamshell handler Omarchy binds
-beside it, `omarchy-hyprland-monitor-clamshell`, stays unbound: it
-disables outputs through Hyprland requests ChonkStep does not serve, so
-it is reported like any other script outside the served list. The baked
-Omarchy keymap holds key chords only, so switch bindings come from the
-live configuration.
+beside it, `omarchy-hyprland-monitor-clamshell`, writes
+`hl.monitor({ output = "<eDP>", disabled = true })` into
+`~/.local/state/omarchy/toggles/hypr/` and runs `hyprctl reload`, which
+this desktop reads and applies (see [Monitors](#monitors) below); the
+script itself stays outside the served list until its every request is
+proved served there. The baked Omarchy keymap holds key chords only, so
+switch bindings come from the live configuration.
 
 ### Window rules
 
@@ -428,11 +430,11 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | A `size` or `move` written in a form other than a number or a layout expression (`move cursor 0 0`, `size 50% 50%`, `move onscreen`) | Only the arithmetic Omarchy's rules use is read — see [window rules](#window-rules). The property is skipped with its text; the rule's other properties still apply. |
 | Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
-| `submap`, workspace rules, `plugin`, `bezier` (Lua `hl.curve`), and the speed, curve and style of every `animation` line (Lua `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. This desktop's motion is one spring; only the on/off switch of an animation line is read, and only for the leaves named under [Animations](#animations). |
+| `submap`, `plugin`, `bezier` (Lua `hl.curve`), and the speed, curve and style of every `animation` line (Lua `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. This desktop's motion is one spring; only the on/off switch of an animation line is read, and only for the leaves named under [Animations](#animations). |
 | Workspace rules other than `layout`, and rules for `special:`, `name:` and range selectors | Only [the layout of a numbered workspace](#workspace-layout) is read. Every other rule and every other selector is logged by name. |
 | Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (such as `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
-| Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |
+| Unsupported `monitor =` lines | A line containing mirror, or an extra field other than a 0/90/180/270-degree transform or `disabled`, is refused whole. Explicit modes, those transforms and `disable` are supported as described below. |
 
 ### Omarchy's Hyprland scripts
 
@@ -673,11 +675,39 @@ The supported transaction is:
 
 Negative positions are normalized together so the logical desktop
 starts at zero without changing relative placement. An unadvertised
-mode, unsupported field, `disable`, `mirror`, or malformed
+mode, unsupported field, `mirror`, or malformed
 position/scale refuses the whole line with the output and field in the log. The same
 output state backs IPC and `zwlr_output_management`, so advertised
 scale, renderer scale, shell geometry, and application fractional scale
 cannot diverge.
+
+`monitor = eDP-1, disable` and Lua `hl.monitor({ output = "eDP-1",
+disabled = true })` take a connected output out of the desktop layout.
+The output is *parked*: no `wl_output` global, no place in the layout,
+no workspaces, and on the DRM session a cleared crtc with the connector
+kept, so putting it back is the DPMS-on path rather than a fresh
+modeset. Its windows move to the remaining outputs and its lock surface
+is released the way an unplug releases one, while the other outputs stay
+covered; when it returns, the locked scene is presented on it before any
+client content. A rule that disables every connected output keeps the
+first, and the log says so: the desktop is never without an output. A
+line with `disabled` carries no geometry, and one given beside it is
+not applied. Mirroring is still refused whole. The same disable is
+available live, from `hyprctl keyword monitor NAME,disable`,
+`hyprctl eval hl.monitor({ output = NAME, disabled = true })` and
+wlr-output-management, and `monitors all` lists a parked output with
+`disabled: true`; see [hyprland-ipc.md](hyprland-ipc.md).
+
+Omarchy's toggle directory, `~/.local/state/omarchy/toggles/hypr/`, is
+read: its `toggles.lua` loads every `*.lua` there through
+`require_all.files(toggles_dir, nil, { exclude = … })`, and that one
+fan-out — `paths.state_home` plus a literal, with no module prefix — is
+followed, honouring the `exclude` table so the legacy
+`touchpad-disabled` and `touchscreen-disabled` names are never read as
+code. This is where `omarchy-hyprland-monitor-clamshell` and
+`omarchy-hyprland-monitor-internal` write their `disabled = true` line
+before running `hyprctl reload`. Any other `require_all.files` call
+without a module prefix stays ignored, and named as such.
 
 ---
 
@@ -757,14 +787,21 @@ reports the layout actually in force rather than the one that was asked
 for.
 
 What a live re-read cannot change is `env` (see above), `autostart` (it
-has already run), and `monitor` lines. Monitor rules are applied at
-startup and when a connector is hot-plugged, not on reload: re-applying
-a mode or a position to a live output is a modeset, and doing it from a
-config re-read would move windows and reflow the desk on every save of
-an unrelated key. Changing an output live has its own verb —
-`hyprctl eval hl.monitor({ output = …, scale = … })` — and the log names
-each monitor line it read for this reason rather than implying it took
-effect.
+has already run), and — from the file watch — `monitor` lines. Monitor
+rules are applied at startup, when a connector is hot-plugged, and on an
+**explicit reload** (`hyprctl reload`, the reload marker, a bound
+`reload` key), never from the one-second file watch or from Omarchy
+theme following: re-applying a mode or a position to a live output is a
+modeset, and doing it on every save of an unrelated key would reflow
+the desk. A reload compares each connector's resolved rule with the one
+last applied and touches only the connectors whose rule changed: a
+changed scale, position, mode or transform is applied to that live
+output; a rule that now disables the output parks it; a rule that no
+longer does puts it back. A reload that changes no monitor rule performs
+no modeset and moves no output, and an output disabled or enabled at
+runtime keeps that state across a reload whose rule for it did not
+change — a changed rule wins. Changing an output live without a reload
+has its own verb, `hyprctl eval hl.monitor({ output = …, … })`.
 
 ---
 
@@ -839,7 +876,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=188 commands=121 env=8 autostart=4
-      float_rules=49 monitors=1 skipped=162
+      float_rules=49 monitors=1 skipped=161
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

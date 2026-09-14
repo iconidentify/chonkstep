@@ -567,18 +567,33 @@ fn virtual_outputs(comp: &mut Compositor, topology: &str) -> Result<(), &'static
             Size::new((host_size.w - host_size.w / 2) as u32, host_size.h as u32)],
         _ => return Err("virtual-outputs wants split, single, compact, aligned or none"),
     };
+    // The same reconciliation a DRM rescan performs, by connector name:
+    // a head in the topology that is already driven is resized in
+    // place; one that is parked (disabled) stays parked, as a plugged
+    // parked connector does; one that is neither is plugged in. A head
+    // the topology no longer names is unplugged whether driven or
+    // parked.
+    let names: Vec<&str> = (0..sizes.len()).map(|index| if index == 0 { "chonkstep" } else { "chonkstep-right" }).collect();
+    let unplugged_parked: Vec<String> = comp
+        .parked_outputs
+        .iter()
+        .map(|parked| parked.setup.output.name())
+        .filter(|name| !names.contains(&name.as_str()))
+        .collect();
+    if !unplugged_parked.is_empty() {
+        crate::state::drop_parked_outputs(comp, &unplugged_parked);
+    }
     let mut added = Vec::new();
     let mut x = 0;
-    for (index, &size) in sizes.iter().enumerate() {
+    for (&name, &size) in names.iter().zip(&sizes) {
         let mode = Mode { size: (size.w as i32, size.h as i32).into(), refresh: 60_000 };
-        if let Some(entry) = comp.outputs.get_mut(index) {
+        if let Some(entry) = comp.outputs.iter_mut().find(|entry| entry.output.name() == name) {
             entry.size = size;
             entry.position = Point::new(x, 0);
             entry.output.change_current_state(Some(mode), None, None, Some((x, 0).into()));
             entry.output.set_preferred(mode);
             entry.modes = vec![mode];
-        } else {
-            let name = if index == 0 { "chonkstep" } else { "chonkstep-right" };
+        } else if !comp.parked_outputs.iter().any(|parked| parked.setup.output.name() == name) {
             let output = Output::new(name.into(), PhysicalProperties { size: (0, 0).into(),
                 subpixel: Subpixel::Unknown, make: "chonkstep".into(), model: "nested test display".into() });
             output.change_current_state(Some(mode), Some(Transform::Flipped180), None, Some((x, 0).into()));
@@ -589,7 +604,14 @@ fn virtual_outputs(comp: &mut Compositor, topology: &str) -> Result<(), &'static
         }
         x += size.w as i32;
     }
-    let removed: Vec<_> = (sizes.len()..comp.outputs.len()).rev().collect();
+    let removed: Vec<_> = comp
+        .outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !names.contains(&entry.output.name().as_str()))
+        .map(|(index, _)| index)
+        .rev()
+        .collect();
     crate::state::apply_connector_hotplug(comp, &removed, added);
     // A host swap covers the framebuffer; wl_output retains each head's viewport.
     let total = Size::new(host_size.w as u32, host_size.h as u32);
