@@ -97,6 +97,17 @@ Two things a hand-written table could not do, and this can:
   condition that would need a *shell* (`o.shell_succeeds`) is not
   answered; that block is skipped and says so.
 
+  Your own conditions combine the way Lua combines them. `and`, `or`,
+  `not`, `==`, `~=` and the orderings follow Lua's precedence, and an
+  unset global is `nil`, so `omarchy_default_bindings = nil` turns the
+  defaults back on. A `local` stays in its own file and never reaches
+  `_G`. A part of a condition only running code could answer decides
+  nothing unless the rest decides it: `o.shell_succeeds(…) and false` is
+  false, while `o.shell_succeeds(…) and true` skips the block. A name
+  that a skipped construct could have set (a `while` body, a function,
+  an `if` that could not be answered) is not taken to be `nil` either.
+  An `if` whose condition is not followed by `then` is skipped whole.
+
 ### Window rules
 
 `windowrule`, `windowrulev2` and `o.window` / `hl.window_rule`, in all
@@ -218,7 +229,8 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
 | Mouse, wheel and switch bindings (`bindm`, `mouse:272`, `mouse_up`, `switch:on:Lid Switch`) | Not key chords; this config format cannot express one. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
-| `submap`, workspace rules, `plugin`, `bezier`, `animation` | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| `submap`, workspace rules, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (`disabled_input_device`, `hl.device`, `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
 | Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |
 
@@ -548,13 +560,13 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=167 commands=119 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=157
+      float_rules=47 monitors=1 skipped=182
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```
 
 `skipped` being large is normal and not a problem — a stock Omarchy
-machine has around 150 directives this desktop has its own answer for.
+machine has around 190 directives this desktop has its own answer for.
 Each one names itself, because "47 rules ignored" tells you nothing you
 can act on and "float rule carries `match:xwayland 1`, which this
 reader does not implement" tells you exactly which line to rewrite.

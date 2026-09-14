@@ -322,6 +322,17 @@ fn a_global_set_before_a_require_reaches_the_file_that_reads_it() {
     );
     let reading = read(&Roots::under(&root));
     assert_eq!(action_for(&reading, "super+w"), Some(Action::Close));
+    // Omarchy's gate is `_G.omarchy_default_bindings ~= false`, and
+    // `nil ~= false` is true: setting the global back to `nil` restores
+    // the defaults, and a `local` of the same name never touches `_G`.
+    for entry in [
+        "omarchy_default_bindings = false\nomarchy_default_bindings = nil\nrequire(\"default.hypr.omarchy\")\n",
+        "local omarchy_default_bindings = false\nrequire(\"default.hypr.omarchy\")\n",
+    ] {
+        write(&root.join(".config/hypr/hyprland.lua"), entry);
+        let reading = read(&Roots::under(&root));
+        assert_eq!(action_for(&reading, "super+w"), Some(Action::Close), "{entry}");
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1975,6 +1986,7 @@ fn hostile_input_never_panics_and_always_yields_something() {
         (vec![nested_loops("hl.env(\"A\", \"B\")\n")], "directives"),
         (vec![nested_loops("")], "statements walked"),
         (vec![nested_loops("local y = 1\n")], "statements walked"),
+        (vec!["local y = 1\n".repeat(20_001)], "per-file limit"),
     ];
     for (sources, needle) in bounded {
         let mut globals = lua::Globals::default();
@@ -2123,6 +2135,197 @@ fn a_condition_that_would_need_a_shell_is_refused_rather_than_run() {
         "and the refusal must be visible: {out:?}"
     );
     let _ = std::fs::remove_dir_all(marker.parent().unwrap());
+}
+
+/// Reads Lua sources in order through one `Globals`, on a machine with
+/// nothing on its `PATH`, and returns what the last one produced.
+fn lua_out(sources: &[&str]) -> Vec<Directive> {
+    let facts = lua::Facts {
+        path: Vec::new(),
+        home: None,
+        state_home: None,
+    };
+    let mut globals = lua::Globals::default();
+    let mut out = Vec::new();
+    for source in sources {
+        out.clear();
+        lua::read(source, &facts, &mut globals, &mut out);
+    }
+    out
+}
+
+/// Which branch of a `RAN` probe ran, if either did.
+fn branch(out: &[Directive]) -> Option<&str> {
+    out.iter().find_map(|d| match d {
+        Directive::Env { name, value } if name == "RAN" => Some(value.as_str()),
+        _ => None,
+    })
+}
+
+/// Branch conditions mean what Lua 5.4 says they mean. `and`, `or` and
+/// `not` combine answers, `==` and `~=` compare values, and an unset
+/// name is `nil`. Every expected answer in the table is Lua's own, for
+/// `x` as a global and as a local.
+///
+/// A condition that depends on something only running code could know
+/// decides nothing, unless the other operand decides it — and a name
+/// that some construct the reader skipped could have set is not
+/// confidently `nil`.
+#[test]
+fn conditions_are_answered_the_way_lua_answers_them() {
+    let conditions = [
+        "x and y",
+        "x or z",
+        "not x",
+        "y and not x",
+        "x == \"y\"",
+        "x ~= nil",
+        "x ~= false",
+    ];
+    let table: [(&str, [bool; 7]); 5] = [
+        ("", [false, false, true, true, false, false, true]),
+        ("x = nil", [false, false, true, true, false, false, true]),
+        ("x = false", [false, false, true, true, false, true, false]),
+        ("x = true", [true, true, false, false, false, true, true]),
+        ("x = \"y\"", [true, true, false, false, true, true, true]),
+    ];
+    for (setting, answers) in table {
+        for (condition, answer) in conditions.iter().zip(answers) {
+            for scope in ["", "local "] {
+                let setting = match setting {
+                    "" => String::new(),
+                    setting => format!("{scope}{setting}\n"),
+                };
+                let source = format!(
+                    "y = true\nz = false\n{setting}if {condition} then hl.env(\"RAN\", \"then\") else hl.env(\"RAN\", \"else\") end\n"
+                );
+                assert_eq!(
+                    branch(&lua_out(&[&source])),
+                    Some(if answer { "then" } else { "else" }),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    // Three-valued: an unanswerable operand, and what decides it anyway.
+    for (condition, expected) in [
+        ("o.shell_succeeds(\"x\") and false", Some("else")),
+        ("false and o.shell_succeeds(\"x\")", Some("else")),
+        ("o.shell_succeeds(\"x\") or true", Some("then")),
+        ("o.cmd_present(\"no-such-tool-xyz\") or true", Some("then")),
+        ("o.cmd_present(\"no-such-tool-xyz\") and true", Some("else")),
+        ("o.shell_succeeds(\"x\") and true", None),
+        ("not o.shell_succeeds(\"x\")", None),
+        ("o.shell_succeeds(\"x\") == nil", None),
+        ("hl ~= nil", None),
+        ("vconsole.XKBLAYOUT == nil", None),
+    ] {
+        let source = format!(
+            "if {condition} then hl.env(\"RAN\", \"then\") else hl.env(\"RAN\", \"else\") end\n"
+        );
+        assert_eq!(branch(&lua_out(&[&source])), expected, "{source}");
+    }
+
+    // Possibly set: each of these could have assigned `w` without the
+    // reader seeing it, so `w ~= nil` is not answered either way.
+    let probe = "if w ~= nil then hl.env(\"RAN\", \"then\") else hl.env(\"RAN\", \"else\") end\n";
+    for prelude in [
+        "if o.shell_succeeds(\"x\") then w = 1 end\n",
+        "if o.shell_succeeds(\"x\") then else w = 1 end\n",
+        "while true do w = 1 end\n",
+        "repeat w = 1 until true\n",
+        "function set() w = 1 end\n",
+        "local function set() _G.w = 1 end\n",
+        "for _, v in pairs(os.environ()) do w = v end\n",
+        "hl.timer(function() w = 1 end)\n",
+    ] {
+        let source = format!("{prelude}{probe}");
+        let out = lua_out(&[&source]);
+        assert_eq!(branch(&out), None, "{source}");
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains("w ~= nil"))),
+            "the probe must be read and left unanswered, not swallowed: {source}\n{out:?}"
+        );
+    }
+    assert_eq!(
+        branch(&lua_out(&["while true do w = 1 end\n", probe])),
+        None,
+        "possibly set in one file is possibly set in the next"
+    );
+    assert_eq!(
+        branch(&lua_out(&["function set() local w = 1 end\n", probe])),
+        Some("else"),
+        "a local inside a skipped function is not the global"
+    );
+    assert_eq!(
+        branch(&lua_out(&["while true do w = 1 end\nw = 2\n", probe])),
+        Some("then"),
+        "a readable assignment after the skipped one is the value"
+    );
+}
+
+/// `if` must be followed by a condition and then `then`. Anything else
+/// is an `if` this reader has misread, and its body is skipped whole
+/// rather than walked as though the rest of the line were a statement.
+#[test]
+fn an_if_without_then_is_skipped_whole() {
+    for source in [
+        "if true garbage then hl.env(\"A\", \"B\") end\nhl.env(\"AFTER\", \"1\")\n",
+        "if false then elseif true garbage then hl.env(\"A\", \"B\") end\nhl.env(\"AFTER\", \"1\")\n",
+    ] {
+        let out = lua_out(&[source]);
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains("unreadable condition"))),
+            "{source}: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|d| matches!(d, Directive::Env { name, .. } if name == "A")),
+            "{source}: {out:?}"
+        );
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Env { name, .. } if name == "AFTER")),
+            "reading must resume after the skipped if: {out:?}"
+        );
+    }
+}
+
+/// The module promises that everything it meets and does not act on is
+/// logged. Calls were the gap: Omarchy's animation curves, its
+/// persisted touchpad disable and every runtime-only call vanished.
+#[test]
+fn every_call_the_lua_reader_meets_is_recorded() {
+    let reading = read(&machine());
+    let count = |kind: &str, needle: &str| {
+        reading
+            .skipped
+            .iter()
+            .filter(|skip| skip.kind == kind && skip.what.contains(needle))
+            .count()
+    };
+    assert_eq!(count("animation", "hl.curve("), 5, "{:?}", reading.skipped);
+    assert_eq!(count("animation", "hl.animation("), 16);
+    assert_eq!(count("lua-call", "disabled_input_device("), 2);
+    assert_eq!(count("include", "dofile("), 1);
+    let out = lua_out(&[concat!(
+        "cover(0)\n",
+        "fit()\n",
+        "hl.device({ name = \"touchpad\", enabled = false })\n",
+        "hl.workspace_rule({ workspace = \"1\" })\n",
+        "hl.dispatch(hl.dsp.window.close())\n",
+        "hl.timer(function() end, { timeout = 10 })\n",
+    )]);
+    for call in ["cover(", "fit(", "hl.device(", "hl.workspace_rule(", "hl.dispatch(", "hl.timer("] {
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.starts_with(call))),
+            "{call} was dropped silently: {out:?}"
+        );
+    }
+    // ...and no arm of the call reader drops a call without a line.
+    const SOURCE: &str = include_str!("lua.rs");
+    let body = &SOURCE[SOURCE.find("fn emit_call(").expect("emit_call")..];
+    let body = &body[..body.find("\n}\n").expect("the end of emit_call")];
+    assert!(!body.contains("=> {}"), "emit_call has an arm that drops a call silently");
 }
 
 /// An include graph that points at itself terminates, whichever
@@ -2383,7 +2586,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        157,
+        182,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -2393,7 +2596,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=167 commands=119 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=157"),
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=182"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }
