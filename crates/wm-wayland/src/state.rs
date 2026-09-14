@@ -1369,7 +1369,14 @@ impl WaylandBackend {
     ) -> (Point, smithay::utils::Scale<f64>) {
         let base = self.window_surface_scale(record);
         let committed = if framed && matches!(record.surface, ManagedSurface::Xdg(_)) {
-            record.surface.wl_surface().and_then(|surface| {
+            // Only an unanswered resize stretches. A client whose settled
+            // buffer differs from the interior (a fullscreen page rounded a
+            // pixel, a size it chose) is drawn and hit-tested 1:1; stretching
+            // it anyway moves every click by the ratio on both axes.
+            record.surface.wl_surface().filter(|surface| {
+                self.surface_windows.get(&surface.id())
+                    .is_some_and(|window| crate::xdg::resize_pending(self, *window, surface))
+            }).and_then(|surface| {
                 crate::xdg::committed_content_size(&surface, base, self.output_size)
             })
         } else {
