@@ -225,7 +225,7 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
         }
         "reload" => ("ok".to_string(), Some(Action::ReloadConfig)),
         "binds" => (if json { json_bindings(snapshot) } else { plain_bindings(snapshot) }, None),
-        "devices" => (json_devices(snapshot), None),
+        "devices" => (if json { json_devices(snapshot) } else { plain_devices(snapshot) }, None),
         "configerrors" => (
             if json {
                 serde_json::Value::Array(
@@ -344,6 +344,41 @@ fn json_devices(snapshot: &Snapshot) -> String {
         "tablets": devices(&snapshot.devices.tablets), "touch": devices(&snapshot.devices.touch),
         "switches": devices(&snapshot.devices.switches),
     }).to_string()
+}
+
+/// `devices` without `j`, in Hyprland's block format. Scripts grep it:
+/// Omarchy's keybindings menu keys its cache on the `active keymap:` line.
+/// Device names are untrusted and kept to one line each.
+fn plain_devices(snapshot: &Snapshot) -> String {
+    let line = |text: &str| text.replace(['\n', '\r'], " ");
+    let devices = &snapshot.devices;
+    let mut out = String::from("mice:\n");
+    for mouse in &devices.mice {
+        let name = line(&mouse.name);
+        out.push_str(&format!("\tMouse at {name}:\n\t\t{name}\n\t\t\tdefault speed: 0.00000\n"));
+    }
+    out.push_str("\n\nKeyboards:\n");
+    for keyboard in &devices.keyboards {
+        let name = line(&keyboard.name);
+        out.push_str(&format!(
+            "\tKeyboard at {name}:\n\t\t{name}\n\t\t\trules: r \"\", m \"\", l \"{}\", v \"\", o \"\"\n\t\t\tactive layout index: {}\n\t\t\tactive keymap: {}\n\t\t\tmain: yes\n",
+            line(&keyboard.layout),
+            keyboard.active_layout_index,
+            line(&keyboard.active_keymap),
+        ));
+    }
+    for (heading, kind, items) in [
+        ("Tablets", "Tablet", &devices.tablets),
+        ("Touch", "Touch Device", &devices.touch),
+        ("Switches", "Switch Device", &devices.switches),
+    ] {
+        out.push_str(&format!("\n\n{heading}:\n"));
+        for device in items {
+            let name = line(&device.name);
+            out.push_str(&format!("\t{kind} at {name}:\n\t\t{name}\n"));
+        }
+    }
+    out
 }
 
 /// Answer a whole payload, which may be a `[[BATCH]]`.

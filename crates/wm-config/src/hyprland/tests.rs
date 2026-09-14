@@ -1806,6 +1806,44 @@ fn idle_inhibit_modes_are_read_by_name_and_unknown_values_are_reported() {
     );
 }
 
+/// Omarchy suppresses client maximize requests on every window. The
+/// events are read one by one from a list, and one this desktop cannot
+/// suppress is reported by name rather than taking the rule down.
+#[test]
+fn suppress_event_reads_each_event_and_reports_the_rest_by_name() {
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = suppress_event maximize, match:class .*\n",
+            "windowrule = suppress_event fullscreen activate, match:class ^game$\n",
+            "windowrule = suppress_event fullscreenoutput, match:class ^odd$\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    let any = rules.window_decision_for("foot", "");
+    assert!(any.suppress_maximize && !any.suppress_fullscreen, "{notes:?}");
+    assert_eq!(any.focus_on_activate, None);
+    let game = rules.window_decision_for("game", "");
+    assert!(game.suppress_maximize && game.suppress_fullscreen, "{notes:?}");
+    assert_eq!(game.focus_on_activate, Some(false), "activate is the activation refusal");
+    assert!(!rules.window_decision_for("odd", "").suppress_fullscreen);
+    assert!(notes.iter().any(|note| note.contains("\"fullscreenoutput\"")), "{notes:?}");
+    assert!(
+        !notes.iter().any(|note| note.contains("property suppress_event")),
+        "the property itself is read: {notes:?}"
+    );
+}
+
 #[test]
 fn non_geometric_window_rules_are_combined_property_by_property() {
     let mut vars = BTreeMap::new();
@@ -3202,7 +3240,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert_eq!(
         reading.float_rules.len(),
-        47,
+        48,
         "window behaviors resolved through Omarchy's tags"
     );
     // The skipped count is quoted too, in the guide's sample log line.
@@ -3211,7 +3249,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        169,
+        168,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -3221,7 +3259,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=179 commands=120 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=169"),
+            && GUIDE.contains("float_rules=48 monitors=1 skipped=168"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

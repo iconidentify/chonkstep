@@ -1375,3 +1375,125 @@ fn membership_events_and_workspace_json_report_the_authoritative_layout() {
     let workspace: serde_json::Value = serde_json::from_str(&reply).unwrap();
     assert_eq!(workspace["tiledLayout"], "scrolling");
 }
+
+/// `binds` reports a ChonkStep binding with no Hyprland dispatcher as
+/// `chonkstep <name>`, and Omarchy's keybindings menu hands that pair back
+/// to `dispatch`. Only a label the snapshot reports replays, and a locked
+/// session replays only a locked binding.
+#[test]
+fn a_reported_chonkstep_binding_replays_and_nothing_else_does() {
+    use chonk_hyprland_ipc::state::Binding;
+    let binding = |argument: &str, locked: bool| Binding {
+        modifiers: 64,
+        key: "up".into(),
+        description: String::new(),
+        dispatcher: "chonkstep".into(),
+        argument: argument.into(),
+        locked,
+        repeating: false,
+        release: false,
+    };
+    let desk = Snapshot { bindings: vec![binding("overview", false), binding("reload", true)], ..desktop() };
+    assert_eq!(dispatch::parse("chonkstep overview", &desk), Outcome::Run(Action::Binding("overview".into())));
+    assert!(
+        matches!(dispatch::parse("chonkstep not-an-action", &desk), Outcome::Unsupported(why) if why.contains("not-an-action")),
+        "an unreported name is refused by name"
+    );
+    let locked = Snapshot { locked: true, ..desk.clone() };
+    assert!(!dispatch::parse("chonkstep overview", &locked).is_ok(), "an unlocked binding waits out the lock");
+    assert_eq!(dispatch::parse("chonkstep reload", &locked), Outcome::Run(Action::Binding("reload".into())));
+}
+
+/// Omarchy's next and previous workspace steps, and the report of a
+/// ChonkStep next/previous binding, are signed steps. Read as integers,
+/// `+1` named workspace 1 and `-1` a special workspace.
+#[test]
+fn signed_workspace_selectors_are_relative_steps() {
+    let desk = Snapshot { monitors: vec![monitor(0, "eDP-1", true, 1)], ..desktop() };
+    for (wire, index) in [
+        ("workspace +1", 2),
+        ("workspace -1", 0),
+        ("workspace e+1", 2),
+        ("workspace e-1", 0),
+        ("workspace 3", 2),
+    ] {
+        assert_eq!(dispatch::parse(wire, &desk), Outcome::Run(Action::FocusWorkspace(index)), "{wire}");
+    }
+}
+
+#[test]
+fn plain_devices_carries_the_active_keymap_line_scripts_grep_for() {
+    let mut desk = desktop();
+    desk.devices.keyboards.push(Keyboard {
+        name: "at-translated-set-2-keyboard".into(),
+        layout: "us,de".into(),
+        active_keymap: "German".into(),
+        active_layout_index: 1,
+    });
+    let plain = ask("devices", &desk);
+    assert!(plain.contains("\t\t\tactive keymap: German\n"), "{plain}");
+    assert!(!plain.trim_start().starts_with('{'), "plain devices is not JSON: {plain}");
+    assert_eq!(ask_json("j/devices", &desk)["keyboards"][0]["active_keymap"], "German");
+}
+
+/// Omarchy's scaling script sends output, mode, position and scale
+/// together. Every key is read or the request is refused by name before
+/// anything changes, and a mode is checked against the output's own list.
+#[test]
+fn hl_monitor_reads_every_key_or_refuses_the_request_by_name() {
+    let desk = desktop();
+    let eval = |source: &str| dispatch::parse_eval(source, &desk);
+    assert_eq!(
+        eval(r#"hl.monitor({ output = "eDP-1", mode = "2560x1600@59.97", position = "auto", scale = 1.6 })"#),
+        Outcome::Run(Action::ConfigureMonitor {
+            output: "eDP-1".into(),
+            scale_120: Some(192),
+            mode: Some("2560x1600@59.97".into()),
+            position: Some("auto".into()),
+        })
+    );
+    assert_eq!(
+        eval(r#"hl.monitor({ output = "eDP-1", scale = 1.5 })"#),
+        Outcome::Run(Action::SetMonitorScale { output: "eDP-1".into(), scale_120: 180 })
+    );
+    assert_eq!(
+        eval(r#"hl.monitor({ output = "eDP-1", position = "2560x0" })"#),
+        Outcome::Run(Action::ConfigureMonitor {
+            output: "eDP-1".into(),
+            scale_120: None,
+            mode: None,
+            position: Some("2560x0".into()),
+        })
+    );
+    for (source, named) in [
+        (r#"hl.monitor({ output = "eDP-1", disabled = true, scale = 1.5 })"#, "disabled"),
+        (r#"hl.monitor({ output = "eDP-1", mirror = "DP-1" })"#, "mirror"),
+        (r#"hl.monitor({ output = "eDP-1", mode = "1920x1080@60", scale = 1.5 })"#, "1920x1080@60"),
+        (r#"hl.monitor({ output = "eDP-1", mode = "2560x1600@90" })"#, "2560x1600@90"),
+        (r#"hl.monitor({ output = "eDP-1", position = "left" })"#, "left"),
+        (r#"hl.monitor({ output = "eDP-1" })"#, "needs a mode"),
+    ] {
+        assert!(matches!(eval(source), Outcome::Unsupported(why) if why.contains(named)), "{source}: {:?}", eval(source));
+    }
+}
+
+/// A snapshot that lists no modes for an output (the nested backend has no
+/// connector to enumerate) cannot refuse a well-formed mode at parse: the
+/// compositor resolves it against the live output before answering. A
+/// malformed mode is still refused here.
+#[test]
+fn hl_monitor_defers_the_mode_check_when_the_snapshot_lists_no_modes() {
+    let mut desk = desktop();
+    desk.monitors[0].modes.clear();
+    let eval = |source: &str| dispatch::parse_eval(source, &desk);
+    assert_eq!(
+        eval(r#"hl.monitor({ output = "eDP-1", mode = "1280x800@60.00", position = "auto", scale = 1.25 })"#),
+        Outcome::Run(Action::ConfigureMonitor {
+            output: "eDP-1".into(),
+            scale_120: Some(150),
+            mode: Some("1280x800@60.00".into()),
+            position: Some("auto".into()),
+        })
+    );
+    assert!(matches!(eval(r#"hl.monitor({ output = "eDP-1", mode = "wide" })"#), Outcome::Unsupported(why) if why.contains("wide")));
+}

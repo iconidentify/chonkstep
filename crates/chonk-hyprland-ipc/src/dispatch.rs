@@ -69,6 +69,12 @@ pub enum Action {
     /// Scale in protocol units (120 == 1.0), avoiding floating-point
     /// equality in an action that is compared in conformance tests.
     SetMonitorScale { output: String, scale_120: u32 },
+    /// `hl.monitor` with a mode or position, with or without a scale. The
+    /// mode and position keep their monitor-rule spellings (`preferred`,
+    /// `WxH@RATE`, `auto`, `XxY`), already checked against the snapshot,
+    /// and the compositor resolves them exactly as a reload of the same
+    /// line would.
+    ConfigureMonitor { output: String, scale_120: Option<u32>, mode: Option<String>, position: Option<String> },
     /// Power one named output, or every output when `output` is `None`.
     SetDpms { output: Option<String>, powered: bool },
     /// Select a group from the seat keymap. Hyprland accepts next,
@@ -102,6 +108,9 @@ pub enum Action {
     ToggleLayout,
     MoveDirection(Direction),
     LayoutNoop,
+    /// Run a ChonkStep binding that has no Hyprland dispatcher, named by
+    /// the label `binds` reported for it (`chonkstep overview`).
+    Binding(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,6 +344,25 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                 _ => Outcome::Unsupported("movecursor requires integer x and y".to_string()),
             }
         }
+        // ChonkStep's own verbs, as `binds` reports a binding with no
+        // Hyprland dispatcher; Omarchy's keybindings menu hands that pair
+        // straight back. Only a label this snapshot reports replays, so a
+        // caller cannot name an arbitrary action, and while the session is
+        // locked only a binding marked locked does.
+        "chonkstep" => {
+            let label = rest.trim();
+            match snapshot
+                .bindings
+                .iter()
+                .find(|binding| binding.dispatcher == "chonkstep" && binding.argument == label)
+            {
+                Some(binding) if snapshot.locked && !binding.locked => Outcome::Unsupported(format!(
+                    "chonkstep {label} is not a locked binding and the session is locked"
+                )),
+                Some(_) => Outcome::Run(Action::Binding(label.to_string())),
+                None => Outcome::Unsupported(format!("chonkstep has no bound action named {label:?}")),
+            }
+        }
         "dpms" => parse_dpms(rest, snapshot),
         "focusmonitor" | "movecurrentworkspacetomonitor" | "focuswindowbyclass" => {
             Outcome::Unsupported(format!("{verb} is not implemented yet"))
@@ -454,19 +482,61 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
             Ok(args) => args,
             Err(error) => return Outcome::Unsupported(format!("hl.monitor: invalid Lua arguments: {error}")),
         };
+        // Every key is accounted for before anything changes. A request that
+        // also asked to disable or mirror the output must not come back `ok`
+        // having applied only its scale.
+        for arg in &args {
+            let Literal::Table(fields) = arg else {
+                return Outcome::Unsupported("hl.monitor takes one table of named keys".to_string());
+            };
+            for (key, _) in fields {
+                match key.as_deref() {
+                    Some("output" | "mode" | "position" | "scale") => {}
+                    Some(other) => {
+                        return Outcome::Unsupported(format!(
+                            "hl.monitor key {other:?} is not supported; output, mode, position and scale are"
+                        ))
+                    }
+                    None => return Outcome::Unsupported("hl.monitor takes named keys only".to_string()),
+                }
+            }
+        }
         let Some(output) = lua_field(&args, "output") else {
             return Outcome::Unsupported("hl.monitor requires a named output".to_string());
         };
-        if !snapshot.monitors.iter().any(|monitor| monitor.name == output) {
+        let Some(monitor) = snapshot.monitors.iter().find(|monitor| monitor.name == output) else {
             return Outcome::Unsupported(format!("hl.monitor names unknown output {output:?}"));
-        }
-        let Some(scale) = lua_field(&args, "scale").and_then(|value| value.parse::<f64>().ok()) else {
-            return Outcome::Unsupported("hl.monitor currently changes scale only, and needs a numeric scale".to_string());
         };
-        if !scale.is_finite() || !(0.5..=4.0).contains(&scale) {
-            return Outcome::Unsupported("hl.monitor scale must be between 0.5 and 4".to_string());
-        }
-        return Outcome::Run(Action::SetMonitorScale { output, scale_120: (scale * 120.0).round() as u32 });
+        let scale_120 = match lua_field(&args, "scale") {
+            None => None,
+            Some(value) => match value.parse::<f64>() {
+                Ok(scale) if scale.is_finite() && (0.5..=4.0).contains(&scale) => Some((scale * 120.0).round() as u32),
+                _ => return Outcome::Unsupported("hl.monitor scale must be a number between 0.5 and 4".to_string()),
+            },
+        };
+        let mode = match lua_field(&args, "mode") {
+            None => None,
+            Some(mode) if monitor_advertises(monitor, &mode) => Some(mode),
+            Some(mode) => {
+                return Outcome::Unsupported(format!("hl.monitor mode {mode:?} is not one {output} advertises"))
+            }
+        };
+        let position = match lua_field(&args, "position") {
+            None => None,
+            Some(position) if position.trim().eq_ignore_ascii_case("auto") || monitor_position(&position).is_some() => {
+                Some(position)
+            }
+            Some(position) => {
+                return Outcome::Unsupported(format!("hl.monitor position {position:?} must be auto or XxY"))
+            }
+        };
+        return Outcome::Run(match (scale_120, mode, position) {
+            (None, None, None) => {
+                return Outcome::Unsupported("hl.monitor needs a mode, position or scale".to_string())
+            }
+            (Some(scale_120), None, None) => Action::SetMonitorScale { output, scale_120 },
+            (scale_120, mode, position) => Action::ConfigureMonitor { output, scale_120, mode, position },
+        });
     }
     if let Some(body) = source.strip_prefix("hl.config(").and_then(|value| value.strip_suffix(')')) {
         let args = match lua_arguments(body) {
@@ -782,6 +852,46 @@ fn lua_field(args: &[Literal], key: &str) -> Option<String> {
         Literal::Str(text) | Literal::Word(text) => Some(text.clone()),
         Literal::Table(_) => None,
     }
+}
+
+/// Whether `request` names a mode `monitor` can drive, in the spellings a
+/// monitor rule accepts. The named choices are resolved by the compositor
+/// against the same list; `WxH` and `WxH@RATE` must match an advertised
+/// size, with the rate within the 1 Hz a printed `refreshRate` can drift
+/// from the timing it came from.
+///
+/// A snapshot with no mode list for the output (the nested backend has no
+/// connector to enumerate) cannot refuse anything here. The spelling is
+/// still checked, and the compositor resolves the mode against the live
+/// output before it answers, refusing there what it cannot drive.
+fn monitor_advertises(monitor: &crate::state::Monitor, request: &str) -> bool {
+    let request = request.trim().to_ascii_lowercase();
+    if matches!(request.as_str(), "preferred" | "highrr" | "highres") {
+        return true;
+    }
+    let (size, rate) = request.split_once('@').map_or((request.as_str(), None), |(size, rate)| (size, Some(rate)));
+    let Some((Ok(width), Ok(height))) = size.split_once('x').map(|(w, h)| (w.parse::<i64>(), h.parse::<i64>())) else {
+        return false;
+    };
+    let millihertz = match rate.map(str::parse::<f64>) {
+        None => None,
+        Some(Ok(hz)) if hz.is_finite() && hz > 0.0 && hz <= 10_000.0 => Some((hz * 1000.0).round() as i64),
+        Some(_) => return false,
+    };
+    if monitor.modes.is_empty() {
+        return true;
+    }
+    monitor.modes.iter().any(|mode| {
+        mode.width as i64 == width
+            && mode.height as i64 == height
+            && millihertz.is_none_or(|millihertz| (mode.refresh_millihertz as i64 - millihertz).abs() <= 1000)
+    })
+}
+
+/// A monitor-rule position, `XxY`.
+fn monitor_position(value: &str) -> Option<(i32, i32)> {
+    let (x, y) = value.trim().split_once(['x', 'X'])?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
 /// The first argument that is a bare string literal.
@@ -1266,12 +1376,9 @@ fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> 
     if target.is_empty() {
         return Err("workspace with no argument".to_string());
     }
-    if let Ok(id) = target.parse::<i32>() {
-        let index = workspace_index_from_hypr_id(id).ok_or_else(|| format!("chonkstep has no workspace {id}"))?;
-        return in_range(index);
-    }
-    // Relative and named selectors. `e+1`/`e-1` and `+1`/`-1` are what
-    // Omarchy's keybindings send for next/previous workspace.
+    // Relative selectors first. `e+1`/`e-1` and `+1`/`-1` are what
+    // Omarchy's keybindings send for next/previous workspace, and read as
+    // integers `+1` is workspace 1 and `-1` a special workspace id.
     let relative = target.strip_prefix('e').unwrap_or(target);
     if let Some(delta) = relative.strip_prefix('+').and_then(|d| d.parse::<usize>().ok()) {
         let current = snapshot.active_workspace().map_or(0, |w| w.index);
@@ -1281,6 +1388,11 @@ fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> 
         let current = snapshot.active_workspace().map_or(0, |w| w.index);
         return in_range(current.saturating_sub(delta));
     }
+    if let Ok(id) = target.parse::<i32>() {
+        let index = workspace_index_from_hypr_id(id).ok_or_else(|| format!("chonkstep has no workspace {id}"))?;
+        return in_range(index);
+    }
+    // Named selectors.
     if target.starts_with("special") {
         return Err("chonkstep has no special (scratchpad) workspaces".to_string());
     }

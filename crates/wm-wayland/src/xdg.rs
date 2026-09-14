@@ -1254,6 +1254,22 @@ impl Compositor {
                 record.content_offset = offset;
             }
             backend.queue(WmEvent::MapRequest(id));
+            // State the client asked for before this buffer, now that the
+            // core has a client to apply it to. It takes the same request
+            // path as a mapped window's, so window rules still decide.
+            let premap = backend
+                .windows
+                .get_mut(&id)
+                .map(|record| std::mem::take(&mut record.premap))
+                .unwrap_or_default();
+            for (first, second) in premap.requests() {
+                backend.queue(WmEvent::NetStateRequested {
+                    window: id,
+                    action: NetStateAction::Add,
+                    first,
+                    second,
+                });
+            }
         } else if !has_buffer && was_mapped {
             // Null-buffer commit: the xdg unmap. The toplevel survives
             // and may map again — the marker reset arms the next
@@ -1356,6 +1372,26 @@ impl Compositor {
     ) {
         let backend = self.wm.backend_mut();
         if let Some(window) = backend.window_for_surface(surface) {
+            // Before the first buffer `wm-core` has no client to apply a
+            // fullscreen or maximize request to, and would drop it. Record
+            // it for the map edge instead. The configure owed in reply still
+            // goes out; the map answers again with the state applied.
+            if matches!(first, NetState::Fullscreen | NetState::MaximizedHorz | NetState::MaximizedVert)
+                && !mapped_marker(surface)
+            {
+                if let Some(record) = backend.windows.get_mut(&window) {
+                    let on = action != NetStateAction::Remove;
+                    for state in [Some(first), second].into_iter().flatten() {
+                        match state {
+                            NetState::Fullscreen => record.premap.fullscreen = on,
+                            NetState::MaximizedHorz | NetState::MaximizedVert => record.premap.maximized = on,
+                            _ => {}
+                        }
+                    }
+                }
+                backend.owe_configure(window);
+                return;
+            }
             backend.queue(WmEvent::NetStateRequested {
                 window,
                 action,

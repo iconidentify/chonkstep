@@ -1032,6 +1032,82 @@ fn window_geometry_plain_fields_and_monitor_eval_are_applied_before_ok() {
     .expect("monitor mutation must happen before success is observable");
 }
 
+/// `hl.monitor` applies everything it was asked for or refuses before
+/// changing anything. A mode the output does not advertise leaves the scale
+/// of the same request alone; an explicit position is where `monitors`
+/// reports the output when `ok` comes back; and Omarchy's own request, the
+/// current mode and `auto` placement with a scale, applies.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn monitor_eval_applies_mode_position_and_scale_together_or_nothing() {
+    let mut options = SessionOptions { scale: Some(1.0), ..SessionOptions::default() };
+    options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+    let mut session = Session::boot("hypr-ipc-monitor-configure", options).expect("nested session");
+    let dir = socket_dir(&session);
+    let monitors = || json(&dir, "j/monitors");
+
+    let first = monitors()[0].clone();
+    let name = first["name"].as_str().expect("monitor name").to_string();
+    let scale = first["scale"].as_f64().expect("monitor scale");
+    let refused = request(&dir, &format!("eval hl.monitor({{ output = \"{name}\", mode = \"1x1@1\", scale = 2 }})"));
+    // The nested output publishes no mode list, so the refusal comes from the
+    // compositor's own resolution, after the parse, before anything changes.
+    assert!(refused.starts_with("Invalid dispatcher"), "an unadvertised mode is refused: {refused}");
+    assert!(
+        (monitors()[0]["scale"].as_f64().unwrap() - scale).abs() < f64::EPSILON,
+        "a refused request must not leave its scale applied"
+    );
+
+    session.door().set_virtual_outputs("split").expect("the nested output splits");
+    let second = poll_until(EVENT, "both split outputs to be reported", || {
+        let all = monitors();
+        (all.as_array()?.len() == 2).then(|| all[1].clone())
+    })
+    .expect("two outputs");
+    let second_name = second["name"].as_str().expect("monitor name").to_string();
+    let x = second["x"].as_i64().expect("monitor x") + 100;
+    assert_eq!(
+        request(&dir, &format!("eval hl.monitor({{ output = \"{second_name}\", position = \"{x}x0\" }})")).trim(),
+        "ok"
+    );
+    let reported = monitors();
+    let moved = reported
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|monitor| monitor["name"] == second_name.as_str())
+        .expect("the moved output is still reported");
+    assert_eq!((moved["x"].as_i64(), moved["y"].as_i64()), (Some(x), Some(0)), "{reported}");
+    session.door().set_virtual_outputs("single").expect("the nested output rejoins");
+
+    let current = poll_until(EVENT, "a single output again", || {
+        let all = monitors();
+        (all.as_array()?.len() == 1).then(|| all[0].clone())
+    })
+    .expect("one output");
+    let mode = format!(
+        "{}x{}@{:.2}",
+        current["width"],
+        current["height"],
+        current["refreshRate"].as_f64().expect("refresh rate")
+    );
+    let name = current["name"].as_str().expect("monitor name").to_string();
+    assert_eq!(
+        request(
+            &dir,
+            &format!("eval hl.monitor({{ output = \"{name}\", mode = \"{mode}\", position = \"auto\", scale = 1.25 }})")
+        )
+        .trim(),
+        "ok",
+        "the mode `monitors` reported must be accepted back: {current}"
+    );
+    assert!(
+        (monitors()[0]["scale"].as_f64().unwrap() - 1.25).abs() < f64::EPSILON,
+        "the scale is applied before ok is observable"
+    );
+    assert!(session.compositor_alive());
+}
+
 #[test]
 #[ignore = "needs a Wayland session to nest inside"]
 fn a_fixed_size_dialog_can_decline_an_ipc_resize_without_an_oversized_frame() {

@@ -5,6 +5,25 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- `hyprctl eval hl.monitor(...)` applies the `mode` and `position` Omarchy's
+  monitor scripts send with the scale, or refuses the whole request before
+  changing anything. It used to answer `ok` after applying only the scale.
+- Make every row of Omarchy's SUPER+K keybindings menu runnable. `hyprctl
+  binds` reported window-management bindings with a `chonkstep` dispatcher and a
+  Rust debug rendering, so picking toggle floating, maximize, layout, move or
+  next workspace did nothing. Each binding now reports a verb that replays,
+  shell commands are quoted so they rebuild exactly, `workspace +1`/`-1` step
+  relative to the current workspace, and plain `devices` answers in Hyprland's
+  block format.
+- Open fullscreen or maximized when a client asks before its window maps.
+  An xdg toplevel's `set_fullscreen` or `set_maximized` during setup, and an
+  X11 window's `_NET_WM_STATE` written while withdrawn, were dropped, so
+  games and players that start fullscreen opened windowed. Both now apply at
+  map, through the same path window rules can refuse.
+- Read the `suppress_event` window rule. Omarchy's `suppress_event maximize`
+  on every window now keeps a tile in its cell when an application asks to
+  be maximized; `fullscreen` works the same way, `activate` refuses focus
+  on activation, and the compositor's own verbs are unaffected.
 - Run Hyprland switch bindings (`switch:on:Lid Switch`, `switch:off:…`,
   `switch:…`) from both configuration syntaxes. Omarchy's lid-close handler
   now locks the session as the lid shuts; only `bindl` switch bindings run

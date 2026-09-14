@@ -143,6 +143,85 @@ pub enum Action {
     Run(String),
 }
 
+impl Action {
+    /// The name `[keybindings]` spells this action with, the inverse of
+    /// the binding parser: `overview`, `workspace 4`, `run lock`. `None`
+    /// for the few values no name produces, such as a resize by a delta
+    /// other than the four named ones or `Floating` with a direction.
+    pub fn config_name(&self) -> Option<String> {
+        use wm_core::LayoutMode;
+        let direction = |direction: &FocusDirection| match direction {
+            FocusDirection::Left => "left",
+            FocusDirection::Right => "right",
+            FocusDirection::Up => "up",
+            FocusDirection::Down => "down",
+        };
+        let name = match self {
+            Action::CycleApplications(1) => "application-next",
+            Action::CycleApplications(-1) => "application-prev",
+            Action::CycleApplications(_) => return None,
+            Action::CycleAppWindows(1) => "application-window-next",
+            Action::CycleAppWindows(-1) => "application-window-prev",
+            Action::CycleAppWindows(_) => return None,
+            Action::QuitApplication => "quit-application",
+            Action::ForceQuitApplications => "force-quit-applications",
+            Action::ApplicationOverview => "application-overview",
+            Action::HideApplication => "hide-application",
+            Action::HideOtherApplications => "hide-other-applications",
+            Action::MiniaturizeApplication => "miniaturize-application",
+            Action::ShowDesktop => "show-desktop",
+            Action::Capture(mode) => match mode {
+                CaptureMode::ScreenClipboard => "capture-screen-clipboard",
+                CaptureMode::AreaClipboard => "capture-area-clipboard",
+                CaptureMode::WindowClipboard => "capture-window-clipboard",
+                CaptureMode::Screen => "capture-screen",
+                CaptureMode::Area => "capture-area",
+                CaptureMode::Window => "capture-window",
+                CaptureMode::Toolbar => "capture",
+                CaptureMode::Stop => "capture-stop",
+            },
+            Action::SpawnTerminal => "spawn-terminal",
+            Action::Close => "close",
+            Action::ToggleMaximize => "toggle-maximize",
+            Action::ToggleShade => "toggle-shade",
+            Action::Miniaturize => "miniaturize",
+            Action::ToggleFullscreen => "toggle-fullscreen",
+            Action::Layout(LayoutMode::Freeform) => "layout-freeform",
+            Action::Layout(LayoutMode::Mosaic) => "layout-mosaic",
+            Action::Layout(LayoutMode::Flow) => "layout-flow",
+            Action::ToggleLayout => "toggle-layout",
+            Action::Floating(None) => "toggle-floating",
+            Action::Floating(Some(_)) => return None,
+            Action::Move(to) => return Some(format!("move-{}", direction(to))),
+            Action::Resize(delta) => match (delta.x, delta.y) {
+                (25, 0) => "grow-width",
+                (-25, 0) => "shrink-width",
+                (0, 25) => "grow-height",
+                (0, -25) => "shrink-height",
+                _ => return None,
+            },
+            Action::LayoutNoop => "layout-noop",
+            Action::Focus(to) => return Some(format!("focus-{}", direction(to))),
+            Action::WorkspaceNext => "workspace-next",
+            Action::WorkspacePrev => "workspace-prev",
+            Action::WorkspaceCarryNext => "workspace-carry-next",
+            Action::WorkspaceCarryPrev => "workspace-carry-prev",
+            Action::Workspace(index) => return Some(format!("workspace {}", index + 1)),
+            Action::WorkspaceSend(index) => return Some(format!("workspace-send {}", index + 1)),
+            Action::WorkspaceCarry(index) => return Some(format!("workspace-carry {}", index + 1)),
+            Action::Overview => "overview",
+            Action::RootMenu => "root-menu",
+            Action::Help => "help",
+            Action::GlobalShortcut(target) => return Some(format!("global-shortcut {target}")),
+            Action::WindowMenu => "window-menu",
+            Action::Reload => "reload",
+            Action::Restart => "restart",
+            Action::Run(name) => return Some(format!("run {name}")),
+        };
+        Some(name.to_string())
+    }
+}
+
 /// Entry points to the native Wayland capture tool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureMode {
@@ -2608,6 +2687,31 @@ numlock_by_default = false
         let text = "desktop = \"omarchy\"\n[cursor]\nhide_on_key_press = false\n";
         let config = parse_with(text, &live).unwrap();
         assert_eq!(config.input.cursor.hide_on_key_press, Some(false));
+    }
+
+    /// `config_name` is the parser's inverse, name for name, so a label
+    /// reported from it names exactly the action the binding runs.
+    #[test]
+    fn every_action_name_round_trips_through_config_name() {
+        for name in [
+            "application-next", "application-prev", "application-window-next", "application-window-prev",
+            "quit-application", "force-quit-applications", "application-overview", "hide-application",
+            "hide-other-applications", "miniaturize-application", "show-desktop", "spawn-terminal", "close",
+            "layout-freeform", "layout-mosaic", "layout-flow", "toggle-layout", "grow-width", "shrink-width",
+            "grow-height", "shrink-height", "layout-noop", "toggle-floating", "move-left", "move-right",
+            "move-up", "move-down", "toggle-maximize", "toggle-shade", "miniaturize", "toggle-fullscreen",
+            "focus-left", "focus-right", "focus-up", "focus-down", "workspace-next", "workspace-prev",
+            "workspace-carry-next", "workspace-carry-prev", "capture-screen-clipboard", "capture-area-clipboard",
+            "capture-window-clipboard", "capture-screen", "capture-area", "capture-window", "capture",
+            "capture-stop", "overview", "root-menu", "help", "window-menu", "reload", "restart",
+            "workspace 4", "workspace-send 10", "workspace-carry 1", "global-shortcut org.example:toggle",
+            "run lock",
+        ] {
+            let action = action_from_name(name).unwrap_or_else(|| panic!("{name} parses"));
+            assert_eq!(action.config_name().as_deref(), Some(name), "{action:?}");
+        }
+        assert_eq!(Action::Resize(wm_core::Point::new(100, 0)).config_name(), None);
+        assert_eq!(Action::Floating(Some(true)).config_name(), None);
     }
 
     #[test]

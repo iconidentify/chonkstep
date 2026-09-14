@@ -655,6 +655,79 @@ fn perform_pending_apply(comp: &mut Compositor) {
     }
 }
 
+/// `hl.monitor` with a mode or position: everything is resolved against
+/// the live output first, then applied. The mode goes first because it is
+/// the one part that can fail at the connector, and when it does nothing
+/// else has changed. `mode` and `position` mean what they mean in a monitor
+/// rule, so this and a reload of the same line land in the same place, and
+/// wlr-output-management clients see one publication for the whole change.
+pub(crate) fn configure_output(
+    comp: &mut Compositor,
+    name: &str,
+    mode: Option<&str>,
+    position: Option<&str>,
+    scale: Option<f64>,
+) -> Result<(), String> {
+    let index = comp
+        .outputs
+        .iter()
+        .position(|entry| entry.output.name() == name)
+        .ok_or_else(|| format!("no output named {name}"))?;
+    if scale.is_some_and(|scale| !scale.is_finite() || !(0.5..=4.0).contains(&scale)) {
+        return Err("scale must be between 0.5 and 4".to_string());
+    }
+    let mode_index = match mode {
+        None => None,
+        Some(request) => {
+            let entry = &comp.outputs[index];
+            Some(
+                crate::state::resolve_monitor_mode(&entry.output, &entry.modes, request)
+                    .ok_or_else(|| format!("{name} does not advertise mode {request:?}"))?,
+            )
+        }
+    };
+    let explicit = match position.map(str::trim) {
+        Some(value) if !value.eq_ignore_ascii_case("auto") => Some(
+            crate::state::parse_monitor_position(value).ok_or_else(|| format!("position {value:?} must be auto or XxY"))?,
+        ),
+        _ => None,
+    };
+
+    let mut moved = false;
+    if let Some(mode_index) = mode_index.filter(|mode_index| *mode_index != current_mode_index(&comp.outputs[index])) {
+        apply_mode(comp, index, mode_index)?;
+        moved = true;
+    }
+    if position.is_some() {
+        // `auto` is to the right of the outputs before this one, at the top,
+        // which is where `apply_monitor_rules` puts an `auto` line.
+        let target = explicit.unwrap_or_else(|| {
+            let x = comp.outputs[..index]
+                .iter()
+                .map(|entry| entry.position.x.saturating_add(entry.size.w as i32))
+                .max()
+                .unwrap_or(0);
+            Point::new(x, 0)
+        });
+        if comp.outputs[index].position != target {
+            comp.outputs[index].position = target;
+            moved = true;
+        }
+    }
+    if moved {
+        normalize_layout(comp);
+        comp.output_mgmt.mark_dirty();
+        comp.session_lock.mark_dirty();
+        comp.sync_monitor_scales();
+        relayout_ledger(comp);
+        comp.layer_shell.needs_arrange = true;
+    }
+    if let Some(scale) = scale {
+        comp.set_output_scale(name, scale);
+    }
+    Ok(())
+}
+
 /// Applies one mode change to one output: the crtc (session backend),
 /// the advertised `wl_output` mode, the entry's size, and the damage
 /// tracker sized to it.

@@ -117,6 +117,36 @@ fn x11_autostart_connects_to_the_nested_display_before_the_first_dispatch() {
     }).expect("the autostart window maps inside this compositor");
 }
 
+/// EWMH asks the window manager to honour `_NET_WM_STATE` when a withdrawn
+/// window is mapped. An SDL game or a player created fullscreen writes the
+/// state before its map request, so the window must open covering the
+/// output rather than at the 400x200 it was created at.
+#[test]
+#[ignore = "needs a nested Wayland session: scripts/e2e.sh --headless --release"]
+fn an_x11_window_that_wrote_fullscreen_before_mapping_opens_fullscreen() {
+    let probe = profile_binary("chonk-x11-autostart-probe").expect("probe is built");
+    let marker = session_dir("x11-premap-fullscreen").join("inherited-display");
+    let mut session = Session::boot("x11-premap-fullscreen", SessionOptions {
+        scale: Some(1.0),
+        config_extra: format!("hyprland_config = false\nautostart = [[{:?}, {:?}, \"fullscreen-before-map\"]]\n", probe, marker),
+        // An invalid inherited display keeps this incapable of opening on
+        // the real desktop, as in the autostart test above.
+        env: vec![("DISPLAY".into(), ":65534".into())],
+        ..Default::default()
+    }).expect("nested session boots");
+    poll_until(EVENT, "the X11 window to open covering the output", || {
+        let world = session.world().ok()?;
+        world
+            .windows
+            .iter()
+            .any(|window| window.mapped && (window.x, window.y, window.w, window.h) == (0, 0, world.output_w, world.output_h))
+            .then_some(())
+    })
+    .unwrap_or_else(|error| {
+        panic!("{error}\n{:?}\n{}", session.world().ok().map(|world| world.windows), session.log())
+    });
+}
+
 fn xwayland_display(session: &Session) -> u32 {
     poll_until(EVENT, "XWayland to announce its display", || {
         let log = session.log();

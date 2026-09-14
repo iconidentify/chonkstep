@@ -110,6 +110,8 @@ struct Rule {
     focus_on_activate: Option<bool>,
     fullscreen: Option<bool>,
     maximize: Option<bool>,
+    suppress_maximize: Option<bool>,
+    suppress_fullscreen: Option<bool>,
     /// The touchpad scroll factor over this window.
     scroll_touchpad: Option<f64>,
 }
@@ -194,6 +196,8 @@ impl FloatRules {
                     (rule.no_initial_focus, "no initial focus"),
                     (rule.fullscreen, "fullscreen"),
                     (rule.maximize, "maximized"),
+                    (rule.suppress_maximize, "client maximize ignored"),
+                    (rule.suppress_fullscreen, "client fullscreen ignored"),
                 ] {
                     if enabled == Some(true) {
                         what.push(label.to_string());
@@ -281,6 +285,12 @@ impl FloatPolicy for FloatRules {
             }
             if let Some(value) = rule.maximize {
                 decision.maximize = value;
+            }
+            if let Some(value) = rule.suppress_maximize {
+                decision.suppress_maximize = value;
+            }
+            if let Some(value) = rule.suppress_fullscreen {
+                decision.suppress_fullscreen = value;
             }
         }
         decision
@@ -466,6 +476,25 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                 spec.maximize = Some(truthy(value));
                 any = true;
             }
+            // A space-separated list of the client requests to ignore.
+            // Each event is read or reported on its own.
+            "suppress_event" | "suppressevent" => {
+                for event in value.split([' ', ',']).filter(|event| !event.is_empty()) {
+                    match event.to_ascii_lowercase().as_str() {
+                        "maximize" => spec.suppress_maximize = Some(true),
+                        "fullscreen" => spec.suppress_fullscreen = Some(true),
+                        "activate" | "activatefocus" => spec.focus_on_activate = Some(false),
+                        _ => {
+                            notes.push(format!(
+                                "window rule suppress_event {event:?} on {} is not implemented: event not suppressed",
+                                describe_matchers(rule)
+                            ));
+                            continue;
+                        }
+                    }
+                    any = true;
+                }
+            }
             "scroll_touchpad" | "scrolltouchpad" => match value.trim().parse::<f64>() {
                 Ok(factor) if factor.is_finite() && (0.01..=10.0).contains(&factor) => {
                     spec.scroll_touchpad = Some(factor);
@@ -502,6 +531,8 @@ struct Spec {
     focus_on_activate: Option<bool>,
     fullscreen: Option<bool>,
     maximize: Option<bool>,
+    suppress_maximize: Option<bool>,
+    suppress_fullscreen: Option<bool>,
     scroll_touchpad: Option<f64>,
 }
 
@@ -554,6 +585,8 @@ fn push(
         focus_on_activate: spec.focus_on_activate,
         fullscreen: spec.fullscreen,
         maximize: spec.maximize,
+        suppress_maximize: spec.suppress_maximize,
+        suppress_fullscreen: spec.suppress_fullscreen,
         scroll_touchpad: spec.scroll_touchpad,
     });
 }
