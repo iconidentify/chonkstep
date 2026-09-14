@@ -2,6 +2,8 @@
 //! their own repeat timer; these assertions observe the parameters and physical
 //! transitions, not invented server-side wl_keyboard repeats.
 
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use chonk_testkit::{poll_until, profile_binary, session_dir, Session, SessionOptions};
@@ -348,6 +350,41 @@ fn unchanged_and_timing_only_reload_preserve_caps_lock_and_the_selected_layout()
         assert_eq!(modifiers(&session), Some(initial), "reload {index} must retain locked modifiers and layout");
     }
     assert_eq!(keymap_count(&session), 1);
+}
+
+/// One JSON reply from the session's Hyprland request socket.
+fn hyprland_json(session: &Session, request: &str) -> serde_json::Value {
+    let log = session.log();
+    let directory = log
+        .lines()
+        .find(|line| line.contains("hyprland ipc listening"))
+        .and_then(|line| line.split("directory=\"").nth(1)?.split('"').next())
+        .expect("the compositor announces its Hyprland IPC directory")
+        .to_string();
+    let mut socket = UnixStream::connect(std::path::Path::new(&directory).join(".socket.sock")).unwrap();
+    socket.set_read_timeout(Some(EVENT)).unwrap();
+    socket.write_all(request.as_bytes()).unwrap();
+    socket.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    serde_json::from_str(&response).unwrap_or_else(|error| panic!("{request}: {error}: {response}"))
+}
+
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn a_reload_that_adds_a_layout_reports_the_installed_list_in_devices() {
+    // Omarchy's layout widget shows itself only when `layout` holds a comma,
+    // and re-queries `devices` on `configreloaded`. The staged keymap installs
+    // at the top of the next dispatch pass and the reload helper ends on a
+    // barrier, so the reply after it must already carry the new list.
+    let name = "keyboard-repeat-devices-layout";
+    let mut session = Session::boot(name, options("input {\n kb_layout = us\n}\n")).unwrap();
+    assert_eq!(hyprland_json(&session, "j/devices")["keyboards"][0]["layout"], "us");
+    reload_hyprland(&mut session, name, "input {\n kb_layout = us,de\n}\n");
+    let devices = hyprland_json(&session, "j/devices");
+    let keyboard = &devices["keyboards"][0];
+    assert_eq!(keyboard["layout"], "us,de");
+    assert_eq!(keyboard["active_layout_index"], 0);
 }
 
 #[test]

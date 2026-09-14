@@ -115,7 +115,9 @@ fn keyboard_layout_ipc_switches_and_reports_the_active_group() {
         serde_json::from_str(&hyprland_request(&session, "j/devices").unwrap()).unwrap();
     let before = &before["keyboards"][0];
     assert_eq!(before["active_layout_index"], 0);
-    assert_eq!(before["layout"], before["active_keymap"]);
+    // `layout` is the installed list, which is what Omarchy's widget checks
+    // for a comma; the label comes from `active_keymap`.
+    assert_eq!(before["layout"], "us,de");
 
     assert_eq!(
         hyprland_request(&session, "/switchxkblayout all next")
@@ -129,7 +131,7 @@ fn keyboard_layout_ipc_switches_and_reports_the_active_group() {
         serde_json::from_str(&hyprland_request(&session, "j/devices").unwrap()).unwrap();
     let after = &after["keyboards"][0];
     assert_eq!(after["active_layout_index"], 1);
-    assert_eq!(after["layout"], after["active_keymap"]);
+    assert_eq!(after["layout"], "us,de");
     assert_ne!(after["active_keymap"], before["active_keymap"]);
 }
 
