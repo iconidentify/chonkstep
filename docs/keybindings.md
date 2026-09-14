@@ -345,8 +345,8 @@ server-decoration protocol, which is the one GTK speaks, keeps its own
 titlebar and wears this desktop's borders and resize handles around it.
 One that declines decoration through `_MOTIF_WM_HINTS` on X11 is left
 bare, and a few clients declare a titlebar and then draw nothing at all.
-Those windows have no titlebar of ours to drag and no resize bar to pull,
-so the gesture is grabbed on the window's own content and works on every
+Those windows have no titlebar of ours to drag, and bare ones have no
+resize bar to pull either, so the gesture is grabbed on the window's own content and works on every
 window, framed or not; `control+escape` reaches its commands menu for
 the same reason.
 

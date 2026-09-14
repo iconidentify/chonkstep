@@ -228,9 +228,11 @@ gate the desktop's own repaint):
    `org.gnome.desktop.wm.preferences button-layout` as
    `appmenu:minimize,maximize,close`, so GTK and libadwaita header bars
    show the minimize and maximize buttons the compositor supports. It
-   replaces only the stock `appmenu:close`, and not even that when
-   `dconf` shows the user set it on purpose; any other layout is left
-   exactly as it is.
+   replaces only the stock `appmenu:close`, and only when `dconf`
+   confirms no database sets the key, the user's or a site default;
+   any other layout, or a system without `dconf`, is left exactly as it
+   is. The published layout stays in the user's settings, so another
+   desktop on the same account shows the same buttons.
 5. **XSETTINGS (X11/XWayland clients)** -- on the X11 session the
    binary republishes `Net/ThemeName`/`Gtk/ThemeName` with the
    matching member of that same installed pair. If no known pair is

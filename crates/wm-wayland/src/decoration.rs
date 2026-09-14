@@ -159,10 +159,14 @@ pub(crate) enum DecorationEvidence {
     /// Framed; see "Who gets the last word" in the module docs.
     PrefersClientSide,
     /// The client has declared over the KDE protocol, with
-    /// `request_mode(Client)` or `None`, that it draws its own chrome and
-    /// will whatever we answer. Believed: it gets edge chrome, never a
-    /// second titlebar.
+    /// `request_mode(Client)`, that it draws its own chrome and will
+    /// whatever we answer. Believed: it gets edge chrome, never a second
+    /// titlebar.
     DeclaresClientSide,
+    /// The client asked over the KDE protocol for `None`: no decoration
+    /// from either side. Left bare, like an X11 client whose Motif hint
+    /// declines decoration.
+    DeclinesDecoration,
     /// The client bound the KDE manager and created no decoration object
     /// for this toplevel, which is GTK4's way of saying it draws its own
     /// chrome (see "The GTK4 asymmetry"). Edge chrome, like a
@@ -199,6 +203,9 @@ pub(crate) struct DecorationNegotiation {
     /// side"), records as client-side: it is a refusal of our chrome,
     /// and the client that asks for it has accepted what it costs.
     pub kde_client_side: Option<bool>,
+    /// That last KDE request was `None` rather than `Client`: the client
+    /// wants no edges either.
+    pub kde_declines_decoration: bool,
     /// An `org_kde_kwin_server_decoration` has existed for this surface
     /// at some point, even if it has since been released.
     ///
@@ -237,6 +244,9 @@ impl DecorationNegotiation {
             };
         }
         if self.kde_object {
+            if self.kde_declines_decoration {
+                return DecorationEvidence::DeclinesDecoration;
+            }
             return match self.kde_client_side {
                 Some(true) => DecorationEvidence::DeclaresClientSide,
                 Some(false) | None => DecorationEvidence::WantsServerSide,
@@ -285,6 +295,7 @@ pub(crate) fn client_chrome(
         // titlebar, so ours would be a second one. The edges are still
         // ours, because nothing else is going to resize it.
         DecorationEvidence::DeclaresClientSide => ClientChrome::Edges,
+        DecorationEvidence::DeclinesDecoration => ClientChrome::Bare,
         DecorationEvidence::ClientSideBySilence if rules.frame_client_drawn => ClientChrome::Full,
         DecorationEvidence::ClientSideBySilence => ClientChrome::Edges,
         // An xdg preference for client-side is overruled, not
@@ -358,6 +369,7 @@ impl KdeDecorationHandler for Compositor {
                 record.decoration.kde_object = true;
                 record.decoration.kde_object_seen = true;
                 record.decoration.kde_client_side = Some(asked_client_side);
+                record.decoration.kde_declines_decoration = matches!(mode, WEnum::Value(KdeMode::None));
             }
             // A `[decorations]` override has to reach the wire too, not
             // just the frame: a client told "client-side" draws a
@@ -390,6 +402,7 @@ impl KdeDecorationHandler for Compositor {
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.decoration.kde_object = false;
                 record.decoration.kde_client_side = None;
+                record.decoration.kde_declines_decoration = false;
             }
             backend.queue(wm_core::BackendEvent::ChromeChanged(id));
         }
@@ -506,6 +519,27 @@ mod tests {
         assert_eq!(client_chrome(&no_rules(), Some("sdl2-game"), silent.evidence()), ClientChrome::Full);
     }
 
+    /// KDE's `None` asks for no decoration from either side, so not even
+    /// edges: bare unless a `server_side` entry insists, and
+    /// `frame_client_drawn`, which only overrules silence, leaves it alone.
+    #[test]
+    fn a_client_that_declines_all_decoration_over_kde_is_left_bare() {
+        let declines = DecorationNegotiation {
+            kde_object: true,
+            kde_object_seen: true,
+            kde_client_side: Some(true),
+            kde_declines_decoration: true,
+            kde_manager_bound: true,
+            ..Default::default()
+        };
+        assert_eq!(declines.evidence(), DecorationEvidence::DeclinesDecoration);
+        assert_eq!(client_chrome(&no_rules(), Some("kiosk"), declines.evidence()), ClientChrome::Bare);
+        let frame_all = DecorationRules { frame_client_drawn: true, ..Default::default() };
+        assert_eq!(client_chrome(&frame_all, Some("kiosk"), declines.evidence()), ClientChrome::Bare);
+        let server_side = DecorationRules { server_side: vec!["kiosk".into()], ..Default::default() };
+        assert_eq!(client_chrome(&server_side, Some("kiosk"), declines.evidence()), ClientChrome::Full);
+    }
+
     /// Both override directions: the one that rescues a window whose
     /// client-side is a declaration we cannot overrule on the wire, and
     /// the one that lets an xdg client have the bare window it asked
@@ -588,6 +622,7 @@ mod tests {
             kde_object: true,
             kde_object_seen: true,
             kde_client_side: Some(false),
+            kde_declines_decoration: false,
             kde_manager_bound: true,
         };
         assert_eq!(both.evidence(), DecorationEvidence::PrefersClientSide);

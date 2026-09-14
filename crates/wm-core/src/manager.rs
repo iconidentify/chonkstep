@@ -583,11 +583,7 @@ impl<B: Backend> WindowManager<B> {
             // one forced reflow in the workspace pass below. Maximized clients
             // first measure the new overhead, then fit and submit only their
             // final geometry; the old cached title height cannot size content.
-            let mut directions = MaximizeDirections::empty();
-            if !client.flags.intersects(ClientFlags::FULLSCREEN | ClientFlags::SHADED) {
-                if client.flags.contains(ClientFlags::MAXIMIZED_H) { directions |= MaximizeDirections::HORIZONTAL; }
-                if client.flags.contains(ClientFlags::MAXIMIZED_V) { directions |= MaximizeDirections::VERTICAL; }
-            }
+            let directions = Self::maximize_directions(client);
             if directions.is_empty() {
                 self.reflow_frame_internal(id, ReflowReason::Restyle);
             } else {
@@ -3175,8 +3171,20 @@ impl<B: Backend> WindowManager<B> {
         tracing::info!(?id, ?directions, "maximized");
     }
 
+    /// The maximized axes new chrome must keep filling: none while
+    /// fullscreen or a shade has the window.
+    fn maximize_directions(client: &Client<B>) -> MaximizeDirections {
+        let mut directions = MaximizeDirections::empty();
+        if !client.flags.intersects(ClientFlags::FULLSCREEN | ClientFlags::SHADED) {
+            if client.flags.contains(ClientFlags::MAXIMIZED_H) { directions |= MaximizeDirections::HORIZONTAL; }
+            if client.flags.contains(ClientFlags::MAXIMIZED_V) { directions |= MaximizeDirections::VERTICAL; }
+        }
+        directions
+    }
+
     /// Measure new chrome before maximizing, rescuing only an unlocked axis.
-    /// Shared by live restyle and a changed-chrome fullscreen restoration.
+    /// Shared by live restyle, a chrome change and a changed-chrome
+    /// fullscreen restoration.
     fn refit_maximized_chrome(&mut self, id: ClientId, layout: DecorationLayout, directions: MaximizeDirections, rescue_title: bool) {
         let mut content_pos = self.clients[id].geometry.pos;
         if rescue_title && layout.titlebar_height > 0 {
@@ -4343,13 +4351,15 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get(id) else {
             return;
         };
-        if client.chrome == wants {
+        let (current, content, existing_frame) = (client.chrome, client.geometry, client.frame);
+        let shaded = client.flags.contains(ClientFlags::SHADED);
+        // Told even when the chrome stays: the evidence behind it can change
+        // (a client releasing its KDE object), and what the backend derives
+        // from that, such as the tiled states, has to follow.
+        self.backend.set_window_chrome(window, wants);
+        if current == wants {
             return;
         }
-        let content = client.geometry;
-        let existing_frame = client.frame;
-        let shaded = client.flags.contains(ClientFlags::SHADED);
-        self.backend.set_window_chrome(window, wants);
         // Shade rolls a window up into our titlebar, and neither edge
         // chrome nor none has one: unroll first, or the content would
         // stay hidden inside a frame that refuses to unshade it.
@@ -4441,7 +4451,19 @@ impl<B: Backend> WindowManager<B> {
         // protocol, but adding a frame can clamp the content onto-screen
         // and therefore change its output membership.
         self.bump_protocol_state_revision();
-        self.reflow_frame(id);
+        // A maximized window keeps filling its work area in whatever chrome
+        // it now wears. The plain reflow keeps the content size, so gaining a
+        // titlebar pushed the bottom edge past the work area and losing one
+        // left a titlebar-high gap: measure the new overhead and refit, as a
+        // restyle does.
+        let directions = self.clients.get(id).map_or(MaximizeDirections::empty(), Self::maximize_directions);
+        match self.clients.get(id) {
+            Some(client) if !directions.is_empty() => {
+                let layout = self.chrome_layout(client.chrome, &Self::decoration_request(client, None), self.client_decoration_scale(id));
+                self.refit_maximized_chrome(id, layout, directions, true);
+            }
+            _ => self.reflow_frame(id),
+        }
         // Whichever direction it went, the window's visibility has to be
         // restated. Taking a frame away removes the only mapped surface
         // a framed window had, and creating one maps the frame but says
@@ -6938,6 +6960,39 @@ mod tests {
         assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
         assert_ne!(wm.backend().client_mapped.get(&window), Some(&false), "the content must stay on screen");
         assert_eq!(wm.backend().last_frame_geometry[&frame].size, frame_size, "the frame keeps its full height");
+    }
+
+    #[test]
+    fn a_maximized_window_keeps_filling_its_work_area_when_its_chrome_changes() {
+        // A chrome change anchors the content where it is. For a maximized
+        // window that is wrong both ways: a titlebar gained on reload pushed
+        // the bottom edge past the work area, and losing it again left a
+        // titlebar-high gap above the content.
+        let (mut wm, window, id) = map_with_chrome(ClientChrome::Edges);
+        wm.maximize(id, MaximizeDirections::HORIZONTAL | MaximizeDirections::VERTICAL);
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let visible = |wm: &WindowManager<FakeBackend>| {
+            let margin = wm.client(id).unwrap().layout.input_margin;
+            let outer = wm.backend().last_frame_geometry[&frame];
+            Rect {
+                pos: Point::new(outer.pos.x + margin as i32, outer.pos.y + margin as i32),
+                size: Size::new(outer.size.w - 2 * margin, outer.size.h - 2 * margin),
+            }
+        };
+        let filled = visible(&wm);
+        let edges_content = wm.client(id).unwrap().geometry.size;
+
+        wm.backend_mut().set_client_chrome(window, ClientChrome::Full);
+        wm.dispatch(BackendEvent::ChromeChanged(window));
+        let client = wm.client(id).unwrap();
+        assert!(client.flags.contains(ClientFlags::MAXIMIZED_V) && client.layout.titlebar_height > 0);
+        assert_eq!(visible(&wm), filled, "the full frame fills the same work area");
+        assert!(client.geometry.size.h < edges_content.h, "its content gives up the titlebar's height");
+
+        wm.backend_mut().set_client_chrome(window, ClientChrome::Edges);
+        wm.dispatch(BackendEvent::ChromeChanged(window));
+        assert_eq!(visible(&wm), filled, "edges fill it again, with no gap where the titlebar was");
+        assert_eq!(wm.client(id).unwrap().geometry.size, edges_content);
     }
 
     #[test]

@@ -288,9 +288,12 @@ impl WaylandBackend {
         record.layout_tiled
             || match record.chrome {
                 wm_core::ClientChrome::Edges => true,
+                // Only a silent header bar keeps drawing under our full
+                // frame. A client that declared client-side and was answered
+                // `Server` by a `server_side` rule draws nothing of its own.
                 wm_core::ClientChrome::Full => matches!(
                     self.decoration_evidence(record),
-                    DecorationEvidence::DeclaresClientSide | DecorationEvidence::ClientSideBySilence
+                    DecorationEvidence::ClientSideBySilence
                 ),
                 wm_core::ClientChrome::Bare => false,
             }

@@ -663,8 +663,9 @@
 #
 # Draw this desktop's whole frame, titlebar included, whatever the
 # client says. Only matters where the client's word is otherwise final:
-# a KDE-protocol or X11 client that declares its own chrome and then
-# draws none is a bare rectangle, and one line here frames it. (A window
+# a KDE-protocol client that declares its own chrome and then draws none
+# gets only edges, an X11 client that declines decoration is a bare
+# rectangle, and one line here gives either a titlebar. (A window
 # with no chrome from either side is still movable and resizable -- see
 # drag_modifier above -- just bare.) An xdg client never needs this; it
 # is framed already.

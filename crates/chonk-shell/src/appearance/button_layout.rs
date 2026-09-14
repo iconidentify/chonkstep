@@ -8,12 +8,11 @@
 //! publishes `appmenu:minimize,maximize,close` instead. Sandboxed
 //! applications read the same key, republished by the settings portal.
 //!
-//! Only the stock value is ever replaced, and only while it is the stock
-//! value by default rather than by choice. When `dconf` can tell, a user
-//! database holding `appmenu:close` explicitly belongs to a user who chose
-//! Close alone, and it is left alone. Any other layout is the user's and
-//! is never touched, and a layout an earlier session published is
-//! recognised and not written again.
+//! Only the stock value is ever replaced, and only while `dconf` confirms
+//! no database sets the key: an `appmenu:close` written by the user or by
+//! a site default is a choice, and it is left alone, as it is wherever
+//! `dconf` cannot answer. Any other layout is never touched, and a layout
+//! an earlier session published is recognised and not written again.
 
 use std::time::Duration;
 
@@ -32,9 +31,9 @@ pub(crate) trait PreferenceStore {
     /// The effective layout, as GSettings prints it, or `None` when it
     /// cannot be read at all.
     fn layout(&mut self) -> Option<String>;
-    /// Whether the user's own database holds a value for the key, rather
-    /// than the effective value being the schema's; `None` when that
-    /// cannot be told.
+    /// Whether a dconf database, the user's or a system one, holds a value
+    /// for the key, rather than the effective value being the schema's;
+    /// `None` when that cannot be told.
     fn user_has_layout(&mut self) -> Option<bool>;
     /// Writes a layout, answering whether it took.
     fn set_layout(&mut self, layout: &str) -> bool;
@@ -46,6 +45,7 @@ pub(crate) enum Outcome {
     Published,
     AlreadyPublished,
     KeptUserLayout(String),
+    Undetermined,
     Unreadable,
     WriteFailed,
 }
@@ -60,8 +60,16 @@ pub(crate) fn publish_to(store: &mut impl PreferenceStore) -> Outcome {
     if current == SESSION_LAYOUT {
         return Outcome::AlreadyPublished;
     }
-    if current != STOCK_LAYOUT || store.user_has_layout() == Some(true) {
+    if current != STOCK_LAYOUT {
         return Outcome::KeptUserLayout(current.to_owned());
+    }
+    match store.user_has_layout() {
+        Some(false) => {}
+        // Set on purpose, by the user or by a site default.
+        Some(true) => return Outcome::KeptUserLayout(current.to_owned()),
+        // Without dconf a stock value cannot be told from a chosen one, and
+        // the write would outlive this session: leave it.
+        None => return Outcome::Undetermined,
     }
     if store.set_layout(SESSION_LAYOUT) {
         Outcome::Published
@@ -99,8 +107,9 @@ impl PreferenceStore for Gsettings {
     }
 
     fn user_has_layout(&mut self) -> Option<bool> {
-        // `dconf read` prints nothing for a key the user database does
-        // not hold, and is absent where GSettings has another backend.
+        // `dconf read` prints nothing for a key no database in the profile
+        // holds, the user's or a system one, and is absent where GSettings
+        // has another backend or the tool is not installed.
         Self::run("dconf", &["read", DCONF_KEY]).map(|value| !value.trim().is_empty())
     }
 
@@ -128,6 +137,9 @@ pub fn publish_button_layout() {
         ),
         Outcome::AlreadyPublished => tracing::debug!(layout = SESSION_LAYOUT, "window button layout already published"),
         Outcome::KeptUserLayout(layout) => tracing::info!(%layout, "kept the user's own window button layout"),
+        Outcome::Undetermined => tracing::info!(
+            "dconf cannot say whether the stock window button layout was chosen; left unchanged"
+        ),
         Outcome::Unreadable => tracing::warn!(
             "gsettings unavailable or schema missing; header bars keep their stock window buttons"
         ),
@@ -177,15 +189,21 @@ mod tests {
 
     #[test]
     fn the_stock_layout_gains_minimize_and_maximize_once() {
-        // Whether dconf says the value is the schema's, or cannot say.
-        for user_set in [Some(false), None] {
-            let mut store = Store::holding(STOCK_LAYOUT, user_set);
-            assert_eq!(publish_to(&mut store), Outcome::Published, "user_set={user_set:?}");
-            assert_eq!(store.writes, vec![SESSION_LAYOUT.to_owned()]);
-            // The next session finds it already there and writes nothing.
-            assert_eq!(publish_to(&mut store), Outcome::AlreadyPublished);
-            assert_eq!(store.writes.len(), 1);
-        }
+        let mut store = Store::holding(STOCK_LAYOUT, Some(false));
+        assert_eq!(publish_to(&mut store), Outcome::Published);
+        assert_eq!(store.writes, vec![SESSION_LAYOUT.to_owned()]);
+        // The next session finds it already there and writes nothing.
+        assert_eq!(publish_to(&mut store), Outcome::AlreadyPublished);
+        assert_eq!(store.writes.len(), 1);
+    }
+
+    #[test]
+    fn a_stock_layout_nobody_can_vouch_for_is_left_alone() {
+        // No dconf to say whether `appmenu:close` was chosen: a write would
+        // be permanent, so none is made.
+        let mut store = Store::holding(STOCK_LAYOUT, None);
+        assert_eq!(publish_to(&mut store), Outcome::Undetermined);
+        assert!(store.writes.is_empty());
     }
 
     #[test]
@@ -209,7 +227,7 @@ mod tests {
         let mut store = Store { layout: None, ..Store::holding(STOCK_LAYOUT, None) };
         assert_eq!(publish_to(&mut store), Outcome::Unreadable);
         assert!(store.writes.is_empty());
-        let mut store = Store { writable: false, ..Store::holding(STOCK_LAYOUT, None) };
+        let mut store = Store { writable: false, ..Store::holding(STOCK_LAYOUT, Some(false)) };
         assert_eq!(publish_to(&mut store), Outcome::WriteFailed);
         assert!(store.writes.is_empty());
     }
