@@ -34,6 +34,62 @@ fn wait_event(session: &Session, after: u64, kind: &str) -> InputEvent {
         .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(PROBE)))
 }
 
+/// A client may acknowledge a configure and commit before it redraws, so its
+/// settled buffer is smaller than the interior it was given; Chromium does
+/// this entering fullscreen. Stretching that buffer to the interior scaled
+/// every click and selection drag by the size ratio.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn a_settled_buffer_smaller_than_its_fullscreen_interior_is_not_stretched() {
+    let mut session = Session::boot(
+        "pointer-coordinates-lagged-fullscreen",
+        SessionOptions { scale: Some(1.0), config_extra: "show_dock = false\n".into(), ..SessionOptions::default() },
+    )
+    .expect("nested compositor");
+    let binary = profile_binary(PROBE).expect("input probe built");
+    session
+        .launch(binary.to_str().unwrap(), &["1", "resizable", "lagged-fullscreen"])
+        .expect("probe launches");
+    session.wait_for_window("input-probe").expect("probe maps");
+    let window = poll_until(EVENT, "the fullscreen ledger rectangle", || {
+        let world = session.world().ok()?;
+        let window = world.window_matching("input-probe")?.clone();
+        (window.w == world.output_w && window.h == world.output_h).then_some(window)
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(PROBE)));
+    session.door().barrier().unwrap();
+    // Every configure sent so far is acknowledged and answered with the old
+    // 400x300 buffer, and the compositor has processed each answer.
+    poll_until(EVENT, "every configure answered with the old buffer", || {
+        let log = session.client_log(PROBE);
+        let last = |prefix: &str| log.lines().rev().find_map(|line| line.strip_prefix(prefix)?.parse::<u32>().ok());
+        let configured = last("surface configure ")?;
+        (last("configure answered ") == Some(configured)).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(PROBE)));
+    session.door().barrier().unwrap();
+
+    let origin = (f64::from(window.x - window.offset_x), f64::from(window.y - window.offset_y));
+    // The first motion may be an enter; the second is a plain motion.
+    session.door().motion(origin.0 + 200.0, origin.1 + 150.0).unwrap();
+    session.door().barrier().unwrap();
+    let seen = session
+        .client_log(PROBE)
+        .lines()
+        .filter_map(|line| line.strip_prefix("input ")?.split_whitespace().next()?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    let (x, y) = (300.0, 250.0);
+    session.door().motion(origin.0 + x, origin.1 + y).unwrap();
+    let event = wait_event(&session, seen, "motion");
+    assert!(
+        (event.x - x).abs() < 0.01 && (event.y - y).abs() < 0.01,
+        "a settled 400x300 buffer in a {}x{} interior must receive ({x}, {y}), got {event:?}",
+        window.w,
+        window.h
+    );
+}
+
 fn drag_at_scale(scale: f32, subsurface: bool) {
     let mut session = Session::boot(
         &format!("pointer-coordinates-{scale}-{}", if subsurface { "child" } else { "root" }),

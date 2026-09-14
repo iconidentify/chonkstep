@@ -2358,6 +2358,17 @@ impl<B: Backend> WindowManager<B> {
             tracing::debug!(?id, ?requested, "configure request from a size-locked client — ignored");
             return;
         }
+        // A fullscreen window's size is its monitor's, the way a maximized
+        // axis below is the work area's. A client that answers fullscreen
+        // with another buffer (a browser still showing its windowed frame, a
+        // fixed-size game) keeps that buffer inside the fullscreen rectangle.
+        // Adopting its size made the fullscreen reflow resize the window
+        // straight back, and the backend answered that unchanged resize with
+        // the same commit, repainting every pass.
+        if client.flags.contains(ClientFlags::FULLSCREEN) {
+            tracing::debug!(?id, ?requested, "configure request from a fullscreen client — ignored");
+            return;
+        }
         // A maximized axis is the WM's to decide, not the client's. A
         // client that re-asks for its pre-maximize size — which toolkits
         // do, on a font change, a DPI change, or just late in startup —
@@ -9092,6 +9103,34 @@ mod tests {
         wm.dispatch(BackendEvent::MapRequest(window));
         let id = wm.client_for_window(window).unwrap();
         (wm, id, window)
+    }
+
+    #[test]
+    fn a_fullscreen_client_cannot_resize_itself_out_of_the_fullscreen_rectangle() {
+        // A browser still presenting its windowed buffer, or a fixed-size
+        // game, commits a size other than the fullscreen rectangle. Adopting
+        // it made the fullscreen reflow resize the window straight back; that
+        // resize deduplicated against the configure already sent, and the
+        // backend answered it with the same commit, about twenty times a
+        // second. The geometry always ended fullscreen, so the loop shows
+        // only as the resize it sends.
+        let (mut wm, id, window) = shadeable_window();
+        let windowed = wm.client(id).unwrap().geometry;
+        wm.fullscreen(id);
+        let fullscreen = wm.client(id).unwrap().geometry;
+        assert_ne!(fullscreen.size, windowed.size);
+        let resizes = |wm: &WindowManager<FakeBackend>| wm.backend().client_resize_count.get(&window).copied().unwrap_or(0);
+        let before = resizes(&wm);
+
+        wm.dispatch(BackendEvent::ClientSizeCommitted { window, size: Size::new(60, 40) });
+        assert_eq!(resizes(&wm), before, "a committed buffer smaller than fullscreen must not start a resize");
+        assert_eq!(wm.client(id).unwrap().geometry, fullscreen);
+        wm.dispatch(BackendEvent::ConfigureRequest { window, requested: Rect::new(Point::new(0, 0), Size::new(70, 50)) });
+        assert_eq!(resizes(&wm), before, "nor may a configure request resize a fullscreen window");
+        assert_eq!(wm.client(id).unwrap().geometry, fullscreen);
+
+        wm.unfullscreen(id);
+        assert_eq!(wm.client(id).unwrap().geometry.size, windowed.size, "leaving fullscreen restores the windowed size");
     }
 
     #[test]

@@ -100,11 +100,16 @@ struct Probe {
     cursor_shape_device: Option<WpCursorShapeDeviceV1>,
     position: (f64, f64),
     sequence: u64,
+    answer_with_old_buffer: bool,
 }
 
 /// The enter serial a `set_shape` used. The sync sent after it is
 /// answered only once the compositor has processed that request.
 struct CursorShapeApplied(u32);
+
+/// A configure serial answered by committing the old buffer. The sync sent
+/// after that commit returns once the compositor has processed it.
+struct ConfigureAnswered(u32);
 
 impl Probe {
     fn report(&mut self, kind: &str) {
@@ -416,6 +421,21 @@ impl Dispatch<wl_callback::WlCallback, CursorShapeApplied> for Probe {
     }
 }
 
+impl Dispatch<wl_callback::WlCallback, ConfigureAnswered> for Probe {
+    fn event(
+        _: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        answered: &ConfigureAnswered,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            say(&format!("configure answered {}", answered.0));
+        }
+    }
+}
+
 impl Dispatch<wl_data_device::WlDataDevice, ()> for Probe {
     fn event(
         probe: &mut Self,
@@ -580,16 +600,24 @@ impl Dispatch<XdgWmBase, ()> for Probe {
 
 impl Dispatch<XdgSurface, ()> for Probe {
     fn event(
-        _: &mut Self,
+        probe: &mut Self,
         surface: &XdgSurface,
         event: xdg_surface::Event,
         _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
+        connection: &Connection,
+        qh: &QueueHandle<Self>,
     ) {
         if let xdg_surface::Event::Configure { serial } = event {
             say(&format!("surface configure {serial}"));
             surface.ack_configure(serial);
+            // `lagged-fullscreen`: answer at once with the old buffer, as a
+            // client whose redraw lags its acknowledgement does.
+            if probe.answer_with_old_buffer {
+                if let Some(root) = &probe.surface {
+                    root.commit();
+                    connection.display().sync(qh, ConfigureAnswered(serial));
+                }
+            }
         }
     }
 }
@@ -864,6 +892,11 @@ fn main() {
     surface.commit();
     queue.roundtrip(&mut probe).expect("map");
     say("mapped input-probe");
+    if std::env::args().any(|arg| arg == "lagged-fullscreen") {
+        probe.answer_with_old_buffer = true;
+        toplevel.set_fullscreen(None);
+        say("requested fullscreen");
+    }
     let _replacement_grab = replace_ime_grab.then(|| {
         let method = _input_method.as_ref().expect("input method");
         let first = method.grab_keyboard(&qh, 0);
