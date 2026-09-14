@@ -273,15 +273,33 @@ pub struct FloatDecision {
     pub center: bool,
 }
 
+/// The `idle_inhibit` rule's modes. Every mode other than `None` also
+/// requires the window to be mapped and visible (or pinned); the mode adds
+/// the one further condition the rule names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IdleInhibitRule {
+    /// No inhibition, including an explicit `none` that overrides an
+    /// earlier matching rule.
+    #[default]
+    None,
+    /// While the window is showing.
+    Always,
+    /// While the window also holds keyboard focus.
+    Focus,
+    /// While the window is also fullscreen: a game launcher's library
+    /// window must not hold the session awake, its game must.
+    Fullscreen,
+}
+
 /// Non-geometric window-rule decisions made when a window maps.
 ///
 /// These are deliberately separate from [`FloatDecision`]: a rule such
 /// as `no_initial_focus` says nothing about placement and must not
 /// accidentally opt the window into centered placement.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WindowRuleDecision {
-    /// Keep the idle notifier inhibited while this window is mapped and visible.
-    pub idle_inhibit: bool,
+    /// When this window keeps the idle notifier inhibited.
+    pub idle_inhibit: IdleInhibitRule,
     /// Keep the window visible on every workspace and above ordinary windows.
     pub pin: bool,
     /// Never give this window keyboard focus.
@@ -294,6 +312,9 @@ pub struct WindowRuleDecision {
     pub fullscreen: bool,
     /// Enter full horizontal-and-vertical maximize after mapping.
     pub maximize: bool,
+    /// The touchpad scroll factor while the pointer is over this window,
+    /// replacing the global touchpad factor (`scroll_touchpad`).
+    pub touchpad_scroll_factor: Option<f64>,
 }
 
 impl WindowRuleDecision {

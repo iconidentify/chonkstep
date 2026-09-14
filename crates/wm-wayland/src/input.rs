@@ -158,6 +158,9 @@ struct InputState {
     /// Leftover fractions of a wheel notch, for the shell's discrete
     /// scroll channel — see [`ScrollAccumulator`].
     scroll: ScrollAccumulator,
+    /// High-resolution wheel units left over after the scroll factor, so
+    /// a factor below one slows a wheel instead of rounding detents away.
+    wheel: WheelResidual,
     /// Tablet tools currently in proximity. Smithay keeps the handles
     /// internally but exposes no iterator over them, so this bounded
     /// set is the compositor's way to send every focused tool a
@@ -2479,7 +2482,7 @@ fn on_pointer_axis<I: InputBackend>(state: &mut Compositor, event: I::PointerAxi
     if route_shell_scroll::<I>(state, &event) {
         return;
     }
-    let factor = state.wm.backend().scroll_factor;
+    let factor = axis_factor(state, event.source());
     let horizontal = event
         .amount(Axis::Horizontal)
         .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0)
@@ -2488,19 +2491,32 @@ fn on_pointer_axis<I: InputBackend>(state: &mut Compositor, event: I::PointerAxi
         event.amount(Axis::Vertical).unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.0)
             * factor;
 
+    let focus = state.seat.get_pointer().and_then(|pointer| pointer.current_focus()).map(|target| target.surface().clone());
+    let (horizontal_v120, vertical_v120) = with_input(&state.seat, |input| {
+        input.wheel.retarget(focus.as_ref());
+        (
+            event
+                .amount_v120(Axis::Horizontal)
+                .and_then(|discrete| scale_v120(&mut input.wheel.horizontal, discrete, factor)),
+            event
+                .amount_v120(Axis::Vertical)
+                .and_then(|discrete| scale_v120(&mut input.wheel.vertical, discrete, factor)),
+        )
+    });
+
     let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
     if horizontal != 0.0 {
         frame = frame.relative_direction(Axis::Horizontal, event.relative_direction(Axis::Horizontal));
         frame = frame.value(Axis::Horizontal, horizontal);
-        if let Some(discrete) = event.amount_v120(Axis::Horizontal) {
-            frame = frame.v120(Axis::Horizontal, (discrete * factor).round() as i32);
+        if let Some(discrete) = horizontal_v120 {
+            frame = frame.v120(Axis::Horizontal, discrete);
         }
     }
     if vertical != 0.0 {
         frame = frame.relative_direction(Axis::Vertical, event.relative_direction(Axis::Vertical));
         frame = frame.value(Axis::Vertical, vertical);
-        if let Some(discrete) = event.amount_v120(Axis::Vertical) {
-            frame = frame.v120(Axis::Vertical, (discrete * factor).round() as i32);
+        if let Some(discrete) = vertical_v120 {
+            frame = frame.v120(Axis::Vertical, discrete);
         }
     }
     // A finger lifting off a touchpad ends kinetic scroll with an
@@ -2611,6 +2627,75 @@ fn take_whole(residual: &mut f64) -> i32 {
     whole as i32
 }
 
+/// The scroll factor for one axis event. Wheel, tilt and button scrolling
+/// are mouse-class; finger scrolling is touchpad-class, and a window whose
+/// `scroll_touchpad` rule sets its own factor replaces the touchpad one
+/// while the pointer is over it. The rule lookup runs only on desktops that
+/// write such a rule, and then costs a parent walk and two index probes.
+fn axis_factor(state: &Compositor, source: AxisSource) -> f64 {
+    let backend = state.wm.backend();
+    if source != AxisSource::Finger {
+        return backend.pointer_scroll_factor;
+    }
+    if state.wm.has_touchpad_scroll_rules() {
+        let rule = state
+            .seat
+            .get_pointer()
+            .and_then(|pointer| pointer.current_focus())
+            .and_then(|target| backend.window_for_surface(&root_surface(target.surface().clone())))
+            .and_then(|window| state.wm.client_for_window(window))
+            .and_then(|id| state.wm.client_touchpad_scroll_factor(id));
+        if let Some(factor) = rule {
+            return factor;
+        }
+    }
+    backend.touchpad_scroll_factor
+}
+
+/// The root of a surface's subsurface tree: pointer focus can rest on a
+/// subsurface, while windows are indexed by their root.
+fn root_surface(mut surface: WlSurface) -> WlSurface {
+    while let Some(parent) = smithay::wayland::compositor::get_parent(&surface) {
+        surface = parent;
+    }
+    surface
+}
+
+/// High-resolution wheel units carried between events. Scaling each event
+/// and rounding dropped up to half a unit every time, so a small factor
+/// turned every detent into nothing and `axis_value120` disagreed with the
+/// `axis` value in the same frame. The residual belongs to one pointer
+/// focus: moving onto another surface starts from zero.
+#[derive(Default)]
+struct WheelResidual {
+    owner: Option<WlSurface>,
+    horizontal: f64,
+    vertical: f64,
+}
+
+impl WheelResidual {
+    fn retarget(&mut self, focus: Option<&WlSurface>) {
+        if self.owner.as_ref() != focus {
+            *self = WheelResidual { owner: focus.cloned(), ..WheelResidual::default() };
+        }
+    }
+}
+
+/// Scales one high-resolution wheel value, keeping the fraction for the
+/// next event. `None` when no whole unit completed, so the frame carries
+/// only the continuous value.
+fn scale_v120(residual: &mut f64, discrete: f64, factor: f64) -> Option<i32> {
+    if *residual != 0.0 && discrete != 0.0 && residual.signum() != discrete.signum() {
+        // A direction change discards the other way's fraction, the same
+        // rule the shell's notch accumulator follows.
+        *residual = 0.0;
+    }
+    let scaled = discrete * factor + *residual;
+    let whole = scaled.trunc();
+    *residual = scaled - whole;
+    (whole != 0.0).then_some(whole as i32)
+}
+
 /// Offers a scroll to the shell-surface family, returning whether it
 /// was claimed (in which case the seat must not also see it).
 ///
@@ -2623,7 +2708,7 @@ fn route_shell_scroll<I: InputBackend>(
     state: &mut Compositor,
     event: &I::PointerAxisEvent,
 ) -> bool {
-    let factor = state.wm.backend().scroll_factor;
+    let factor = axis_factor(state, event.source());
     route_shell_scroll_values(
         state,
         event.amount(Axis::Horizontal).map(|value| value * factor),
@@ -3720,6 +3805,28 @@ mod tests {
         assert_eq!(axis_notches(None, Some(15.0)), 1.0);
         assert_eq!(axis_notches(None, Some(5.0)), 1.0 / 3.0);
         assert_eq!(axis_notches(None, None), 0.0);
+    }
+
+    /// A factor below one slows a wheel exactly instead of rounding every
+    /// small value up or down.
+    #[test]
+    fn scaled_wheel_units_carry_their_fraction_between_events() {
+        let mut residual = 0.0;
+        let total: i32 = (0..120).filter_map(|_| scale_v120(&mut residual, 1.0, 0.4)).sum();
+        assert_eq!(total, 48, "0.4 of 120 one-unit events");
+
+        let mut residual = 0.0;
+        assert!(
+            (0..2000).any(|_| scale_v120(&mut residual, 1.0, 0.001).is_some()),
+            "a tiny factor still completes a unit eventually"
+        );
+
+        let mut residual = 0.0;
+        assert_eq!(scale_v120(&mut residual, 100.0, 0.5), Some(50));
+        assert_eq!(scale_v120(&mut residual, 1.0, 0.5), None);
+        assert_eq!(scale_v120(&mut residual, -1.0, 0.5), None, "the opposite fraction is discarded");
+        assert_eq!(residual, -0.5);
+        assert_eq!(scale_v120(&mut residual, 120.0, 1.0), Some(120), "a detent at factor one is exact");
     }
 
     /// The whole point of the accumulator: a touchpad drip-feeds

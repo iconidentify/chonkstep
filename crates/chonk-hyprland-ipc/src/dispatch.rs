@@ -196,9 +196,11 @@ pub fn parse(args: &str, snapshot: &Snapshot) -> Outcome {
     parse_classic(&verb, rest, snapshot)
 }
 
+/// Split the verb from its arguments on the first whitespace character,
+/// whatever its width; see `Request::parse`, which splits the same way.
 fn split_verb(args: &str) -> (String, &str) {
-    match args.find(char::is_whitespace) {
-        Some(space) => (args[..space].to_ascii_lowercase(), args[space + 1..].trim()),
+    match args.split_once(char::is_whitespace) {
+        Some((verb, rest)) => (verb.to_ascii_lowercase(), rest.trim()),
         None => (args.to_ascii_lowercase(), ""),
     }
 }
@@ -332,21 +334,31 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
 /// everything else *as unsupported rather than as understood*, which is
 /// the safe direction: a Lua call we mis-parse into a plausible action
 /// would be exactly the confident wrong answer this module forbids.
+///
+/// The arguments, though, are read as real Lua literals: a string is
+/// decoded with Lua's own escape rules, and a field is a key of a table
+/// rather than a word found somewhere in the text. `exec_cmd`'s string
+/// is a command to run, so reading it as "whatever lies between the
+/// first two quotes" ran a different command and answered `ok`.
 fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
     let (path, body) = match rest.split_once('(') {
         Some((path, body)) => (path.trim(), body.trim_end().trim_end_matches(')')),
         None => (rest.trim(), ""),
     };
+    let args = match lua_arguments(body) {
+        Ok(args) => args,
+        Err(error) => return Outcome::Unsupported(format!("hl.dsp.{path}: invalid Lua arguments: {error}")),
+    };
 
     match path {
         "focus" => {
-            if let Some(value) = lua_field(body, "workspace") {
+            if let Some(value) = lua_field(&args, "workspace") {
                 return match workspace_target(&value, snapshot) {
                     Ok(index) => Outcome::Run(Action::FocusWorkspace(index)),
                     Err(why) => Outcome::Unsupported(why),
                 };
             }
-            if let Some(value) = lua_field(body, "window") {
+            if let Some(value) = lua_field(&args, "window") {
                 return match resolve_window(&value, snapshot) {
                     Some(window) => Outcome::Run(Action::FocusWindow(window.id)),
                     None => Outcome::Unsupported(format!("no window matches {value:?}")),
@@ -354,54 +366,54 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
             }
             Outcome::Unknown("hl.dsp.focus with no workspace or window".to_string())
         }
-        "window.close" => match lua_field(body, "window") {
+        "window.close" => match lua_field(&args, "window") {
             Some(value) => match resolve_window(&value, snapshot) {
                 Some(window) => Outcome::Run(Action::CloseWindow(window.id)),
                 None => Outcome::Unsupported(format!("no window matches {value:?}")),
             },
             None => Outcome::Run(Action::KillActive),
         },
-        "exec_cmd" => match lua_field(body, "cmd").or_else(|| lua_string(body)) {
+        "exec_cmd" => match lua_field(&args, "cmd").or_else(|| lua_string(&args)) {
             Some(command) => Outcome::Run(Action::ExecShell(command)),
             None => Outcome::Unknown("hl.dsp.exec_cmd with no command".to_string()),
         },
-        "window.float" => lua_window(body, snapshot, |window| Action::SetFloating {
+        "window.float" => lua_window(&args, snapshot, |window| Action::SetFloating {
             window: window.id,
-            floating: match lua_field(body, "action").as_deref() {
+            floating: match lua_field(&args, "action").as_deref() {
                 Some("on" | "set") => Some(true),
                 Some("off" | "unset") => Some(false),
                 _ => None,
             },
         }),
         "layout" => Outcome::Run(Action::LayoutNoop),
-        "window.pin" => lua_window(body, snapshot, |window| Action::SetPinned { window: window.id, pinned: None }),
-        "window.resize" => lua_geometry(body, snapshot, true),
-        "window.move" => lua_geometry(body, snapshot, false),
-        "window.center" => lua_window(body, snapshot, |window| Action::CenterWindow(window.id)),
+        "window.pin" => lua_window(&args, snapshot, |window| Action::SetPinned { window: window.id, pinned: None }),
+        "window.resize" => lua_geometry(&args, snapshot, true),
+        "window.move" => lua_geometry(&args, snapshot, false),
+        "window.center" => lua_window(&args, snapshot, |window| Action::CenterWindow(window.id)),
         "window.alter_zorder" => {
-            if lua_field(body, "mode").as_deref() != Some("top") {
+            if lua_field(&args, "mode").as_deref() != Some("top") {
                 Outcome::Unsupported("hl.dsp.window.alter_zorder supports mode=top only".to_string())
             } else {
-                lua_window(body, snapshot, |window| Action::RaiseWindow(window.id))
+                lua_window(&args, snapshot, |window| Action::RaiseWindow(window.id))
             }
         }
         "window.tag" => {
-            let Some(tag) = lua_field(body, "tag") else {
+            let Some(tag) = lua_field(&args, "tag") else {
                 return Outcome::Unknown("hl.dsp.window.tag with no tag".to_string());
             };
             let (present, tag) = match tag.strip_prefix('-') {
                 Some(tag) => (false, tag.to_string()),
                 None => (true, tag.trim_start_matches('+').to_string()),
             };
-            lua_window(body, snapshot, |window| Action::SetTag { window: window.id, tag, present })
+            lua_window(&args, snapshot, |window| Action::SetTag { window: window.id, tag, present })
         }
         "window.fullscreen_state" => {
-            let client = lua_field(body, "client").and_then(|value| value.parse::<i32>().ok()).unwrap_or(0);
+            let client = lua_field(&args, "client").and_then(|value| value.parse::<i32>().ok()).unwrap_or(0);
             Outcome::Run(Action::Fullscreen(if client == 0 { Fullscreen::Off } else { Fullscreen::On }))
         }
         "window.set_prop" => Outcome::Unsupported("window opacity and other dynamic properties are not modeled".to_string()),
         "cursor.move" => Outcome::Unsupported("chonkstep does not warp the pointer from IPC".to_string()),
-        "dpms" => parse_dpms_lua(body, snapshot),
+        "dpms" => parse_dpms_lua(&args, snapshot),
         other => Outcome::Unknown(format!("unknown Lua dispatcher hl.dsp.{other}")),
     }
 }
@@ -416,13 +428,17 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         return parse(source, snapshot);
     }
     if let Some(body) = source.strip_prefix("hl.monitor(").and_then(|value| value.strip_suffix(')')) {
-        let Some(output) = lua_field(body, "output") else {
+        let args = match lua_arguments(body) {
+            Ok(args) => args,
+            Err(error) => return Outcome::Unsupported(format!("hl.monitor: invalid Lua arguments: {error}")),
+        };
+        let Some(output) = lua_field(&args, "output") else {
             return Outcome::Unsupported("hl.monitor requires a named output".to_string());
         };
         if !snapshot.monitors.iter().any(|monitor| monitor.name == output) {
             return Outcome::Unsupported(format!("hl.monitor names unknown output {output:?}"));
         }
-        let Some(scale) = lua_field(body, "scale").and_then(|value| value.parse::<f64>().ok()) else {
+        let Some(scale) = lua_field(&args, "scale").and_then(|value| value.parse::<f64>().ok()) else {
             return Outcome::Unsupported("hl.monitor currently changes scale only, and needs a numeric scale".to_string());
         };
         if !scale.is_finite() || !(0.5..=4.0).contains(&scale) {
@@ -431,8 +447,12 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         return Outcome::Run(Action::SetMonitorScale { output, scale_120: (scale * 120.0).round() as u32 });
     }
     if let Some(body) = source.strip_prefix("hl.config(").and_then(|value| value.strip_suffix(')')) {
-        if let Some(cursor) = lua_table_field(body, "cursor") {
-            if let Some(value) = lua_field(cursor, "invisible") {
+        let args = match lua_arguments(body) {
+            Ok(args) => args,
+            Err(error) => return Outcome::Unsupported(format!("hl.config: invalid Lua arguments: {error}")),
+        };
+        if let Some(cursor @ Literal::Table(_)) = lua_value(&args, "cursor") {
+            if let Some(value) = lua_field(std::slice::from_ref(cursor), "invisible") {
                 return match parse_bool(&value) {
                     Some(hidden) => Outcome::Run(Action::SetCursorHidden(hidden)),
                     None => Outcome::Unsupported(
@@ -446,11 +466,15 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
     if source.starts_with("hl.device(") {
         return Outcome::Unsupported("hl.device enable/disable is not supported by this input backend".to_string());
     }
-    if source.starts_with("hl.workspace_rule(") {
-        let workspace = lua_field(source, "workspace")
+    if let Some(call) = source.strip_prefix("hl.workspace_rule(") {
+        let args = match lua_arguments(call.strip_suffix(')').unwrap_or(call)) {
+            Ok(args) => args,
+            Err(error) => return Outcome::Unsupported(format!("hl.workspace_rule: invalid Lua arguments: {error}")),
+        };
+        let workspace = lua_field(&args, "workspace")
             .and_then(|s| s.parse::<i32>().ok())
             .and_then(workspace_index_from_hypr_id);
-        return match (workspace, lua_field(source, "layout")) {
+        return match (workspace, lua_field(&args, "layout")) {
             (Some(workspace), Some(mode)) if workspace < 99 => layout_action(workspace, &mode),
             _ => Outcome::Unsupported(
                 "workspace_rule requires a workspace from 1 to 99 and a layout".into(),
@@ -578,11 +602,11 @@ fn parse_dpms(source: &str, snapshot: &Snapshot) -> Outcome {
     Outcome::Run(Action::SetDpms { output, powered })
 }
 
-fn parse_dpms_lua(body: &str, snapshot: &Snapshot) -> Outcome {
-    let state = lua_field(body, "state")
-        .or_else(|| lua_field(body, "enabled"))
-        .or_else(|| lua_field(body, "action"))
-        .or_else(|| lua_string(body));
+fn parse_dpms_lua(args: &[Literal], snapshot: &Snapshot) -> Outcome {
+    let state = lua_field(args, "state")
+        .or_else(|| lua_field(args, "enabled"))
+        .or_else(|| lua_field(args, "action"))
+        .or_else(|| lua_string(args));
     let Some(state) = state else {
         return Outcome::Unsupported("hl.dsp.dpms requires state=on or state=off".to_string());
     };
@@ -591,7 +615,7 @@ fn parse_dpms_lua(body: &str, snapshot: &Snapshot) -> Outcome {
         "disable" | "disabled" => "off",
         _ => state.as_str(),
     };
-    let output = lua_field(body, "output").or_else(|| lua_field(body, "monitor"));
+    let output = lua_field(args, "output").or_else(|| lua_field(args, "monitor"));
     parse_dpms(&format!("{}{}", state, output.map_or_else(String::new, |name| format!(" {name}"))), snapshot)
 }
 
@@ -603,11 +627,11 @@ fn selected_window<'a>(selector: &str, snapshot: &'a Snapshot) -> Option<&'a Win
     }
 }
 
-fn lua_window<F>(body: &str, snapshot: &Snapshot, action: F) -> Outcome
+fn lua_window<F>(args: &[Literal], snapshot: &Snapshot, action: F) -> Outcome
 where
     F: FnOnce(&Window) -> Action,
 {
-    let window = lua_field(body, "window")
+    let window = lua_field(args, "window")
         .as_deref()
         .and_then(|selector| resolve_window(selector, snapshot))
         .or_else(|| snapshot.focused_window());
@@ -615,15 +639,15 @@ where
         .unwrap_or_else(|| Outcome::Unsupported("window dispatcher has no matching target".to_string()))
 }
 
-fn lua_geometry(body: &str, snapshot: &Snapshot, resize: bool) -> Outcome {
-    let Some(x) = lua_field(body, "x").and_then(|value| value.parse::<i32>().ok()) else {
+fn lua_geometry(args: &[Literal], snapshot: &Snapshot, resize: bool) -> Outcome {
+    let Some(x) = lua_field(args, "x").and_then(|value| value.parse::<i32>().ok()) else {
         return Outcome::Unsupported("window geometry requires an integer x".to_string());
     };
-    let Some(y) = lua_field(body, "y").and_then(|value| value.parse::<i32>().ok()) else {
+    let Some(y) = lua_field(args, "y").and_then(|value| value.parse::<i32>().ok()) else {
         return Outcome::Unsupported("window geometry requires an integer y".to_string());
     };
-    let relative = lua_field(body, "relative").is_some_and(|value| value == "true");
-    lua_window(body, snapshot, |window| {
+    let relative = lua_field(args, "relative").is_some_and(|value| value == "true");
+    lua_window(args, snapshot, |window| {
         if resize {
             Action::ResizeWindow { window: window.id, width: x, height: y, relative }
         } else {
@@ -668,70 +692,33 @@ fn classic_tag(rest: &str, snapshot: &Snapshot) -> Outcome {
     Outcome::Run(Action::SetTag { window: window.id, tag: tag.to_string(), present })
 }
 
-/// Pull `key = "value"` (or `key = value`) out of a Lua table literal.
-fn lua_field(body: &str, key: &str) -> Option<String> {
-    for (at, _) in body.match_indices(key) {
-        // Guard against `key` matching inside a longer identifier or a
-        // value. In particular, looking for `x` must skip the `x` in an
-        // address such as `address:0x12` and continue to the real field.
-        if at > 0 {
-            let before = body[..at].chars().next_back().unwrap_or(' ');
-            if before.is_alphanumeric() || before == '_' || before == '.' {
-                continue;
-            }
+/// The value of `key = ...` in the first table argument that has the key.
+/// Only a table's own keys count: a key name that appears inside a
+/// string value, or in a nested table, is not a field of the call.
+fn lua_value<'a>(args: &'a [Literal], key: &str) -> Option<&'a Literal> {
+    args.iter().find_map(|arg| match arg {
+        Literal::Table(fields) => {
+            fields.iter().find(|(name, _)| name.as_deref() == Some(key)).map(|(_, value)| value)
         }
-        let after_key = &body[at + key.len()..];
-        if after_key.chars().next().is_some_and(|after| after.is_alphanumeric() || after == '_') {
-            continue;
-        }
-        let rest = after_key.trim_start();
-        let Some(rest) = rest.strip_prefix('=') else { continue };
-        let rest = rest.trim_start();
-        return Some(match rest.strip_prefix('"') {
-            Some(quoted) => quoted.split('"').next().unwrap_or_default().to_string(),
-            None => rest.split([',', '}', ' ']).next().unwrap_or_default().trim().to_string(),
-        });
-    }
-    None
+        _ => None,
+    })
 }
 
-/// Pull the contents of `key = { ... }` out of a Lua table literal.
-/// Only balanced braces are recognized; malformed or non-table fields
-/// are left to the caller's named refusal.
-fn lua_table_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
-    for (at, _) in body.match_indices(key) {
-        if at > 0 {
-            let before = body[..at].chars().next_back().unwrap_or(' ');
-            if before.is_alphanumeric() || before == '_' || before == '.' {
-                continue;
-            }
-        }
-        let after_key = &body[at + key.len()..];
-        if after_key.chars().next().is_some_and(|after| after.is_alphanumeric() || after == '_') {
-            continue;
-        }
-        let Some(rest) = after_key.trim_start().strip_prefix('=') else {
-            continue;
-        };
-        let rest = rest.trim_start();
-        let Some(table) = rest.strip_prefix('{') else {
-            continue;
-        };
-        let mut depth = 1_u32;
-        for (index, character) in table.char_indices() {
-            match character {
-                '{' => depth = depth.saturating_add(1),
-                '}' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return Some(&table[..index]);
-                    }
-                }
-                _ => {}
-            }
-        }
+/// The text of `key = "value"` (or `key = value`) in an argument list.
+/// A table value has no text and is left to the caller's named refusal.
+fn lua_field(args: &[Literal], key: &str) -> Option<String> {
+    match lua_value(args, key)? {
+        Literal::Str(text) | Literal::Word(text) => Some(text.clone()),
+        Literal::Table(_) => None,
     }
-    None
+}
+
+/// The first argument that is a bare string literal.
+fn lua_string(args: &[Literal]) -> Option<String> {
+    args.iter().find_map(|arg| match arg {
+        Literal::Str(text) => Some(text.clone()),
+        _ => None,
+    })
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -742,31 +729,382 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-/// The first bare string literal in a Lua argument list.
-fn lua_string(body: &str) -> Option<String> {
-    // Lua long-bracket strings are ordinary string literals. Omarchy's
-    // screensaver launcher uses exactly this spelling so accepting only
-    // quotes turns a visible menu action into a silent refusal.
-    if let Some(rest) = body.trim_start().strip_prefix("[[") {
-        return rest.find("]]").map(|end| rest[..end].to_string());
+/// The deepest table nesting an argument list may use. Omarchy's
+/// deepest is two (`hl.config({ cursor = { ... } })`); the bound exists
+/// because tables are read recursively and the payload is untrusted.
+/// Length needs no bound of its own: strings are read iteratively, and
+/// the whole request is already capped at [`crate::request::MAX_REQUEST`].
+const MAX_LUA_DEPTH: usize = 16;
+
+/// One value in a Lua argument list, as far as dispatch reads Lua.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Literal {
+    /// A string literal in any of Lua's three spellings, decoded.
+    Str(String),
+    /// A number, `true`, `false`, `nil` or a name, kept as its source
+    /// text. Every caller reads these as text (an integer, a scale, a
+    /// boolean), so deciding here what a number is would be a second
+    /// place to get it wrong.
+    Word(String),
+    /// A table constructor: each field with its key, or `None` for a
+    /// positional one.
+    Table(Vec<(Option<String>, Literal)>),
+}
+
+/// Why an argument list is not made of the Lua literals dispatch reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LuaError {
+    /// The input ends inside a string or table.
+    Unterminated(&'static str),
+    /// A backslash escape Lua does not have, or a malformed one.
+    InvalidEscape(char),
+    /// Byte escapes that together are not UTF-8. Lua would accept the
+    /// bytes, but they cannot be a command line or a selector.
+    InvalidUtf8,
+    TooDeep,
+    /// The input ends where a value should be.
+    MissingValue,
+    /// Anything that is not a literal: an operator, a call, a stray
+    /// character.
+    Unexpected(char),
+}
+
+impl std::fmt::Display for LuaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LuaError::Unterminated(what) => write!(f, "unterminated {what}"),
+            LuaError::InvalidEscape(escape) => write!(f, "invalid escape \\{}", escape.escape_debug()),
+            LuaError::InvalidUtf8 => f.write_str("string escapes decode to bytes that are not UTF-8"),
+            LuaError::TooDeep => write!(f, "tables nested deeper than {MAX_LUA_DEPTH}"),
+            LuaError::MissingValue => f.write_str("a value is missing"),
+            LuaError::Unexpected(character) => write!(f, "unexpected {character:?}"),
+        }
     }
-    // Also accept the delimiter-with-equals form (`[=[...]=]`). It
-    // costs a small bounded scan and avoids making the same parser gap
-    // reappear the first time a command itself contains `]]`.
-    let trimmed = body.trim_start();
-    if let Some(after_open) = trimmed.strip_prefix('[') {
-        let equals = after_open.bytes().take_while(|byte| *byte == b'=').count();
-        if after_open.as_bytes().get(equals) == Some(&b'[') {
-            let content = &after_open[equals + 1..];
-            let close = format!("]{}]", "=".repeat(equals));
-            if let Some(end) = content.find(&close) {
-                return Some(content[..end].to_string());
+}
+
+/// Read a whole argument list: comma-separated literals and nothing else.
+fn lua_arguments(body: &str) -> Result<Vec<Literal>, LuaError> {
+    let mut reader = LuaReader { text: body, at: 0 };
+    let mut args = Vec::new();
+    reader.skip_space();
+    if reader.peek().is_none() {
+        return Ok(args);
+    }
+    loop {
+        args.push(reader.value(0)?);
+        reader.skip_space();
+        match reader.peek() {
+            None => return Ok(args),
+            Some(b',') => {
+                reader.at += 1;
+                reader.skip_space();
+            }
+            Some(_) => return Err(reader.unexpected()),
+        }
+    }
+}
+
+/// A cursor over an argument list. `at` only ever advances over ASCII
+/// bytes or over a whole literal, so it always sits on a character
+/// boundary; the slices below use `get` regardless, because the input
+/// is a client's.
+struct LuaReader<'a> {
+    text: &'a str,
+    at: usize,
+}
+
+impl<'a> LuaReader<'a> {
+    fn peek(&self) -> Option<u8> {
+        self.text.as_bytes().get(self.at).copied()
+    }
+
+    fn peek_after(&self, offset: usize) -> Option<u8> {
+        self.text.as_bytes().get(self.at + offset).copied()
+    }
+
+    fn skip_space(&mut self) {
+        while self.peek().is_some_and(is_lua_space) {
+            self.at += 1;
+        }
+    }
+
+    fn unexpected(&self) -> LuaError {
+        self.text.get(self.at..).and_then(|rest| rest.chars().next()).map_or(LuaError::MissingValue, LuaError::Unexpected)
+    }
+
+    /// Step over `byte`, after any whitespace, or say what is there instead.
+    fn expect(&mut self, byte: u8, within: &'static str) -> Result<(), LuaError> {
+        self.skip_space();
+        match self.peek() {
+            Some(found) if found == byte => {
+                self.at += 1;
+                self.skip_space();
+                Ok(())
+            }
+            None => Err(LuaError::Unterminated(within)),
+            Some(_) => Err(self.unexpected()),
+        }
+    }
+
+    fn value(&mut self, depth: usize) -> Result<Literal, LuaError> {
+        match self.peek() {
+            None => Err(LuaError::MissingValue),
+            Some(b'"' | b'\'') => self.string(),
+            Some(b'[') if matches!(self.peek_after(1), Some(b'[' | b'=')) => self.string(),
+            Some(b'{') => self.table(depth + 1),
+            Some(byte) if is_word_byte(byte) => Ok(Literal::Word(self.word().to_string())),
+            Some(_) => Err(self.unexpected()),
+        }
+    }
+
+    fn string(&mut self) -> Result<Literal, LuaError> {
+        let (text, length) = string_literal(self.text.get(self.at..).unwrap_or_default())?;
+        self.at += length;
+        Ok(Literal::Str(text))
+    }
+
+    fn word(&mut self) -> &'a str {
+        let start = self.at;
+        while self.peek().is_some_and(is_word_byte) {
+            self.at += 1;
+        }
+        self.text.get(start..self.at).unwrap_or_default()
+    }
+
+    fn table(&mut self, depth: usize) -> Result<Literal, LuaError> {
+        if depth > MAX_LUA_DEPTH {
+            return Err(LuaError::TooDeep);
+        }
+        self.at += 1;
+        let mut fields = Vec::new();
+        loop {
+            self.skip_space();
+            match self.peek() {
+                None => return Err(LuaError::Unterminated("table")),
+                Some(b'}') => {
+                    self.at += 1;
+                    return Ok(Literal::Table(fields));
+                }
+                Some(_) => {}
+            }
+            fields.push(self.field(depth)?);
+            self.skip_space();
+            match self.peek() {
+                None => return Err(LuaError::Unterminated("table")),
+                Some(b',' | b';') => self.at += 1,
+                Some(b'}') => {}
+                Some(_) => return Err(self.unexpected()),
             }
         }
     }
-    let start = body.find('"')?;
-    let rest = &body[start + 1..];
-    Some(rest.split('"').next()?.to_string())
+
+    /// One table field: `name = value`, `[key] = value`, or a positional
+    /// value.
+    fn field(&mut self, depth: usize) -> Result<(Option<String>, Literal), LuaError> {
+        if self.peek() == Some(b'[') && !matches!(self.peek_after(1), Some(b'[' | b'=')) {
+            self.at += 1;
+            self.skip_space();
+            let key = match self.value(depth)? {
+                Literal::Str(key) | Literal::Word(key) => key,
+                Literal::Table(_) => return Err(LuaError::Unexpected('}')),
+            };
+            self.expect(b']', "table")?;
+            self.expect(b'=', "table")?;
+            return Ok((Some(key), self.value(depth)?));
+        }
+        if self.peek().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_') {
+            let start = self.at;
+            let name = self.word();
+            self.skip_space();
+            if self.peek() == Some(b'=') && self.peek_after(1) != Some(b'=') {
+                // `a.b = 1` is an assignment, not a table field.
+                if !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+                    return Err(LuaError::Unexpected('='));
+                }
+                self.at += 1;
+                self.skip_space();
+                return Ok((Some(name.to_string()), self.value(depth)?));
+            }
+            self.at = start;
+        }
+        Ok((None, self.value(depth)?))
+    }
+}
+
+fn is_lua_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+/// The bytes of a number, a boolean, `nil` or a name, including the sign
+/// and exponent characters of a number such as `-1.5e+3`.
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'+' | b'-')
+}
+
+/// Decode one Lua string literal at the start of `src`: `"..."`, `'...'`
+/// or a long bracket, with Lua 5.4's escapes. Returns the text and the
+/// number of bytes the literal spans.
+///
+/// Lua strings are bytes, and `\xNN` and `\ddd` each name one byte, so
+/// the decoded bytes are collected first and checked as UTF-8 once at the
+/// end. Decoding escape by escape into `char`s would garble a multibyte
+/// character spelled as separate byte escapes.
+fn string_literal(src: &str) -> Result<(String, usize), LuaError> {
+    let bytes = src.as_bytes();
+    let quote = match bytes.first() {
+        Some(b'[') => return long_bracket(src),
+        Some(&quote @ (b'"' | b'\'')) => quote,
+        _ => return Err(LuaError::MissingValue),
+    };
+    let mut out = Vec::new();
+    let mut at = 1;
+    loop {
+        let Some(&byte) = bytes.get(at) else {
+            return Err(LuaError::Unterminated("string"));
+        };
+        at += 1;
+        match byte {
+            _ if byte == quote => break,
+            // Lua refuses an unescaped line break in a short string: it
+            // does not end the string, so the string never ended.
+            b'\n' | b'\r' => return Err(LuaError::Unterminated("string")),
+            b'\\' => {
+                let Some(&escape) = bytes.get(at) else {
+                    return Err(LuaError::Unterminated("string"));
+                };
+                at += 1;
+                match escape {
+                    b'n' => out.push(b'\n'),
+                    b't' => out.push(b'\t'),
+                    b'r' => out.push(b'\r'),
+                    b'a' => out.push(0x07),
+                    b'b' => out.push(0x08),
+                    b'f' => out.push(0x0c),
+                    b'v' => out.push(0x0b),
+                    b'\\' | b'"' | b'\'' => out.push(escape),
+                    // A backslash before a line break is one newline;
+                    // `\r\n` and `\n\r` count as one break.
+                    b'\n' | b'\r' => {
+                        if bytes.get(at).is_some_and(|&next| matches!(next, b'\n' | b'\r') && next != escape) {
+                            at += 1;
+                        }
+                        out.push(b'\n');
+                    }
+                    // `\z` skips the whitespace after it, line breaks included.
+                    b'z' => {
+                        while bytes.get(at).copied().is_some_and(is_lua_space) {
+                            at += 1;
+                        }
+                    }
+                    // Exactly two hex digits.
+                    b'x' => {
+                        let digit = |offset: usize| bytes.get(at + offset).copied().and_then(hex_digit);
+                        let (Some(high), Some(low)) = (digit(0), digit(1)) else {
+                            return Err(LuaError::InvalidEscape('x'));
+                        };
+                        out.push((high << 4) | low);
+                        at += 2;
+                    }
+                    // Up to three decimal digits, naming a byte.
+                    b'0'..=b'9' => {
+                        let mut value = u32::from(escape - b'0');
+                        for _ in 0..2 {
+                            let Some(&digit @ b'0'..=b'9') = bytes.get(at) else { break };
+                            value = value * 10 + u32::from(digit - b'0');
+                            at += 1;
+                        }
+                        let byte = u8::try_from(value).map_err(|_| LuaError::InvalidEscape(char::from(escape)))?;
+                        out.push(byte);
+                    }
+                    b'u' => {
+                        let character = unicode_escape(bytes, &mut at)?;
+                        out.extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
+                    }
+                    _ => {
+                        let escape = src.get(at - 1..).and_then(|rest| rest.chars().next()).unwrap_or('\\');
+                        return Err(LuaError::InvalidEscape(escape));
+                    }
+                }
+            }
+            // Every delimiter is ASCII, so the bytes of a multibyte
+            // character are copied through whole.
+            _ => out.push(byte),
+        }
+    }
+    let text = String::from_utf8(out).map_err(|_| LuaError::InvalidUtf8)?;
+    Ok((text, at))
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    char::from(byte).to_digit(16).and_then(|digit| u8::try_from(digit).ok())
+}
+
+/// The `{XXX}` after `\u`. Lua also accepts values past Unicode, up to
+/// 2^31, and encodes them as extended UTF-8; those are not text, so any
+/// value that is not a Unicode scalar is refused.
+fn unicode_escape(bytes: &[u8], at: &mut usize) -> Result<char, LuaError> {
+    let invalid = LuaError::InvalidEscape('u');
+    if bytes.get(*at) != Some(&b'{') {
+        return Err(invalid);
+    }
+    *at += 1;
+    let mut value = 0_u32;
+    let mut digits = 0;
+    while let Some(digit) = bytes.get(*at).copied().and_then(hex_digit) {
+        value = value.checked_mul(16).and_then(|value| value.checked_add(u32::from(digit))).ok_or(invalid)?;
+        digits += 1;
+        *at += 1;
+    }
+    if digits == 0 || bytes.get(*at) != Some(&b'}') {
+        return Err(invalid);
+    }
+    *at += 1;
+    char::from_u32(value).ok_or(invalid)
+}
+
+/// A long bracket string, `[[...]]` or `[==[...]==]`, closed only by a
+/// bracket of the same level. Omarchy's screensaver launcher sends this
+/// spelling, and the level lets a command contain `]]`. Nothing is
+/// escaped inside one; as in Lua, a line break straight after the
+/// opening bracket is skipped and every line break becomes `\n`.
+fn long_bracket(src: &str) -> Result<(String, usize), LuaError> {
+    let bytes = src.as_bytes();
+    let level = bytes.iter().skip(1).take_while(|&&byte| byte == b'=').count();
+    if bytes.get(level + 1) != Some(&b'[') {
+        return Err(LuaError::Unexpected('['));
+    }
+    let open = level + 2;
+    let mut at = open;
+    let mut out = Vec::new();
+    loop {
+        let Some(&byte) = bytes.get(at) else {
+            return Err(LuaError::Unterminated("long string"));
+        };
+        match byte {
+            b']' if bytes.get(at + 1..at + 1 + level).is_some_and(|run| run.iter().all(|&byte| byte == b'='))
+                && bytes.get(at + 1 + level) == Some(&b']') =>
+            {
+                at += level + 2;
+                break;
+            }
+            b'\n' | b'\r' => {
+                let leading = at == open;
+                at += 1;
+                if bytes.get(at).is_some_and(|&next| matches!(next, b'\n' | b'\r') && next != byte) {
+                    at += 1;
+                }
+                if !leading {
+                    out.push(b'\n');
+                }
+            }
+            _ => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    let text = String::from_utf8(out).map_err(|_| LuaError::InvalidUtf8)?;
+    Ok((text, at))
 }
 
 /// Decode classic `dispatch exec` without changing its argv.
@@ -927,4 +1265,125 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
         return false;
     }
     haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The verb split has the same shape as the request split, so it
+    /// had the same panic: a multibyte space after the verb put the
+    /// argument slice inside the character.
+    #[test]
+    fn non_ascii_whitespace_after_the_verb_splits_without_panicking() {
+        assert_eq!(split_verb("exec\u{a0}foot"), ("exec".to_string(), "foot"));
+        assert_eq!(
+            parse("exec\u{a0}foot", &Snapshot::default()),
+            Outcome::Run(Action::ExecArgv(vec!["foot".to_string()]))
+        );
+    }
+
+    fn decode(literal: &str) -> Result<String, LuaError> {
+        string_literal(literal).map(|(text, _)| text)
+    }
+
+    #[test]
+    fn lua_short_strings_decode_every_escape_form() {
+        assert_eq!(decode(r#""\n\t\r\a\b\f\v""#), Ok("\n\t\r\u{7}\u{8}\u{c}\u{b}".into()));
+        assert_eq!(decode(r#""\\ \" \'""#), Ok(r#"\ " '"#.into()));
+        assert_eq!(decode(r#"'it\'s "quoted"'"#), Ok(r#"it's "quoted""#.into()));
+        // A backslash before a line break is one newline, whichever
+        // break it is; two breaks of the same kind are two lines.
+        for newline in ["\n", "\r", "\r\n", "\n\r"] {
+            assert_eq!(decode(&format!("\"a\\{newline}b\"")), Ok("a\nb".into()), "{newline:?}");
+        }
+        assert_eq!(decode("\"a\\\n\nb\""), Err(LuaError::Unterminated("string")));
+        assert_eq!(decode("\"one \\z\n\t\u{b}  two\""), Ok("one two".into()));
+        assert_eq!(decode(r#""\x41\x6a""#), Ok("Aj".into()));
+        // At most three digits: `\0067` is byte 6 and then a `7`.
+        assert_eq!(decode(r#""\65\066\0067""#), Ok("AB\u{6}7".into()));
+        assert_eq!(decode(r#""\u{48}\u{1F600}\u{000041}""#), Ok("H\u{1F600}A".into()));
+        // Byte escapes form one character between them.
+        assert_eq!(decode(r#""\228\189\160\xe4\xbd\xa0""#), Ok("你你".into()));
+        assert_eq!(decode("\"日本\""), Ok("日本".into()));
+        // The length ends at the closing quote, not at the end of input.
+        assert_eq!(string_literal(r#""a\"b" , rest"#), Ok((r#"a"b"#.into(), 6)));
+    }
+
+    #[test]
+    fn lua_strings_lua_itself_would_reject_are_errors() {
+        assert_eq!(decode(r#""\q""#), Err(LuaError::InvalidEscape('q')));
+        assert_eq!(decode(r#""\x4""#), Err(LuaError::InvalidEscape('x')));
+        assert_eq!(decode(r#""\256""#), Err(LuaError::InvalidEscape('2')));
+        assert_eq!(decode(r#""\u{}""#), Err(LuaError::InvalidEscape('u')));
+        assert_eq!(decode(r#""\u48""#), Err(LuaError::InvalidEscape('u')));
+        assert_eq!(decode(r#""\u{D800}""#), Err(LuaError::InvalidEscape('u')));
+        assert_eq!(decode(r#""\u{FFFFFFFFF}""#), Err(LuaError::InvalidEscape('u')));
+        assert_eq!(decode(r#""\xff""#), Err(LuaError::InvalidUtf8));
+        assert_eq!(decode(r#""\228\189""#), Err(LuaError::InvalidUtf8));
+        assert_eq!(decode("\"no end"), Err(LuaError::Unterminated("string")));
+        assert_eq!(decode("\"ends in a backslash\\"), Err(LuaError::Unterminated("string")));
+        assert_eq!(decode("'line\nbreak'"), Err(LuaError::Unterminated("string")));
+        assert_eq!(decode("[==[mismatched]=]"), Err(LuaError::Unterminated("long string")));
+    }
+
+    #[test]
+    fn lua_long_brackets_match_their_level_and_read_no_escapes() {
+        assert_eq!(decode("[[x]]"), Ok("x".into()));
+        assert_eq!(decode("[==[x]]y]=]z]==]"), Ok("x]]y]=]z".into()));
+        assert_eq!(decode(r"[[\n is not an escape]]"), Ok(r"\n is not an escape".into()));
+        // The break straight after the opening bracket is not part of
+        // the string; later ones are, each as `\n`.
+        assert_eq!(decode("[[\r\nfirst\r\nsecond\n]]"), Ok("first\nsecond\n".into()));
+        assert_eq!(string_literal("[=[a]=], rest"), Ok(("a".into(), 7)));
+    }
+
+    #[test]
+    fn lua_argument_lists_read_tables_by_key_and_position() {
+        let args = lua_arguments(r#"{ window = "address:0x5", x = -25, relative = true; ["y"] = 1.5e+3, 'loose' }, "second""#);
+        assert_eq!(
+            args,
+            Ok(vec![
+                Literal::Table(vec![
+                    (Some("window".into()), Literal::Str("address:0x5".into())),
+                    (Some("x".into()), Literal::Word("-25".into())),
+                    (Some("relative".into()), Literal::Word("true".into())),
+                    (Some("y".into()), Literal::Word("1.5e+3".into())),
+                    (None, Literal::Str("loose".into())),
+                ]),
+                Literal::Str("second".into()),
+            ])
+        );
+        let args = args.unwrap_or_default();
+        assert_eq!(lua_field(&args, "x").as_deref(), Some("-25"));
+        assert_eq!(lua_string(&args).as_deref(), Some("second"));
+        assert_eq!(lua_arguments("  "), Ok(Vec::new()));
+
+        // Only a table's own keys are fields.
+        let args = lua_arguments(r#"{ cursor = { invisible = true } }, "workspace = 3""#).unwrap_or_default();
+        assert_eq!(lua_field(&args, "invisible"), None);
+        assert_eq!(lua_field(&args, "workspace"), None);
+        assert!(matches!(lua_value(&args, "cursor"), Some(Literal::Table(_))));
+    }
+
+    #[test]
+    fn lua_argument_lists_refuse_what_is_not_a_literal() {
+        assert_eq!(lua_arguments(r#""a" .. "b""#), Err(LuaError::Unexpected('.')));
+        assert_eq!(lua_arguments("{ workspace = "), Err(LuaError::MissingValue));
+        assert_eq!(lua_arguments("{ workspace = 1"), Err(LuaError::Unterminated("table")));
+        assert_eq!(lua_arguments(r#""a","#), Err(LuaError::MissingValue));
+        assert_eq!(lua_arguments("{ a.b = 1 }"), Err(LuaError::Unexpected('=')));
+        assert_eq!(lua_arguments("{ [\"k\" = 1 }"), Err(LuaError::Unexpected('=')));
+        assert_eq!(lua_arguments("os.exit()"), Err(LuaError::Unexpected('(')));
+    }
+
+    #[test]
+    fn lua_table_nesting_is_bounded() {
+        let nested = |depth: usize| format!("{}{}", "{".repeat(depth), "}".repeat(depth));
+        assert!(lua_arguments(&nested(MAX_LUA_DEPTH)).is_ok());
+        assert_eq!(lua_arguments(&nested(MAX_LUA_DEPTH + 1)), Err(LuaError::TooDeep));
+        // A request-sized run of openers stops at the bound rather than
+        // recursing once per brace.
+        assert_eq!(lua_arguments(&"{".repeat(crate::request::MAX_REQUEST)), Err(LuaError::TooDeep));
+    }
 }

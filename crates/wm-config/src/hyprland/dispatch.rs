@@ -65,8 +65,8 @@ pub fn verb_for(dispatcher: &Dispatcher) -> Verb {
     }
 }
 
-/// An `exec` dispatcher: a command to run, unless it commands a
-/// compositor that is not running.
+/// An `exec` dispatcher: a command to run, unless it commands Hyprland
+/// in a way chonkstep does not serve.
 fn exec_verb(command: &str) -> Verb {
     let argv = split_command(command);
     let Some(program) = argv.first() else {
@@ -77,8 +77,8 @@ fn exec_verb(command: &str) -> Verb {
     {
         return Verb::Action(Action::ToggleLayout);
     }
-    if commands_hyprland(program) {
-        return Verb::Unbound(Unbound::HyprlandOnly);
+    if let Some(reason) = hyprland_refusal(program) {
+        return Verb::Unbound(reason);
     }
     // "Open a terminal" is a verb this desktop has, and the preset
     // already decided it wins over running the guest's launcher:
@@ -115,17 +115,85 @@ fn exec_verb(command: &str) -> Verb {
     Verb::Run(argv)
 }
 
-/// Whether this program talks to Hyprland rather than to the desktop.
+/// `omarchy-hyprland-*` scripts whose every Hyprland IPC request
+/// chonkstep serves with `Outcome::Run`. Proven by
+/// `omarchy_scripts_send_only_served_requests` in `chonk-hyprland-ipc`'s
+/// protocol tests, not asserted here: that test iterates this list and
+/// fails for a name with no fixture of the requests it sends, so a
+/// script cannot be admitted without the proof.
 ///
-/// The same filter `chonk_shell::omarchy_menu` applies to menu rows,
-/// and deliberately the same *narrow* one: `hyprpicker`, `hyprlock`
-/// and `hypridle` are ordinary Wayland clients that happen to carry
-/// the prefix in their names, and this compositor implements every
-/// protocol they use. Only the two things that speak Hyprland's own
-/// IPC are refused.
-pub fn commands_hyprland(program: &str) -> bool {
+/// Proof matters in both directions. `hyprctl` exits zero whatever the
+/// reply, so a script whose request is refused would be a chord that
+/// silently does nothing; and a name test that ignores what the IPC
+/// serves leaves working chords dead as coverage grows.
+///
+/// The layout toggle is here because Omarchy's menu runs it as a
+/// script. A binding of the bare command still becomes the native
+/// `toggle-layout` in [`exec_verb`].
+pub const SERVED_OMARCHY_SCRIPTS: &[&str] = &[
+    "omarchy-hyprland-window-pop",
+    "omarchy-hyprland-window-width",
+    "omarchy-hyprland-window-close-all",
+    "omarchy-hyprland-monitor-scaling",
+    "omarchy-hyprland-workspace-layout-toggle",
+];
+
+/// The `omarchy-hyprland-*` scripts Omarchy binds or starts whose
+/// requests chonkstep does not serve, each with what it needs. They are
+/// refused exactly like any unlisted script; the table only lets the
+/// refusal name the missing piece. A script moves to
+/// [`SERVED_OMARCHY_SCRIPTS`] in the change that makes its requests
+/// served.
+pub const UNSERVED_OMARCHY_SCRIPTS: &[(&str, Unbound)] = &[
+    // It reads `.fullscreenClient` and asks for a window that keeps its
+    // tile while the client is told it is fullscreen.
+    ("omarchy-hyprland-window-tiled-fullscreen-toggle", Unbound::CLIENT_FULLSCREEN),
+    ("omarchy-hyprland-window-transparency-toggle", Unbound::OPACITY),
+    // Both rewrite a Hyprland config flag and run `hyprctl reload`.
+    ("omarchy-hyprland-window-gaps-toggle", Unbound::GAPS),
+    ("omarchy-hyprland-window-single-square-aspect-toggle", Unbound::LAYOUT_OPTION),
+    ("omarchy-hyprland-monitor-internal", Unbound::OUTPUT_DISABLE),
+    ("omarchy-hyprland-monitor-internal-mirror", Unbound::OUTPUT_MIRROR),
+    ("omarchy-hyprland-monitor-clamshell", Unbound::OUTPUT_DISABLE),
+    // The watcher that re-applies the clamshell and display toggles.
+    ("omarchy-hyprland-monitor-watch", Unbound::OUTPUT_DISABLE),
+];
+
+/// Why this program may not run because it commands Hyprland, or `None`
+/// when it may.
+///
+/// `hyprctl` itself is refused: its requests are whatever its caller
+/// writes, so nothing can prove them served. So is every
+/// `omarchy-hyprland-*` script outside [`SERVED_OMARCHY_SCRIPTS`], which
+/// is also the conservative answer for a script a future Omarchy adds.
+/// The test is deliberately *narrow* otherwise: `hyprpicker`,
+/// `hyprlock` and `hypridle` are ordinary Wayland clients that happen
+/// to carry the prefix in their names, and this compositor implements
+/// every protocol they use.
+pub fn hyprland_refusal(program: &str) -> Option<Unbound> {
     let base = program.rsplit('/').next().unwrap_or(program);
-    base == "hyprctl" || base.starts_with("omarchy-hyprland-")
+    if base == "hyprctl" {
+        return Some(Unbound::HyprlandOnly);
+    }
+    if !base.starts_with("omarchy-hyprland-") || SERVED_OMARCHY_SCRIPTS.contains(&base) {
+        return None;
+    }
+    Some(
+        UNSERVED_OMARCHY_SCRIPTS
+            .iter()
+            .find(|(script, _)| *script == base)
+            .map_or(Unbound::HyprlandOnly, |(_, reason)| *reason),
+    )
+}
+
+/// Whether this program commands Hyprland in a way chonkstep does not
+/// serve.
+///
+/// The one predicate bindings, `exec-once` lines and
+/// `chonk_shell::omarchy_menu`'s rows all apply, so a chord, an
+/// autostart entry and a menu row cannot disagree about a script.
+pub fn commands_hyprland(program: &str) -> bool {
+    hyprland_refusal(program).is_some()
 }
 
 /// Whether a command line contains shell grammar that argv splitting
@@ -168,17 +236,18 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         "layoutmsg" | "togglesplit" | "swapsplit" | "pseudo" | "splitratio" => {
             Verb::Action(Action::LayoutNoop)
         }
-        "resizeactive" => {
-            let values: Vec<_> = arg
-                .split_whitespace()
-                .filter_map(|s| s.parse::<i32>().ok())
-                .collect();
-            if let [x, y] = values.as_slice() {
-                Verb::Action(Action::Resize(wm_core::Point::new(*x, *y)))
-            } else {
-                Verb::Unbound(Unbound::NoVerb)
-            }
-        }
+        // `resizeactive x y` is a delta, in logical pixels. Exactly two
+        // integers and nothing else: the `exact w h` form sets a size,
+        // which this desktop has no binding verb for, and reading its
+        // numbers as a delta would grow the window by the size it asked
+        // for. Percentages and every other spelling are refused alike.
+        "resizeactive" => match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [x, y] => match (x.parse::<i32>(), y.parse::<i32>()) {
+                (Ok(x), Ok(y)) => Verb::Action(Action::Resize(wm_core::Point::new(x, y))),
+                _ => Verb::Unbound(Unbound::NoVerb),
+            },
+            _ => Verb::Unbound(Unbound::NoVerb),
+        },
         "swapnext" | "moveactive" | "pin" | "centerwindow" => Verb::Unbound(Unbound::TilingOnly),
         "togglegroup"
         | "changegroupactive"

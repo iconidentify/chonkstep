@@ -104,6 +104,11 @@ pub trait Backend {
     /// Whether this backend supplies app-aware Mac keyboard delivery.
     fn supports_mac_interaction(&self) -> bool { false }
 
+    /// Whether a session lock currently covers the desktop. An
+    /// activation received behind the lock must not change which
+    /// workspace the user finds on unlock.
+    fn session_locked(&self) -> bool { false }
+
     /// Establish output clipping before staging final geometry, then animate
     /// live surfaces from the old frame without intermediate configures.
     /// `clip` confines managed windows to their output workarea. Backends without native transforms settle

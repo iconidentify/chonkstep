@@ -166,9 +166,11 @@
 # the remaining settings from taking effect.
 #
 # Sensitivity is -1.0 through 1.0. The acceleration profile is "adaptive" or
-# "flat". `scroll_factor` is a positive multiplier applied to both smooth and
-# wheel scrolling. `[input.touchpad]` is an optional nested spelling for the
-# touchpad-oriented controls; it overrides the corresponding flat key.
+# "flat". Scrolling is configured per device class: `natural_scroll` and
+# `scroll_factor` (a positive multiplier for smooth and wheel scrolling) under
+# `[input]` apply to mice, trackpoints and other non-touchpad devices, and under
+# `[input.touchpad]` apply to touchpads only. The remaining touchpad-oriented
+# controls may be written in either table; the nested one overrides the flat key.
 # disable_while_typing defaults to each device’s libinput preference. Active
 # pointer locks/confinement temporarily disable it so games can accept keyboard
 # and touchpad input together; releasing capture restores the preference.

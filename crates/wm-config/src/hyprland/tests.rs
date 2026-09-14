@@ -237,6 +237,73 @@ fn the_generated_workspace_chords_are_expanded_from_the_loop() {
     );
 }
 
+/// Omarchy's keyboard resize chords, all twelve, from `tiling.lua`: SUPER
+/// with minus or equal, SHIFT for the other axis, and ALT and CTRL for
+/// the small and the large step, each `hl.dsp.window.resize({ x = …,
+/// y = …, relative = true })`. The deltas are carried as written, in the
+/// logical pixels Omarchy writes them in.
+#[test]
+fn the_keyboard_resize_chords_carry_their_deltas() {
+    let reading = read(&machine());
+    for (spec, x, y) in [
+        ("super+minus", -100, 0),
+        ("super+equal", 100, 0),
+        ("super+shift+minus", 0, -100),
+        ("super+shift+equal", 0, 100),
+        ("super+alt+minus", -25, 0),
+        ("super+alt+equal", 25, 0),
+        ("super+shift+alt+minus", 0, -25),
+        ("super+shift+alt+equal", 0, 25),
+        ("super+ctrl+minus", -300, 0),
+        ("super+ctrl+equal", 300, 0),
+        ("super+ctrl+shift+minus", 0, -300),
+        ("super+ctrl+shift+equal", 0, 300),
+    ] {
+        assert_eq!(
+            action_for(&reading, spec),
+            Some(Action::Resize(wm_core::Point::new(x, y))),
+            "{spec}"
+        );
+    }
+}
+
+/// Without `relative = true`, Hyprland's Lua resize sets an exact size,
+/// as the classic `resizeactive exact` does. This desktop has no
+/// exact-size verb, and an exact size read as a delta would grow the
+/// window by the size it asked for, so both spellings are refused by
+/// name while a relative resize beside them still binds.
+#[test]
+fn an_exact_resize_is_refused_rather_than_read_as_a_delta() {
+    let root = scratch("exact-resize");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        concat!(
+            "hl.bind(\"SUPER + R\", hl.dsp.window.resize({ x = 1300, y = 900 }))\n",
+            "hl.bind(\"SUPER + T\", hl.dsp.window.resize({ x = -40, y = 0, relative = true }))\n",
+        ),
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(action_for(&reading, "super+r"), None);
+    assert!(skipped_why(&reading, "SUPER + R").is_some(), "{:?}", reading.skipped);
+    assert_eq!(
+        action_for(&reading, "super+t"),
+        Some(Action::Resize(wm_core::Point::new(-40, 0)))
+    );
+    let _ = std::fs::remove_file(root.join(".config/hypr/hyprland.lua"));
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "bind = SUPER, R, resizeactive, exact 1300 900\nbind = SUPER, T, resizeactive, -40 0\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(action_for(&reading, "super+r"), None, "the classic spelling of an exact size");
+    assert!(skipped_why(&reading, "SUPER R").is_some(), "{:?}", reading.skipped);
+    assert_eq!(
+        action_for(&reading, "super+t"),
+        Some(Action::Resize(wm_core::Point::new(-40, 0)))
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Hyprland's `movetoworkspacesilent` moves a window *without*
 /// following it. The translated action preserves that distinction from
 /// `workspace-carry`, including Omarchy's tenth workspace on zero.
@@ -322,6 +389,17 @@ fn a_global_set_before_a_require_reaches_the_file_that_reads_it() {
     );
     let reading = read(&Roots::under(&root));
     assert_eq!(action_for(&reading, "super+w"), Some(Action::Close));
+    // Omarchy's gate is `_G.omarchy_default_bindings ~= false`, and
+    // `nil ~= false` is true: setting the global back to `nil` restores
+    // the defaults, and a `local` of the same name never touches `_G`.
+    for entry in [
+        "omarchy_default_bindings = false\nomarchy_default_bindings = nil\nrequire(\"default.hypr.omarchy\")\n",
+        "local omarchy_default_bindings = false\nrequire(\"default.hypr.omarchy\")\n",
+    ] {
+        write(&root.join(".config/hypr/hyprland.lua"), entry);
+        let reading = read(&Roots::under(&root));
+        assert_eq!(action_for(&reading, "super+w"), Some(Action::Close), "{entry}");
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -367,28 +445,52 @@ fn the_bind_helper_forms_expand_exactly_as_omarchy_expands_them() {
     );
 }
 
-/// A chord that runs `hyprctl` or an `omarchy-hyprland-*` script
-/// commands a compositor that is not running, and is left unbound —
-/// the same filter `chonk_shell::omarchy_menu` applies to menu rows.
-/// `hyprpicker` is deliberately *not* caught by it: it is an ordinary
-/// layer-shell client and works here.
+/// A chord that runs `hyprctl` or an `omarchy-hyprland-*` script whose
+/// requests chonkstep does not serve is left unbound, with a reason
+/// naming what the script needs — the same predicate
+/// `chonk_shell::omarchy_menu` applies to menu rows. The scripts on
+/// `dispatch::SERVED_OMARCHY_SCRIPTS` send only requests the IPC
+/// applies, and bind like any other command; they were refused by a
+/// name test for years after the IPC began serving them. `hyprpicker`
+/// is deliberately *not* caught either: it is an ordinary layer-shell
+/// client and works here.
 #[test]
 fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
+    use crate::preset::Unbound;
     let reading = read(&machine());
-    assert_eq!(
-        action_for(&reading, "super+backspace"),
-        None,
-        "omarchy-hyprland-window-transparency-toggle"
-    );
-    assert_eq!(
-        action_for(&reading, "super+slash"),
-        None,
-        "omarchy-hyprland-monitor-scaling"
-    );
-    assert_eq!(
-        skipped_why(&reading, "SUPER + BACKSPACE"),
-        Some(crate::preset::Unbound::HyprlandOnly.reason().to_string())
-    );
+    for (chord, argv) in [
+        ("super+o", &["omarchy-hyprland-window-pop"][..]),
+        ("super+alt+home", &["omarchy-hyprland-window-width", "save"]),
+        ("super+home", &["omarchy-hyprland-window-width", "restore"]),
+        ("super+slash", &["omarchy-hyprland-monitor-scaling", "up"]),
+        ("super+alt+slash", &["omarchy-hyprland-monitor-scaling", "down"]),
+        ("ctrl+alt+delete", &["omarchy-hyprland-window-close-all"]),
+    ] {
+        let argv: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
+        assert_eq!(argv_for(&reading, chord), Some(argv), "{chord} runs its served script");
+    }
+    for (chord, what, reason) in [
+        ("super+ctrl+f", "SUPER + CTRL + F (Tiled full screen)", Unbound::CLIENT_FULLSCREEN),
+        ("super+backspace", "SUPER + BACKSPACE (Toggle window transparency)", Unbound::OPACITY),
+        ("super+shift+backspace", "SUPER + SHIFT + BACKSPACE (Toggle window gaps)", Unbound::GAPS),
+        (
+            "super+ctrl+backspace",
+            "SUPER + CTRL + BACKSPACE (Toggle single-window square aspect)",
+            Unbound::LAYOUT_OPTION,
+        ),
+        ("super+ctrl+delete", "SUPER + CTRL + Delete (Toggle laptop display)", Unbound::OUTPUT_DISABLE),
+        (
+            "super+ctrl+alt+delete",
+            "SUPER + CTRL + ALT + Delete (Toggle laptop display mirroring)",
+            Unbound::OUTPUT_MIRROR,
+        ),
+    ] {
+        assert_eq!(action_for(&reading, chord), None, "{chord} must stay unbound");
+        assert_eq!(skipped_why(&reading, what), Some(reason.reason().to_string()), "{what}");
+    }
+    // The lid switches never reach the script filter: a switch is not a
+    // chord this desktop can grab.
+    assert!(skipped_why(&reading, "switch:off:Lid Switch").is_some());
     assert_eq!(
         argv_for(&reading, "super+print"),
         Some(vec![
@@ -497,11 +599,13 @@ o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
     assert_eq!(reading.input.repeat_delay, Some(250));
     assert_eq!(reading.input.sensitivity, Some(-0.25));
     assert_eq!(reading.input.accel_profile.as_deref(), Some("flat"));
-    assert_eq!(reading.input.natural_scroll, Some(true));
+    assert_eq!(reading.input.touchpad_natural_scroll, Some(true));
+    assert_eq!(reading.input.natural_scroll, None, "Omarchy's touchpad table must not reach mice");
     assert_eq!(reading.input.tap_to_click, Some(false));
     assert_eq!(reading.input.disable_while_typing, Some(false));
     assert_eq!(reading.input.clickfinger_behavior, Some(true));
-    assert_eq!(reading.input.scroll_factor, Some(0.4));
+    assert_eq!(reading.input.touchpad_scroll_factor, Some(0.4));
+    assert_eq!(reading.input.scroll_factor, None);
     assert!(
         skipped_why(&reading, "follow_mouse")
             .is_some_and(|why| why.contains("focus policy belongs to chonkstep")),
@@ -561,6 +665,151 @@ fn keyboard_only_configuration_is_usable_without_replacing_default_bindings() {
     assert_eq!(config.input.layout.as_deref(), Some("de"));
     assert_eq!(config.input.repeat_rate, Some(0));
     assert_eq!(config.input.repeat_delay, Some(0));
+}
+
+/// A value only running code could give is not a value this reader has,
+/// and it must never reach xkb, a window rule or a monitor line as the
+/// source text of the expression. Omarchy 4 computes its layout as
+/// `vconsole.XKBLAYOUT or "us"`, and handing libxkbcommon those words
+/// cost every stock session its keymap and its options.
+#[test]
+fn a_value_computed_at_runtime_is_refused_rather_than_rendered() {
+    let out = lua_out(&[concat!(
+        "x = y or \"z\"\n",
+        "hl.config({ input = { kb_layout = x, touchpad = { natural_scroll = x } } })\n",
+        "o.window(\"foot\", { size = x })\n",
+        "o.window(x, { float = true })\n",
+        "hl.window_rule({ match = { class = x }, float = true })\n",
+        "hl.monitor({ output = \"DP-1\", mode = x })\n",
+        "hl.monitor({ output = \"DP-2\", mode = \"preferred\", transform = x })\n",
+    )]);
+    for directive in &out {
+        assert!(
+            !matches!(
+                directive,
+                Directive::Input { .. } | Directive::WindowRule(_) | Directive::Monitor(_)
+            ),
+            "built from a value only running code could give: {directive:?}"
+        );
+    }
+    for name in ["kb_layout", "natural_scroll", "size", "class", "mode", "transform"] {
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains(name))),
+            "{name} was not refused by name: {out:?}"
+        );
+    }
+}
+
+/// Omarchy 4's stock `input.lua`, off the captured machine: the layout
+/// and variant are computed at runtime, so they are left unset and the
+/// read says why, while the literal model and options still arrive.
+#[test]
+fn omarchys_runtime_keyboard_layout_is_left_unset_rather_than_named_as_text() {
+    let reading = read(&machine());
+    assert_eq!(reading.input.layout, None, "{:?}", reading.input);
+    assert_eq!(reading.input.variant, None);
+    assert_eq!(reading.input.model.as_deref(), Some(""));
+    assert_eq!(
+        reading.input.options.as_deref(),
+        Some("compose:caps,shift:both_capslock_cancel")
+    );
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what.contains("kb_layout")),
+        "the unset layout must be explained: {:?}",
+        reading.skipped
+    );
+}
+
+/// ...and the system's own keyboard configuration stands in for what
+/// the read leaves unset. `/etc/vconsole.conf` is the file `localectl`
+/// writes and the one Omarchy's `input.lua` reads. The Lua is Omarchy
+/// 4's `default/hypr/input.lua`, the lines that compute the keyboard,
+/// verbatim.
+#[test]
+fn the_systems_keyboard_configuration_fills_what_the_read_leaves_unset() {
+    const INPUT_LUA: &str = r##"
+local function read_vconsole()
+  local values = {}
+  local file = io.open("/etc/vconsole.conf", "r")
+  if not file then
+    return values
+  end
+
+  for line in file:lines() do
+    local key, value = line:match("^%s*([%w_]+)%s*=%s*(.-)%s*$")
+    if key and value then
+      value = value:gsub("%s+#.*$", "")
+      value = value:gsub('^"(.*)"$', "%1")
+      value = value:gsub("^'(.*)'$", "%1")
+      values[key] = value
+    end
+  end
+
+  file:close()
+  return values
+end
+
+local non_latin_layouts =
+  " af am ara bd bg by et ge gr il in iq ir kg kh kz la lk mk mm mn mv np rs ru sy th tj ua "
+
+local vconsole = read_vconsole()
+
+local kb_layout = vconsole.XKBLAYOUT or "us"
+local kb_variant = vconsole.XKBVARIANT or ""
+local kb_options = "compose:caps,shift:both_capslock_cancel"
+
+if non_latin_layouts:find(" " .. kb_layout:match("^[^,]*") .. " ", 1, true) then
+  kb_layout = "us," .. kb_layout
+  kb_variant = "," .. kb_variant
+  -- Reach the original layout with Left Alt + Right Alt.
+  kb_options = kb_options .. ",grp:alts_toggle"
+end
+
+hl.config({
+  input = {
+    kb_layout = kb_layout,
+    kb_variant = kb_variant,
+    kb_model = "",
+    kb_options = kb_options,
+    kb_rules = "",
+  },
+})
+"##;
+    let root = scratch("vconsole");
+    write(&root.join(".config/hypr/hyprland.lua"), INPUT_LUA);
+    write(
+        &root.join("etc/vconsole.conf"),
+        "# Written by systemd-localed(8)\nKEYMAP=de\nXKBLAYOUT=\"de\"\nXKBVARIANT='nodeadkeys'\nXKBMODEL=pc105\nXKBOPTIONS=\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.input.layout.as_deref(), Some("de"), "{:?}", reading.input);
+    assert_eq!(reading.input.variant.as_deref(), Some("nodeadkeys"));
+    // Omarchy's own literals win over the system's values.
+    assert_eq!(reading.input.model.as_deref(), Some(""));
+    assert_eq!(
+        reading.input.options.as_deref(),
+        Some("compose:caps,shift:both_capslock_cancel")
+    );
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what.contains("vconsole.conf")),
+        "the substitution must be said: {:?}",
+        reading.skipped
+    );
+
+    // A layout the configuration names outright wins too.
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        &format!("{INPUT_LUA}\nhl.config({{ input = {{ kb_layout = \"fr\" }} }})\n"),
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.input.layout.as_deref(), Some("fr"));
+    assert_eq!(reading.input.variant.as_deref(), Some("nodeadkeys"));
+
+    // The system file alone does not make a desk with nothing to read
+    // into one that replaces its keymap.
+    let _ = std::fs::remove_file(root.join(".config/hypr/hyprland.lua"));
+    assert!(read(&Roots::under(&root)).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -743,8 +992,9 @@ fn autostart_comes_out_of_the_start_handler() {
     );
 }
 
-/// Two autostart entries must not be carried: one commands Hyprland,
-/// and one is a second copy of the shell this desktop already starts.
+/// Two autostart entries must not be carried: one is Omarchy's monitor
+/// watcher, whose display toggles need output disable, and one is a
+/// second copy of the shell this desktop already starts.
 #[test]
 fn autostart_refuses_the_two_things_that_would_be_worse_than_nothing() {
     let reading = read(&machine());
@@ -758,6 +1008,10 @@ fn autostart_refuses_the_two_things_that_would_be_worse_than_nothing() {
             .iter()
             .any(|c| c.contains("omarchy-hyprland-monitor-watch")),
         "commands Hyprland: {flat:?}"
+    );
+    assert_eq!(
+        skipped_why(&reading, "omarchy-hyprland-monitor-watch"),
+        Some(crate::preset::Unbound::OUTPUT_DISABLE.reason().to_string())
     );
     assert!(
         !flat.iter().any(|c| c.contains("omarchy-launch-shell")),
@@ -1065,6 +1319,84 @@ fn every_window_rule_syntax_hyprland_has_shipped_is_read() {
 }
 
 #[test]
+fn a_scroll_touchpad_rule_sets_that_windows_touchpad_factor() {
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = scroll_touchpad 1.5, match:class (Alacritty|kitty|foot)\n",
+            "windowrule = scroll_touchpad 0.2, match:class com.mitchellh.ghostty\n",
+            "windowrule = scroll_touchpad fast, match:class ^odd$\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    assert_eq!(rules.window_decision_for("foot", "").touchpad_scroll_factor, Some(1.5));
+    assert_eq!(rules.window_decision_for("com.mitchellh.ghostty", "").touchpad_scroll_factor, Some(0.2));
+    assert_eq!(rules.window_decision_for("firefox", "").touchpad_scroll_factor, None);
+    assert_eq!(rules.window_decision_for("odd", "").touchpad_scroll_factor, None);
+    assert!(notes.iter().any(|note| note.contains("\"fast\"")), "{notes:?}");
+    assert!(
+        !notes.iter().any(|note| note.contains("scroll_touchpad is not implemented")),
+        "the property is read now: {notes:?}"
+    );
+}
+
+#[test]
+fn idle_inhibit_modes_are_read_by_name_and_unknown_values_are_reported() {
+    use wm_core::IdleInhibitRule::{Always, Focus, Fullscreen, None as Never};
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = idle_inhibit always, match:class ^always$\n",
+            "windowrule = idle_inhibit on, match:class ^on$\n",
+            "windowrule = idle_inhibit focus, match:class ^focus$\n",
+            "windowrule = idle_inhibit fullscreen, match:class ^steam$\n",
+            "windowrule = idle_inhibit none, match:class ^none$\n",
+            "windowrule = idle_inhibit off, match:class ^off$\n",
+            "windowrule = idle_inhibit always, match:class ^cleared$\n",
+            "windowrule = idle_inhibit none, match:class ^cleared$\n",
+            "windowrule = idle_inhibit sometimes, match:class ^odd$\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    for (class, mode) in [
+        ("always", Always),
+        ("on", Always),
+        ("focus", Focus),
+        ("steam", Fullscreen),
+        ("none", Never),
+        ("off", Never),
+        ("cleared", Never),
+        ("odd", Never),
+    ] {
+        assert_eq!(rules.window_decision_for(class, "").idle_inhibit, mode, "{class}");
+    }
+    assert!(
+        notes.iter().any(|note| note.contains("\"sometimes\"")),
+        "an unknown mode is reported, not read as on: {notes:?}"
+    );
+}
+
+#[test]
 fn non_geometric_window_rules_are_combined_property_by_property() {
     let mut vars = BTreeMap::new();
     let mut out = Vec::new();
@@ -1096,7 +1428,8 @@ fn non_geometric_window_rules_are_combined_property_by_property() {
     );
 
     let decision = rules.window_decision_for("player", "Cinema");
-    assert!(decision.pin && decision.idle_inhibit);
+    assert!(decision.pin);
+    assert_eq!(decision.idle_inhibit, wm_core::IdleInhibitRule::Always);
     assert!(
         !decision.no_focus,
         "the later property overrides only no_focus"
@@ -1804,6 +2137,109 @@ fn hostile_input_never_panics_and_always_yields_something() {
             }
         }
     }
+
+    // Shapes that recurse or multiply rather than nest: a name bound to
+    // itself, operator chains longer than a stack, values that grow each
+    // time they are rebound, and loops whose counts multiply. Each group
+    // of files is read in order through one `Globals`, the way
+    // `helpers.lua` and a user's file share them, and must end in a
+    // skip that names the bound it hit.
+    let facts = lua::Facts {
+        path: Vec::new(),
+        home: None,
+        state_home: None,
+    };
+    let nested_loops = |body: &str| {
+        format!(
+            "{}{body}{}",
+            "for i = 1, 64 do\n".repeat(5),
+            "end\n".repeat(5)
+        )
+    };
+    let bounded: Vec<(Vec<String>, &str)> = vec![
+        (
+            vec!["o = o or {}\n".into(), "if o then hl.env(\"A\", \"B\") end\n".into()],
+            "cannot answer",
+        ),
+        (vec!["a = b\nb = a\nif b then hl.env(\"A\", \"B\") end\n".into()], "cannot answer"),
+        (vec!["local x = x or false\nif x then hl.env(\"A\", \"B\") end\n".into()], "cannot answer"),
+        (
+            vec![format!("if {}true then hl.env(\"A\", \"B\") end", "not ".repeat(200_000))],
+            "nested too deeply",
+        ),
+        (
+            vec![format!("if {}1 then hl.env(\"A\", \"B\") end", "- ".repeat(200_000))],
+            "nested too deeply",
+        ),
+        (
+            vec![format!("local x = a{}\nif x then hl.env(\"A\", \"B\") end", " .. a".repeat(150_000))],
+            "too long",
+        ),
+        (
+            vec![format!(
+                "local x = {}a{}\nif x then hl.env(\"A\", \"B\") end",
+                "(".repeat(24),
+                format!("){}", " .. a".repeat(16)).repeat(24)
+            )],
+            "too long",
+        ),
+        (
+            vec![format!("local x = {{}}\n{}if x then hl.env(\"A\", \"B\") end", "x = { x }\n".repeat(19_000))],
+            "too large",
+        ),
+        (
+            vec![format!("local x = {{}}\n{}if x then hl.env(\"A\", \"B\") end", "x = { x, x }\n".repeat(64))],
+            "too large",
+        ),
+        (
+            vec![format!("local x = \"ab\"\n{}if x then hl.env(\"A\", \"B\") end", "x = x .. x\n".repeat(64))],
+            "too large",
+        ),
+        (vec![nested_loops("hl.env(\"A\", \"B\")\n")], "directives"),
+        (vec![nested_loops("")], "statements walked"),
+        (vec![nested_loops("local y = 1\n")], "statements walked"),
+        (vec!["local y = 1\n".repeat(20_001)], "per-file limit"),
+    ];
+    for (sources, needle) in bounded {
+        let mut globals = lua::Globals::default();
+        let mut out = Vec::new();
+        for source in &sources {
+            out.clear();
+            lua::read(source, &facts, &mut globals, &mut out);
+        }
+        let shape = &sources.last().unwrap()[..sources.last().unwrap().len().min(60)];
+        assert!(
+            out.iter()
+                .any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains(needle))),
+            "{shape:?} must be skipped naming its bound ({needle:?}): {:?}",
+            &out[..out.len().min(4)]
+        );
+        assert!(
+            out.len() <= lua::MAX_DIRECTIVES + 1,
+            "{shape:?} produced {} directives",
+            out.len()
+        );
+        if needle == "cannot answer" {
+            assert!(
+                !out.iter().any(|d| matches!(d, Directive::Env { .. })),
+                "{shape:?} ran a block whose condition it could not answer"
+            );
+        }
+    }
+    // ...and every one of those bounds sits far above what a real
+    // Omarchy tree spends, so none of them costs a real binding.
+    let real = read(&machine());
+    assert!(
+        !real.skipped.iter().any(|skip| ["the rest is not read", "too large", "too long", "nested too deeply"]
+            .iter()
+            .any(|bound| skip.what.contains(bound))),
+        "the captured machine hit a reader bound: {:?}",
+        real.skipped
+    );
+    assert!(
+        real.bindings.len() + real.skipped.len() < lua::MAX_DIRECTIVES / 16,
+        "the directive bound is no longer far above a real tree's output"
+    );
 }
 
 /// The same, over bytes that are not text at all.
@@ -1911,6 +2347,197 @@ fn a_condition_that_would_need_a_shell_is_refused_rather_than_run() {
         "and the refusal must be visible: {out:?}"
     );
     let _ = std::fs::remove_dir_all(marker.parent().unwrap());
+}
+
+/// Reads Lua sources in order through one `Globals`, on a machine with
+/// nothing on its `PATH`, and returns what the last one produced.
+fn lua_out(sources: &[&str]) -> Vec<Directive> {
+    let facts = lua::Facts {
+        path: Vec::new(),
+        home: None,
+        state_home: None,
+    };
+    let mut globals = lua::Globals::default();
+    let mut out = Vec::new();
+    for source in sources {
+        out.clear();
+        lua::read(source, &facts, &mut globals, &mut out);
+    }
+    out
+}
+
+/// Which branch of a `RAN` probe ran, if either did.
+fn branch(out: &[Directive]) -> Option<&str> {
+    out.iter().find_map(|d| match d {
+        Directive::Env { name, value } if name == "RAN" => Some(value.as_str()),
+        _ => None,
+    })
+}
+
+/// Branch conditions mean what Lua 5.4 says they mean. `and`, `or` and
+/// `not` combine answers, `==` and `~=` compare values, and an unset
+/// name is `nil`. Every expected answer in the table is Lua's own, for
+/// `x` as a global and as a local.
+///
+/// A condition that depends on something only running code could know
+/// decides nothing, unless the other operand decides it — and a name
+/// that some construct the reader skipped could have set is not
+/// confidently `nil`.
+#[test]
+fn conditions_are_answered_the_way_lua_answers_them() {
+    let conditions = [
+        "x and y",
+        "x or z",
+        "not x",
+        "y and not x",
+        "x == \"y\"",
+        "x ~= nil",
+        "x ~= false",
+    ];
+    let table: [(&str, [bool; 7]); 5] = [
+        ("", [false, false, true, true, false, false, true]),
+        ("x = nil", [false, false, true, true, false, false, true]),
+        ("x = false", [false, false, true, true, false, true, false]),
+        ("x = true", [true, true, false, false, false, true, true]),
+        ("x = \"y\"", [true, true, false, false, true, true, true]),
+    ];
+    for (setting, answers) in table {
+        for (condition, answer) in conditions.iter().zip(answers) {
+            for scope in ["", "local "] {
+                let setting = match setting {
+                    "" => String::new(),
+                    setting => format!("{scope}{setting}\n"),
+                };
+                let source = format!(
+                    "y = true\nz = false\n{setting}if {condition} then hl.env(\"RAN\", \"then\") else hl.env(\"RAN\", \"else\") end\n"
+                );
+                assert_eq!(
+                    branch(&lua_out(&[&source])),
+                    Some(if answer { "then" } else { "else" }),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    // Three-valued: an unanswerable operand, and what decides it anyway.
+    for (condition, expected) in [
+        ("o.shell_succeeds(\"x\") and false", Some("else")),
+        ("false and o.shell_succeeds(\"x\")", Some("else")),
+        ("o.shell_succeeds(\"x\") or true", Some("then")),
+        ("o.cmd_present(\"no-such-tool-xyz\") or true", Some("then")),
+        ("o.cmd_present(\"no-such-tool-xyz\") and true", Some("else")),
+        ("o.shell_succeeds(\"x\") and true", None),
+        ("not o.shell_succeeds(\"x\")", None),
+        ("o.shell_succeeds(\"x\") == nil", None),
+        ("hl ~= nil", None),
+        ("vconsole.XKBLAYOUT == nil", None),
+    ] {
+        let source = format!(
+            "if {condition} then hl.env(\"RAN\", \"then\") else hl.env(\"RAN\", \"else\") end\n"
+        );
+        assert_eq!(branch(&lua_out(&[&source])), expected, "{source}");
+    }
+
+    // Possibly set: each of these could have assigned `w` without the
+    // reader seeing it, so `w ~= nil` is not answered either way.
+    let probe = "if w ~= nil then hl.env(\"RAN\", \"then\") else hl.env(\"RAN\", \"else\") end\n";
+    for prelude in [
+        "if o.shell_succeeds(\"x\") then w = 1 end\n",
+        "if o.shell_succeeds(\"x\") then else w = 1 end\n",
+        "while true do w = 1 end\n",
+        "repeat w = 1 until true\n",
+        "function set() w = 1 end\n",
+        "local function set() _G.w = 1 end\n",
+        "for _, v in pairs(os.environ()) do w = v end\n",
+        "hl.timer(function() w = 1 end)\n",
+    ] {
+        let source = format!("{prelude}{probe}");
+        let out = lua_out(&[&source]);
+        assert_eq!(branch(&out), None, "{source}");
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains("w ~= nil"))),
+            "the probe must be read and left unanswered, not swallowed: {source}\n{out:?}"
+        );
+    }
+    assert_eq!(
+        branch(&lua_out(&["while true do w = 1 end\n", probe])),
+        None,
+        "possibly set in one file is possibly set in the next"
+    );
+    assert_eq!(
+        branch(&lua_out(&["function set() local w = 1 end\n", probe])),
+        Some("else"),
+        "a local inside a skipped function is not the global"
+    );
+    assert_eq!(
+        branch(&lua_out(&["while true do w = 1 end\nw = 2\n", probe])),
+        Some("then"),
+        "a readable assignment after the skipped one is the value"
+    );
+}
+
+/// `if` must be followed by a condition and then `then`. Anything else
+/// is an `if` this reader has misread, and its body is skipped whole
+/// rather than walked as though the rest of the line were a statement.
+#[test]
+fn an_if_without_then_is_skipped_whole() {
+    for source in [
+        "if true garbage then hl.env(\"A\", \"B\") end\nhl.env(\"AFTER\", \"1\")\n",
+        "if false then elseif true garbage then hl.env(\"A\", \"B\") end\nhl.env(\"AFTER\", \"1\")\n",
+    ] {
+        let out = lua_out(&[source]);
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains("unreadable condition"))),
+            "{source}: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|d| matches!(d, Directive::Env { name, .. } if name == "A")),
+            "{source}: {out:?}"
+        );
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Env { name, .. } if name == "AFTER")),
+            "reading must resume after the skipped if: {out:?}"
+        );
+    }
+}
+
+/// The module promises that everything it meets and does not act on is
+/// logged. Calls were the gap: Omarchy's animation curves, its
+/// persisted touchpad disable and every runtime-only call vanished.
+#[test]
+fn every_call_the_lua_reader_meets_is_recorded() {
+    let reading = read(&machine());
+    let count = |kind: &str, needle: &str| {
+        reading
+            .skipped
+            .iter()
+            .filter(|skip| skip.kind == kind && skip.what.contains(needle))
+            .count()
+    };
+    assert_eq!(count("animation", "hl.curve("), 5, "{:?}", reading.skipped);
+    assert_eq!(count("animation", "hl.animation("), 16);
+    assert_eq!(count("lua-call", "disabled_input_device("), 2);
+    assert_eq!(count("include", "dofile("), 1);
+    let out = lua_out(&[concat!(
+        "cover(0)\n",
+        "fit()\n",
+        "hl.device({ name = \"touchpad\", enabled = false })\n",
+        "hl.workspace_rule({ workspace = \"1\" })\n",
+        "hl.dispatch(hl.dsp.window.close())\n",
+        "hl.timer(function() end, { timeout = 10 })\n",
+    )]);
+    for call in ["cover(", "fit(", "hl.device(", "hl.workspace_rule(", "hl.dispatch(", "hl.timer("] {
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.starts_with(call))),
+            "{call} was dropped silently: {out:?}"
+        );
+    }
+    // ...and no arm of the call reader drops a call without a line.
+    const SOURCE: &str = include_str!("lua.rs");
+    let body = &SOURCE[SOURCE.find("fn emit_call(").expect("emit_call")..];
+    let body = &body[..body.find("\n}\n").expect("the end of emit_call")];
+    assert!(!body.contains("=> {}"), "emit_call has an arm that drops a call silently");
 }
 
 /// An include graph that points at itself terminates, whichever
@@ -2100,14 +2727,16 @@ fn the_documented_switch_is_the_real_one() {
 fn every_reason_a_binding_can_be_refused_for_is_explained_somewhere() {
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     const CARD: &str = include_str!("../../../../docs/keybindings.md");
-    for reason in [
+    let named = [
         crate::preset::Unbound::TilingOnly,
         crate::preset::Unbound::HyprlandOnly,
         crate::preset::Unbound::NoVerb,
         crate::preset::Unbound::NotAKey,
         crate::preset::Unbound::Conditional,
         crate::preset::Unbound::Declined,
-    ] {
+    ];
+    let scripts = dispatch::UNSERVED_OMARCHY_SCRIPTS.iter().map(|(_, reason)| *reason);
+    for reason in named.into_iter().chain(scripts) {
         let text = reason.reason();
         assert!(
             GUIDE.contains(text) || CARD.contains(text) || explained_in_prose(GUIDE, reason),
@@ -2122,7 +2751,9 @@ fn every_reason_a_binding_can_be_refused_for_is_explained_somewhere() {
 fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
     let phrase = match reason {
         crate::preset::Unbound::TilingOnly => "there is nothing to split",
-        crate::preset::Unbound::HyprlandOnly => "talks to a compositor that is not running",
+        crate::preset::Unbound::HyprlandOnly => "only when every request it sends is proven served",
+        // A script's reason is specific to it, so the guide has to quote it.
+        crate::preset::Unbound::Unserved(text) => text,
         crate::preset::Unbound::NoVerb => "has no verb for",
         crate::preset::Unbound::NotAKey => "Not key chords; this config format cannot express one",
         crate::preset::Unbound::Conditional => "answered by asking the file system",
@@ -2135,8 +2766,8 @@ fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
 /// reader actually produces from it.
 ///
 /// `docs/omarchy-mode.md` tells a reader what they gain by having a
-/// real Omarchy configuration rather than the baked table — "153
-/// bindings over 113 commands, against the baked table's 127 over 77",
+/// real Omarchy configuration rather than the baked table — "167
+/// bindings over 119 commands, against the baked table's 151 over 83",
 /// and 38 float rules where the hardcoded one had a single prefix.
 /// Those numbers are the argument for the whole module, and a number
 /// in prose is the first thing to go stale. Pinned here against the
@@ -2148,17 +2779,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     let reading = read(&machine());
     assert_eq!(
         reading.keybindings.len(),
-        161,
+        179,
         "bindings read from the captured machine"
     );
     assert_eq!(
         reading.commands.len(),
-        113,
+        119,
         "commands declared for global and scoped bindings"
     );
     assert_eq!(
         reading.float_rules.len(),
-        45,
+        47,
         "window behaviors resolved through Omarchy's tags"
     );
     // The skipped count is quoted too, in the guide's sample log line.
@@ -2167,17 +2798,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        165,
+        172,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("161\nbindings over 113 commands") || MODE.contains("161 bindings over 113 commands"),
-        "docs/omarchy-mode.md no longer quotes the 161 bindings over 113 commands this machine produces"
+        MODE.contains("179\nbindings over 119 commands") || MODE.contains("179 bindings over 119 commands"),
+        "docs/omarchy-mode.md no longer quotes the 179 bindings over 119 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=161 commands=113 env=8 autostart=4")
-            && GUIDE.contains("float_rules=45 monitors=1 skipped=165"),
+        GUIDE.contains("files=42 bindings=179 commands=119 env=8 autostart=4")
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=172"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

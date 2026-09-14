@@ -731,6 +731,21 @@ fn spatial_mixed_scale_output_moves_preserve_logical_flow_width_and_gaps() {
 }
 
 #[test]
+fn spatial_a_clients_output_scale_is_the_scale_of_its_own_output() {
+    let (mut wm, ids) = spatial_desktop(2);
+    wm.backend_mut().set_monitors(dual_monitors());
+    wm.backend_mut().set_monitor_scales(vec![1.0, 2.0]);
+    wm.set_workspace_layout(0, crate::LayoutMode::Mosaic);
+    wm.move_client_to_output(ids[1], 1);
+    assert_eq!(wm.client_output_scale(ids[0]), 1.0);
+    assert_eq!(wm.client_output_scale(ids[1]), 2.0);
+    // A resize must never be multiplied by something that is not a scale.
+    wm.backend_mut().set_monitor_scales(vec![f32::NAN, 0.0]);
+    assert_eq!(wm.client_output_scale(ids[0]), 1.0);
+    assert_eq!(wm.client_output_scale(ids[1]), 1.0);
+}
+
+#[test]
 fn spatial_deleting_into_freeform_restores_geometry_and_empty_desktops_restore() {
     let (mut wm, ids) = spatial_desktop(3);
     let original: Vec<_> = ids.iter().map(|&id| wm.clients[id].geometry).collect();

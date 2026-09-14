@@ -273,7 +273,10 @@ fn build_snapshot(
             hidden: client.lifecycle == Lifecycle::Miniaturized,
             urgent: client.flags.contains(wm_core::ClientFlags::URGENT),
             pinned: client.flags.contains(wm_core::ClientFlags::STICKY),
-            inhibiting_idle: client.flags.contains(wm_core::ClientFlags::IDLE_INHIBIT),
+            // The rule's evaluated answer, not whether one matched:
+            // `omarchy-debug-idle` reads this to explain why a machine
+            // stays awake, and a windowed Steam library does not.
+            inhibiting_idle: wm.client_inhibits_idle(id),
             tags: client.tags.clone(),
             xdg_tag: String::new(),
             xdg_description: String::new(),
@@ -324,12 +327,16 @@ fn build_snapshot(
         .get(active_layout_index as usize)
         .cloned()
         .unwrap_or_else(|| configured_layout.clone());
+    // `layout` and `active_keymap` answer different questions. `layout` is
+    // the list the keymap was built from ("us,de"), which is how a shell
+    // tells whether there is anything to switch between; `active_keymap`
+    // names the group in force now, which is what a label shows.
     let mut devices = Devices::default();
     for device in &wm.backend().input_devices {
         if device.keyboard {
             devices.keyboards.push(Keyboard {
                 name: device.name.clone(),
-                layout: active_keymap.clone(),
+                layout: configured_layout.clone(),
                 active_keymap: active_keymap.clone(),
                 active_layout_index,
             });
@@ -348,7 +355,7 @@ fn build_snapshot(
     if devices.keyboards.is_empty() {
         devices.keyboards.push(Keyboard {
             name: "chonkstep-keyboard".into(),
-            layout: active_keymap.clone(),
+            layout: configured_layout.clone(),
             active_keymap,
             active_layout_index,
         });

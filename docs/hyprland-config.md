@@ -97,6 +97,17 @@ Two things a hand-written table could not do, and this can:
   condition that would need a *shell* (`o.shell_succeeds`) is not
   answered; that block is skipped and says so.
 
+  Your own conditions combine the way Lua combines them. `and`, `or`,
+  `not`, `==`, `~=` and the orderings follow Lua's precedence, and an
+  unset global is `nil`, so `omarchy_default_bindings = nil` turns the
+  defaults back on. A `local` stays in its own file and never reaches
+  `_G`. A part of a condition only running code could answer decides
+  nothing unless the rest decides it: `o.shell_succeeds(…) and false` is
+  false, while `o.shell_succeeds(…) and true` skips the block. A name
+  that a skipped construct could have set (a `while` body, a function,
+  an `if` that could not be answered) is not taken to be `nil` either.
+  An `if` whose condition is not followed by `then` is skipped whole.
+
 ### Window rules
 
 `windowrule`, `windowrulev2` and `o.window` / `hl.window_rule`, in all
@@ -110,14 +121,20 @@ windowrule   = float on, match:class steam               # 0.53+
 
 The supported properties are `float`, `size`, `center`, `idle_inhibit`,
 `pin`, `no_focus`, `no_initial_focus`, `focus_on_activate`,
-`fullscreen`, and `maximize`. They match `class` and `title` as regular
+`fullscreen`, `maximize`, and `scroll_touchpad`. They match `class` and `title` as regular
 expressions, matched against the entire class or title, as in Hyprland's
 `RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
 
-`idle_inhibit` follows the mapped/visible interpretation: a matching
-window inhibits idle while it is visible on the current workspace (or
-pinned), without requiring keyboard focus. `pin` makes the client
+`idle_inhibit` reads four modes. `always` (also `on`, `true`, `1`, `yes`)
+inhibits idle while a matching window is visible on the current workspace
+or pinned, without requiring keyboard focus. `focus` additionally requires
+the window to hold keyboard focus, and `fullscreen` additionally requires
+it to be fullscreen, which is how Omarchy keeps a game or stream awake
+without letting a launcher's windowed library do the same. `none` (also
+`off`, `false`, `0`, `no`) explicitly clears an earlier matching rule. Any
+other value is reported and ignored. A minimized, parked or locked-away
+window never inhibits, whatever its mode. `pin` makes the client
 sticky across workspaces. Focus exclusions affect initial focus and
 later activation requests separately. Fullscreen and maximize are
 applied after initial placement, with maximize underneath fullscreen so
@@ -203,7 +220,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 
 | Not read | Why |
 |---|---|
-| Anything commanding Hyprland — `hyprctl`, `omarchy-hyprland-*` | It talks to a compositor that is not running, so the binding could only fail. The same filter chonkstep's Omarchy menu already applies to menu rows. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
+| Hyprland requests chonkstep does not serve — `hyprctl`, and `omarchy-hyprland-*` scripts outside [the list below](#omarchys-hyprland-scripts) | Chonkstep answers Hyprland's IPC, but only with the requests it can apply, and `hyprctl` exits zero on a refusal, so a binding whose request is refused would be a key that silently does nothing. A script therefore runs only when every request it sends is proven served. The same rule filters chonkstep's Omarchy menu rows and `exec-once` lines. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
 | Gaps, borders, rounding, blur, shadows, animations, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
 | Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use `focus_follows_mouse` and native [`[input.gestures]`](gestures.md). Arbitrary Hyprland gesture bindings remain declined. Device properties listed below are applied; remaining declined values are logged. |
@@ -212,9 +229,49 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
 | Mouse, wheel and switch bindings (`bindm`, `mouse:272`, `mouse_up`, `switch:on:Lid Switch`) | Not key chords; this config format cannot express one. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
-| `submap`, workspace rules, `plugin`, `bezier`, `animation` | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| `submap`, workspace rules, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (`disabled_input_device`, `hl.device`, `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
 | Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |
+
+### Omarchy's Hyprland scripts
+
+Omarchy implements several window and display chords as
+`omarchy-hyprland-*` scripts that drive the compositor through `hyprctl`.
+These five send only requests chonkstep's Hyprland IPC applies, so their
+bindings, menu rows and autostart lines run as written. The list lives in
+`crates/wm-config/src/hyprland/dispatch.rs`, and
+`crates/chonk-hyprland-ipc/tests/protocol.rs` feeds every request each
+script sends through the IPC, failing if one is refused or a field the
+script reads is missing. A script cannot join the list without that proof.
+
+| Script | Omarchy's use of it |
+|---|---|
+| `omarchy-hyprland-window-pop` | `SUPER + O`: pop the window out, floating and pinned, or put it back |
+| `omarchy-hyprland-window-width` | `SUPER + ALT + Home` / `SUPER + Home`: save / restore the window's width |
+| `omarchy-hyprland-window-close-all` | `CTRL + ALT + DELETE`: close every window, then show workspace 1 |
+| `omarchy-hyprland-monitor-scaling` | `SUPER + SLASH` / `SUPER + ALT + SLASH`: step the focused monitor's scale |
+| `omarchy-hyprland-workspace-layout-toggle` | The menu's Workspace Layout row. Its `SUPER + L` binding takes chonkstep's own `toggle-layout`. |
+
+On a Freeform workspace the pop-out's float toggle does nothing, because
+Freeform has no layout to float a window out of; the window is still
+resized, centred, pinned and raised.
+
+`hyprctl` itself, and every other `omarchy-hyprland-*` script, is refused
+as "commands Hyprland beyond the requests ChonkStep serves". That is also
+the answer for a script a future Omarchy adds. The ones Omarchy binds or
+starts are refused with the piece they need:
+
+| Script | Why not here |
+|---|---|
+| `omarchy-hyprland-window-tiled-fullscreen-toggle` | needs client-only fullscreen, which ChonkStep does not model |
+| `omarchy-hyprland-window-transparency-toggle` | needs per-window opacity, which ChonkStep does not model |
+| `omarchy-hyprland-window-gaps-toggle` | toggles Hyprland's gaps, which ChonkStep does not read |
+| `omarchy-hyprland-window-single-square-aspect-toggle` | toggles a Hyprland layout option, which ChonkStep does not read |
+| `omarchy-hyprland-monitor-internal` | disables an output, which ChonkStep does not do |
+| `omarchy-hyprland-monitor-internal-mirror` | mirrors an output, which ChonkStep does not do |
+| `omarchy-hyprland-monitor-clamshell` | disables an output, which ChonkStep does not do |
+| `omarchy-hyprland-monitor-watch` | disables an output, which ChonkStep does not do |
 
 ### Bindings this desktop has no verb for
 
@@ -228,7 +285,14 @@ is worth knowing about:
 Directional focus (`movefocus l/r/u/d`) follows actual geometry in Freeform
 and Mosaic. Flow follows its horizontal sequence; up/down does nothing.
 `movewindow` and `swapwindow` directions reorder managed windows while keeping
-focus. `resizeactive` changes Mosaic boundaries or the focused Flow width.
+focus. `resizeactive` changes Mosaic boundaries or the focused Flow width,
+in both syntaxes, including Omarchy 4's Lua
+`hl.dsp.window.resize({ x = …, y = …, relative = true })` chords. Its
+deltas are logical pixels, converted by the scale of the focused
+window's output exactly as `hyprctl dispatch resizeactive` is. The
+exact-size forms (`resizeactive exact w h`, and the Lua call without
+`relative = true`) have no verb here and are refused rather than read
+as a delta.
 `fullscreen 0` toggles real fullscreen; `fullscreen 1` toggles maximize within
 the workarea. Floating windows retain traditional movement and resizing.
 
@@ -254,7 +318,17 @@ do is not what you are asking for:
 ### Input and binding behavior
 
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
-build the seat's xkb keymap. `repeat_rate` and `repeat_delay` configure
+build the seat's xkb keymap. A value Hyprland would compute as it runs,
+such as Omarchy 4's `kb_layout = vconsole.XKBLAYOUT or "us"`, is logged
+and left unset rather than passed on as the text of the expression, and
+a window rule or `hl.monitor` line with such a value is refused whole.
+Whatever of `kb_layout`, `kb_variant`, `kb_model` and `kb_options` is
+still unset then comes from `/etc/vconsole.conf`, the file `localectl`
+writes and Omarchy's `input.lua` reads. So for each setting, a
+non-empty `XKB_DEFAULT_*` variable wins, then a value the configuration
+spells out (an empty one included), then `/etc/vconsole.conf`, then
+libxkbcommon's default. Omarchy's `us,` prefix for a layout with no
+Latin letters is not applied. `repeat_rate` and `repeat_delay` configure
 both client key repeat and `binde` actions. These hardware-facing values
 transfer; whole-desktop interaction policy does not. In particular,
 Hyprland's `follow_mouse` is logged and ignored—even when it is `1` in
@@ -269,12 +343,23 @@ default usable keymap instead of aborting the login.
 
 Pointer configuration is also carried from both classic `input {}` /
 `touchpad {}` blocks and Omarchy's Lua tables. `sensitivity` and
-`accel_profile` configure libinput acceleration; `natural_scroll`,
-`tap_to_click`, `disable_while_typing`, `clickfinger_behavior`, and `left_handed` are applied
-where the device advertises them. `scroll_factor` multiplies continuous
-and wheel-axis motion after libinput so the configured speed also works
-on the nested backend. Unsupported capabilities are named per device
-without rejecting the rest of the configuration.
+`accel_profile` configure libinput acceleration; `tap_to_click`,
+`disable_while_typing`, `clickfinger_behavior`, and `left_handed` are applied
+where the device advertises them.
+
+Scrolling is configured per device class. `input:natural_scroll` and
+`input:scroll_factor` (or `[input]` in `config.toml`) apply to mice,
+trackpoints and every other device that is not a touchpad;
+`input:touchpad:natural_scroll` and `input:touchpad:scroll_factor` (or
+`[input.touchpad]`) apply only to touchpads, so Omarchy's touchpad settings
+never invert or slow a mouse wheel. Removing a natural-scroll key restores
+each device's libinput default. `scroll_factor` multiplies axis motion after
+libinput, chosen by the event's source (finger scrolling is touchpad-class),
+so the configured speed also works on the nested backend, and
+high-resolution wheel units keep their fraction between events instead of
+rounding it away. A `scroll_touchpad` window rule replaces the touchpad
+factor while the pointer is over a matching window. Unsupported capabilities
+are named per device without rejecting the rest of the configuration.
 
 Active pointer locks and confinement temporarily suspend `disable_while_typing`
 so games can receive keyboard and touchpad motion together. This includes
@@ -456,6 +541,14 @@ never a refusal to start.**
   graph is cycle-checked (through symlinks too) and budget-limited to
   256 files and 8 MiB, and regex patterns are compiled with a size cap
   by an engine that cannot backtrack.
+- Work is bounded per file, not only per construct, because nested
+  loops multiply. One Lua file walks at most 65,536 statements (every
+  pass of a loop counts) and contributes at most 8,192 directives. One
+  statement chains at most 256 operators, a value bound to a name is
+  capped in size, and following a name bound to a name is metered, so
+  `o = o or {}` followed by `if o then` is a condition that cannot be
+  answered rather than a hang. Past any bound, what is left is skipped
+  with a line naming the bound.
 - A file that is not valid UTF-8 is read lossily rather than dropped.
 - A binding that will not parse costs you that binding. A rule that
   will not compile costs you that rule. A file that will not open costs
@@ -466,7 +559,10 @@ never a refusal to start.**
   path into the window manager.
 
 The tests for this feed the parser unterminated strings, five thousand
-nested braces, loops asking for a hundred million iterations, patterns
+nested braces, loops asking for a hundred million iterations, five
+nested loops asking for a billion, names bound to themselves, two
+hundred thousand chained `not`s, values that double each time they are
+rebound, patterns
 that would hang a backtracking engine, four hundred random byte
 strings, and every truncation of the real files — and, end to end, boot
 a whole session against a configuration tree made of garbage and check
@@ -480,14 +576,14 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=161 commands=113 env=8 autostart=4
-      float_rules=45 monitors=1 skipped=165
+      files=42 bindings=179 commands=119 env=8 autostart=4
+      float_rules=47 monitors=1 skipped=172
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```
 
 `skipped` being large is normal and not a problem — a stock Omarchy
-machine has around 150 directives this desktop has its own answer for.
+machine has around 190 directives this desktop has its own answer for.
 Each one names itself, because "47 rules ignored" tells you nothing you
 can act on and "float rule carries `match:xwayland 1`, which this
 reader does not implement" tells you exactly which line to rewrite.

@@ -123,3 +123,59 @@ fn destroying_one_duplicate_inhibitor_keeps_the_other_until_disconnect() {
     .unwrap();
     assert!(session.compositor_alive(), "duplicate inhibitor teardown keeps the compositor alive");
 }
+
+/// Omarchy writes `idle_inhibit = "fullscreen"` for Steam, GeForceNOW,
+/// Moonlight and RetroArch: a launcher's windowed library must let the
+/// session idle and lock, and only its fullscreen game may hold it awake.
+/// The client here owns no inhibitor at all, so every hold observed comes
+/// from the compositor's own rule, re-evaluated on the fullscreen edge.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn a_fullscreen_mode_idle_rule_holds_only_while_its_window_is_fullscreen() {
+    /// The probe's fullscreen control (`f`, evdev 33): enter, then exit.
+    const KEY_F: u32 = 33;
+    let options = SessionOptions {
+        config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into(),
+        config_root_files: vec![(
+            "hypr/hyprland.conf".into(),
+            "windowrule = idle_inhibit fullscreen, match:class ^idle-watcher$\nbind = SUPER, F12, workspace, 1\n".into(),
+        )],
+        ..Default::default()
+    };
+    let mut session = Session::boot("fullscreen-idle-rule", options).expect("session boots");
+    let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
+    let program = probe.display().to_string();
+    session
+        .launch(&program, &["IdleWatcher", "idle-watcher", "animate-watch-idle"])
+        .expect("idle watcher launches");
+    let window = session.wait_for_window("IdleWatcher").expect("rule holder maps");
+    poll_until(SETTLE, "the client to arm its idle notification", || {
+        session.client_log(&program).contains("idle watch armed").then_some(())
+    })
+    .unwrap();
+    let idled = |session: &Session| session.client_log(&program).matches("idle state=idled").count();
+
+    poll_until(SETTLE, "a windowed rule holder to let the session idle", || (idled(&session) > 0).then_some(()))
+        .unwrap();
+
+    session.door().click(f64::from(window.x + 80), f64::from(window.y + 70)).unwrap();
+    session.door().tap_key(KEY_F).unwrap();
+    poll_until(SETTLE, "the client's fullscreen request to be granted", || {
+        session.client_log(&program).contains("answer granted").then_some(())
+    })
+    .unwrap();
+    let before = idled(&session);
+    let start = animation_frame(&session.client_log(&program)).unwrap_or(0);
+    // Sixty self-timed commits, about four notification periods with no
+    // input: an unheld session would have idled again by now.
+    poll_until(SETTLE, "sixty animation frames while fullscreen", || {
+        animation_frame(&session.client_log(&program)).filter(|frame| *frame >= start + 60)
+    })
+    .unwrap();
+    assert_eq!(idled(&session), before, "a fullscreen rule holder must keep the session awake");
+
+    session.door().tap_key(KEY_F).unwrap();
+    poll_until(SETTLE, "leaving fullscreen to release the rule", || (idled(&session) > before).then_some(()))
+        .unwrap();
+    assert!(session.compositor_alive());
+}

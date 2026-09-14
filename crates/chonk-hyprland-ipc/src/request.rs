@@ -97,8 +97,11 @@ impl Request {
         };
 
         let rest = rest.trim_start();
-        let (command, args) = match rest.find(char::is_whitespace) {
-            Some(space) => (&rest[..space], rest[space + 1..].trim()),
+        // `split_once` rather than slicing one byte past a found
+        // space: any Unicode whitespace separates, and all but the
+        // ASCII ones are several bytes long.
+        let (command, args) = match rest.split_once(char::is_whitespace) {
+            Some((command, args)) => (command, args.trim()),
             None => (rest, ""),
         };
 
@@ -263,6 +266,20 @@ mod tests {
     fn collapses_runs_of_whitespace_between_command_and_args() {
         assert_eq!(parse("/dispatch    workspace 3").args, "workspace 3");
         assert_eq!(parse("/monitors\tall").args, "all");
+    }
+
+    /// Any Unicode whitespace separates the command from its arguments,
+    /// and every one of these is more than one byte in UTF-8. Slicing
+    /// one byte past the start of the match used to land inside the
+    /// character and panic, which the binary's panic hook turns into an
+    /// abort of the whole session.
+    #[test]
+    fn non_ascii_whitespace_separates_command_from_args_without_panicking() {
+        for space in ['\u{85}', '\u{a0}', '\u{2003}', '\u{3000}'] {
+            let request = parse(&format!("dispatch{space}workspace 2"));
+            assert_eq!(request.command, "dispatch", "command after {space:?}");
+            assert_eq!(request.args, "workspace 2", "args after {space:?}");
+        }
     }
 
     #[test]

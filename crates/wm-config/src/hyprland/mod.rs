@@ -74,7 +74,8 @@
 //! is a logged warning and a skipped line — never a panic, and never a
 //! refusal to start.** Everything here is total. There is no `unwrap`
 //! on parsed content, recursion is depth-bounded, loops are
-//! iteration-bounded, the file graph is cycle-checked and
+//! iteration-bounded, a Lua file's whole walk is step-bounded because
+//! loops multiply, the file graph is cycle-checked and
 //! budget-limited, and patterns are compiled with a size cap. The
 //! hostile-input tests exist to keep that true.
 //!
@@ -99,10 +100,13 @@
 //!   position, scale, and 0/90/180/270-degree transforms are applied
 //!   once outputs exist. Disable, mirror, and other extras refuse their
 //!   whole line.
-//! - **Anything that commands Hyprland.** `hyprctl` and the
-//!   `omarchy-hyprland-*` scripts talk to a compositor that is not
-//!   running; those bindings stay unbound, the same filter
-//!   `chonk_shell::omarchy_menu` applies to menu rows.
+//! - **Hyprland requests chonkstep does not serve.** `hyprctl` and any
+//!   `omarchy-hyprland-*` script outside
+//!   [`dispatch::SERVED_OMARCHY_SCRIPTS`] stay unbound, with a reason
+//!   naming what a known script needs. The listed scripts send only
+//!   requests this desktop's Hyprland IPC applies, which a conformance
+//!   test proves, and run like any other command.
+//!   `chonk_shell::omarchy_menu` applies the same predicate to menu rows.
 //!
 //! Every one of these is logged when it is met, not silently dropped.
 
@@ -119,7 +123,6 @@ use std::path::{Path, PathBuf};
 use directive::{Directive, Include};
 use wm_core::KeyCombo;
 
-use crate::preset::Unbound;
 use crate::Action;
 
 /// The most files one read will open. Omarchy's own tree is about
@@ -155,6 +158,9 @@ pub struct Roots {
     pub module_path: Vec<PathBuf>,
     /// What the branch conditions in Omarchy's Lua are answered from.
     pub facts: lua::Facts,
+    /// The system's keyboard configuration, `/etc/vconsole.conf`, which
+    /// fills any xkb setting a read leaves unset. See [`read`].
+    pub vconsole: PathBuf,
 }
 
 impl Roots {
@@ -178,6 +184,7 @@ impl Roots {
             defaults: omarchy.join("default/hypr"),
             module_path: vec![state, config, omarchy],
             facts: lua::Facts::of_this_machine(),
+            vconsole: PathBuf::from("/etc/vconsole.conf"),
         })
     }
 
@@ -209,6 +216,7 @@ impl Roots {
                 home: Some(root.to_path_buf()),
                 state_home: Some(root.join(".local/state")),
             },
+            vconsole: root.join("etc/vconsole.conf"),
         }
     }
 
@@ -409,7 +417,39 @@ pub fn read(roots: &Roots) -> Reading {
         // would have required anyway.
         loader.directory(&roots.defaults.join("bindings"), &mut stream, 0);
     }
-    lower(stream, loader.finish())
+    let mut reading = lower(stream, loader.finish());
+    // Any xkb setting the configuration leaves unset — including one it
+    // computes at runtime, which the Lua reader refuses to render — is
+    // taken from the system's own keyboard configuration, the file
+    // Omarchy's `input.lua` reads its layout from. Here rather than in
+    // `load`, because the live re-read calls `read` directly and must
+    // resolve the keymap the way startup did. And only for a reading
+    // that found something: the system file alone must not turn a desk
+    // with nothing to read into one whose keymap the read replaces.
+    if !reading.is_empty() {
+        let system = crate::system_keyboard(&system_file(&roots.vconsole));
+        let filled = reading.input.fill_keyboard_from(&system);
+        if !filled.is_empty() {
+            reading.skipped.push(Skipped {
+                kind: "input".into(),
+                what: format!("{} taken from {}", filled.join(", "), roots.vconsole.display()),
+                why: "the Hyprland configuration leaves it unset or computes it at runtime; Omarchy's `us,` prefix for a layout with no Latin letters is not applied".into(),
+            });
+        }
+    }
+    reading
+}
+
+/// A small system file's text, or nothing: a missing or unreadable file
+/// reads as empty, never as an error, and an oversized one is cut at the
+/// per-file budget.
+fn system_file(path: &Path) -> String {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(MAX_FILE_BYTES).read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 // ---- activation and layering ------------------------------------------
@@ -1005,8 +1045,11 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
                 why: "pointer sensitivity must be between -1 and 1".into(),
             }),
         },
-        "natural_scroll" | "touchpad:natural_scroll" => {
+        "natural_scroll" => {
             parse_input_bool(reading, name, &value, |input, enabled| input.natural_scroll = Some(enabled))
+        }
+        "touchpad:natural_scroll" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.touchpad_natural_scroll = Some(enabled))
         }
         "tap_to_click" | "touchpad:tap_to_click" => {
             parse_input_bool(reading, name, &value, |input, enabled| input.tap_to_click = Some(enabled))
@@ -1022,7 +1065,11 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
         }
         "scroll_factor" | "touchpad:scroll_factor" => match value.parse::<f64>() {
             Ok(factor) if factor.is_finite() && (0.01..=10.0).contains(&factor) => {
-                reading.input.scroll_factor = Some(factor)
+                if name.starts_with("touchpad:") {
+                    reading.input.touchpad_scroll_factor = Some(factor)
+                } else {
+                    reading.input.scroll_factor = Some(factor)
+                }
             }
             _ => reading.skipped.push(Skipped {
                 kind: "input".into(),
@@ -1075,8 +1122,9 @@ fn parse_input_bool(
 /// One `exec-once` line, filtered.
 ///
 /// Two filters, and both exist because starting the wrong thing here
-/// is worse than starting nothing. A command that talks to Hyprland
-/// cannot work; and Omarchy's own shell is already started by
+/// is worse than starting nothing. A command whose Hyprland requests
+/// chonkstep does not serve can only half-work; and Omarchy's own shell
+/// is already started by
 /// `chonk_shell::omarchy_shell`, at the point in the session where
 /// Hyprland's `autostart` would have started it, so taking it from
 /// this list too would start a second copy of the bar.
@@ -1114,11 +1162,11 @@ fn autostart(reading: &mut Reading, command: &str) {
         .next()
         .unwrap_or(&effective)
         .to_string();
-    if dispatch::commands_hyprland(&base) || dispatch::commands_hyprland(&effective) {
+    if let Some(reason) = dispatch::hyprland_refusal(&base).or_else(|| dispatch::hyprland_refusal(&effective)) {
         reading.skipped.push(Skipped {
             kind: "exec-once".into(),
             what: command.to_string(),
-            why: Unbound::HyprlandOnly.reason().to_string(),
+            why: reason.reason().to_string(),
         });
         return;
     }

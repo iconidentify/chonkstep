@@ -88,7 +88,7 @@ start with `[[BATCH]]` and use `;` separators.
 | `clients` / `activewindow` | Live pid, class/title, position, size, workspace, monitor, XWayland, floating, pinned, fullscreen, tags, focus history and idle inhibition |
 | `activeworkspace` | Exactly the active workspace, in JSON or one plain block |
 | `cursorpos` | The live pointer as plain `X, Y`, or `{"x": X, "y": Y}` with `-j` |
-| `devices` | Seat keyboards and pointers; keyboards include `name`, `active_keymap`, `layout`, and `active_layout_index` |
+| `devices` | Seat keyboards and pointers; keyboards include `name`, `layout` (the installed layout list, such as `us,de`), `active_keymap` (the group in force now), and `active_layout_index` |
 | `binds` | The live chonkstep keymap in Hyprland's plain bind-block format (or JSON) |
 | `getoption` | An explicitly unset `{ "option": ..., "set": false }` object. Value fields are absent so JavaScript keeps its own default instead of coercing `null` or zero. |
 | `version`, `splash` | Supported |

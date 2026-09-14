@@ -15,8 +15,11 @@
 //! What it does instead is *parse* Lua's syntax into statements and
 //! then evaluate the small, closed subset of expressions Omarchy's
 //! configuration actually uses: string literals, numbers, booleans,
-//! tables, concatenation, integer arithmetic, `tostring`, and a name
-//! bound by `local` or by a numeric `for`. Every other expression is
+//! tables, concatenation, arithmetic, `tostring`, `and`/`or`/`not` and
+//! comparisons at Lua's own precedence, and a name bound by `local`, by
+//! a loop or by an earlier file's global. Conditions are answered in
+//! three-valued logic, so a part only running code could answer decides
+//! nothing unless the rest decides the whole. Every other expression is
 //! [`Value::Opaque`] and every statement built on one is skipped with
 //! a log line naming it. The result is that this reader understands
 //! precisely the constructs Omarchy writes, and is honestly ignorant of
@@ -71,6 +74,68 @@ const MAX_DEPTH: u32 = 24;
 /// amount of parsing whatever shape it takes.
 const MAX_STATEMENTS: usize = 20_000;
 
+/// The most directives one `read` may contribute. Loops multiply, so a
+/// per-loop bound alone bounds neither output nor work: five nested
+/// loops of 64 ask for a billion passes, each within its own bound.
+/// The captured Omarchy machine's whole tree produces a few hundred.
+pub(super) const MAX_DIRECTIVES: usize = 8_192;
+
+/// The most statements one `read` may walk, counting every pass of a
+/// loop body. The directive bound's twin: a loop whose body produces
+/// nothing still costs its passes.
+const MAX_STEPS: usize = 65_536;
+
+/// The most operators one statement's expressions may build. An
+/// operator chain is a tree, and `eval`, `render` and `Drop` all
+/// recurse over it, so a chain longer than a stack is a stack
+/// overflow three different ways. Counted per statement rather than
+/// per chain, because parentheses stack chains end to end. Omarchy's
+/// longest is four.
+const MAX_OPERATORS: usize = 256;
+
+/// The heaviest a value bound to a name may be, in nodes plus one per
+/// 64 bytes of text, and the deepest it may nest. A value only grows by
+/// being bound and read back — `t = { t, t }` doubles on every pass and
+/// `t = { t }` deepens — so binding is where its size is checked.
+const MAX_VALUE_WEIGHT: usize = 4_096;
+const MAX_VALUE_DEPTH: u32 = 256;
+
+/// How many steps answering one condition may take. A name bound to a
+/// name is followed, and `o = o or {}` binds one to itself.
+const MAX_TRUTH_STEPS: u32 = 256;
+
+/// Lua's binary operators by precedence, loosest first, and longest
+/// spelling first within a level so that `<=` is not read as `<`.
+const PRECEDENCE: [&[&str]; 6] = [
+    &["or"],
+    &["and"],
+    &["==", "~=", "<=", ">=", "<", ">"],
+    &[".."],
+    &["+", "-"],
+    &["*", "//", "/", "%"],
+];
+
+/// What a function's parameter is bound to inside its body: something
+/// only a caller could supply, and this reader never calls anything.
+const PARAMETER: &str = "a function parameter";
+
+/// Stands for every name in [`Globals::unknown`], once part of a file
+/// went unread. Not a Lua identifier, so it cannot collide with one.
+const ANY_NAME: &str = "*";
+
+/// Names Lua or Hyprland define before any configuration file runs, so
+/// never an unset `nil`.
+const BUILTINS: &[&str] = &[
+    "_G", "_VERSION", "arg", "assert", "collectgarbage", "coroutine", "debug", "dofile",
+    "error", "getmetatable", "hl", "io", "ipairs", "load", "loadfile", "math", "next", "os",
+    "package", "pairs", "pcall", "print", "rawequal", "rawget", "rawlen", "rawset",
+    "require", "select", "setmetatable", "string", "table", "tonumber", "tostring", "type",
+    "utf8", "xpcall",
+];
+
+/// The `nil` an unset global reads as.
+static NIL: Value = Value::Nil;
+
 /// A Lua value, to the extent this reader needs one.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -101,8 +166,12 @@ pub enum Value {
     /// is a *definition* (`helpers.lua` defines `o.bind` in terms of
     /// `hl.bind`), and walking a definition would emit the bindings its
     /// own body describes rather than the ones its callers ask for.
-    Function(Vec<Stmt>),
-    /// `a .. b`, `a + b`, `a - b`, kept unevaluated.
+    ///
+    /// Shared rather than owned, so binding a function to a name, or
+    /// putting it in a table that is bound again, copies nothing.
+    Function(std::sync::Arc<Vec<Stmt>>),
+    /// `a .. b`, `a + b`, `a - b` and the rest of Lua's arithmetic, kept
+    /// unevaluated.
     ///
     /// Unevaluated on purpose, and this is the single most important
     /// decision in the file. Omarchy writes its workspace bindings as
@@ -120,6 +189,21 @@ pub enum Value {
     /// An expression this parser declines to represent. The string is
     /// the source text, truncated, for the log.
     Opaque(String),
+    /// `a or b` and `a and b`, kept unevaluated while `a` is not yet a
+    /// value. Once it is, Lua's own value semantics apply: `a or b` is
+    /// `a` when `a` is truthy and `b` otherwise, and `and` is the
+    /// reverse.
+    Or(Box<Value>, Box<Value>),
+    And(Box<Value>, Box<Value>),
+    /// `not a`, kept unevaluated while `a` is not yet a value.
+    Not(Box<Value>),
+    /// `a == b`, `a ~= b` and the orderings, kept unevaluated while
+    /// either side is not yet a value.
+    Compare {
+        op: &'static str,
+        left: Box<Value>,
+        right: Box<Value>,
+    },
 }
 
 /// The Hyprland event whose handler body is read as autostart.
@@ -132,9 +216,18 @@ pub enum Stmt {
         path: String,
         args: Vec<Value>,
     },
-    /// `local x = …` and plain `x = …`, which is how a user's
-    /// `hyprland.lua` sets `omarchy_default_bindings = false`.
+    /// `x = …` with no `local x` in scope: a global, which is how a
+    /// user's `hyprland.lua` sets `omarchy_default_bindings = false`
+    /// for Omarchy's defaults to read. `_G.x = …` keeps its prefix only
+    /// while a `local x` is in scope, so the walk leaves that local be.
     Assign {
+        name: String,
+        value: Value,
+    },
+    /// `local x = …`, and a plain `x = …` while a `local x` is in scope.
+    /// Seen only by the file that declares it: a `local` never reaches
+    /// `_G`, so it never reaches another file.
+    Local {
         name: String,
         value: Value,
     },
@@ -158,8 +251,10 @@ pub enum Stmt {
     /// A bare `do … end` scope: its statements, transparently.
     Block(Vec<Stmt>),
     /// A construct parsed well enough to be skipped over safely, named
-    /// so it can be reported. `while`, generic `for`, function
-    /// definitions, `return`.
+    /// so it can be reported. `while`, a malformed `for`, function
+    /// definitions, an `if` without `then`, a statement that hit a
+    /// bound. Whatever names it could assign were recorded as it was
+    /// parsed.
     Skipped(&'static str),
 }
 
@@ -217,8 +312,16 @@ impl Facts {
 pub fn read(source: &str, facts: &Facts, globals: &mut Globals, out: &mut Vec<Directive>) {
     let mut parser = Parser::new(source);
     let body = parser.block(0);
+    // What the parser skipped over could have assigned these, so none
+    // of them is an unset `nil` from here on.
+    globals.unknown.append(&mut parser.hidden);
     let mut env = Env::default();
-    walk(&body, facts, globals, &mut env, out, 0);
+    // This read's own vector, so the directive budget counts this
+    // file's output and not the files read before it.
+    let mut read = Vec::new();
+    let mut steps = 0;
+    walk(&body, facts, globals, &mut env, &mut read, &mut steps, 0);
+    out.append(&mut read);
 }
 
 /// Globals a file may set that a later file reads. Only the two
@@ -228,18 +331,38 @@ pub fn read(source: &str, facts: &Facts, globals: &mut Globals, out: &mut Vec<Di
 #[derive(Clone, Debug, Default)]
 pub struct Globals {
     values: std::collections::BTreeMap<String, Value>,
+    /// Names a construct this reader did not walk could have assigned:
+    /// the body of an `if` it could not answer, a `while`, a function, a
+    /// loop over an unreadable iterator. An unset global is `nil` in
+    /// Lua, but reading one of these as `nil` would be a guess.
+    unknown: std::collections::BTreeSet<String>,
 }
 
 impl Globals {
     fn get(&self, name: &str) -> Option<&Value> {
         self.values.get(name)
     }
+
+    /// `nil`, for a name no file has set and nothing unread could have:
+    /// Lua's rule for an unset global, applied only where it is not a
+    /// guess. A dotted path reads a field of something, and a builtin
+    /// is set before any file runs, so neither reads as `nil` merely
+    /// for being unset here.
+    fn unset(&self, name: &str) -> Option<&'static Value> {
+        let plain = name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+        (plain
+            && !BUILTINS.contains(&name)
+            && !self.unknown.contains(name)
+            && !self.unknown.contains(ANY_NAME))
+        .then_some(&NIL)
+    }
 }
 
-/// Names bound inside the block being walked: loop variables and
-/// `local`s. A flat map rather than a scope chain because Omarchy's
-/// files never shadow, and a wrong answer here can only ever produce a
-/// binding that is skipped for an unresolvable name.
+/// Names bound in the file being walked: `local`s, loop variables, and
+/// the globals the file itself assigned. A flat map rather than a scope
+/// chain; the parser has already decided which assignments are to a
+/// `local`, which is the part of scoping that changes an answer.
 type Env = std::collections::BTreeMap<String, Value>;
 
 // ---- the walk ---------------------------------------------------------
@@ -250,9 +373,11 @@ fn walk(
     globals: &mut Globals,
     env: &mut Env,
     out: &mut Vec<Directive>,
+    steps: &mut usize,
     depth: u32,
 ) {
     if depth > MAX_DEPTH {
+        unwalked(body, globals);
         out.push(Directive::Ignored {
             kind: "lua",
             detail: "block nested too deeply".into(),
@@ -260,6 +385,11 @@ fn walk(
         return;
     }
     for stmt in body {
+        if spent(steps, out) {
+            // The rest of this file goes unread, so any name may be set.
+            globals.unknown.insert(ANY_NAME.into());
+            return;
+        }
         match stmt {
             Stmt::Call { path, args } => {
                 // `hl.on("hyprland.start", function() … end)`: the one
@@ -268,12 +398,16 @@ fn walk(
                 if path == "hl.on" {
                     let event = args.first().map(|v| eval(v, env));
                     let body = args.get(1).map(|v| eval(v, env));
+                    if !matches!(&event, Some(Value::Str(name)) if name == START_EVENT) {
+                        // Any other handler runs later, if ever.
+                        args.iter().for_each(|arg| unwalked_value(arg, globals));
+                    }
                     match (event, body) {
                         (Some(Value::Str(name)), Some(Value::Function(body))) if name == START_EVENT => {
-                            walk(&body, facts, globals, env, out, depth + 1);
+                            walk(&body, facts, globals, env, out, steps, depth + 1);
                         }
                         (Some(Value::Str(name)), Some(Value::Function(body))) if name == "layer.opened" => {
-                            match layer_bindings(&body, env) {
+                            match layer_bindings(&body, env, steps) {
                                 Ok(bindings) if !bindings.is_empty() => out.extend(bindings),
                                 Ok(_) => out.push(Directive::Ignored {
                                     kind: "event",
@@ -298,12 +432,15 @@ fn walk(
                     }
                     continue;
                 }
+                // Every other call's function arguments, if any, are
+                // handlers or definitions, never walked.
+                args.iter().for_each(|arg| unwalked_value(arg, globals));
                 if path == "hl.define_submap" {
                     let name = args.first().map(|value| eval(value, env));
                     let body = args.get(1).map(|value| eval(value, env));
                     match (name, body) {
                         (Some(Value::Str(name)), Some(Value::Function(body))) => {
-                            note_submap_bindings(&name, &body, env, out, depth + 1);
+                            note_submap_bindings(&name, &body, env, out, steps, depth + 1);
                         }
                         _ => out.push(Directive::Ignored {
                             kind: "submap",
@@ -314,10 +451,25 @@ fn walk(
                 }
                 emit_call(path, args, env, out);
             }
+            Stmt::Local { name, value } => {
+                unwalked_value(value, globals);
+                let value = bind(name, eval(value, env), out);
+                env.insert(name.clone(), value);
+            }
             Stmt::Assign { name, value } => {
-                let value = eval(value, env);
-                env.insert(name.clone(), value.clone());
-                globals.values.insert(name.clone(), value);
+                unwalked_value(value, globals);
+                let value = bind(name, eval(value, env), out);
+                match name.strip_prefix("_G.") {
+                    // `_G.x` while a `local x` is in scope: the global
+                    // changes and the local does not.
+                    Some(global) => {
+                        globals.values.insert(global.to_string(), value);
+                    }
+                    None => {
+                        env.insert(name.clone(), value.clone());
+                        globals.values.insert(name.clone(), value);
+                    }
+                }
             }
             Stmt::NumericFor {
                 var,
@@ -328,6 +480,7 @@ fn walk(
             } => {
                 let (Some(from), Some(to)) = (as_int(&eval(from, env)), as_int(&eval(to, env)))
                 else {
+                    unwalked(body, globals);
                     out.push(Directive::Ignored {
                         kind: "lua",
                         detail: format!("for {var} = … over non-integer bounds"),
@@ -342,6 +495,7 @@ fn walk(
                     .as_ref()
                     .is_some_and(|s| as_int(&eval(s, env)) != Some(1))
                 {
+                    unwalked(body, globals);
                     out.push(Directive::Ignored {
                         kind: "lua",
                         detail: format!("for {var} = … with a step this reader does not expand"),
@@ -349,6 +503,7 @@ fn walk(
                     continue;
                 }
                 if to.saturating_sub(from) >= MAX_LOOP {
+                    unwalked(body, globals);
                     out.push(Directive::Ignored {
                         kind: "lua",
                         detail: format!(
@@ -359,8 +514,13 @@ fn walk(
                 }
                 let shadowed = env.get(var).cloned();
                 for i in from..=to {
+                    // Every pass counts, even one with nothing in it:
+                    // nested loops multiply, and their bounds do not.
+                    if spent(steps, out) {
+                        break;
+                    }
                     env.insert(var.clone(), Value::Num(i as f64));
-                    walk(body, facts, globals, env, out, depth + 1);
+                    walk(body, facts, globals, env, out, steps, depth + 1);
                 }
                 match shadowed {
                     Some(old) => env.insert(var.clone(), old),
@@ -370,6 +530,7 @@ fn walk(
             Stmt::GenericFor { var, values, body } => {
                 let values = iterable(&eval(values, env));
                 let Some(values) = values else {
+                    unwalked(body, globals);
                     out.push(Directive::Ignored {
                         kind: "lua",
                         detail: format!("generic for {var} uses an unreadable iterator"),
@@ -378,8 +539,11 @@ fn walk(
                 };
                 let shadowed = env.get(var).cloned();
                 for value in values.into_iter().take(MAX_LOOP as usize) {
+                    if spent(steps, out) {
+                        break;
+                    }
                     env.insert(var.clone(), value);
-                    walk(body, facts, globals, env, out, depth + 1);
+                    walk(body, facts, globals, env, out, steps, depth + 1);
                 }
                 match shadowed {
                     Some(old) => {
@@ -394,21 +558,28 @@ fn walk(
                 cond,
                 then_body,
                 else_body,
-            } => match truth(cond, facts, globals, env) {
-                Some(true) => walk(then_body, facts, globals, env, out, depth + 1),
-                Some(false) => walk(else_body, facts, globals, env, out, depth + 1),
-                None => out.push(Directive::Ignored {
-                    kind: "lua",
-                    detail: format!(
-                        "if {} — a condition this reader cannot answer without running it",
-                        describe(cond)
-                    ),
-                }),
-            },
-            Stmt::Block(body) => walk(body, facts, globals, env, out, depth + 1),
+            } => {
+                let mut fuel = MAX_TRUTH_STEPS;
+                match truth(cond, facts, globals, env, &mut fuel) {
+                    Some(true) => walk(then_body, facts, globals, env, out, steps, depth + 1),
+                    Some(false) => walk(else_body, facts, globals, env, out, steps, depth + 1),
+                    None => {
+                        unwalked(then_body, globals);
+                        unwalked(else_body, globals);
+                        out.push(Directive::Ignored {
+                            kind: "lua",
+                            detail: format!(
+                                "if {} — a condition this reader cannot answer without running it",
+                                describe(cond)
+                            ),
+                        });
+                    }
+                }
+            }
+            Stmt::Block(body) => walk(body, facts, globals, env, out, steps, depth + 1),
             Stmt::Skipped(what) => out.push(Directive::Ignored {
                 kind: "lua",
-                detail: format!("{what} block"),
+                detail: format!("{what}: not read"),
             }),
         }
     }
@@ -424,6 +595,7 @@ fn note_submap_bindings(
     body: &[Stmt],
     env: &Env,
     out: &mut Vec<Directive>,
+    steps: &mut usize,
     depth: u32,
 ) {
     if depth > MAX_DEPTH {
@@ -434,6 +606,9 @@ fn note_submap_bindings(
         return;
     }
     for stmt in body {
+        if spent(steps, out) {
+            return;
+        }
         match stmt {
             Stmt::Call { path, args }
                 if matches!(path.as_str(), "hl.bind" | "o.bind" | "o.bind_toggle") =>
@@ -450,12 +625,15 @@ fn note_submap_bindings(
                     ),
                 });
             }
-            Stmt::Block(nested) => note_submap_bindings(name, nested, env, out, depth + 1),
+            Stmt::Block(nested) => note_submap_bindings(name, nested, env, out, steps, depth + 1),
+            // The body's own parameters: bookkeeping, not a construct.
+            Stmt::Local { value: Value::Opaque(text), .. } if text == PARAMETER => {}
             Stmt::NumericFor { .. }
             | Stmt::GenericFor { .. }
             | Stmt::If { .. }
             | Stmt::Call { .. }
             | Stmt::Assign { .. }
+            | Stmt::Local { .. }
             | Stmt::Skipped(_) => {
                 out.push(Directive::Ignored {
                     kind: "submap",
@@ -483,18 +661,26 @@ fn iterable(value: &Value) -> Option<Vec<Value>> {
 /// by Omarchy's selection overlay. The whole handler is validated
 /// before any directive is returned, so an unexpected side effect can
 /// never leave a partially interpreted modal keymap behind.
-fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
+fn layer_bindings(body: &[Stmt], env: &Env, steps: &mut usize) -> Result<Vec<Directive>, String> {
     fn walk_layer(
         body: &[Stmt],
         env: &mut Env,
         namespace: Option<&str>,
         out: &mut Vec<Directive>,
+        steps: &mut usize,
         depth: u32,
     ) -> Result<(), String> {
         if depth > MAX_DEPTH {
             return Err("handler nested too deeply".into());
         }
         for stmt in body {
+            // The read's own budget: loops nest here as they do there.
+            *steps = steps.saturating_add(1);
+            if *steps > MAX_STEPS || out.len() >= MAX_DIRECTIVES {
+                return Err(format!(
+                    "handler walks more than {MAX_STEPS} statements or binds more than {MAX_DIRECTIVES} keys"
+                ));
+            }
             match stmt {
                 Stmt::If {
                     cond,
@@ -503,7 +689,7 @@ fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
                 } => {
                     let discovered = namespace_from_condition(cond);
                     let namespace = discovered.as_deref().or(namespace);
-                    walk_layer(then_body, env, namespace, out, depth + 1)?;
+                    walk_layer(then_body, env, namespace, out, steps, depth + 1)?;
                     // An else branch may contain alternate bindings and
                     // is safe only when it has no executable content.
                     if !else_body.is_empty() {
@@ -519,7 +705,7 @@ fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
                     let shadowed = env.get(var).cloned();
                     for value in values {
                         env.insert(var.clone(), value);
-                        walk_layer(body, env, namespace, out, depth + 1)?;
+                        walk_layer(body, env, namespace, out, steps, depth + 1)?;
                     }
                     match shadowed {
                         Some(old) => {
@@ -533,7 +719,14 @@ fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
                 Stmt::NumericFor { .. } => {
                     return Err("numeric loops are not a layer-binding lifecycle".into())
                 }
-                Stmt::Assign { value, .. } => collect_layer_value(value, env, namespace, out)?,
+                // The handler's parameter, `layer`, is what the event
+                // supplies; bound so the body's names resolve, not read.
+                Stmt::Local { name, value: Value::Opaque(text) } if text == PARAMETER => {
+                    env.insert(name.clone(), Value::Opaque(text.clone()));
+                }
+                Stmt::Assign { value, .. } | Stmt::Local { value, .. } => {
+                    collect_layer_value(value, env, namespace, out)?
+                }
                 Stmt::Call { path, args } if path == "table.insert" => {
                     for value in args {
                         collect_layer_value(value, env, namespace, out)?;
@@ -543,7 +736,7 @@ fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
                 // bookkeeping. Calls other than table.insert would be
                 // arbitrary handler side effects and refuse the whole.
                 Stmt::Call { path, .. } => return Err(format!("unexpected call {path}")),
-                Stmt::Block(body) => walk_layer(body, env, namespace, out, depth + 1)?,
+                Stmt::Block(body) => walk_layer(body, env, namespace, out, steps, depth + 1)?,
                 Stmt::Skipped(kind) => return Err(format!("unsupported {kind} construct")),
             }
         }
@@ -552,19 +745,23 @@ fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
 
     let mut out = Vec::new();
     let mut env = env.clone();
-    walk_layer(body, &mut env, None, &mut out, 0)?;
+    walk_layer(body, &mut env, None, &mut out, steps, 0)?;
     Ok(out)
 }
 
+/// The namespace a `layer.namespace == "…"` guard names. Exactly that
+/// shape and no other: a guard this cannot read leaves the bindings
+/// under it unscoped, and an unscoped binding refuses the handler.
 fn namespace_from_condition(condition: &Value) -> Option<String> {
-    let text = describe(condition);
-    let at = text.find("namespace")?;
-    let rest = &text[at + "namespace".len()..];
-    let quote = rest.find(['\'', '"'])?;
-    let delimiter = rest.as_bytes()[quote] as char;
-    let value = &rest[quote + 1..];
-    let end = value.find(delimiter)?;
-    Some(value[..end].to_string())
+    let Value::Compare { op: "==", left, right } = condition else {
+        return None;
+    };
+    match (&**left, &**right) {
+        (Value::Name(name), Value::Str(namespace)) if name == "layer.namespace" => {
+            Some(namespace.clone())
+        }
+        _ => None,
+    }
 }
 
 fn collect_layer_value(
@@ -630,60 +827,205 @@ fn collect_layer_value(
 /// the one that would need a shell, and it is refused by name so that
 /// the refusal is visible in the log rather than implied by falling
 /// through to the default.
-fn truth(cond: &Value, facts: &Facts, globals: &Globals, env: &Env) -> Option<bool> {
+///
+/// `fuel` meters the answer. A name bound to a name is followed, and
+/// must be — `local gate = omarchy_default_bindings` then `if gate` is
+/// a legitimate two-hop read — but `o = o or {}` binds a name to
+/// itself, and a cycle followed without a meter never returns. Out of
+/// fuel, a condition is simply unanswerable.
+fn truth(cond: &Value, facts: &Facts, globals: &Globals, env: &Env, fuel: &mut u32) -> Option<bool> {
+    *fuel = fuel.checked_sub(1)?;
     match cond {
         Value::Bool(b) => Some(*b),
         Value::Nil => Some(false),
-        Value::Str(_) | Value::Num(_) => Some(true),
-        Value::Name(name) => {
-            // Lua truthiness: anything but `nil` and `false` is true,
-            // and an unset global is `nil`.
-            let value = env.get(name).or_else(|| globals.get(name))?;
-            truth(value, facts, globals, env)
+        Value::Str(_) | Value::Num(_) | Value::Table(_) | Value::Function(_) => Some(true),
+        // Lua truthiness: anything but `nil` and `false` is true, and
+        // an unset global is `nil` wherever that is not a guess.
+        Value::Name(name) => truth(resolve(name, globals, env)?, facts, globals, env, fuel),
+        // Kleene logic. An operand this cannot answer decides nothing,
+        // unless the other one decides the whole: `x and false` is
+        // false and `x or true` is true, whatever `x` is.
+        Value::And(left, right) => {
+            let left = truth(left, facts, globals, env, fuel);
+            if left == Some(false) {
+                return Some(false);
+            }
+            match (left, truth(right, facts, globals, env, fuel)?) {
+                (_, false) => Some(false),
+                (Some(true), true) => Some(true),
+                _ => None,
+            }
+        }
+        Value::Or(left, right) => {
+            let left = truth(left, facts, globals, env, fuel);
+            if left == Some(true) {
+                return Some(true);
+            }
+            match (left, truth(right, facts, globals, env, fuel)?) {
+                (_, true) => Some(true),
+                (Some(false), false) => Some(false),
+                _ => None,
+            }
+        }
+        Value::Not(operand) => truth(operand, facts, globals, env, fuel).map(|b| !b),
+        // Omarchy's own gate, `_G.omarchy_default_bindings ~= false`,
+        // is one of these, and `nil ~= false` is true: an untouched
+        // config, or one that sets the global back to `nil`, leaves the
+        // default bindings on.
+        Value::Compare { op, left, right } => {
+            let left = settle(left, facts, globals, env, fuel)?;
+            let right = settle(right, facts, globals, env, fuel)?;
+            compare(op, &left, &right)
         }
         Value::Call { path, args } => match (path.as_str(), args.first()) {
             ("o.cmd_present", Some(Value::Str(cmd))) => Some(facts.cmd_present(cmd)),
             ("o.cmd_missing", Some(Value::Str(cmd))) => Some(!facts.cmd_present(cmd)),
-            // `not file_exists(state/omarchy/preinstalls-removed)`,
-            // unless the user set the global — Omarchy's own
-            // definition in `helpers.lua`, reproduced.
+            // Omarchy's own definition in `helpers.lua`, reproduced:
+            // `_G.omarchy_preinstalled_bindings == true` when the global
+            // is set, and otherwise whether the preinstalls-removed
+            // marker is absent.
             ("o.preinstalled_bindings_enabled", _) => {
-                if let Some(value) = globals
-                    .get("omarchy_preinstalled_bindings")
-                    .or_else(|| globals.get("_G.omarchy_preinstalled_bindings"))
-                {
-                    return Some(matches!(value, Value::Bool(true)));
+                let global = Value::Name("_G.omarchy_preinstalled_bindings".into());
+                match settle(&global, facts, globals, env, fuel)? {
+                    Value::Nil => Some(!facts.omarchy_state()?.join("preinstalls-removed").exists()),
+                    value => Some(value == Value::Bool(true)),
                 }
-                Some(!facts.omarchy_state()?.join("preinstalls-removed").exists())
             }
             _ => None,
         },
-        // `x ~= false`, the shape Omarchy's own gate is written in, is
-        // parsed as an opaque expression carrying its source text; the
-        // two spellings it ever takes are recognised here rather than
-        // by growing the expression grammar a comparison operator that
-        // nothing else needs.
-        Value::Opaque(text) => {
-            let text = text.replace(char::is_whitespace, "");
-            let name = text
-                .strip_suffix("~=false")
-                .or_else(|| text.strip_suffix("~=nil"))?;
-            let name = name.trim_start_matches("_G.");
-            match globals.get(name).or_else(|| env.get(name)) {
-                Some(Value::Bool(false)) | Some(Value::Nil) => Some(text.ends_with("~=nil")),
-                Some(_) => Some(true),
-                // Unset is `nil`: `nil ~= false` is true, `nil ~= nil`
-                // is false. Omarchy relies on the first — an untouched
-                // config leaves the default bindings enabled.
-                None => Some(text.ends_with("~=false")),
-            }
+        // An opaque expression, or arithmetic that never resolved, is
+        // exactly what this function has no way to answer, so it says
+        // so rather than guessing a default.
+        Value::Opaque(_) | Value::Binary { .. } => None,
+    }
+}
+
+/// What a name reads as: its binding in this file or in `_G`, `nil`
+/// where Lua's unset-global rule is not a guess (see
+/// [`Globals::unset`]), or `None`. `_G.x` is the global whatever
+/// `local x` is in scope.
+fn resolve<'a>(name: &str, globals: &'a Globals, env: &'a Env) -> Option<&'a Value> {
+    match name.strip_prefix("_G.") {
+        Some(global) => globals.get(global).or_else(|| globals.unset(global)),
+        None => env
+            .get(name)
+            .or_else(|| globals.get(name))
+            .or_else(|| globals.unset(name)),
+    }
+}
+
+/// A comparison's operand as a Lua value, or `None` where only running
+/// code could say what it is.
+fn settle(value: &Value, facts: &Facts, globals: &Globals, env: &Env, fuel: &mut u32) -> Option<Value> {
+    *fuel = fuel.checked_sub(1)?;
+    match value {
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Num(_)
+        | Value::Str(_)
+        | Value::Table(_)
+        | Value::Function(_) => Some(value.clone()),
+        Value::Name(name) => settle(resolve(name, globals, env)?, facts, globals, env, fuel),
+        // Each of these is a boolean exactly when it can be answered.
+        Value::Not(_) | Value::Compare { .. } | Value::Call { .. } => {
+            truth(value, facts, globals, env, fuel).map(Value::Bool)
         }
-        Value::Table(_) | Value::Function(_) => Some(true),
-        // Arithmetic or concatenation in a condition is not something
-        // Omarchy writes. A resolved one would already be a value; an
-        // unresolved one is exactly what this function has no way to
-        // answer, so it says so rather than guessing a default.
-        Value::Binary { .. } => None,
+        // `a or b` is `a` when `a` is truthy and `b` otherwise; `and` is
+        // the reverse.
+        Value::Or(left, right) | Value::And(left, right) => {
+            let or = matches!(value, Value::Or(..));
+            let left_decides = truth(left, facts, globals, env, fuel)? == or;
+            settle(if left_decides { left } else { right }, facts, globals, env, fuel)
+        }
+        Value::Opaque(_) | Value::Binary { .. } => None,
+    }
+}
+
+/// `==`, `~=` and the orderings, as Lua 5.4 answers them, between two
+/// values that are values. Different types are unequal. Two tables or
+/// two functions are equal only if they are the same one, which a reader
+/// that runs nothing cannot tell, and ordering anything but two numbers
+/// or two strings is an error in Lua; both are unanswerable here.
+fn compare(op: &str, left: &Value, right: &Value) -> Option<bool> {
+    let kind = |value: &Value| match value {
+        Value::Nil => Some(0),
+        Value::Bool(_) => Some(1),
+        Value::Num(_) => Some(2),
+        Value::Str(_) => Some(3),
+        Value::Table(_) => Some(4),
+        Value::Function(_) => Some(5),
+        _ => None,
+    };
+    let equal = match (left, right) {
+        (Value::Nil, Value::Nil) => Some(true),
+        (Value::Bool(a), Value::Bool(b)) => Some(a == b),
+        (Value::Num(a), Value::Num(b)) => Some(a == b),
+        (Value::Str(a), Value::Str(b)) => Some(a == b),
+        _ => (kind(left)? != kind(right)?).then_some(false),
+    };
+    match (op, left, right) {
+        ("==", _, _) => equal,
+        ("~=", _, _) => equal.map(|equal| !equal),
+        ("<", Value::Num(a), Value::Num(b)) => Some(a < b),
+        ("<=", Value::Num(a), Value::Num(b)) => Some(a <= b),
+        (">", Value::Num(a), Value::Num(b)) => Some(a > b),
+        (">=", Value::Num(a), Value::Num(b)) => Some(a >= b),
+        ("<", Value::Str(a), Value::Str(b)) => Some(a < b),
+        ("<=", Value::Str(a), Value::Str(b)) => Some(a <= b),
+        (">", Value::Str(a), Value::Str(b)) => Some(a > b),
+        (">=", Value::Str(a), Value::Str(b)) => Some(a >= b),
+        _ => None,
+    }
+}
+
+/// Records, as possibly set, every global a body the walk did not enter
+/// assigns. Its `local`s are left out: one declared in such a body is
+/// out of scope past it.
+fn unwalked(body: &[Stmt], globals: &mut Globals) {
+    for stmt in body {
+        match stmt {
+            Stmt::Assign { name, value } => {
+                globals
+                    .unknown
+                    .insert(name.trim_start_matches("_G.").to_string());
+                unwalked_value(value, globals);
+            }
+            Stmt::Local { value, .. } => unwalked_value(value, globals),
+            Stmt::Call { args, .. } => args.iter().for_each(|arg| unwalked_value(arg, globals)),
+            Stmt::NumericFor { body, .. } | Stmt::GenericFor { body, .. } | Stmt::Block(body) => {
+                unwalked(body, globals)
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                unwalked(then_body, globals);
+                unwalked(else_body, globals);
+            }
+            // Its names were recorded as it was parsed.
+            Stmt::Skipped(_) => {}
+        }
+    }
+}
+
+/// The same, for the function bodies a value carries.
+fn unwalked_value(value: &Value, globals: &mut Globals) {
+    match value {
+        Value::Function(body) => unwalked(body, globals),
+        Value::Table(fields) => fields
+            .iter()
+            .for_each(|(_, value)| unwalked_value(value, globals)),
+        Value::Call { args, .. } => args.iter().for_each(|arg| unwalked_value(arg, globals)),
+        Value::Binary { left, right, .. }
+        | Value::Or(left, right)
+        | Value::And(left, right)
+        | Value::Compare { left, right, .. } => {
+            unwalked_value(left, globals);
+            unwalked_value(right, globals);
+        }
+        Value::Not(operand) => unwalked_value(operand, globals),
+        Value::Str(_) | Value::Num(_) | Value::Bool(_) | Value::Nil | Value::Name(_) | Value::Opaque(_) => {}
     }
 }
 
@@ -757,10 +1099,19 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
             Some(command) => out.push(Directive::ExecOnce { command: format!("uwsm-app -- {command}") }),
             None => out.push(Directive::Ignored { kind: "exec-once", detail: "o.launch_on_start with an unreadable command".into() }),
         },
-        "o.window" => out.push(Directive::WindowRule(window_rule(&arg(0), &arg(1)))),
-        "hl.window_rule" => out.push(Directive::WindowRule(window_rule(&Value::Nil, &arg(0)))),
+        "o.window" => out.push(match window_rule(&arg(0), &arg(1)) {
+            Ok(rule) => Directive::WindowRule(rule),
+            Err(why) => Directive::Ignored { kind: "window-rule", detail: format!("o.window refused whole: {why}") },
+        }),
+        "hl.window_rule" => out.push(match window_rule(&Value::Nil, &arg(0)) {
+            Ok(rule) => Directive::WindowRule(rule),
+            Err(why) => Directive::Ignored { kind: "window-rule", detail: format!("hl.window_rule refused whole: {why}") },
+        }),
         "hl.monitor" => match &arg(0) {
-            Value::Table(fields) => out.push(Directive::Monitor(monitor_from(fields))),
+            Value::Table(fields) => out.push(match monitor_from(fields) {
+                Ok(monitor) => Directive::Monitor(monitor),
+                Err(why) => Directive::Ignored { kind: "monitor", detail: format!("hl.monitor refused whole: {why}") },
+            }),
             other => out.push(Directive::Ignored { kind: "monitor", detail: format!("hl.monitor({})", describe(other)) }),
         },
         // Recognised, deliberately not acted on. Each is named rather
@@ -771,7 +1122,19 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
         "hl.config" => emit_config(&arg(0), out),
         "hl.gesture" => out.push(Directive::Ignored { kind: "gesture", detail: "touchpad gestures".into() }),
         "hl.on" => out.push(Directive::Ignored { kind: "event", detail: "hl.on event handlers other than the start handler's body".into() }),
-        "hl.timer" | "hl.dispatch" | "hl.get_config" | "hl.get_active_window" => {}
+        // Hyprland's animation machinery, the Lua spelling of the
+        // `bezier` and `animation` lines the conf reader names.
+        "hl.curve" | "hl.animation" => out.push(Directive::Ignored {
+            kind: "animation",
+            detail: format!("{path}(…): Hyprland's animations; this desktop draws its own"),
+        }),
+        // Calls that act while Hyprland runs rather than configure it.
+        runtime if runtime == "hl.timer" || runtime == "hl.dispatch" || runtime.starts_with("hl.get_") => {
+            out.push(Directive::Ignored {
+                kind: "lua-call",
+                detail: format!("{path}(…): a runtime call, not configuration"),
+            })
+        }
         // The file graph. Emitted as directives rather than followed
         // here, so this module does no I/O and the loader can splice
         // each file in at exactly the point its `require` sat.
@@ -800,8 +1163,18 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
         // `dofile` is Omarchy's bootstrap, whose whole job is to set
         // `package.path` — which `super::Roots` already models, so
         // there is nothing in it to read.
-        "dofile" | "package" => {}
-        _ => {}
+        "dofile" => out.push(Directive::Ignored {
+            kind: "include",
+            detail: "dofile(…): Omarchy's bootstrap sets package.path, which the module search path already models".into(),
+        }),
+        // Every other call, named, so that nothing this reader meets
+        // vanishes without a line: `disabled_input_device("touchpad")`
+        // re-applies a persisted touchpad disable under Hyprland, and a
+        // user who sees it dropped here knows why the touchpad is on.
+        _ => out.push(Directive::Ignored {
+            kind: "lua-call",
+            detail: format!("{path}(…): not a configuration call this reader reads"),
+        }),
     }
 }
 
@@ -842,10 +1215,7 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
                     for (nested_key, nested_value) in nested {
                         let Some(nested_key) = nested_key else { continue };
                         if !matches!(nested_value, Value::Table(_)) {
-                            out.push(Directive::Input {
-                                name: format!("touchpad:{nested_key}"),
-                                value: property_text(nested_value),
-                            });
+                            out.push(input_setting(format!("touchpad:{nested_key}"), nested_value));
                         }
                     }
                 } else {
@@ -855,10 +1225,7 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
                     });
                 }
             } else {
-                out.push(Directive::Input {
-                    name: key.clone(),
-                    value: property_text(value),
-                });
+                out.push(input_setting(key.clone(), value));
             }
         }
     } else if input.is_some() {
@@ -872,6 +1239,24 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
             kind: "config",
             detail: "hl.config settings outside input are not carried over".into(),
         });
+    }
+}
+
+/// One scalar `input` setting, or a named skip when its value is only
+/// known at runtime. Omarchy 4's `kb_layout = vconsole.XKBLAYOUT or
+/// "us"` is exactly that, and the text of the expression is not a
+/// layout: libxkbcommon rejects it, and the session loses every option
+/// that came with the keymap.
+fn input_setting(name: String, value: &Value) -> Directive {
+    match property_text(value) {
+        Some(value) => Directive::Input { name, value },
+        None => Directive::Ignored {
+            kind: "input",
+            detail: format!(
+                "{name} = {}: computed at runtime, not carried over",
+                describe(value)
+            ),
+        },
     }
 }
 
@@ -973,7 +1358,25 @@ fn dsp(path: &str, args: &[Value]) -> Dispatcher {
         "window.float" => verb("togglefloating", String::new()),
         "window.pin" => verb("pin", String::new()),
         "window.swap" => verb("swapwindow", text("direction")),
-        "window.resize" => verb("resizeactive", String::new()),
+        // `x` and `y` are a delta with `relative = true`, and an exact
+        // size without it: Omarchy's `omarchy-hyprland-window-pop` pairs
+        // the bare form with the classic `resizeactive exact`. Both are
+        // carried in the classic spelling so that `super::dispatch`
+        // makes the one judgement for both syntaxes, and a table this
+        // cannot read keeps the empty argument it refuses.
+        "window.resize" => {
+            let number = |name: &str| match field(name) {
+                Some(Value::Num(n)) if n.is_finite() => Some(format_number(*n)),
+                _ => None,
+            };
+            match (number("x"), number("y")) {
+                (Some(x), Some(y)) if matches!(field("relative"), Some(Value::Bool(true))) => {
+                    verb("resizeactive", format!("{x} {y}"))
+                }
+                (Some(x), Some(y)) => verb("resizeactive", format!("exact {x} {y}")),
+                _ => verb("resizeactive", String::new()),
+            }
+        }
         "window.drag" => verb("movewindow", String::new()),
         "window.cycle_next" => verb("cyclenext", String::new()),
         "window.bring_to_top" => verb("bringactivetotop", String::new()),
@@ -1024,10 +1427,17 @@ fn dsp(path: &str, args: &[Value]) -> Dispatcher {
 /// `helpers.lua`'s `o.window` folds its first argument into the rule
 /// table's `match` field — a bare string becomes `match.class` — so
 /// this reproduces that fold and then reads one shape.
-fn window_rule(match_arg: &Value, rules: &Value) -> WindowRule {
+///
+/// A matcher or property whose value is only known at runtime refuses
+/// the whole rule. A rule missing its class matcher would match every
+/// window, and one missing a property is some other rule.
+fn window_rule(match_arg: &Value, rules: &Value) -> Result<WindowRule, String> {
+    let runtime = |key: &str, value: &Value| {
+        format!("{key} = {} is computed at runtime", describe(value))
+    };
     let mut rule = WindowRule::default();
     let mut push_match = |key: &str, value: &Value| {
-        let Some(text) = as_string(value) else { return };
+        let text = as_string(value).ok_or_else(|| runtime(&format!("match {key}"), value))?;
         rule.matchers.push(match key {
             "class" => Matcher::Class(text),
             "title" => Matcher::Title(text),
@@ -1037,62 +1447,75 @@ fn window_rule(match_arg: &Value, rules: &Value) -> WindowRule {
                 value: text,
             },
         });
+        Ok::<(), String>(())
     };
     match match_arg {
-        Value::Str(class) => push_match("class", &Value::Str(class.clone())),
+        Value::Str(class) => push_match("class", &Value::Str(class.clone()))?,
         Value::Table(fields) => {
             for (key, value) in fields {
                 if let Some(key) = key {
-                    push_match(key, value);
+                    push_match(key, value)?;
                 }
             }
         }
-        _ => {}
+        // `hl.window_rule` has no match argument of its own.
+        Value::Nil => {}
+        other => return Err(runtime("match", other)),
     }
     if let Value::Table(fields) = rules {
         for (key, value) in fields {
             let Some(key) = key else { continue };
             if key == "match" {
-                if let Value::Table(inner) = value {
-                    for (key, value) in inner {
-                        if let Some(key) = key {
-                            push_match(key, value);
-                        }
+                let Value::Table(inner) = value else {
+                    return Err(runtime("match", value));
+                };
+                for (key, value) in inner {
+                    if let Some(key) = key {
+                        push_match(key, value)?;
                     }
                 }
                 continue;
             }
-            rule.props.push((key.clone(), property_text(value)));
+            let text = property_text(value).ok_or_else(|| runtime(key, value))?;
+            rule.props.push((key.clone(), text));
         }
     }
-    rule
+    Ok(rule)
 }
 
 /// A rule property's value as the conf syntax would spell it, so the
 /// two front ends hand `super::rules` the same strings: `size = { 875,
 /// 600 }` and `size 875 600` both become `"875 600"`.
-fn property_text(value: &Value) -> String {
+///
+/// `None` for anything that is not yet a value — a name, a call, an
+/// unresolved expression. Its source text is not a setting, and a
+/// plausible-looking string is worse than a refusal.
+fn property_text(value: &Value) -> Option<String> {
     match value {
-        Value::Str(text) => text.clone(),
-        Value::Num(n) => format_number(*n),
-        Value::Bool(true) => "on".into(),
-        Value::Bool(false) => "off".into(),
+        Value::Str(text) => Some(text.clone()),
+        Value::Num(n) => Some(format_number(*n)),
+        Value::Bool(true) => Some("on".into()),
+        Value::Bool(false) => Some("off".into()),
         Value::Table(items) => items
             .iter()
             .map(|(_, v)| property_text(v))
-            .collect::<Vec<_>>()
-            .join(" "),
-        other => describe(other),
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.join(" ")),
+        _ => None,
     }
 }
 
-fn monitor_from(fields: &[(Option<String>, Value)]) -> Monitor {
-    let field = |name: &str| {
-        fields
-            .iter()
-            .find(|(k, _)| k.as_deref() == Some(name))
-            .map(|(_, v)| property_text(v))
-            .unwrap_or_default()
+/// An `hl.monitor` table as a [`Monitor`]. A field that is present but
+/// only known at runtime refuses the whole line, the way the lowering
+/// already refuses a line it only half understands.
+fn monitor_from(fields: &[(Option<String>, Value)]) -> Result<Monitor, String> {
+    let text = |key: &str, value: &Value| {
+        property_text(value)
+            .ok_or_else(|| format!("{key} = {} is computed at runtime", describe(value)))
+    };
+    let field = |name: &str| match fields.iter().find(|(k, _)| k.as_deref() == Some(name)) {
+        Some((_, value)) => text(name, value),
+        None => Ok(String::new()),
     };
     let mut extra = Vec::new();
     for (key, value) in fields {
@@ -1106,15 +1529,80 @@ fn monitor_from(fields: &[(Option<String>, Value)]) -> Monitor {
             // silently refused every Lua-configured rotation as an
             // unsupported field.
             extra.push(key.clone());
-            extra.push(property_text(value));
+            extra.push(text(key, value)?);
         }
     }
-    Monitor {
-        output: field("output"),
-        mode: field("mode"),
-        position: field("position"),
-        scale: field("scale"),
+    Ok(Monitor {
+        output: field("output")?,
+        mode: field("mode")?,
+        position: field("position")?,
+        scale: field("scale")?,
         extra,
+    })
+}
+
+// ---- budgets ----------------------------------------------------------
+
+/// Counts one step of a read's walk, and answers whether the read has
+/// spent its budget of steps or of directives — saying so once, the
+/// first time. `usize::MAX` marks a read already cut off, so every
+/// enclosing loop and block stops without another line.
+fn spent(steps: &mut usize, out: &mut Vec<Directive>) -> bool {
+    if *steps == usize::MAX {
+        return true;
+    }
+    *steps += 1;
+    let detail = if *steps > MAX_STEPS {
+        format!(
+            "more than {MAX_STEPS} statements walked in one file, counting every pass of a loop; the rest is not read"
+        )
+    } else if out.len() >= MAX_DIRECTIVES {
+        format!("more than {MAX_DIRECTIVES} directives from one file; the rest is not read")
+    } else {
+        return false;
+    };
+    *steps = usize::MAX;
+    out.push(Directive::Ignored { kind: "lua", detail });
+    true
+}
+
+/// A value about to be bound to `name`, or an opaque stand-in, said
+/// so, when it is too big to keep.
+fn bind(name: &str, value: Value, out: &mut Vec<Directive>) -> Value {
+    let mut weight = 0;
+    if fits(&value, 0, &mut weight) {
+        return value;
+    }
+    out.push(Directive::Ignored {
+        kind: "lua",
+        detail: format!("{name} = …: a value too large to follow"),
+    });
+    Value::Opaque("a value too large to follow".into())
+}
+
+/// Whether `value` is within [`MAX_VALUE_WEIGHT`] and
+/// [`MAX_VALUE_DEPTH`]. Stops at the first bound crossed, so checking a
+/// value costs no more than keeping one.
+fn fits(value: &Value, depth: u32, weight: &mut usize) -> bool {
+    *weight += match value {
+        Value::Str(text) | Value::Name(text) | Value::Opaque(text) => 1 + text.len() / 64,
+        _ => 1,
+    };
+    if *weight > MAX_VALUE_WEIGHT || depth > MAX_VALUE_DEPTH {
+        return false;
+    }
+    match value {
+        Value::Table(fields) => fields.iter().all(|(_, value)| fits(value, depth + 1, weight)),
+        Value::Call { args, .. } => args.iter().all(|value| fits(value, depth + 1, weight)),
+        Value::Binary { left, right, .. }
+        | Value::Or(left, right)
+        | Value::And(left, right)
+        | Value::Compare { left, right, .. } => {
+            fits(left, depth + 1, weight) && fits(right, depth + 1, weight)
+        }
+        Value::Not(operand) => fits(operand, depth + 1, weight),
+        // A function's body is shared, not copied, by binding it.
+        _ => true,
     }
 }
 
@@ -1203,6 +1691,10 @@ fn eval(value: &Value, env: &Env) -> Value {
                 },
             }
         }
+        Value::Or(left, right) => fold("or", eval(left, env), eval(right, env)),
+        Value::And(left, right) => fold("and", eval(left, env), eval(right, env)),
+        Value::Compare { op, left, right } => fold(op, eval(left, env), eval(right, env)),
+        Value::Not(operand) => negate(eval(operand, env)),
         other => other.clone(),
     }
 }
@@ -1248,7 +1740,11 @@ fn describe(value: &Value) -> String {
         Value::Name(name) => name.clone(),
         Value::Opaque(text) => text.clone(),
         Value::Function(_) => "a function".into(),
-        Value::Binary { op, left, right } => format!("{} {op} {}", render(left), render(right)),
+        Value::Binary { .. }
+        | Value::Or(..)
+        | Value::And(..)
+        | Value::Not(_)
+        | Value::Compare { .. } => render(value),
     };
     if text.chars().count() > 80 {
         text = text.chars().take(80).collect::<String>() + "…";
@@ -1274,6 +1770,24 @@ struct Parser {
     chars: Vec<char>,
     at: usize,
     statements: usize,
+    /// Operators built by the statement being parsed. See
+    /// [`MAX_OPERATORS`].
+    operators: usize,
+    /// The bound, if any, one of the current statement's expressions
+    /// hit. Such a statement is refused whole: a condition, a chord or a
+    /// command with its tail cut off is not some other one.
+    trouble: Option<&'static str>,
+    /// The `local`s in scope, with how many declarations of each name
+    /// are live, and the order they were declared in so that a block
+    /// can end its own. Scope is what decides whether `x = …` is to a
+    /// global.
+    scope: std::collections::BTreeMap<String, usize>,
+    declared: Vec<String>,
+    /// Names something this parser skipped over could assign. See
+    /// [`Globals::unknown`].
+    hidden: std::collections::BTreeSet<String>,
+    /// Whether [`MAX_STATEMENTS`] has been reached, and said.
+    capped: bool,
 }
 
 impl Parser {
@@ -1282,6 +1796,127 @@ impl Parser {
             chars: source.chars().collect(),
             at: 0,
             statements: 0,
+            operators: 0,
+            trouble: None,
+            scope: Default::default(),
+            declared: Vec::new(),
+            hidden: Default::default(),
+            capped: false,
+        }
+    }
+
+    /// The stand-in for an expression past [`MAX_DEPTH`]. Like
+    /// [`Parser::operator`], it keeps the first bound a statement hit:
+    /// what is left after one bound often trips the other.
+    fn too_deep(&mut self) -> Value {
+        self.trouble.get_or_insert("expression nested too deeply");
+        Value::Opaque("an expression nested too deeply".into())
+    }
+
+    /// One more operator for the current statement, built by `build`
+    /// unless the statement has already built its share.
+    fn operator(&mut self, build: impl FnOnce() -> Value) -> Value {
+        self.operators += 1;
+        if self.operators > MAX_OPERATORS {
+            self.trouble.get_or_insert("expression too long");
+            return Value::Opaque("an expression too long to read".into());
+        }
+        build()
+    }
+
+    /// Declares a `local`, in scope until the block declaring it ends.
+    fn declare(&mut self, name: String) {
+        *self.scope.entry(name.clone()).or_default() += 1;
+        self.declared.push(name);
+    }
+
+    /// Ends the scope of every `local` declared since `mark`.
+    fn undeclare(&mut self, mark: usize) {
+        let mark = mark.min(self.declared.len());
+        for name in self.declared.drain(mark..) {
+            if let Some(count) = self.scope.get_mut(&name) {
+                *count -= 1;
+                if *count == 0 {
+                    self.scope.remove(&name);
+                }
+            }
+        }
+    }
+
+    /// A plain `name = value`, scoped as Lua scopes it: to the `local`
+    /// of that name when one is in scope, and to the global otherwise.
+    fn assignment(&self, name: String, value: Value) -> Stmt {
+        let in_scope = |path: &str| {
+            self.scope
+                .contains_key(path.split('.').next().unwrap_or_default())
+        };
+        if let Some(global) = name.strip_prefix("_G.") {
+            if !in_scope(global) {
+                return Stmt::Assign {
+                    name: global.to_string(),
+                    value,
+                };
+            }
+            return Stmt::Assign { name, value };
+        }
+        if in_scope(&name) {
+            Stmt::Local { name, value }
+        } else {
+            Stmt::Assign { name, value }
+        }
+    }
+
+    /// Records what a statement refused whole would have assigned, its
+    /// own `local`s included: they are in scope after it, bound to
+    /// nothing this reader read.
+    fn note_hidden(&mut self, stmt: &Stmt) {
+        let mut names = Globals::default();
+        unwalked(std::slice::from_ref(stmt), &mut names);
+        self.hidden.append(&mut names.unknown);
+        let declared = match stmt {
+            Stmt::Block(stmts) => stmts.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        for stmt in declared {
+            if let Stmt::Local { name, .. } = stmt {
+                self.hidden.insert(name.clone());
+            }
+        }
+    }
+
+    /// `a, b, c`: the names a `local`, a `for` or a parameter list
+    /// declares, with Lua 5.4's `<const>` and `<close>` attributes
+    /// passed over.
+    fn names(&mut self) -> Vec<String> {
+        let mut names = Vec::new();
+        loop {
+            let name = self.take_word();
+            if name.is_empty() {
+                return names;
+            }
+            names.push(name);
+            self.trivia();
+            if self.peek() == Some('<') {
+                while self.bump().is_some_and(|ch| ch != '>') {}
+                self.trivia();
+            }
+            if self.peek() != Some(',') {
+                return names;
+            }
+            self.at += 1;
+        }
+    }
+
+    /// `a, b, c`: the values an assignment lists.
+    fn values(&mut self) -> Vec<Value> {
+        let mut values = vec![self.expr(0)];
+        loop {
+            self.trivia();
+            if self.peek() != Some(',') {
+                return values;
+            }
+            self.at += 1;
+            values.push(self.expr(0));
         }
     }
 
@@ -1384,15 +2019,32 @@ impl Parser {
     /// `until` or end of input. The terminator is left unconsumed for
     /// the caller.
     fn block(&mut self, depth: u32) -> Vec<Stmt> {
+        // Each statement gets its own operator budget and its own
+        // record of a bound hit. A function body sits inside an
+        // expression, so the enclosing statement's are put back after.
+        let enclosing = (self.operators, self.trouble.take());
+        // And a block is a scope: the `local`s it declares end with it.
+        let mark = self.declared.len();
         let mut body = Vec::new();
         loop {
             self.trivia();
-            if self.eof() || self.statements >= MAX_STATEMENTS {
-                return body;
+            if self.eof() {
+                break;
+            }
+            if self.statements >= MAX_STATEMENTS {
+                // Said once, by the innermost block to reach it; every
+                // enclosing block stops too. The rest of the file goes
+                // unread, so any name may be set in it.
+                if !self.capped {
+                    self.capped = true;
+                    self.hidden.insert(ANY_NAME.into());
+                    body.push(Stmt::Skipped("statements past the per-file limit"));
+                }
+                break;
             }
             let word = self.peek_word();
             match word.as_str() {
-                "end" | "else" | "elseif" | "until" => return body,
+                "end" | "else" | "elseif" | "until" => break,
                 "" => {
                     // Not a word: punctuation this parser has no
                     // statement for. Consume it so progress is
@@ -1403,10 +2055,20 @@ impl Parser {
                 _ => {}
             }
             self.statements += 1;
-            if let Some(stmt) = self.statement(&word, depth) {
+            self.operators = 0;
+            let stmt = self.statement(&word, depth);
+            if let Some(why) = self.trouble.take() {
+                if let Some(stmt) = &stmt {
+                    self.note_hidden(stmt);
+                }
+                body.push(Stmt::Skipped(why));
+            } else if let Some(stmt) = stmt {
                 body.push(stmt);
             }
         }
+        self.undeclare(mark);
+        (self.operators, self.trouble) = enclosing;
+        body
     }
 
     fn statement(&mut self, word: &str, depth: u32) -> Option<Stmt> {
@@ -1417,36 +2079,42 @@ impl Parser {
         match word {
             "local" => {
                 self.take_word();
-                let name = self.take_word();
-                self.trivia();
-                // `local function f() … end`
-                if name == "function" {
+                // `local function f() … end`: `f` is in scope from here
+                // on, its own body included.
+                if self.peek_word() == "function" {
+                    self.take_word();
+                    let name = self.take_word();
+                    self.declare(name);
                     self.skip_to_end();
                     return Some(Stmt::Skipped("function"));
                 }
-                if self.peek() == Some('=') && self.peek_at(1) != Some('=') {
+                let names = self.names();
+                self.trivia();
+                let values = if self.peek() == Some('=') && self.peek_at(1) != Some('=') {
                     self.at += 1;
-                    return Some(Stmt::Assign {
-                        name,
-                        value: self.expr(0),
-                    });
-                }
-                Some(Stmt::Assign {
+                    self.values()
+                } else {
+                    Vec::new()
+                };
+                // Declared after the values are read: in `local x = x`,
+                // the `x` on the right is whichever was already in scope.
+                let stmt = assignments(names.clone(), values, |name, value| Stmt::Local {
                     name,
-                    value: Value::Nil,
-                })
+                    value,
+                });
+                for name in names {
+                    self.declare(name);
+                }
+                stmt
             }
             "for" => {
                 self.take_word();
-                let var = self.take_word();
+                let vars = self.names();
+                let var = vars.first().cloned().unwrap_or_default();
                 self.trivia();
+                // A loop's variables are in scope for its body only.
+                let mark = self.declared.len();
                 if self.peek() != Some('=') {
-                    let mut last_var = var;
-                    while self.peek() == Some(',') {
-                        self.at += 1;
-                        last_var = self.take_word();
-                        self.trivia();
-                    }
                     if self.take_word() != "in" {
                         self.skip_to_end();
                         return Some(Stmt::Skipped("generic for"));
@@ -1456,10 +2124,14 @@ impl Parser {
                         self.skip_to_end();
                         return Some(Stmt::Skipped("generic for"));
                     }
+                    for name in &vars {
+                        self.declare(name.clone());
+                    }
                     let body = self.block(depth + 1);
+                    self.undeclare(mark);
                     self.take_word();
                     return Some(Stmt::GenericFor {
-                        var: last_var,
+                        var: vars.last().cloned().unwrap_or_default(),
                         values,
                         body,
                     });
@@ -1484,7 +2156,9 @@ impl Parser {
                     self.skip_to_end();
                     return Some(Stmt::Skipped("for"));
                 }
+                self.declare(var.clone());
                 let body = self.block(depth + 1);
+                self.undeclare(mark);
                 self.take_word();
                 Some(Stmt::NumericFor {
                     var,
@@ -1497,7 +2171,15 @@ impl Parser {
             "if" => {
                 self.take_word();
                 let cond = self.expr(0);
-                self.take_word(); // `then`
+                if self.take_word() != "then" {
+                    // Something between the condition and `then` was no
+                    // part of an expression this reader knows, so the
+                    // condition is not what was read. The whole `if` is
+                    // skipped rather than the rest of the line walked as
+                    // though it were the body.
+                    self.skip_to_end();
+                    return Some(Stmt::Skipped("if with an unreadable condition"));
+                }
                 let then_body = self.block(depth + 1);
                 // The else-chain consumes everything through the single
                 // `end` that closes the whole `if`. Its own function,
@@ -1542,29 +2224,49 @@ impl Parser {
             }
             _ => {
                 // An expression statement: a call, or an assignment to
-                // a name. Both start with a name path.
+                // one or more names. Both start with a name path.
                 let path = self.take_path();
                 if path.is_empty() {
                     self.at += 1;
                     return None;
                 }
                 self.trivia();
-                if self.peek() == Some('=') && self.peek_at(1) != Some('=') {
+                let single = self.peek() == Some('=') && self.peek_at(1) != Some('=');
+                if single || self.peek() == Some(',') {
+                    let mut targets = vec![path];
+                    while self.peek() == Some(',') {
+                        self.at += 1;
+                        targets.push(self.take_path());
+                        self.trivia();
+                    }
+                    if self.peek() != Some('=') || self.peek_at(1) == Some('=') {
+                        return None;
+                    }
                     self.at += 1;
-                    let value = self.expr(0);
-                    return Some(Stmt::Assign {
-                        name: path.trim_start_matches("_G.").to_string(),
-                        value,
-                    });
+                    let values = self.values();
+                    targets.retain(|target| !target.is_empty());
+                    return assignments(targets, values, |name, value| self.assignment(name, value));
                 }
-                if self.peek() == Some('(') {
-                    let args = self.call_args();
+                match self.peek() {
                     // A call whose result is indexed or called again
                     // (`hl.bind(…):unbind()`) is still the outer call
                     // for our purposes; the tail is skipped.
-                    return Some(Stmt::Call { path, args });
+                    Some('(') => Some(Stmt::Call {
+                        path,
+                        args: self.call_args(),
+                    }),
+                    // `require "x"` and `f{…}`: Lua's parenthesis-free
+                    // call forms.
+                    Some('"') | Some('\'') => Some(Stmt::Call {
+                        path,
+                        args: vec![Value::Str(self.string())],
+                    }),
+                    Some('{') => Some(Stmt::Call {
+                        path,
+                        args: vec![self.table(depth + 1)],
+                    }),
+                    _ => None,
                 }
-                None
             }
         }
     }
@@ -1573,31 +2275,37 @@ impl Parser {
     /// keyword has been consumed.
     fn function_body(&mut self, depth: u32) -> Value {
         self.trivia();
-        // The parameter list, discarded: this reader never calls a
-        // function, so a parameter is a name that will simply be
-        // unresolvable inside the body — which is the honest result.
+        // The parameters are locals of the body, bound to what only a
+        // caller could supply. This reader never calls a function, so in
+        // the one body it walks a parameter must not read as an unset
+        // global's `nil`.
+        let mut params = Vec::new();
         if self.peek() == Some('(') {
-            let mut open = 0;
-            while let Some(ch) = self.bump() {
-                match ch {
-                    '(' => open += 1,
-                    ')' => {
-                        open -= 1;
-                        if open == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            self.at += 1;
+            params = self.names();
+            // Whatever is left of the list, `...` included.
+            while self.bump().is_some_and(|ch| ch != ')') {}
         }
         if depth > MAX_DEPTH {
             self.skip_to_end();
-            return Value::Function(Vec::new());
+            self.too_deep();
+            return Value::Function(Default::default());
         }
-        let body = self.block(depth + 1);
+        let mark = self.declared.len();
+        let mut body: Vec<Stmt> = params
+            .iter()
+            .map(|name| Stmt::Local {
+                name: name.clone(),
+                value: Value::Opaque(PARAMETER.into()),
+            })
+            .collect();
+        for name in params {
+            self.declare(name);
+        }
+        body.extend(self.block(depth + 1));
+        self.undeclare(mark);
         self.take_word();
-        Value::Function(body)
+        Value::Function(body.into())
     }
 
     /// The tail of an `if`: `elseif …`, `else …`, or nothing — in every
@@ -1617,7 +2325,11 @@ impl Parser {
             "elseif" => {
                 self.take_word();
                 let cond = self.expr(0);
-                self.take_word(); // `then`
+                if self.take_word() != "then" {
+                    // As for `if`. The skip takes the chain's one `end`.
+                    self.skip_to_end();
+                    return vec![Stmt::Skipped("if with an unreadable condition")];
+                }
                 let then_body = self.block(depth + 1);
                 let else_body = self.else_chain(depth + 1);
                 vec![Stmt::If {
@@ -1643,37 +2355,81 @@ impl Parser {
     /// Consumes tokens until the `end` that closes the construct just
     /// opened, tracking nesting so an inner `if`/`for`/`function` does
     /// not close the outer one. Strings and comments are skipped whole,
-    /// so an `end` inside a string literal cannot unbalance it.
+    /// so an `end` inside a string literal cannot unbalance it, and a
+    /// `repeat` closes at its `until`.
+    ///
+    /// On the way it records in [`Parser::hidden`] every name the
+    /// skipped text could assign: the `a` of `a =` and of `a, b =` that
+    /// no `local` or `for` introduces, and the `a` of `_G.a =`. It reads
+    /// tokens rather than parsing, so where it errs it records a name
+    /// too many, which costs an answer and never gives a wrong one.
     fn skip_to_end(&mut self) {
+        const KEYWORDS: &[&str] = &[
+            "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto",
+            "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until",
+            "while",
+        ];
         let mut depth = 1i32;
+        // The current `a, b` run of names; whether a `local` or `for`
+        // introduced it (or is about to); whether the last token was a
+        // comma; and, after a `.`, whether the path so far is `_G`.
+        let mut run: Vec<String> = Vec::new();
+        let mut declared = false;
+        let mut introducing = false;
+        let mut comma = false;
+        let mut field: Option<bool> = None;
         while !self.eof() {
             self.trivia();
-            match self.peek() {
-                None => return,
-                Some('"') | Some('\'') => {
+            match (self.peek(), self.peek_at(1)) {
+                (None, _) => return,
+                (Some('"' | '\''), _) => {
                     let _ = self.string();
+                    run.clear();
+                    continue;
+                }
+                (Some('['), Some('[')) => {
+                    let _ = self.long_string();
+                    run.clear();
                     continue;
                 }
                 _ => {}
             }
             let word = self.peek_word();
             if word.is_empty() {
-                self.at += 1;
+                let before = self.at.checked_sub(1).and_then(|at| self.chars.get(at)).copied();
+                match self.bump() {
+                    Some(',') => {
+                        comma = true;
+                        continue;
+                    }
+                    // `a.b`: `b` is a field of `a`, unless `a` is `_G`.
+                    // Two dots are concatenation.
+                    Some('.') if self.peek() != Some('.') && before != Some('.') => {
+                        field = Some(run.pop().as_deref() == Some("_G"));
+                        continue;
+                    }
+                    Some('=')
+                        if !declared
+                            && self.peek() != Some('=')
+                            && !matches!(before, Some('=' | '~' | '<' | '>')) =>
+                    {
+                        self.hidden.extend(run.drain(..));
+                    }
+                    _ => {}
+                }
+                run.clear();
+                (declared, introducing, comma, field) = (false, false, false, None);
                 continue;
             }
             self.at += word.chars().count();
             match word.as_str() {
-                "function" | "if" | "for" | "while" | "do" => {
-                    // `do` closes nothing of its own when it opens a
-                    // `for`/`while` body, which has already been
-                    // counted; counting it again would swallow the
-                    // enclosing `end`. Only a *bare* `do` opens a
-                    // block, and Omarchy writes none.
-                    if word != "do" {
-                        depth += 1;
-                    }
-                }
-                "end" => {
+                // `do` closes nothing of its own when it opens a
+                // `for`/`while` body, which has already been counted;
+                // counting it again would swallow the enclosing `end`.
+                // Only a *bare* `do` opens a block, and Omarchy writes
+                // none.
+                "function" | "if" | "for" | "while" | "repeat" => depth += 1,
+                "end" | "until" => {
                     depth -= 1;
                     if depth <= 0 {
                         return;
@@ -1681,55 +2437,130 @@ impl Parser {
                 }
                 _ => {}
             }
+            let name = !KEYWORDS.contains(&word.as_str())
+                && !word.starts_with(|c: char| c.is_ascii_digit());
+            match field.take() {
+                // `_G.a`
+                Some(true) if name => run.push(word),
+                // `a.b`: a field, not a name
+                Some(_) => {}
+                None if name && comma => run.push(word),
+                None if name => {
+                    run = vec![word];
+                    declared = introducing;
+                }
+                None => {
+                    run.clear();
+                    declared = false;
+                    introducing = matches!(word.as_str(), "local" | "for");
+                    comma = false;
+                    continue;
+                }
+            }
+            introducing = false;
+            comma = false;
         }
     }
 
-    /// An expression, with `..`, `+` and `-` at one precedence level —
-    /// enough for the arithmetic-then-concatenation shapes Omarchy
-    /// writes, and left-associative like Lua's.
+    /// An expression, at Lua's precedence: `or` binds loosest, then
+    /// `and`, the comparisons, `..`, `+ -`, `* / // %`, the unary
+    /// operators, and `^` tightest. Each binary level is a loop rather
+    /// than a recursion, so a long chain costs iterations, not stack.
     fn expr(&mut self, depth: u32) -> Value {
         if depth > MAX_DEPTH {
-            return Value::Opaque("…".into());
+            return self.too_deep();
         }
-        let mut left = self.primary(depth);
-        loop {
-            let save = self.at;
-            self.trivia();
-            let op = match (self.peek(), self.peek_at(1)) {
-                (Some('.'), Some('.')) => {
-                    self.at += 2;
-                    ".."
-                }
-                (Some('+'), _) => {
-                    self.at += 1;
-                    "+"
-                }
-                // A `-` only continues an expression when what follows
-                // is not a comment; `trivia` has already eaten
-                // comments, so a bare `-` here is arithmetic.
-                (Some('-'), Some(c)) if c != '-' => {
-                    self.at += 1;
-                    "-"
-                }
-                // Any comparison operator: this parser has no boolean
-                // algebra, so the whole expression is carried as source
-                // text for `truth` to recognise the two shapes Omarchy
-                // writes.
-                (Some('~'), Some('=')) | (Some('='), Some('=')) => {
-                    let start = save;
-                    self.at += 2;
-                    let _ = self.primary(depth + 1);
-                    let text: String = self.chars[start..self.at].iter().collect();
-                    return Value::Opaque(format!("{}{}", render(&left), text));
-                }
-                _ => {
-                    self.at = save;
-                    return left;
-                }
+        self.binary(0, depth)
+    }
+
+    /// One level of [`PRECEDENCE`], folded from the left. `..` is
+    /// right-associative in Lua, and folding it from the left makes the
+    /// same string.
+    fn binary(&mut self, level: usize, depth: u32) -> Value {
+        let Some(operators) = PRECEDENCE.get(level) else {
+            return self.unary(depth);
+        };
+        let mut left = self.binary(level + 1, depth);
+        while let Some(op) = self.binary_operator(operators) {
+            let right = self.binary(level + 1, depth);
+            left = self.operator(|| fold(op, left, right));
+        }
+        left
+    }
+
+    /// The operator at the cursor, consumed, when it is one of
+    /// `operators`. `trivia` has already eaten comments, so a `-` here
+    /// is arithmetic.
+    fn binary_operator(&mut self, operators: &[&'static str]) -> Option<&'static str> {
+        let save = self.at;
+        self.trivia();
+        for &op in operators {
+            let found = if op.starts_with(char::is_alphabetic) {
+                self.peek_word() == op
+            } else {
+                op.chars()
+                    .enumerate()
+                    .all(|(i, ch)| self.peek_at(i) == Some(ch))
+                    // `...` is a value, not `..` and a stray dot.
+                    && !(op == ".." && self.peek_at(2) == Some('.'))
             };
-            let right = self.primary(depth + 1);
-            left = fold(op, left, right);
+            if found {
+                self.at += op.len();
+                return Some(op);
+            }
         }
+        self.at = save;
+        None
+    }
+
+    /// `not`, `-` and `#`, then [`Parser::power`].
+    fn unary(&mut self, depth: u32) -> Value {
+        self.trivia();
+        let op = if self.peek_word() == "not" {
+            "not"
+        } else {
+            match self.peek() {
+                Some('-') => "-",
+                Some('#') => "#",
+                _ => return self.power(depth),
+            }
+        };
+        self.at += op.len();
+        // Unary operators recurse without passing through `expr`, so
+        // they check the depth themselves, after consuming the operator
+        // so that progress is still guaranteed.
+        if depth > MAX_DEPTH {
+            return self.too_deep();
+        }
+        match (op, self.unary(depth + 1)) {
+            // A negative literal is a number, not an operator.
+            ("-", Value::Num(n)) => Value::Num(-n),
+            (op, operand) => self.operator(|| match op {
+                "not" => negate(operand),
+                "-" => fold("-", Value::Num(0.0), operand),
+                _ => Value::Opaque(format!("#{}", render(&operand))),
+            }),
+        }
+    }
+
+    /// A primary expression, raised to a power if one follows. `^` is
+    /// right-associative and binds tighter than a unary operator on its
+    /// left but not one on its right: `-x^2` is `-(x^2)`, and `2^-1`
+    /// is `2^(-1)`.
+    fn power(&mut self, depth: u32) -> Value {
+        let base = self.primary(depth);
+        let save = self.at;
+        self.trivia();
+        if self.peek() != Some('^') {
+            self.at = save;
+            return base;
+        }
+        self.at += 1;
+        if depth > MAX_DEPTH {
+            return self.too_deep();
+        }
+        let exponent = self.unary(depth + 1);
+        self.operator(|| fold("^", base, exponent))
     }
 
     fn primary(&mut self, depth: u32) -> Value {
@@ -1748,13 +2579,6 @@ impl Parser {
                 }
                 inner
             }
-            Some('-') => {
-                self.at += 1;
-                match self.primary(depth + 1) {
-                    Value::Num(n) => Value::Num(-n),
-                    other => Value::Opaque(render(&other)),
-                }
-            }
             Some(ch) if ch.is_ascii_digit() => self.number(),
             Some(ch) if ch.is_alphabetic() || ch == '_' => {
                 let path = self.take_path();
@@ -1763,10 +2587,6 @@ impl Parser {
                     "false" => return Value::Bool(false),
                     "nil" => return Value::Nil,
                     "function" => return self.function_body(depth),
-                    "not" => {
-                        let _ = self.primary(depth + 1);
-                        return Value::Opaque("not …".into());
-                    }
                     "" => {
                         self.at += 1;
                         return Value::Nil;
@@ -1859,6 +2679,7 @@ impl Parser {
                     _ => {}
                 }
             }
+            self.too_deep();
             return Value::Table(fields);
         }
         loop {
@@ -1983,8 +2804,14 @@ impl Parser {
     }
 }
 
-/// `a .. b`, `a + b`, `a - b` on the values this reader can resolve.
+/// An operator applied to the values this reader can resolve, and kept,
+/// unevaluated, over the ones it cannot resolve yet.
 fn fold(op: &'static str, left: Value, right: Value) -> Value {
+    let keep = |left: Value, right: Value| Value::Binary {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    };
     match op {
         ".." => match (as_string(&left), as_string(&right)) {
             (Some(a), Some(b)) => Value::Str(format!("{a}{b}")),
@@ -1994,21 +2821,38 @@ fn fold(op: &'static str, left: Value, right: Value) -> Value {
             // concatenation still unresolved when a binding asks for it
             // is refused there, whole: half a key spec is not a key
             // spec.
-            _ => Value::Binary {
+            _ => keep(left, right),
+        },
+        "+" | "-" | "*" | "/" | "//" | "%" | "^" => match (as_number(&left), as_number(&right)) {
+            (Some(a), Some(b)) => Value::Num(match op {
+                "+" => a + b,
+                "-" => a - b,
+                "*" => a * b,
+                "/" => a / b,
+                "//" => (a / b).floor(),
+                "%" => a - (a / b).floor() * b,
+                _ => a.powf(b),
+            }),
+            _ => keep(left, right),
+        },
+        "or" => match plain_truth(&left) {
+            Some(true) => left,
+            Some(false) => right,
+            None => Value::Or(Box::new(left), Box::new(right)),
+        },
+        "and" => match plain_truth(&left) {
+            Some(true) => right,
+            Some(false) => left,
+            None => Value::And(Box::new(left), Box::new(right)),
+        },
+        _ => match compare(op, &left, &right) {
+            Some(answer) => Value::Bool(answer),
+            None => Value::Compare {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
             },
         },
-        "+" | "-" => match (as_number(&left), as_number(&right)) {
-            (Some(a), Some(b)) => Value::Num(if op == "+" { a + b } else { a - b }),
-            _ => Value::Binary {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        },
-        _ => Value::Opaque(render(&left)),
     }
 }
 
@@ -2020,8 +2864,56 @@ fn as_number(value: &Value) -> Option<f64> {
     }
 }
 
-/// A value rendered back to something resembling its source, for the
-/// opaque-expression text `truth` matches on and for log lines.
+/// Lua truthiness, for a value that is already a value.
+fn plain_truth(value: &Value) -> Option<bool> {
+    match value {
+        Value::Nil => Some(false),
+        Value::Bool(b) => Some(*b),
+        Value::Str(_) | Value::Num(_) | Value::Table(_) | Value::Function(_) => Some(true),
+        _ => None,
+    }
+}
+
+/// `not value`.
+fn negate(value: Value) -> Value {
+    match plain_truth(&value) {
+        Some(truthy) => Value::Bool(!truthy),
+        None => Value::Not(Box::new(value)),
+    }
+}
+
+/// `a, b = x, y` as one statement per name, each made by `make`. A name
+/// past the last value is `nil`, unless that value is a call, whose
+/// further results only running it would give.
+fn assignments(
+    names: Vec<String>,
+    values: Vec<Value>,
+    make: impl Fn(String, Value) -> Stmt,
+) -> Option<Stmt> {
+    let spread = matches!(values.last(), Some(Value::Call { .. }));
+    let mut values = values.into_iter();
+    let mut stmts: Vec<Stmt> = names
+        .into_iter()
+        .map(|name| {
+            let value = values.next().unwrap_or_else(|| {
+                if spread {
+                    Value::Opaque("a further result of a call".into())
+                } else {
+                    Value::Nil
+                }
+            });
+            make(name, value)
+        })
+        .collect();
+    if stmts.len() > 1 {
+        Some(Stmt::Block(stmts))
+    } else {
+        stmts.pop()
+    }
+}
+
+/// A value rendered back to something resembling its source, for log
+/// lines.
 fn render(value: &Value) -> String {
     match value {
         Value::Name(name) => name.clone(),
@@ -2033,6 +2925,11 @@ fn render(value: &Value) -> String {
         Value::Call { path, .. } => format!("{path}(…)"),
         Value::Table(_) => "{…}".into(),
         Value::Function(_) => "function".into(),
-        Value::Binary { op, left, right } => format!("{} {op} {}", render(left), render(right)),
+        Value::Binary { op, left, right } | Value::Compare { op, left, right } => {
+            format!("{} {op} {}", render(left), render(right))
+        }
+        Value::Or(left, right) => format!("{} or {}", render(left), render(right)),
+        Value::And(left, right) => format!("{} and {}", render(left), render(right)),
+        Value::Not(operand) => format!("not {}", render(operand)),
     }
 }

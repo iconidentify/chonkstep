@@ -103,13 +103,15 @@ struct Rule {
     /// Logical pixels, as Omarchy writes them. Scaled at the point of
     /// use, exactly as the hardcoded 875×600 always was.
     size: Option<Size>,
-    idle_inhibit: Option<bool>,
+    idle_inhibit: Option<wm_core::IdleInhibitRule>,
     pin: Option<bool>,
     no_focus: Option<bool>,
     no_initial_focus: Option<bool>,
     focus_on_activate: Option<bool>,
     fullscreen: Option<bool>,
     maximize: Option<bool>,
+    /// The touchpad scroll factor over this window.
+    scroll_touchpad: Option<f64>,
 }
 
 impl Rule {
@@ -175,8 +177,18 @@ impl FloatRules {
                 if rule.center == Some(true) {
                     what.push("centered".to_string());
                 }
+                match rule.idle_inhibit {
+                    Some(wm_core::IdleInhibitRule::Always) => what.push("idle inhibited".to_string()),
+                    Some(wm_core::IdleInhibitRule::Focus) => what.push("idle inhibited while focused".to_string()),
+                    Some(wm_core::IdleInhibitRule::Fullscreen) => {
+                        what.push("idle inhibited while fullscreen".to_string())
+                    }
+                    Some(wm_core::IdleInhibitRule::None) | None => {}
+                }
+                if let Some(factor) = rule.scroll_touchpad {
+                    what.push(format!("touchpad scroll x{factor}"));
+                }
                 for (enabled, label) in [
-                    (rule.idle_inhibit, "idle inhibited"),
                     (rule.pin, "pinned"),
                     (rule.no_focus, "never focused"),
                     (rule.no_initial_focus, "no initial focus"),
@@ -248,6 +260,9 @@ impl FloatPolicy for FloatRules {
             }
             if let Some(value) = rule.idle_inhibit {
                 decision.idle_inhibit = value;
+            }
+            if let Some(factor) = rule.scroll_touchpad {
+                decision.touchpad_scroll_factor = Some(factor);
             }
             if let Some(value) = rule.pin {
                 decision.pin = value;
@@ -417,10 +432,16 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                     }
                 }
             }
-            "idle_inhibit" | "idleinhibit" => {
-                spec.idle_inhibit = Some(truthy(value));
-                any = true;
-            }
+            "idle_inhibit" | "idleinhibit" => match idle_inhibit_mode(value) {
+                Some(mode) => {
+                    spec.idle_inhibit = Some(mode);
+                    any = true;
+                }
+                None => notes.push(format!(
+                    "window rule idle_inhibit {value:?} on {} is not one of none, always, focus or fullscreen: property skipped",
+                    describe_matchers(rule)
+                )),
+            },
             "pin" | "pinned" => {
                 spec.pin = Some(truthy(value));
                 any = true;
@@ -445,6 +466,16 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                 spec.maximize = Some(truthy(value));
                 any = true;
             }
+            "scroll_touchpad" | "scrolltouchpad" => match value.trim().parse::<f64>() {
+                Ok(factor) if factor.is_finite() && (0.01..=10.0).contains(&factor) => {
+                    spec.scroll_touchpad = Some(factor);
+                    any = true;
+                }
+                _ => notes.push(format!(
+                    "window rule scroll_touchpad {value:?} on {} must be a number from 0.01 to 10: property skipped",
+                    describe_matchers(rule)
+                )),
+            },
             // `tag +name` is consumed by compile's first pass. A tag
             // matcher likewise participates in expansion, so neither
             // is a silently dropped property.
@@ -464,13 +495,14 @@ struct Spec {
     center: Option<bool>,
     size: Option<Size>,
     unreadable_size: Option<String>,
-    idle_inhibit: Option<bool>,
+    idle_inhibit: Option<wm_core::IdleInhibitRule>,
     pin: Option<bool>,
     no_focus: Option<bool>,
     no_initial_focus: Option<bool>,
     focus_on_activate: Option<bool>,
     fullscreen: Option<bool>,
     maximize: Option<bool>,
+    scroll_touchpad: Option<f64>,
 }
 
 fn push(
@@ -522,6 +554,7 @@ fn push(
         focus_on_activate: spec.focus_on_activate,
         fullscreen: spec.fullscreen,
         maximize: spec.maximize,
+        scroll_touchpad: spec.scroll_touchpad,
     });
 }
 
@@ -559,6 +592,19 @@ fn split_matchers(matchers: &[Matcher]) -> (Option<String>, Option<String>, Opti
         }
     }
     (class, title, None)
+}
+
+/// The `idle_inhibit` modes. The boolean spellings stay accepted, but
+/// only as themselves: `fullscreen` is a condition, not a truthy word.
+fn idle_inhibit_mode(value: &str) -> Option<wm_core::IdleInhibitRule> {
+    use wm_core::IdleInhibitRule;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "always" | "on" | "true" | "1" | "yes" => Some(IdleInhibitRule::Always),
+        "focus" => Some(IdleInhibitRule::Focus),
+        "fullscreen" => Some(IdleInhibitRule::Fullscreen),
+        "none" | "off" | "false" | "0" | "no" => Some(IdleInhibitRule::None),
+        _ => None,
+    }
 }
 
 /// Hyprland's spelling of a boolean rule property.

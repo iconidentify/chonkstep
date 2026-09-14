@@ -953,6 +953,54 @@ fn silently_moves_a_real_window_without_following_it() {
     .expect("silent move must send B, remain on workspace 1, and focus A");
 }
 
+/// Omarchy's launch-or-focus chords and notification clicks activate a
+/// window by address. When that window lives on another workspace the
+/// desktop must go there: focusing it in place would send the user's next
+/// keystrokes into a window nobody can see.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn activating_a_window_on_another_workspace_shows_it() {
+    let mut session = boot("hypr-ipc-activate-hidden");
+    let dir = socket_dir(&session);
+    let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
+    let program = probe.display().to_string();
+    session.launch(&program, &["ActivateA"]).expect("first probe launches");
+    session.wait_for_window("ActivateA").expect("first probe maps");
+    session.launch(&program, &["ActivateB"]).expect("second probe launches");
+    session.wait_for_window("ActivateB").expect("second probe maps and takes focus");
+
+    assert_eq!(request(&dir, "/dispatch movetoworkspacesilent 2").trim(), "ok");
+    let address = poll_until(EVENT, "B to be parked on workspace 2", || {
+        let clients = json(&dir, "j/clients");
+        let parked = clients.as_array()?.iter().find(|client| client["title"] == "ActivateB")?;
+        if parked["workspace"]["id"] != serde_json::json!(2)
+            || json(&dir, "j/activeworkspace")["id"] != serde_json::json!(1)
+        {
+            return None;
+        }
+        parked["address"].as_str().map(str::to_string)
+    })
+    .expect("the silent move parks B and stays on workspace 1");
+
+    for (spelling, activation) in [
+        ("classic", format!("/dispatch focuswindow address:{address}")),
+        ("lua", format!(r#"dispatch hl.dsp.focus({{ window = "address:{address}" }})"#)),
+    ] {
+        assert_eq!(request(&dir, "/dispatch workspace 1").trim(), "ok");
+        poll_until(EVENT, "the desktop to be back on workspace 1", || {
+            (json(&dir, "j/activeworkspace")["id"] == serde_json::json!(1)).then_some(())
+        })
+        .unwrap();
+        assert_eq!(request(&dir, &activation).trim(), "ok", "{spelling}");
+        poll_until(EVENT, "activation to bring B's workspace on screen with B focused", || {
+            (json(&dir, "j/activeworkspace")["id"] == serde_json::json!(2)
+                && json(&dir, "j/activewindow")["title"] == "ActivateB")
+                .then_some(())
+        })
+        .unwrap_or_else(|error| panic!("{spelling} activation: {error}"));
+    }
+}
+
 /// A mutation arriving through chonkstep's native bar protocol must
 /// invalidate the Hyprland event baseline too. Omarchy can have both
 /// clients connected at once; treating only Hyprland requests as dirty
