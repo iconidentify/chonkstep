@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chonk_hyprland_ipc::{MAX_EVENT_CLIENTS, MAX_REQUEST_CLIENTS};
-use chonk_testkit::{HyprlandSources, poll_until, profile_binary, Session, SessionOptions};
+use chonk_testkit::{keys, HyprlandSources, poll_until, profile_binary, Session, SessionOptions};
 
 const EVENT: Duration = Duration::from_secs(10);
 
@@ -422,6 +422,82 @@ fn screensaver_cursor_visibility_is_live_and_owned() {
         hidden.path.display(),
         after_owner_death.path.display()
     );
+}
+
+/// Omarchy's look turns on `cursor:hide_on_key_press`: typing into a window
+/// gets the pointer out of the way until it next moves, and a touch does the
+/// same with `hide_on_touch`. The compositor's own hide must not disturb the
+/// screensaver's owned `invisible` flag in either direction.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn typing_and_touch_hide_the_pointer_until_it_moves() {
+    let mut options = SessionOptions {
+        config_extra: concat!(
+            "[cursor]\nhide_on_key_press = true\nhide_on_touch = true\n\n",
+            "[commands]\nnoop = [\"true\"]\n\n",
+            "[keybindings]\n\"super+x\" = \"run noop\"\n",
+        )
+        .into(),
+        ..SessionOptions::default()
+    };
+    options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+    let mut session = Session::boot("hypr-ipc-cursor-auto-hide", options).expect("nested session");
+    let dir = socket_dir(&session);
+    session
+        .launch("zenity", &["--question", "--title", "typing-target", "--text", "type here"])
+        .expect("launch a focused window to type into");
+    session.wait_for_window("typing-target").expect("the typing target maps");
+
+    let (x, y) = (48_u32, 48_u32);
+    // Motion away and back, so the comparison is at the same position.
+    let wiggle = |session: &mut Session| {
+        session.door().motion(f64::from(x + 6), f64::from(y)).unwrap();
+        session.door().motion(f64::from(x), f64::from(y)).unwrap();
+        session.door().barrier().unwrap();
+    };
+    wiggle(&mut session);
+    let visible = session.screenshot_with_cursor("auto-hide-visible").unwrap();
+    let shown = |session: &mut Session, name: &str| {
+        session.door().barrier().unwrap();
+        let shot = session.screenshot_with_cursor(name).unwrap();
+        changed_cursor_pixels(&visible, &shot, x, y) <= 4
+    };
+    let hidden = |session: &mut Session, name: &str| {
+        session.door().barrier().unwrap();
+        let shot = session.screenshot_with_cursor(name).unwrap();
+        changed_cursor_pixels(&visible, &shot, x, y) > 16
+    };
+
+    session.door().tap_key(keys::LEFTSHIFT).unwrap();
+    assert!(shown(&mut session, "auto-hide-after-modifier"), "a bare modifier must not hide the pointer");
+
+    session.door().key(keys::LEFTMETA, true).unwrap();
+    session.door().tap_key(keys::X).unwrap();
+    session.door().key(keys::LEFTMETA, false).unwrap();
+    assert!(shown(&mut session, "auto-hide-after-binding"), "a key consumed by a binding is not typing");
+
+    session.door().tap_key(keys::X).unwrap();
+    assert!(hidden(&mut session, "auto-hide-after-typing"), "a key delivered to the window hides the pointer");
+    assert_eq!(request(&dir, "/keyword cursor:invisible false").trim(), "ok");
+    assert!(hidden(&mut session, "auto-hide-survives-visible-keyword"), "the screensaver flag cannot reveal a typing hide");
+    wiggle(&mut session);
+    assert!(shown(&mut session, "auto-hide-after-motion"), "the next motion shows the pointer again");
+
+    assert_eq!(request(&dir, "/keyword cursor:invisible true").trim(), "ok");
+    session.door().tap_key(keys::X).unwrap();
+    wiggle(&mut session);
+    assert!(hidden(&mut session, "invisible-survives-typing-and-motion"), "motion cannot reveal a screensaver hide");
+    assert_eq!(request(&dir, "/keyword cursor:invisible false").trim(), "ok");
+    assert!(shown(&mut session, "invisible-released"));
+
+    // On the dialog's label, which a tap leaves alone; its buttons would close it.
+    session.door().touch_down(0, 220.0, 110.0).unwrap();
+    session.door().touch_frame().unwrap();
+    session.door().touch_up(0).unwrap();
+    session.door().touch_frame().unwrap();
+    assert!(hidden(&mut session, "auto-hide-after-touch"), "a touch hides the pointer");
+    wiggle(&mut session);
+    assert!(shown(&mut session, "auto-hide-after-touch-then-motion"));
 }
 
 /// The mapping protocol has two requests, and both are a join: whether

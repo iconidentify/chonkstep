@@ -845,6 +845,10 @@ pub struct WaylandBackend {
     /// cannot strand the rest of the session without a pointer.
     pub(crate) cursor_hidden: bool,
     pub(crate) cursor_hidden_owner: Option<WlSurface>,
+    /// The compositor's own reason to hide the pointer (typing, touch or
+    /// idleness), kept apart from the IPC flag above; see
+    /// [`crate::input::cursor_visibility`].
+    pub(crate) cursor_visibility: crate::input::cursor_visibility::CursorVisibility,
     /// Selected graphics stack and hardware identity for live system
     /// information (`nested-winit` or the KMS/driver/render-node set).
     pub(crate) graphics_diagnostics: String,
@@ -1099,6 +1103,7 @@ impl WaylandBackend {
             last_damage_source: None,
             cursor_hidden: false,
             cursor_hidden_owner: None,
+            cursor_visibility: Default::default(),
             graphics_diagnostics: "backend=uninitialized".to_string(),
             gpu_timings: Default::default(),
             native_frame_stats: Vec::new(),
@@ -2626,10 +2631,16 @@ impl Compositor {
         crate::gesture_scene::tick(self);
         crate::layout_scene::tick(self);
         self.apply_pending_keyboard();
+        if self.wm.backend_mut().cursor_visibility.tick(dispatch_started) {
+            self.wm.backend_mut().mark_damaged();
+        }
         if let Some(config) = self.wm.backend_mut().pending_pointer.take() {
             let backend = self.wm.backend_mut();
             backend.pointer_scroll_factor = config.pointer.scroll_factor.unwrap_or(1.0);
             backend.touchpad_scroll_factor = config.touchpad.scroll_factor.unwrap_or(1.0);
+            if backend.cursor_visibility.configure(&config.cursor, dispatch_started) {
+                backend.mark_damaged();
+            }
             crate::session::apply_pointer_config(&mut self.graphics, &config, self.touchpad_pointer_captured);
         }
         tracing::debug_span!("dispatch_phase", phase = "connector_hotplug")
@@ -4393,6 +4404,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::session::next_hotplug_deadline(&comp.graphics) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = comp.wm.backend().cursor_visibility.deadline() {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(pacing) = comp.next_surface_pacing_in() {

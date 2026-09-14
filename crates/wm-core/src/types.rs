@@ -397,6 +397,20 @@ pub struct KeyboardConfig {
     pub repeat_delay: Option<i32>,
 }
 
+/// When the compositor hides the pointer on its own: while the user types
+/// or touches, or after a stretch without pointer input. `None` everywhere
+/// means never; the IPC-owned `invisible` flag is a separate matter.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CursorBehaviour {
+    /// `cursor:hide_on_key_press`: a key press delivered to a client hides
+    /// the pointer until it next moves.
+    pub hide_on_key_press: Option<bool>,
+    /// `cursor:hide_on_touch`: a touch hides the pointer until it next moves.
+    pub hide_on_touch: Option<bool>,
+    /// `cursor:inactive_timeout`, in seconds; zero or unset never hides.
+    pub inactive_timeout: Option<f64>,
+}
+
 /// Scroll settings for one class of pointing device.
 ///
 /// Mice and touchpads are configured apart because a setting written for
@@ -419,6 +433,8 @@ pub struct PointerConfig {
     pub pointer: ScrollClass,
     /// `input:touchpad:*` and `[input.touchpad]`.
     pub touchpad: ScrollClass,
+    /// `cursor { }` and `[cursor]`.
+    pub cursor: CursorBehaviour,
     pub tap_to_click: Option<bool>,
     /// Typing suppression outside application pointer capture; None restores
     /// each device's libinput default. Active locks/confinement suspend it.

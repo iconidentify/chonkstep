@@ -1348,6 +1348,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 natural_scroll: next.input.touchpad_natural_scroll,
                 scroll_factor: next.input.touchpad_scroll_factor,
             },
+            cursor: next.input.cursor.clone(),
             tap_to_click: next.input.tap_to_click,
             disable_while_typing: next.input.disable_while_typing,
             clickfinger_behavior: next.input.clickfinger_behavior,

@@ -1691,7 +1691,9 @@ pub(crate) fn push_cursor_elements(
 ) {
     let capture_cursor = crate::capture_tool::owns_cursor(backend,
         Point::new(location.x.floor() as i32, location.y.floor() as i32));
-    if backend.cursor_hidden && !capture_cursor {
+    // Either reason hides it: the IPC-owned flag, or the compositor's own
+    // typing, touch and idle policy (`input::cursor_visibility`).
+    if (backend.cursor_hidden || backend.cursor_visibility.hidden()) && !capture_cursor {
         return;
     }
     // The pointer has one position in global space. Build it in each

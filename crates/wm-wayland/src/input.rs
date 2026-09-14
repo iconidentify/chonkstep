@@ -58,6 +58,7 @@
 //! it.
 
 pub(crate) mod constraints;
+pub(crate) mod cursor_visibility;
 pub(crate) mod gestures;
 pub(crate) mod keyboard;
 mod seat;
@@ -968,6 +969,12 @@ fn on_touch_down<I: InputBackend>(state: &mut Compositor, event: I::TouchDownEve
         focus,
         &TouchDown { slot, location: position, serial, time: event.time_msec() },
     );
+    let backend = state.wm.backend_mut();
+    if backend.pointer_config.cursor.hide_on_touch == Some(true)
+        && backend.cursor_visibility.hide(cursor_visibility::AutoHide::Touch)
+    {
+        backend.mark_damaged();
+    }
 
     if !state.wm.backend().locked {
         let target = press_target(&hit);
@@ -1199,6 +1206,7 @@ fn queue_tablet_axes<I: InputBackend, E: TabletToolEvent<I>>(
 }
 
 fn on_tablet_axis<I: InputBackend>(state: &mut Compositor, event: I::TabletToolAxisEvent) {
+    reveal_cursor(state);
     let position = tablet_position::<I, _>(state, &event);
     let descriptor = event.tool();
     let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
@@ -1210,6 +1218,7 @@ fn on_tablet_axis<I: InputBackend>(state: &mut Compositor, event: I::TabletToolA
 }
 
 fn on_tablet_proximity<I: InputBackend>(state: &mut Compositor, event: I::TabletToolProximityEvent) {
+    reveal_cursor(state);
     let position = tablet_position::<I, _>(state, &event);
     let descriptor = event.tool();
     let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
@@ -1229,6 +1238,7 @@ fn on_tablet_proximity<I: InputBackend>(state: &mut Compositor, event: I::Tablet
 }
 
 fn on_tablet_tip<I: InputBackend>(state: &mut Compositor, event: I::TabletToolTipEvent) {
+    reveal_cursor(state);
     let position = tablet_position::<I, _>(state, &event);
     let descriptor = event.tool();
     let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
@@ -1245,6 +1255,7 @@ fn on_tablet_tip<I: InputBackend>(state: &mut Compositor, event: I::TabletToolTi
 }
 
 fn on_tablet_button<I: InputBackend>(state: &mut Compositor, event: I::TabletToolButtonEvent) {
+    reveal_cursor(state);
     let descriptor = event.tool();
     let (_, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
     remember_tablet_tool(&state.seat, descriptor);
@@ -1461,6 +1472,15 @@ pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key
             }
         }
     });
+    // A press that reaches a client is typing; one the compositor consumed
+    // as a binding is not, and neither is a bare modifier.
+    if matches!(route, FilterResult::Forward)
+        && key_state == KeyState::Pressed
+        && cursor_visibility::hides_on_key(&state.wm.backend().pointer_config.cursor, physical_combo.keysym)
+        && state.wm.backend_mut().cursor_visibility.hide(cursor_visibility::AutoHide::Typing)
+    {
+        state.wm.backend_mut().mark_damaged();
+    }
     if matches!(route, FilterResult::Forward) {
         if state.wm.mac_keyboard() || state.mac_keyboard.has_held(keycode) {
             keyboard::mac::forward(state, &keyboard, keyboard::mac::Delivery {
@@ -1770,6 +1790,15 @@ enum PointerDelivery {
     LockedSilent,
 }
 
+/// Visible pointer input shows a pointer the compositor hid for typing,
+/// touch or idleness, and restarts the idle clock.
+fn reveal_cursor(state: &mut Compositor) {
+    let backend = state.wm.backend_mut();
+    if backend.cursor_visibility.reveal(&backend.pointer_config.cursor, std::time::Instant::now) {
+        backend.mark_damaged();
+    }
+}
+
 fn pointer_moved(
     state: &mut Compositor,
     position: LogicalPoint<f64, Logical>,
@@ -1792,6 +1821,7 @@ fn pointer_moved(
         }
         return;
     }
+    reveal_cursor(state);
     let serial = SERIAL_COUNTER.next_serial();
     // Floor, not round: a pointer at x=10.7 is over pixel 10, and
     // rounding at the output's far edge would name a pixel outside
@@ -2034,6 +2064,7 @@ fn pointer_button(
     button_state: ButtonState,
     button: Option<MouseButton>,
 ) {
+    reveal_cursor(state);
     let serial = SERIAL_COUNTER.next_serial();
     let pressed = button_state == ButtonState::Pressed;
     if !state.wm.backend().locked && pressed && state.wm.backend().gesture_scene.is_some() {
@@ -2479,6 +2510,7 @@ fn press_target(hit: &Hit) -> PressTarget {
 /// notches (`wm_core::ScrollDelta` records why), so it is the side
 /// that accumulates.
 fn on_pointer_axis<I: InputBackend>(state: &mut Compositor, event: I::PointerAxisEvent) {
+    reveal_cursor(state);
     if route_shell_scroll::<I>(state, &event) {
         return;
     }

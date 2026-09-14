@@ -198,6 +198,8 @@ pub struct InputConfig {
     /// invert and slow a wheel.
     pub touchpad_natural_scroll: Option<bool>,
     pub touchpad_scroll_factor: Option<f64>,
+    /// Hyprland's `cursor` section and chonkstep's own `[cursor]` table.
+    pub cursor: wm_core::CursorBehaviour,
     pub left_handed: Option<bool>,
     pub accel_profile: Option<String>,
 }
@@ -1240,6 +1242,31 @@ fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &s
     }
 }
 
+/// `[cursor]`: when the compositor hides the pointer on its own. A value
+/// of the wrong type is warned about and leaves that key as it was.
+fn apply_cursor_table(cursor: &mut wm_core::CursorBehaviour, entries: &toml::Table) {
+    for (key, value) in entries {
+        match key.as_str() {
+            "hide_on_key_press" => match value.as_bool() {
+                Some(enabled) => cursor.hide_on_key_press = Some(enabled),
+                None => tracing::warn!(%key, ?value, "config: [cursor] setting must be a boolean, ignoring it"),
+            },
+            "hide_on_touch" => match value.as_bool() {
+                Some(enabled) => cursor.hide_on_touch = Some(enabled),
+                None => tracing::warn!(%key, ?value, "config: [cursor] setting must be a boolean, ignoring it"),
+            },
+            "inactive_timeout" => match input_number(value) {
+                Some(seconds) if seconds.is_finite() && seconds >= 0.0 => cursor.inactive_timeout = Some(seconds),
+                _ => tracing::warn!(
+                    %key, ?value,
+                    "config: [cursor] inactive_timeout must be a non-negative number of seconds (0 never hides), ignoring it"
+                ),
+            },
+            unknown => tracing::warn!(key = %unknown, "config: unknown [cursor] setting, ignoring it"),
+        }
+    }
+}
+
 /// The pure core [`load`] wraps: parses config-file text into a
 /// [`Config`], merging over [`Config::default_config`].
 ///
@@ -1607,6 +1634,15 @@ pub fn parse_with(
                 other => tracing::warn!(
                     value = ?other,
                     "config: [input] must be a table, ignoring it"
+                ),
+            },
+            // Read after the live Hyprland configuration, like every key in
+            // this walk, so a `[cursor]` setting here overrides Omarchy's.
+            "cursor" => match value {
+                toml::Value::Table(entries) => apply_cursor_table(&mut config.input.cursor, entries),
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: [cursor] must be a table, ignoring it"
                 ),
             },
             "commands" => match value {
@@ -2393,6 +2429,39 @@ scroll_factor = 0.4
         assert_eq!(config.input.scroll_factor, Some(2.0));
         assert_eq!(config.input.touchpad_natural_scroll, Some(true));
         assert_eq!(config.input.touchpad_scroll_factor, Some(0.4));
+    }
+
+    #[test]
+    fn a_cursor_table_sets_when_the_pointer_hides_and_refuses_bad_values() {
+        let config = parse("[cursor]\nhide_on_key_press = true\nhide_on_touch = false\ninactive_timeout = 5\n").unwrap();
+        assert_eq!(
+            config.input.cursor,
+            wm_core::CursorBehaviour {
+                hide_on_key_press: Some(true),
+                hide_on_touch: Some(false),
+                inactive_timeout: Some(5.0),
+            }
+        );
+        let config = parse("[cursor]\nhide_on_key_press = 'yes'\ninactive_timeout = -1\n").unwrap();
+        assert_eq!(config.input.cursor, wm_core::CursorBehaviour::default());
+        let config = parse("[cursor]\ninactive_timeout = 0\n").unwrap();
+        assert_eq!(config.input.cursor.inactive_timeout, Some(0.0), "zero is a valid never");
+    }
+
+    #[test]
+    fn a_cursor_table_overrides_the_live_hyprland_reading() {
+        let live = || {
+            Some(hyprland::Reading {
+                input: InputConfig {
+                    cursor: wm_core::CursorBehaviour { hide_on_key_press: Some(true), ..Default::default() },
+                    ..InputConfig::default()
+                },
+                ..hyprland::Reading::default()
+            })
+        };
+        let text = "desktop = \"omarchy\"\n[cursor]\nhide_on_key_press = false\n";
+        let config = parse_with(text, &live).unwrap();
+        assert_eq!(config.input.cursor.hide_on_key_press, Some(false));
     }
 
     #[test]

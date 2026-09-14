@@ -186,6 +186,18 @@
 #clickfinger_behavior = true
 #scroll_factor = 0.4
 
+# When the pointer gets out of the way on its own. `hide_on_key_press` hides it
+# while you type into a window (a bare modifier or a key bound to a desktop
+# action does not count); `hide_on_touch` hides it after a touchscreen tap; and
+# `inactive_timeout` hides it after that many seconds without pointer input
+# (0 never). The next pointer motion, click or scroll shows it again. This is
+# read after an Omarchy or Hyprland configuration, so it overrides its `cursor`
+# settings. The screensaver's own cursor hide is separate and unaffected.
+#[cursor]
+#hide_on_key_press = true
+#hide_on_touch = true
+#inactive_timeout = 0
+
 # UI scale factor for HiDPI displays: multiplies every pixel dimension
 # in the window chrome, cursors, and terminal font as one system.
 # The CHONKSTEP_SCALE environment variable, when set to a valid value,
