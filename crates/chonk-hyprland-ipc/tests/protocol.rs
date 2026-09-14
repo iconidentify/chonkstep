@@ -517,6 +517,52 @@ fn lua_long_bracket_exec_is_the_same_command_as_a_quoted_string() {
     assert_eq!(long, quoted);
 }
 
+/// `hl.dsp.exec_cmd` takes a Lua string literal, and a caller that
+/// builds one with a JSON encoder escapes `"` and `\`. Omarchy's
+/// keybinding menu quotes with `jq @json` and falls back to classic
+/// `exec` only when the answer is not `ok`. Reading up to the next quote
+/// ran a truncated command and answered `ok`, so the fallback never ran.
+#[test]
+fn lua_exec_decodes_its_string_literal_rather_than_cutting_it_at_a_quote() {
+    let exec = |literal: &str| answer_payload(format!("/dispatch hl.dsp.exec_cmd({literal})").as_bytes(), &desktop()).1;
+    let shell = |command: &str| vec![Action::ExecShell(command.to_string())];
+
+    assert_eq!(exec(r#""notify-send \"build finished\"""#), shell(r#"notify-send "build finished""#));
+    assert_eq!(exec("'omarchy-launch-shell'"), shell("omarchy-launch-shell"));
+    // A key name inside the string is text, not a table field.
+    assert_eq!(exec(r#""env cmd=true touch /tmp/x""#), shell("env cmd=true touch /tmp/x"));
+    assert_eq!(exec(r#""grep -E \"a\\.b\" f""#), shell(r#"grep -E "a\.b" f"#));
+    assert_eq!(exec(r#""printf 'a\\nb'""#), shell(r"printf 'a\nb'"));
+    assert_eq!(exec(r#""a\\.b""#), shell(r"a\.b"));
+    assert_eq!(exec(r#""\u{48}i""#), shell("Hi"));
+    // Lua strings are bytes: each escape names one byte of a UTF-8 character.
+    assert_eq!(exec(r#""\228\189\160""#), shell("你"));
+    assert_eq!(exec(r#""\xe4\xbd\xa0""#), shell("你"));
+    assert_eq!(exec("[==[x]]y]==]"), shell("x]]y"));
+}
+
+/// A literal Lua would reject is refused, never run as the nearest
+/// plausible command.
+#[test]
+fn an_invalid_lua_string_literal_is_refused_not_guessed_at() {
+    for literal in [r#""\q""#, r#""unterminated"#, r#""\xff""#, "'line\nbreak'", "[[never closed", r#""a" .. "b""#] {
+        let (response, actions) = answer_payload(format!("/dispatch hl.dsp.exec_cmd({literal})").as_bytes(), &desktop());
+        assert!(actions.is_empty(), "{literal:?} produced {actions:?}");
+        assert!(response.starts_with("Invalid dispatcher"), "{literal:?} answered {response:?}");
+    }
+}
+
+/// Field lookup reads the table, not the text: `workspace = 3` inside a
+/// window selector's string is part of the title being matched.
+#[test]
+fn a_key_name_inside_a_lua_string_value_is_not_a_field() {
+    let mut snapshot = desktop();
+    snapshot.windows[0].title = "notes: workspace = 3".into();
+    let (response, actions) =
+        answer_payload(br#"dispatch hl.dsp.focus({ window = "title:workspace = 3" })"#, &snapshot);
+    assert_eq!(actions, vec![Action::FocusWindow(4_294_967_297)], "got {response:?}");
+}
+
 #[test]
 fn lua_geometry_fields_are_not_hidden_by_hex_window_addresses() {
     let (_, actions) = answer_payload(
