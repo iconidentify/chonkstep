@@ -54,6 +54,37 @@ fn change_density(marker: &Path, stage: &str) {
 
 #[test]
 #[ignore = "requires nested Wayland"]
+fn older_gpu_buffer_during_resize_cannot_change_window_density() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut s = Session::boot(
+            &format!("resize-stretch-{scale}"),
+            SessionOptions {
+                scale: Some(scale),
+                config_extra: "show_dock = false\nomarchy_menu = false\nhyprland_config = false\n".into(),
+                env: vec![("RUST_LOG".into(), "info,wm_wayland::xdg=trace".into())],
+                ..Default::default()
+            },
+        ).unwrap();
+        let act = s.dir.join("resize-stage");
+        let binary = profile_binary("chonk-scale-change-probe").unwrap();
+        s.launch_isolated(binary.to_str().unwrap(), &[act.to_str().unwrap(), "viewport-resize"]).unwrap();
+        s.wait_for_window("scale-change-probe").unwrap();
+        s.door().barrier().unwrap();
+        change_density(&act, "old");
+        for (w, h) in [(780, 570), (600, 450), (900, 600), (660, 480)] {
+            resize(&mut s, w, h);
+            // Fence the rendered commit as well as the IPC reply. Both the
+            // decorated bounds and the pixels must remain at the requested
+            // size even though buffer and destination have different ratios.
+            assert_pixels(&mut s, w, h);
+        }
+        change_density(&act, "settled");
+        assert_pixels(&mut s, 660, 480);
+    }
+}
+
+#[test]
+#[ignore = "requires nested Wayland"]
 fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
     for style in wm_theme::SUPPORTED_DECORATION_STYLES {
     for scale in [1.0, 1.5, 2.0] {

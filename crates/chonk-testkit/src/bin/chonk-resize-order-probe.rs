@@ -170,21 +170,37 @@ fn main() {
     let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
     let signature = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").unwrap();
     let socket = runtime.join("hypr").join(signature).join(".socket.sock");
-    let mut ipc = UnixStream::connect(socket).unwrap();
-    ipc.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    ipc.set_write_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    ipc.write_all(b"/dispatch resizeactive 120 80").unwrap();
-    let mut response = String::new();
-    ipc.read_to_string(&mut response).unwrap();
-    assert_eq!(response, "ok");
+    let lagged = std::env::args().nth(2).as_deref() == Some("lagged");
+    for step in 0..if lagged { 32 } else { 1 } {
+        let mut ipc = UnixStream::connect(&socket).unwrap();
+        ipc.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        ipc.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+        let request = if lagged {
+            format!("/dispatch resizeactive exact {} {}", 520 + step * 2, 380 + step * 2)
+        } else {
+            "/dispatch resizeactive 120 80".to_string()
+        };
+        ipc.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        ipc.read_to_string(&mut response).unwrap();
+        assert_eq!(response, "ok");
+        if lagged && step < 31 {
+            // Acknowledge the earlier sizes while rendering trails behind.
+            // Leave the final configure unread: committing after its ack
+            // would legitimately answer it with a client-chosen cell snap.
+            queue.roundtrip(&mut probe).unwrap();
+        }
+    }
     // This is deliberately the previously rendered content, committed before
-    // the client has read/acked any configure answering that resize. The
+    // the client has read/acked the final configure answering that resize. The
     // compositor may not interpret it as a new request to undo the resize.
     surface.attach(Some(&buffer), 0, 0);
     surface.damage_buffer(0, 0, 400, 300);
     surface.commit();
     connection.flush().unwrap();
+    if lagged {
+        queue.roundtrip(&mut probe).unwrap();
+    }
     probe.requested = true;
     say("old rendered commit crossed resize request");
     loop {

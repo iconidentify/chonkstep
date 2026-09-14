@@ -144,7 +144,7 @@ fn main() {
         .get_viewport(&surface, &qh, ());
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut logical = (400, 200);
-    let mut density = 1;
+    let mut density = if mode == "viewport-resize" { 2 } else { 1 };
     let mut stage = String::new();
     let mut dirty = true;
     loop {
@@ -159,7 +159,7 @@ fn main() {
         let next = std::fs::read_to_string(&act).unwrap_or_default();
         if next != stage {
             stage = next;
-            let next_density = if stage.trim() == "2" { 2 } else { 1 };
+            let next_density = if stage.trim() == "2" || mode == "viewport-resize" { 2 } else { 1 };
             if mode == "viewport-destination" {
                 // Change only destination/window coordinates, retaining the
                 // raw buffer dimensions. This is distinct from increasing
@@ -173,7 +173,13 @@ fn main() {
             dirty = true;
         }
         if dirty {
-            let (w, h) = (logical.0 * density, logical.1 * density);
+            // Replay the JBR Vulkan resize: a new viewport destination can
+            // precede the GPU allocation that will eventually fill it.
+            let (w, h) = if mode == "viewport-resize" && stage.trim() == "old" {
+                (800, 400)
+            } else {
+                (logical.0 * density, logical.1 * density)
+            };
             let mut file = tempfile::tempfile().unwrap();
             file.write_all(&[0x31, 0xe7, 0x17, 0xff].repeat((w * h) as usize))
                 .unwrap();

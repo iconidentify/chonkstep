@@ -451,6 +451,17 @@ pub(crate) struct WindowRecord {
     /// Zero for surfaces that declare no geometry, which is the
     /// overwhelming majority.
     pub content_offset: Point,
+    /// Density used for an outstanding compositor resize. A client can commit
+    /// the new viewport destination with an older GPU buffer; that temporary
+    /// stretch must not change the frame, renderer or input coordinate scale.
+    pub resize_scale: Option<ResizeScale>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResizeScale {
+    pub factor: f64,
+    pub output_scale: f64,
+    pub expected: Size,
 }
 
 impl WindowRecord {
@@ -477,6 +488,7 @@ impl WindowRecord {
             snapshot_attempted_at: None,
             decoration: crate::decoration::DecorationNegotiation::default(),
             content_offset: Point::new(0, 0),
+            resize_scale: None,
         }
     }
 }
@@ -1309,6 +1321,15 @@ impl WaylandBackend {
     /// ledger measurement and the configure path all call — four sites
     /// describing one rectangle must multiply by one number.
     pub(crate) fn window_surface_scale(&self, record: &WindowRecord) -> f64 {
+        if let Some(resize) = record.resize_scale {
+            if resize.output_scale == self.window_output_scale(record) {
+                return resize.factor;
+            }
+        }
+        self.unlatched_window_surface_scale(record)
+    }
+
+    pub(crate) fn unlatched_window_surface_scale(&self, record: &WindowRecord) -> f64 {
         let Some(surface) = record.surface.wl_surface() else {
             return 1.0;
         };
