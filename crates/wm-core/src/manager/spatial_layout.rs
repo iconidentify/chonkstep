@@ -156,6 +156,8 @@ impl<B: Backend> WindowManager<B> {
         self.set_workspace_layout(self.current_workspace, mode);
     }
 
+    /// `CLIENT_FULLSCREEN` is deliberately not in the excluded set: a
+    /// window told it is fullscreen keeps its cell.
     pub(super) fn layout_candidate(&self, id: ClientId) -> bool {
         self.clients.get(id).is_some_and(|c| {
             self.workspace_layout(c.workspace) != LayoutMode::Freeform

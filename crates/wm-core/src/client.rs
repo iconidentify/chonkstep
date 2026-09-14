@@ -110,6 +110,13 @@ bitflags::bitflags! {
         const SUPPRESS_MAXIMIZE = 1 << 12;
         /// The same refusal for entering fullscreen.
         const SUPPRESS_FULLSCREEN = 1 << 13;
+        /// The client is told it is fullscreen while its geometry, frame
+        /// and layout membership are untouched: Hyprland's
+        /// `fullscreenstate 0 2`, which Omarchy calls "tiled fullscreen"
+        /// (a browser drops its toolbars inside its tile, the bar stays).
+        /// Never set together with `FULLSCREEN`, whose own state already
+        /// tells the client; `layout_candidate` deliberately ignores it.
+        const CLIENT_FULLSCREEN = 1 << 14;
     }
 }
 

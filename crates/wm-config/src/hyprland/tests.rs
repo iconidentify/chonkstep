@@ -533,12 +533,12 @@ fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
         ("super+slash", &["omarchy-hyprland-monitor-scaling", "up"]),
         ("super+alt+slash", &["omarchy-hyprland-monitor-scaling", "down"]),
         ("ctrl+alt+delete", &["omarchy-hyprland-window-close-all"]),
+        ("super+ctrl+f", &["omarchy-hyprland-window-tiled-fullscreen-toggle"]),
     ] {
         let argv: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
         assert_eq!(argv_for(&reading, chord), Some(argv), "{chord} runs its served script");
     }
     for (chord, what, reason) in [
-        ("super+ctrl+f", "SUPER + CTRL + F (Tiled full screen)", Unbound::CLIENT_FULLSCREEN),
         ("super+backspace", "SUPER + BACKSPACE (Toggle window transparency)", Unbound::OPACITY),
         ("super+shift+backspace", "SUPER + SHIFT + BACKSPACE (Toggle window gaps)", Unbound::GAPS),
         (
@@ -3718,12 +3718,12 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     let reading = read(&machine());
     assert_eq!(
         reading.keybindings.len(),
-        186,
+        187,
         "bindings read from the captured machine"
     );
     assert_eq!(
         reading.commands.len(),
-        120,
+        121,
         "commands declared for global and scoped bindings"
     );
     assert_eq!(
@@ -3737,17 +3737,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        153,
+        152,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("186\nbindings over 120 commands") || MODE.contains("186 bindings over 120 commands"),
-        "docs/omarchy-mode.md no longer quotes the 186 bindings over 120 commands this machine produces"
+        MODE.contains("187\nbindings over 121 commands") || MODE.contains("187 bindings over 121 commands"),
+        "docs/omarchy-mode.md no longer quotes the 187 bindings over 121 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=186 commands=120 env=8 autostart=4")
-            && GUIDE.contains("float_rules=48 monitors=1 skipped=153"),
+        GUIDE.contains("files=42 bindings=187 commands=121 env=8 autostart=4")
+            && GUIDE.contains("float_rules=48 monitors=1 skipped=152"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

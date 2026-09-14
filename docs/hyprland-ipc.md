@@ -85,7 +85,7 @@ start with `[[BATCH]]` and use `;` separators.
 | `status` | `configProvider="chonkstep"`; Quickshell uses classic dispatch while scripts may use the supported Lua forms |
 | `monitors` | Live output name, geometry, scale, focus, active workspace, transform, DPMS state, and measured VRR capability/runtime state. The optional `all` argument is accepted and ignored because connected outputs remain in the layout while powered down. |
 | `workspaces` | One-based ids; real per-workspace monitor assignment, fullscreen state and `tiledLayout` (`freeform`, `dwindle`, `scrolling`) |
-| `clients` / `activewindow` | Live pid, class/title, position, size, workspace, monitor, XWayland, floating, pinned, fullscreen, tags, focus history and idle inhibition |
+| `clients` / `activewindow` | Live pid, class/title, position, size, workspace, monitor, XWayland, floating, pinned, fullscreen, tags, focus history and idle inhibition. `fullscreen` is the compositor's mode (2 fullscreen, 1 maximized, 0 neither) and `fullscreenClient` what the window is told (2 for real or tiled fullscreen, 1 maximized, 0 neither), so Omarchy's tiled-fullscreen toggle can read its own state back |
 | `activeworkspace` | Exactly the active workspace, in JSON or one plain block |
 | `cursorpos` | The live pointer as plain `X, Y`, or `{"x": X, "y": Y}` with `-j` |
 | `devices` | Seat keyboards and pointers; keyboards include `name`, `layout` (the installed layout list, such as `us,de`), `active_keymap` (the group in force now), and `active_layout_index`. Plain `devices` uses Hyprland's block format, with one `active keymap:` line per keyboard |
@@ -126,7 +126,13 @@ actions. Supported families include:
 
 - workspace focus and moving a window to a workspace;
 - focus by selector or spatial direction, close, kill-active, cycle,
-  fullscreen/maximize;
+  fullscreen/maximize, and `fullscreenstate <internal> <client>` /
+  `hl.dsp.window.fullscreen_state({ internal = …, client = … })`, each
+  axis 0, 1 or 2 and refused by name otherwise. `0 2` tells the window
+  it is fullscreen without moving it — Omarchy's tiled fullscreen — and
+  asking for the state a window already has clears both axes, as in
+  Hyprland. `hasfullscreen` and the `fullscreen` event follow only the
+  compositor's own fullscreen;
 - move, resize, center, raise, pin, tags, and floating membership;
 - `layout freeform|mosaic|flow`, `togglelayout`, `togglefloating`, `setfloating`,
   `settiled`, and directional `movewindow`/`swapwindow`;

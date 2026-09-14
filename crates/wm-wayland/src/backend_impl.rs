@@ -1970,6 +1970,7 @@ impl Backend for WaylandBackend {
     fn publish_net_state(&mut self, window: Self::WindowId, state: wm_core::NetStateSnapshot) {
         let wm_core::NetStateSnapshot {
             fullscreen,
+            client_fullscreen,
             maximized_horizontally: max_h,
             maximized_vertically: max_v,
             shaded,
@@ -1977,6 +1978,12 @@ impl Backend for WaylandBackend {
             modal,
         } = state;
         let _ = shaded;
+        // What the client is told: real fullscreen, or the client-only
+        // state that leaves its tile where it is. `record.fullscreen`
+        // below keeps only the real one, so band occlusion, the
+        // fullscreen idle rule and the damage edge never follow a
+        // window that has not moved.
+        let told_fullscreen = fullscreen || client_fullscreen;
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
@@ -2005,7 +2012,7 @@ impl Backend for WaylandBackend {
                         } else {
                             state.states.unset(XdgToplevelState::Maximized);
                         }
-                        if fullscreen {
+                        if told_fullscreen {
                             state.states.set(XdgToplevelState::Fullscreen);
                         } else {
                             state.states.unset(XdgToplevelState::Fullscreen);
@@ -2042,7 +2049,7 @@ impl Backend for WaylandBackend {
                     // property-only counterpart through our ordinary
                     // XWayland EWMH connection instead.
                     self.ewmh.note_window_iconic(window, hidden);
-                    if let Err(error) = surface.set_fullscreen(fullscreen) {
+                    if let Err(error) = surface.set_fullscreen(told_fullscreen) {
                         tracing::warn!(?error, ?window, "X11 set_fullscreen failed");
                     }
                     if let Err(error) = surface.set_maximized(maximized) {

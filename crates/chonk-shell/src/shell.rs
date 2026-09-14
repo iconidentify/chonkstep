@@ -1863,6 +1863,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.toggle_fullscreen(id);
                 }
             }
+            Action::FullscreenState { internal, client } => {
+                if let Some(id) = wm.focused_client() {
+                    wm.toggle_fullscreen_state(id, *internal, *client);
+                }
+            }
             Action::Focus(direction) => {
                 wm.focus_direction(*direction);
             }

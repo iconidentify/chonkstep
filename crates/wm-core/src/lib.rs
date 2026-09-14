@@ -50,7 +50,7 @@ pub use placement::{place_frame, FloatDecision, FloatPolicy, IdleInhibitRule, Pl
 pub use snap::snap_position;
 pub use spatial::{LayoutMode, LayoutStatistics, WindowPlacement};
 pub use types::{
-    BackendEvent, ClientChrome, DecorationRules, DragHandle, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetState,
+    BackendEvent, ClientChrome, DecorationRules, DragHandle, FullscreenMode, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetState,
     CursorBehaviour, DeviceRule, MultiFingerDrag, PointerConfig, ScrollClass, ScrollMethod, TapButtonMap, MAX_SCROLL_BUTTON,
     NetStateAction, NetStateSnapshot, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };

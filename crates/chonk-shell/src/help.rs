@@ -58,6 +58,16 @@ fn action_label(action: &Action) -> (&'static str, String, bool) {
         Close => ("WINDOWS", "Close the focused window".into(), true),
         ToggleMaximize => ("WINDOWS", "Maximize / restore".into(), true),
         ToggleFullscreen => ("WINDOWS", "Enter / leave fullscreen".into(), true),
+        FullscreenState { internal: wm_core::FullscreenMode::None, client: wm_core::FullscreenMode::Fullscreen } => (
+            "WINDOWS",
+            "Tiled fullscreen: the app hides its chrome in place".into(),
+            false,
+        ),
+        FullscreenState { internal, client } => (
+            "WINDOWS",
+            format!("Set fullscreen state {} {}", internal.level(), client.level()),
+            false,
+        ),
         Miniaturize => ("WINDOWS", "Minimize the focused window".into(), true),
         WindowMenu => ("WINDOWS", "Open window commands".into(), true),
         ToggleShade => ("WINDOWS", "Roll up / unroll the window".into(), false),

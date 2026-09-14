@@ -19,7 +19,7 @@ mod mac;
 mod spaces;
 pub use spaces::{DisplaySpace, DisplaySpacesSnapshot, Space, SpaceHomeGeometry, FULLSCREEN_SPACE_STAYS_HOME, SHARED_DESKTOP_SPANS_DISPLAYS};
 use crate::types::{
-    BackendEvent, ClientChrome, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
+    BackendEvent, ClientChrome, DragHandle, FullscreenMode, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
     NetStateSnapshot, SurfaceRef, WindowType,
 };
 
@@ -3701,6 +3701,9 @@ impl<B: Backend> WindowManager<B> {
         self.fullscreen_restore.insert(id, client.geometry);
         self.restore_title_metrics.insert((id, RestoreKind::Fullscreen), TitleMetrics::of(&client.layout));
         client.flags.insert(ClientFlags::FULLSCREEN);
+        // The real state tells the client on its own; the client-only
+        // flag never stands beside it (see `set_fullscreen_state`).
+        client.flags.remove(ClientFlags::CLIENT_FULLSCREEN);
         self.bump_protocol_state_revision();
         self.reflow_frame(id);
         // Raise on entering: fullscreen is a "take over the screen"
@@ -3749,6 +3752,110 @@ impl<B: Backend> WindowManager<B> {
     /// one).
     pub fn toggle_fullscreen(&mut self, id: ClientId) {
         self.apply_fullscreen_action(id, NetStateAction::Toggle);
+    }
+
+    /// Hyprland's two-axis fullscreen state of a client: what the
+    /// compositor does with the window, and what the window is told.
+    /// `None` for an unknown id.
+    ///
+    /// The internal axis is `Fullscreen` for `FULLSCREEN`, `Maximized`
+    /// when both maximize axes are set, else `None`; the client axis is
+    /// `Fullscreen` for `FULLSCREEN` or `CLIENT_FULLSCREEN`, otherwise
+    /// the same as the internal axis. This is the reading the Hyprland
+    /// IPC reports as `fullscreen` and `fullscreenClient`, so a script
+    /// branching on either sees the state the next request acts on.
+    pub fn fullscreen_state(&self, id: ClientId) -> Option<(FullscreenMode, FullscreenMode)> {
+        let client = self.clients.get(id)?;
+        let internal = if client.flags.contains(ClientFlags::FULLSCREEN) {
+            FullscreenMode::Fullscreen
+        } else if client.flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V) {
+            FullscreenMode::Maximized
+        } else {
+            FullscreenMode::None
+        };
+        let told = if client.flags.contains(ClientFlags::CLIENT_FULLSCREEN) {
+            FullscreenMode::Fullscreen
+        } else {
+            internal
+        };
+        Some((internal, told))
+    }
+
+    /// Sets Hyprland's two fullscreen axes independently: `internal` is
+    /// what the compositor does (real fullscreen, a full maximize, or
+    /// neither) and `client` what the window is told. The one
+    /// combination the flags model beyond the compositor's own states
+    /// is `(None | Maximized, Fullscreen)` — the client is told it is
+    /// fullscreen while its geometry, frame, stacking and layout cell
+    /// stay exactly as they are (`ClientFlags::CLIENT_FULLSCREEN`).
+    /// Omarchy's "tiled fullscreen" chord is `(None, Fullscreen)`.
+    ///
+    /// A `Maximized` client axis has nothing of its own to set: the
+    /// protocols' maximized state already follows the two maximize
+    /// flags. `internal == Fullscreen` tells the client by itself, so
+    /// the client-only flag is cleared rather than doubled.
+    ///
+    /// Client-only fullscreen changes no geometry and therefore causes
+    /// no reflow of the workspace, no raise, and no Spaces fullscreen
+    /// Space: only compositor fullscreen does those. A no-op for an
+    /// unknown id.
+    pub fn set_fullscreen_state(&mut self, id: ClientId, internal: FullscreenMode, client: FullscreenMode) {
+        if self.clients.get(id).is_none() {
+            return;
+        }
+        match internal {
+            FullscreenMode::Fullscreen => self.fullscreen(id),
+            FullscreenMode::Maximized => {
+                self.unfullscreen(id);
+                let current = self.clients.get(id).map_or(MaximizeDirections::empty(), Self::maximize_directions);
+                if current != MaximizeDirections::FULL {
+                    if !current.is_empty() {
+                        self.unmaximize(id);
+                    }
+                    self.maximize(id, MaximizeDirections::FULL);
+                }
+            }
+            FullscreenMode::None => {
+                self.unfullscreen(id);
+                self.unmaximize(id);
+            }
+        }
+        let told = client == FullscreenMode::Fullscreen && internal != FullscreenMode::Fullscreen;
+        self.set_client_fullscreen(id, told);
+    }
+
+    /// The `fullscreenstate` dispatcher's rule on top of
+    /// [`Self::set_fullscreen_state`]: asking for exactly the state the
+    /// window already has clears both axes instead. That is how
+    /// Hyprland makes a bound `fullscreenstate 0 2` a toggle, and it is
+    /// what a classic Omarchy binding of that dispatcher relies on;
+    /// Omarchy's own script reads `fullscreenClient` first and sends
+    /// `0 0` explicitly, which this rule leaves alone.
+    pub fn toggle_fullscreen_state(&mut self, id: ClientId, internal: FullscreenMode, client: FullscreenMode) {
+        let Some(current) = self.fullscreen_state(id) else {
+            return;
+        };
+        if current == (internal, client) {
+            self.set_fullscreen_state(id, FullscreenMode::None, FullscreenMode::None);
+        } else {
+            self.set_fullscreen_state(id, internal, client);
+        }
+    }
+
+    /// Flips `CLIENT_FULLSCREEN` and publishes the change, which is the
+    /// whole of its effect: the backend sends the client the protocol's
+    /// fullscreen state and nothing else about the window moves.
+    fn set_client_fullscreen(&mut self, id: ClientId, told: bool) {
+        let Some(client) = self.clients.get_mut(id) else {
+            return;
+        };
+        if client.flags.contains(ClientFlags::CLIENT_FULLSCREEN) == told {
+            return;
+        }
+        client.flags.set(ClientFlags::CLIENT_FULLSCREEN, told);
+        self.bump_protocol_state_revision();
+        self.publish_client_net_state(id);
+        tracing::info!(?id, told, "client-only fullscreen changed");
     }
 
     /// Unmaps a client family and records its minimized state. Alt-Tab or an
@@ -4076,6 +4183,12 @@ impl<B: Backend> WindowManager<B> {
             self.fullscreen(id);
         } else {
             self.unfullscreen(id);
+            // A window told it is fullscreen in its tile leaves that
+            // state the same way a real one does: its own
+            // `unset_fullscreen` (a browser's Escape) is honoured, and
+            // the answer says so. `unfullscreen` above was a no-op for
+            // it, so the flag is retired here.
+            self.set_client_fullscreen(id, false);
         }
     }
 
@@ -4461,6 +4574,7 @@ impl<B: Backend> WindowManager<B> {
         };
         self.backend.publish_net_state(client.window, NetStateSnapshot {
             fullscreen: client.flags.contains(ClientFlags::FULLSCREEN),
+            client_fullscreen: client.flags.contains(ClientFlags::CLIENT_FULLSCREEN),
             maximized_horizontally: client.flags.contains(ClientFlags::MAXIMIZED_H),
             maximized_vertically: client.flags.contains(ClientFlags::MAXIMIZED_V),
             shaded: client.flags.contains(ClientFlags::SHADED),
@@ -9953,7 +10067,7 @@ mod tests {
         assert_eq!(wm.client(id).unwrap().lifecycle, Lifecycle::Miniaturized);
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, true, false)),
+            Some(&(window, false, false, false, false, false, true, false)),
             "miniaturizing must publish the client as hidden"
         );
 
@@ -9970,7 +10084,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false)),
+            Some(&(window, false, false, false, false, false, false, false)),
             "the restored client must be re-published as not hidden"
         );
     }
@@ -10269,7 +10383,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, true, false, false, false, false, false))
+            Some(&(window, true, false, false, false, false, false, false))
         );
 
         wm.dispatch(toggle);
@@ -10282,7 +10396,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false))
+            Some(&(window, false, false, false, false, false, false, false))
         );
     }
 
@@ -10320,7 +10434,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, true, false, false, false, false, false))
+            Some(&(window, true, false, false, false, false, false, false))
         );
 
         wm.toggle_fullscreen(id);
@@ -10333,7 +10447,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false))
+            Some(&(window, false, false, false, false, false, false, false))
         );
     }
 
@@ -10401,7 +10515,7 @@ mod tests {
             .contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, true, true, false, false, false))
+            Some(&(window, false, false, true, true, false, false, false))
         );
 
         wm.dispatch(BackendEvent::NetStateRequested {
@@ -10474,7 +10588,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false))
+            Some(&(window, false, false, false, false, false, false, false))
         );
 
         wm.toggle_maximize_full(id);
@@ -10511,7 +10625,7 @@ mod tests {
         assert!(wm.client(id).unwrap().flags.contains(ClientFlags::MODAL));
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, true))
+            Some(&(window, false, false, false, false, false, false, true))
         );
 
         wm.dispatch(BackendEvent::NetStateRequested {
@@ -10523,7 +10637,7 @@ mod tests {
         assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::MODAL));
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false))
+            Some(&(window, false, false, false, false, false, false, false))
         );
     }
 
@@ -11154,6 +11268,24 @@ mod tests {
         let window=wm.client(last).unwrap().window;
         wm.dispatch(BackendEvent::Destroyed(window));
         assert_eq!((wm.workspace_count(),wm.current_workspace()), (1,0));
+        assert!(wm.mac_fullscreen.is_empty());
+    }
+
+    /// A window merely told it is fullscreen has not taken the screen,
+    /// so it gets no Space of its own; only compositor fullscreen does.
+    #[test]
+    fn mac_client_only_fullscreen_opens_no_space() {
+        let (mut wm, [_, _, last]) = mac_windows();
+        let geometry = wm.client(last).unwrap().geometry;
+        wm.set_fullscreen_state(last, FullscreenMode::None, FullscreenMode::Fullscreen);
+        assert!(wm.client(last).unwrap().flags.contains(ClientFlags::CLIENT_FULLSCREEN));
+        assert_eq!((wm.workspace_count(), wm.current_workspace()), (1, 0));
+        assert!(wm.mac_fullscreen.is_empty());
+        assert_eq!(wm.client(last).unwrap().geometry, geometry);
+        wm.set_fullscreen_state(last, FullscreenMode::Fullscreen, FullscreenMode::Fullscreen);
+        assert_eq!((wm.workspace_count(), wm.current_workspace()), (2, 1));
+        wm.set_fullscreen_state(last, FullscreenMode::None, FullscreenMode::None);
+        assert_eq!((wm.workspace_count(), wm.current_workspace()), (1, 0));
         assert!(wm.mac_fullscreen.is_empty());
     }
 

@@ -57,6 +57,13 @@ pub enum Action {
     ExecArgv(Vec<String>),
     /// Set or toggle fullscreen on the focused window.
     Fullscreen(Fullscreen),
+    /// Hyprland's `fullscreenstate <internal> <client>`: the compositor's
+    /// own mode and the one the window is told, each 0 (none), 1
+    /// (maximized) or 2 (fullscreen), already checked to be in range.
+    /// `0 2` is Omarchy's tiled fullscreen — the client drops its chrome
+    /// inside a tile that does not move. The host applies Hyprland's
+    /// rule that asking for the state a window already has clears both.
+    FullscreenState { window: Option<u64>, internal: u8, client: u8 },
     ToggleMaximize,
     /// Focus the next/previous window.
     CycleFocus { forward: bool },
@@ -320,8 +327,13 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             }
         }
         "fullscreenstate" => {
-            let client = rest.split_whitespace().nth(1).unwrap_or("0");
-            Outcome::Run(Action::Fullscreen(if client == "0" { Fullscreen::Off } else { Fullscreen::On }))
+            let mut words = rest.split_whitespace();
+            let (internal, client) = (words.next(), words.next());
+            let level = |name: &str, value: Option<&str>| fullscreen_level("fullscreenstate", name, value);
+            match (level("internal", internal), level("client", client)) {
+                (Ok(internal), Ok(client)) => Outcome::Run(Action::FullscreenState { window: None, internal, client }),
+                (Err(why), _) | (_, Err(why)) => Outcome::Unsupported(why),
+            }
         }
         "cyclenext" => Outcome::Run(Action::CycleFocus { forward: !rest.contains("prev") }),
         "resizeactive" => classic_geometry(rest, snapshot, true, true),
@@ -484,8 +496,17 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
             lua_window(&args, snapshot, |window| Action::SetTag { window: window.id, tag, present })
         }
         "window.fullscreen_state" => {
-            let client = lua_field(&args, "client").and_then(|value| value.parse::<i32>().ok()).unwrap_or(0);
-            Outcome::Run(Action::Fullscreen(if client == 0 { Fullscreen::Off } else { Fullscreen::On }))
+            let level = |name: &str| {
+                fullscreen_level("hl.dsp.window.fullscreen_state", name, lua_field(&args, name).as_deref())
+            };
+            match (level("internal"), level("client")) {
+                (Ok(internal), Ok(client)) => lua_window(&args, snapshot, |window| Action::FullscreenState {
+                    window: Some(window.id),
+                    internal,
+                    client,
+                }),
+                (Err(why), _) | (_, Err(why)) => Outcome::Unsupported(why),
+            }
         }
         "window.set_prop" => Outcome::Unsupported("window opacity and other dynamic properties are not modeled".to_string()),
         "cursor.move" => {
@@ -790,6 +811,22 @@ fn parse_dpms_lua(args: &[Literal], snapshot: &Snapshot) -> Outcome {
     };
     let output = lua_field(args, "output").or_else(|| lua_field(args, "monitor"));
     parse_dpms(&format!("{}{}", state, output.map_or_else(String::new, |name| format!(" {name}"))), snapshot)
+}
+
+/// One axis of `fullscreenstate`, refused by name for anything but the
+/// three modes Hyprland numbers. A missing field is refused too rather
+/// than defaulted: Hyprland reads a missing axis as "keep the current
+/// one", and a request this cannot honour exactly is not answered `ok`.
+fn fullscreen_level(spelling: &str, name: &str, value: Option<&str>) -> Result<u8, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(format!(
+            "{spelling} needs both internal and client, each 0 (none), 1 (maximized) or 2 (fullscreen)"
+        ));
+    };
+    match value.parse::<u8>() {
+        Ok(level @ 0..=2) => Ok(level),
+        _ => Err(format!("{spelling}: {name} must be 0 (none), 1 (maximized) or 2 (fullscreen), not {value:?}")),
+    }
 }
 
 fn selected_window<'a>(selector: &str, snapshot: &'a Snapshot) -> Option<&'a Window> {

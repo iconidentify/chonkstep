@@ -1533,6 +1533,19 @@ fn dsp(path: &str, args: &[Value]) -> Dispatcher {
                 "0".into()
             },
         ),
+        // Both axes in the classic spelling, so `super::dispatch` makes
+        // the one judgement for both syntaxes; a table missing either
+        // keeps the empty argument it refuses.
+        "window.fullscreen_state" => {
+            let level = |name: &str| match field(name) {
+                Some(Value::Num(n)) if n.is_finite() => Some(format_number(*n)),
+                _ => None,
+            };
+            match (level("internal"), level("client")) {
+                (Some(internal), Some(client)) => verb("fullscreenstate", format!("{internal} {client}")),
+                _ => verb("fullscreenstate", String::new()),
+            }
+        }
         "window.pseudo" => verb("pseudo", String::new()),
         "window.float" => verb("togglefloating", String::new()),
         "window.pin" => verb("pin", String::new()),

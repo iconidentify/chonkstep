@@ -489,6 +489,197 @@ fn a_suppressed_maximize_request_keeps_every_tile_in_its_cell() {
     assert!(session.compositor_alive());
 }
 
+/// One request on the Hyprland IPC socket, exactly as `hyprctl` sends it.
+fn hypr_request(session: &Session, request: &str) -> String {
+    use std::io::{Read, Write};
+    let socket = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"))
+        .join("hypr")
+        .join(session.hyprland_signature().expect("the Hyprland IPC announced its signature"))
+        .join(".socket.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket)
+        .unwrap_or_else(|error| panic!("{}: {error}", socket.display()));
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).unwrap();
+    reply
+}
+
+fn hypr_json(session: &Session, request: &str) -> serde_json::Value {
+    let reply = hypr_request(session, request);
+    serde_json::from_str(&reply).unwrap_or_else(|error| panic!("{request}: {error}: {reply}"))
+}
+
+/// The last `configure` the probe named `client` logged, with the
+/// states it carried.
+fn last_configure(session: &Session, client: &str) -> Option<String> {
+    let log = std::fs::read_to_string(session.dir.join(client)).unwrap_or_default();
+    log.lines().rev().find(|line| line.starts_with("configure ")).map(str::to_string)
+}
+
+/// Runs Omarchy's tiled-fullscreen toggle once, the way `SUPER + CTRL + F`
+/// does: the installed script itself when this machine has it (it reads
+/// `hyprctl activewindow -j` through `jq` and dispatches through
+/// `hyprctl`), otherwise the exact requests the script sends, on the
+/// socket. Returns which of the two ran.
+fn omarchy_tiled_fullscreen_toggle(session: &mut Session) -> &'static str {
+    const SCRIPT: &str = "omarchy-hyprland-window-tiled-fullscreen-toggle";
+    let on_path = |program: &str| {
+        std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
+    };
+    let installed = std::env::var_os("PATH")
+        .and_then(|path| std::env::split_paths(&path).map(|dir| dir.join(SCRIPT)).find(|path| path.is_file()))
+        .or_else(|| {
+            let home = std::env::var_os("HOME")?;
+            let path = std::path::Path::new(&home).join(".local/share/omarchy/bin").join(SCRIPT);
+            path.is_file().then_some(path)
+        });
+    match installed {
+        Some(script) if on_path("hyprctl") && on_path("jq") => {
+            session.launch(&script.to_string_lossy(), &[]).expect("the Omarchy script launches");
+            let status = poll_until(Duration::from_secs(10), "the Omarchy script to finish", || {
+                session.client_status(SCRIPT).ok().flatten()
+            })
+            .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(SCRIPT)));
+            assert!(status.success(), "{SCRIPT} exited {status}:\n{}", session.client_log(SCRIPT));
+            "the installed Omarchy script"
+        }
+        _ => {
+            let told = hypr_json(session, "j/activewindow")["fullscreenClient"].as_i64().unwrap_or(0);
+            let client = if told == 2 { 0 } else { 2 };
+            let reply = hypr_request(
+                session,
+                &format!("dispatch hl.dsp.window.fullscreen_state({{ internal = 0, client = {client} }})"),
+            );
+            assert_eq!(reply, "ok", "the script's request is served");
+            "the script's requests on the socket"
+        }
+    }
+}
+
+/// Omarchy's `SUPER + CTRL + F`, "tiled full screen": the application is
+/// told it is fullscreen, so a browser or player drops its own chrome,
+/// while its tile, its neighbour and the bar stay exactly where they
+/// are. The compositor's own fullscreen is never entered. A second run
+/// turns it back off, which works only because `fullscreenClient`
+/// reports the state the script branches on. Afterwards, the maximize
+/// `SUPER + ALT + F` dispatches reports as Hyprland's mode 1 on both
+/// fields.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn omarchys_tiled_fullscreen_toggle_tells_the_tile_and_reads_its_own_state_back() {
+    fn settled(session: &mut Session) -> chonk_testkit::World {
+        poll_until(Duration::from_secs(5), "layout settlement", || {
+            let world = session.world().ok()?;
+            (!world.spatial.moving && world.gesture.is_none()).then_some(world)
+        })
+        .expect("the layout settles")
+    }
+    fn cell(world: &chonk_testkit::World, app: &str) -> (i32, i32, u32, u32) {
+        let window = world.window_matching(app).expect("the tile is in the world");
+        (window.x, window.y, window.w, window.h)
+    }
+    const TILE_B_LOG: &str = "client-1-chonk-fullscreen-probe.log";
+
+    let probe = profile_binary("chonk-fullscreen-probe").expect("cargo build -p chonk-testkit builds the probe");
+    let bar = profile_binary("chonk-fake-bar").expect("cargo build -p chonk-testkit builds the bar");
+    let mut session = Session::boot(
+        "tiled-fullscreen",
+        SessionOptions {
+            scale: Some(1.0),
+            config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into(),
+            config_root_files: vec![("hypr/hyprland.conf".into(), "bind = SUPER, F12, workspace, 1\n".into())],
+            ..SessionOptions::default()
+        },
+    )
+    .expect("the nested compositor boots");
+    for (title, app) in [("TileA", "tile-a"), ("TileB", "tile-b")] {
+        session.launch(&probe.to_string_lossy(), &[title, app]).expect("the probe launches");
+        session.wait_for_window(app).expect("the probe maps");
+    }
+    session.launch(&bar.to_string_lossy(), &[&BAR.to_string()]).expect("the Top layer fixture launches");
+    poll_until(Duration::from_secs(10), "the Top layer fixture to map", || {
+        session.client_log("chonk-fake-bar").contains("mapped ").then_some(())
+    })
+    .expect("the Top layer fixture maps");
+    assert_eq!(hypr_request(&session, "/dispatch layout mosaic"), "ok", "Mosaic is selected");
+    session.door().barrier().unwrap();
+
+    let before = settled(&mut session);
+    let (a, b) = (cell(&before, "tile-a"), cell(&before, "tile-b"));
+    assert_ne!(a, b, "two tiles share the output");
+    let strip = (before.output_w / 2 - 20, 8, 40, 24);
+    let top = (before.output_w as i32 / 2, BAR as i32 / 2);
+    let bar_before = session.screenshot("tiled-fullscreen-before").unwrap();
+    assert!(near(bar_before.mean_rgb(strip.0, strip.1, strip.2, strip.3), FAKE_BAR_RGB), "the bar is visible before");
+    let door = session.door();
+    door.click(f64::from(b.0) + f64::from(b.2) / 2.0, f64::from(b.1) + f64::from(b.3) / 2.0)
+        .expect("a click focuses the second tile");
+    door.barrier().unwrap();
+    let address = hypr_json(&session, "j/activewindow")["address"].as_str().expect("tile B is active").to_string();
+
+    // -- on --------------------------------------------------------------
+    let how = omarchy_tiled_fullscreen_toggle(&mut session);
+    eprintln!("tiled fullscreen toggled through {how}");
+    let active = poll_until(Duration::from_secs(10), "activewindow to report fullscreenClient 2", || {
+        let active = hypr_json(&session, "j/activewindow");
+        (active["fullscreenClient"] == 2).then_some(active)
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.log()));
+    assert_eq!(active["address"], address);
+    assert_eq!(active["fullscreen"], 0, "the compositor's own fullscreen is untouched");
+    let told = poll_until(Duration::from_secs(10), "the probe to be told it is fullscreen", || {
+        last_configure(&session, TILE_B_LOG).filter(|line| line.contains("fullscreen"))
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log("chonk-fullscreen-probe")));
+    assert!(told.contains("fullscreen"), "{told}");
+    session.door().barrier().unwrap();
+    let during = settled(&mut session);
+    assert_eq!(cell(&during, "tile-b"), b, "the told tile keeps its cell");
+    assert_eq!(cell(&during, "tile-a"), a, "its neighbour does not move");
+    poll_until(Duration::from_secs(10), "the bar strip to stay painted", || {
+        session.door().barrier().ok()?;
+        let shot = session.screenshot("tiled-fullscreen-during").ok()?;
+        near(shot.mean_rgb(strip.0, strip.1, strip.2, strip.3), FAKE_BAR_RGB).then_some(())
+    })
+    .expect("the bar is still rendered over a tile told it is fullscreen");
+    assert_eq!(session.door().hit(top.0, top.1).unwrap(), "layer", "the bar keeps its input");
+    assert_eq!(fullscreen_transitions(&session), (0, 0), "no compositor fullscreen was entered");
+    let workspaces = hypr_json(&session, "j/workspaces");
+    assert!(
+        workspaces.as_array().unwrap().iter().all(|workspace| workspace["hasfullscreen"] == false),
+        "hasfullscreen stays compositor-only: {workspaces}"
+    );
+
+    // -- off -------------------------------------------------------------
+    let how = omarchy_tiled_fullscreen_toggle(&mut session);
+    eprintln!("tiled fullscreen toggled back through {how}");
+    poll_until(Duration::from_secs(10), "activewindow to report fullscreenClient 0", || {
+        (hypr_json(&session, "j/activewindow")["fullscreenClient"] == 0).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.log()));
+    poll_until(Duration::from_secs(10), "the probe to be told it is no longer fullscreen", || {
+        last_configure(&session, TILE_B_LOG).filter(|line| !line.contains("fullscreen"))
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log("chonk-fullscreen-probe")));
+    session.door().barrier().unwrap();
+    let after = settled(&mut session);
+    assert_eq!(cell(&after, "tile-b"), b, "the tile is where it was");
+    assert_eq!(cell(&after, "tile-a"), a);
+    assert_eq!(fullscreen_transitions(&session), (0, 0));
+
+    // -- SUPER + ALT + F reports as mode 1 ---------------------------------
+    assert_eq!(hypr_request(&session, "/dispatch fullscreen 1"), "ok", "Omarchy's full width maximizes");
+    poll_until(Duration::from_secs(10), "clients to report the maximized tile as fullscreen 1", || {
+        let clients = hypr_json(&session, "j/clients");
+        let window = clients.as_array()?.iter().find(|client| client["address"] == address.as_str())?;
+        (window["fullscreen"] == 1 && window["fullscreenClient"] == 1).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}\n{}", hypr_request(&session, "j/clients"), session.log()));
+    assert_eq!(fullscreen_transitions(&session), (0, 0), "maximize is not fullscreen");
+    assert!(session.compositor_alive());
+}
+
 /// A client that asks for fullscreen or maximize during setup, before its
 /// initial commit, opens in that state. Under Omarchy's `suppress_event
 /// maximize` rule the maximize asked for at launch is refused like any

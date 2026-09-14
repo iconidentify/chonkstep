@@ -160,7 +160,7 @@ Three kinds of Omarchy binding get three different answers:
 
 | Chord | Omarchy | Here | The difference |
 |---|---|---|---|
-| `super+f` / `super+alt+f` | fullscreen / "full width" (Hyprland's `maximized`) | `toggle-fullscreen` / `toggle-maximize` | The pair keeps its shape: the plain chord takes the whole output with no chrome, the modified one fills the workarea and keeps the titlebar. |
+| `super+f` / `super+alt+f` | fullscreen / "full width" (Hyprland's `maximized`) | `toggle-fullscreen` / `toggle-maximize` | The pair keeps its shape: the plain chord takes the whole output with no chrome, the modified one fills the workarea and keeps the titlebar. `super+ctrl+f`, "tiled full screen", is the same here as there: the application is told it is fullscreen and drops its own toolbars while its tile and the bar stay (`toggle-tiled-fullscreen`; with Omarchy's files, its own script). |
 | `super+alt+s` | move the window to the scratchpad workspace | `miniaturize` | Both mean "send this window away, recoverably". Omarchy's goes to a hidden workspace and comes back with the same chord; ChonkStep hides the window until it is selected with Alt-Tab. `super+s` (toggle scratchpad) is unbound. |
 | `control+escape` | nothing | `window-menu` | The window menu is a chonkstep verb Omarchy has no vocabulary for. It keeps its own chord, which Omarchy leaves free. |
 
@@ -190,8 +190,8 @@ between "chonkstep knows what Omarchy's chords were in August" and
 "Omarchy's menu still configures your machine": rebind a key through
 their UI and the running session follows it within a second.
 
-On the machine this was developed on the live read produced **186
-bindings over 120 commands**, against the baked table's 161 over 86 —
+On the machine this was developed on the live read produced **187
+bindings over 121 commands**, against the baked table's 161 over 86 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
 file test that only a live read can make, and Omarchy's twelve keyboard

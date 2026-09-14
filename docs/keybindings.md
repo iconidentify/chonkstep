@@ -50,6 +50,7 @@ ever do disagree, the source wins.
 | `alt+shift+s`      | `toggle-shade`         | Roll the window up into its titlebar          |
 | `alt+shift+m`      | `miniaturize`          | Minimize; restore through Alt-Tab                      |
 | `alt+shift+f`      | `toggle-fullscreen`    | Borderless fullscreen on / off                |
+| --                 | `toggle-tiled-fullscreen` | Tell the app it is fullscreen; it drops its own chrome and keeps its place |
 | `alt+ctrl+right`   | `workspace-next`       | Next workspace (grows on demand)              |
 | `alt+ctrl+left`    | `workspace-prev`       | Previous workspace (stops at the first)       |
 | `alt+shift+right`  | `workspace-carry-next` | Carry the focused window to the next          |
@@ -62,8 +63,10 @@ ever do disagree, the source wins.
 | `control+escape`   | `window-menu`          | Window commands menu, no titlebar required    |
 
 Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
-`miniaturize`, `toggle-fullscreen`, `window-menu`) act on the focused
-window and do nothing when no window is focused.
+`miniaturize`, `toggle-fullscreen`, `toggle-tiled-fullscreen`,
+`window-menu`) act on the focused window and do nothing when no window
+is focused. `toggle-tiled-fullscreen` has no default chord; it is what
+Omarchy's `super+ctrl+f` becomes, and Hyprland's `fullscreenstate 0 2`.
 
 ChonkStep has three workspace styles. **Freeform** lets you place windows
 yourself. **Mosaic** keeps windows visible. **Flow** extends them sideways.
@@ -152,7 +155,7 @@ helpers are supported directly.
 | `super+alt+f`            | `toggle-maximize`                      | --                                                                                                                  |
 | `super+j` | `layout-noop` | -- |
 | `super+p` | `layout-noop` | -- |
-| `super+ctrl+f` | `toggle-maximize` | -- |
+| `super+ctrl+f` | `toggle-tiled-fullscreen` | -- |
 | `super+o` | `run omarchy-window-pop` | `omarchy-hyprland-window-pop` |
 | `super+alt+home` | `run omarchy-window-width-save` | `omarchy-hyprland-window-width save` |
 | `super+home` | `run omarchy-window-width-restore` | `omarchy-hyprland-window-width restore` |

@@ -270,6 +270,10 @@ fn build_snapshot(
             xwayland: wm.backend().windows.get(&client.window)
                 .is_some_and(|record| matches!(record.surface, ManagedSurface::X11(_))),
             fullscreen: client.flags.contains(wm_core::ClientFlags::FULLSCREEN),
+            maximized: client
+                .flags
+                .contains(wm_core::ClientFlags::MAXIMIZED_H | wm_core::ClientFlags::MAXIMIZED_V),
+            client_fullscreen: client.flags.contains(wm_core::ClientFlags::CLIENT_FULLSCREEN),
             hidden: client.lifecycle == Lifecycle::Miniaturized,
             urgent: client.flags.contains(wm_core::ClientFlags::URGENT),
             pinned: client.flags.contains(wm_core::ClientFlags::STICKY),
@@ -427,6 +431,9 @@ fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::Ses
         A::Close => verb("killactive", ""),
         A::ToggleFullscreen => verb("fullscreen", "0"),
         A::ToggleMaximize => verb("fullscreen", "1"),
+        A::FullscreenState { internal, client } => {
+            ("fullscreenstate".to_string(), format!("{} {}", internal.level(), client.level()))
+        }
         A::Focus(direction) => ("movefocus".to_string(), letter(direction)),
         A::Move(direction) => ("movewindow".to_string(), letter(direction)),
         A::Floating(None) => verb("togglefloating", ""),
@@ -680,6 +687,22 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             }
             None => false,
         },
+        Action::FullscreenState { window, internal, client } => {
+            let target = match window {
+                Some(id) => client_of(wm, id),
+                None => wm.focused_client(),
+            };
+            // Parsing already refused anything outside 0..=2; a value
+            // that still fails here is answered as not applied rather
+            // than rounded.
+            match (target, wm_core::FullscreenMode::from_level(internal), wm_core::FullscreenMode::from_level(client)) {
+                (Some(target), Some(internal), Some(client)) => {
+                    wm.toggle_fullscreen_state(target, internal, client);
+                    true
+                }
+                _ => false,
+            }
+        }
         Action::CycleFocus { forward } => wm.focus_adjacent_client(forward),
         Action::FocusDirection(direction) => {
             wm.focus_direction(match direction {
@@ -1178,6 +1201,8 @@ mod binding_replay_tests {
                 pid: 4242,
                 xwayland: false,
                 fullscreen: false,
+                maximized: false,
+                client_fullscreen: false,
                 hidden: false,
                 urgent: false,
                 pinned: false,

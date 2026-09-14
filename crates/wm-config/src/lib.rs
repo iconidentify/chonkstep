@@ -39,6 +39,14 @@ pub enum Action {
     ToggleShade,
     Miniaturize,
     ToggleFullscreen,
+    /// Hyprland's `fullscreenstate <internal> <client>`: what the
+    /// compositor does with the focused window and what the window is
+    /// told, set independently. `toggle-tiled-fullscreen` is the one
+    /// pair with a name of its own, `(None, Fullscreen)`: Omarchy's
+    /// tiled fullscreen, where the client drops its own chrome inside a
+    /// tile that stays put. Asking for the state the window already has
+    /// clears both axes, so a bound pair is a toggle.
+    FullscreenState { internal: wm_core::FullscreenMode, client: wm_core::FullscreenMode },
     Layout(wm_core::LayoutMode),
     ToggleLayout,
     Floating(Option<bool>),
@@ -208,6 +216,11 @@ impl Action {
             Action::ToggleShade => "toggle-shade",
             Action::Miniaturize => "miniaturize",
             Action::ToggleFullscreen => "toggle-fullscreen",
+            Action::FullscreenState {
+                internal: wm_core::FullscreenMode::None,
+                client: wm_core::FullscreenMode::Fullscreen,
+            } => "toggle-tiled-fullscreen",
+            Action::FullscreenState { .. } => return None,
             Action::Layout(LayoutMode::Freeform) => "layout-freeform",
             Action::Layout(LayoutMode::Mosaic) => "layout-mosaic",
             Action::Layout(LayoutMode::Flow) => "layout-flow",
@@ -559,6 +572,10 @@ fn action_from_name(name: &str) -> Option<Action> {
         "toggle-shade" => Some(Action::ToggleShade),
         "miniaturize" => Some(Action::Miniaturize),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
+        "toggle-tiled-fullscreen" => Some(Action::FullscreenState {
+            internal: wm_core::FullscreenMode::None,
+            client: wm_core::FullscreenMode::Fullscreen,
+        }),
         "focus-left" => Some(Action::Focus(FocusDirection::Left)),
         "focus-right" => Some(Action::Focus(FocusDirection::Right)),
         "focus-up" => Some(Action::Focus(FocusDirection::Up)),
@@ -3201,6 +3218,13 @@ numlock_by_default = false
             ("toggle-shade", Action::ToggleShade),
             ("miniaturize", Action::Miniaturize),
             ("toggle-fullscreen", Action::ToggleFullscreen),
+            (
+                "toggle-tiled-fullscreen",
+                Action::FullscreenState {
+                    internal: wm_core::FullscreenMode::None,
+                    client: wm_core::FullscreenMode::Fullscreen,
+                },
+            ),
             ("focus-left", Action::Focus(FocusDirection::Left)),
             ("focus-right", Action::Focus(FocusDirection::Right)),
             ("focus-up", Action::Focus(FocusDirection::Up)),

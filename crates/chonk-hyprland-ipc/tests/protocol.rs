@@ -72,6 +72,8 @@ fn window(id: u64, title: &str, class: &str, workspace: usize) -> Window {
         pid: 4242,
         xwayland: false,
         fullscreen: false,
+        maximized: false,
+        client_fullscreen: false,
         hidden: false,
         urgent: false,
         pinned: false,
@@ -824,6 +826,19 @@ fn served_script_requests(snapshot: &Snapshot) -> Vec<(&'static str, Vec<ScriptR
                 Mutation(r#"/eval hl.workspace_rule({ workspace = "1", layout = "dwindle" })"#.to_string()),
             ],
         ),
+        (
+            "omarchy-hyprland-window-tiled-fullscreen-toggle",
+            vec![
+                Query("j/activewindow", &["fullscreenClient"]),
+                // Off when `fullscreenClient` reads 2, on otherwise, each
+                // with the classic fallback the script keeps for an older
+                // Hyprland.
+                dispatch("hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })"),
+                dispatch("hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })"),
+                dispatch("fullscreenstate 0 0"),
+                dispatch("fullscreenstate 0 2"),
+            ],
+        ),
     ]
 }
 
@@ -900,6 +915,107 @@ fn fullscreen_arguments_map() {
     assert_eq!(actions, vec![Action::ToggleMaximize]);
     let (_, actions) = answer_payload(b"/dispatch fullscreen 2", &snapshot);
     assert_eq!(actions, vec![Action::Fullscreen(Fullscreen::On)]);
+}
+
+/// `fullscreenstate` carries two axes, and both reach the action in
+/// either spelling; the Lua form also takes a window selector.
+#[test]
+fn fullscreen_state_parses_both_axes_in_both_spellings() {
+    let snapshot = desktop();
+    let focused = snapshot.windows[0].id;
+    for (wire, internal, client) in [
+        ("/dispatch fullscreenstate 0 2", 0, 2),
+        ("/dispatch fullscreenstate 0 0", 0, 0),
+        ("/dispatch fullscreenstate 2 1", 2, 1),
+        ("/dispatch fullscreenstate  1   2 ", 1, 2),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response, "ok", "{wire}");
+        assert_eq!(actions, vec![Action::FullscreenState { window: None, internal, client }], "{wire}");
+    }
+    for (wire, internal, client) in [
+        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })", 0, 2),
+        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })", 0, 0),
+        ("/dispatch hl.dsp.window.fullscreen_state({ client = 1, internal = 2 })", 2, 1),
+        (
+            "/dispatch hl.dsp.window.fullscreen_state({ window = \"address:0x100000001\", internal = 1, client = 1 })",
+            1,
+            1,
+        ),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response, "ok", "{wire}");
+        assert_eq!(actions, vec![Action::FullscreenState { window: Some(focused), internal, client }], "{wire}");
+    }
+}
+
+/// A mode outside 0..=2, a missing axis, or a non-number is refused by
+/// the name of the field, never rounded to a state the window did not
+/// ask for. `hyprctl` exits zero whatever the reply, so the reply text
+/// is the only thing that tells a script author what was wrong.
+#[test]
+fn fullscreen_state_refuses_out_of_range_and_missing_axes_by_name() {
+    let snapshot = desktop();
+    for (wire, field, value) in [
+        ("fullscreenstate 3 2", "internal", "\"3\""),
+        ("fullscreenstate 0 -1", "client", "\"-1\""),
+        ("fullscreenstate 0 on", "client", "\"on\""),
+        ("hl.dsp.window.fullscreen_state({ internal = 0, client = 7 })", "client", "\"7\""),
+        ("hl.dsp.window.fullscreen_state({ internal = 256, client = 2 })", "internal", "\"256\""),
+    ] {
+        let outcome = dispatch::parse(wire, &snapshot);
+        let Outcome::Unsupported(why) = outcome else {
+            panic!("{wire:?} must be refused, got {outcome:?}");
+        };
+        assert!(why.contains(field) && why.contains(value), "{wire:?} names the bad field and value: {why}");
+        let (response, actions) = answer_payload(format!("/dispatch {wire}").as_bytes(), &snapshot);
+        assert_ne!(response, "ok", "{wire}");
+        assert!(actions.is_empty(), "{wire}: nothing applied");
+    }
+    for wire in [
+        "fullscreenstate",
+        "fullscreenstate 0",
+        "hl.dsp.window.fullscreen_state({ client = 2 })",
+        "hl.dsp.window.fullscreen_state()",
+    ] {
+        let outcome = dispatch::parse(wire, &snapshot);
+        let Outcome::Unsupported(why) = outcome else {
+            panic!("{wire:?} must be refused, got {outcome:?}");
+        };
+        assert!(why.contains("both internal and client"), "{wire:?}: {why}");
+    }
+}
+
+/// `fullscreen` is the compositor's mode and `fullscreenClient` what the
+/// window is told, in Hyprland's numbering: a maximized window reads 1
+/// on both, one told it is fullscreen in its tile reads 0 and 2, and a
+/// real fullscreen reads 2 and 2. `hasfullscreen` follows only the last.
+#[test]
+fn clients_report_fullscreen_and_fullscreen_client_modes_honestly() {
+    let mut snapshot = desktop();
+    let read = |snapshot: &Snapshot| {
+        let active = ask_json("j/activewindow", snapshot);
+        let clients = ask_json("j/clients", snapshot);
+        let client = &clients.as_array().unwrap()[0];
+        assert_eq!(client["fullscreen"], active["fullscreen"]);
+        assert_eq!(client["fullscreenClient"], active["fullscreenClient"]);
+        (active["fullscreen"].as_i64().unwrap(), active["fullscreenClient"].as_i64().unwrap())
+    };
+    assert_eq!(read(&snapshot), (0, 0));
+
+    snapshot.windows[0].maximized = true;
+    assert_eq!(read(&snapshot), (1, 1), "SUPER+ALT+F's maximize is Hyprland's mode 1");
+    snapshot.windows[0].maximized = false;
+
+    snapshot.windows[0].client_fullscreen = true;
+    assert_eq!(read(&snapshot), (0, 2), "tiled fullscreen is told, not done");
+    let plain = ask("activewindow", &snapshot);
+    assert!(plain.contains("\tfullscreen: 0\n\tfullscreenClient: 2\n"), "{plain}");
+    assert_eq!(ask_json("j/workspaces", &snapshot)[0]["hasfullscreen"], false, "hasfullscreen stays compositor-only");
+    snapshot.windows[0].client_fullscreen = false;
+
+    snapshot.windows[0].fullscreen = true;
+    assert_eq!(read(&snapshot), (2, 2));
 }
 
 #[test]

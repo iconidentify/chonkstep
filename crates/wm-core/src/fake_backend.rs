@@ -15,6 +15,11 @@ pub struct FakeWindowId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FakeFrameId(pub u64);
 
+/// One recorded `publish_net_state` call:
+/// `(window, fullscreen, client_fullscreen, max_h, max_v, shaded, hidden, modal)`,
+/// matching `NetStateSnapshot`'s field order exactly.
+pub type PublishedNetState = (FakeWindowId, bool, bool, bool, bool, bool, bool, bool);
+
 /// In-memory `Backend` double for unit-testing `wm-core`'s state
 /// machine, focus policy, and hit-testing without any X server. Every
 /// side effect a real backend would perform (mapping, painting,
@@ -197,10 +202,8 @@ pub struct FakeBackend {
     /// Every `publish_workarea` call in order, as
     /// `(area, workspace_count)`.
     pub published_workareas: Vec<(Rect, usize)>,
-    /// Every `publish_net_state` call in order, as
-    /// `(window, fullscreen, max_h, max_v, shaded, hidden, modal)` — matching
-    /// the trait method's parameter order exactly.
-    pub published_net_states: Vec<(FakeWindowId, bool, bool, bool, bool, bool, bool)>,
+    /// Every `publish_net_state` call in order; see [`PublishedNetState`].
+    pub published_net_states: Vec<PublishedNetState>,
     /// Every `publish_window_desktop` call in order, as
     /// `(window, desktop)` — a history, so a test can assert both the
     /// initial manage-time publish and a later move's re-publish, not
@@ -613,6 +616,7 @@ impl Backend for FakeBackend {
             .push((
                 window,
                 state.fullscreen,
+                state.client_fullscreen,
                 state.maximized_horizontally,
                 state.maximized_vertically,
                 state.shaded,

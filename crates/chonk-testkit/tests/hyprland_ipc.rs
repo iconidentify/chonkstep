@@ -863,7 +863,8 @@ fn foreign_toplevel_mapping_returns_the_same_live_ipc_address() {
         .iter()
         .find(|client| client["title"].as_str().is_some_and(|title| title.contains("mapping-probe")))
         .and_then(|client| client["fullscreen"].as_i64());
-    assert_eq!(fullscreen, Some(1), "Hyprland IPC and foreign-toplevel observe the same fullscreen transition");
+    // 2 is Hyprland's number for real fullscreen; 1 would be maximize.
+    assert_eq!(fullscreen, Some(2), "Hyprland IPC and foreign-toplevel observe the same fullscreen transition");
 
     session.kill_client("zenity");
     session.wait_for_window_gone("mapping-probe").expect("window unmaps cleanly");

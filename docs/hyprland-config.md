@@ -63,7 +63,9 @@ Each binding gets one of three answers:
 
 1. **A verb chonkstep also has** becomes that verb. `killactive` →
    `close`, `fullscreen 0` → `toggle-fullscreen`, `fullscreen 1` →
-   `toggle-maximize`, `workspace 4` → `workspace 4`, `workspace e+1` →
+   `toggle-maximize`, `fullscreenstate 0 2` → `toggle-tiled-fullscreen`
+   (any other `fullscreenstate <internal> <client>` pair with each axis
+   0, 1 or 2 binds too), `workspace 4` → `workspace 4`, `workspace e+1` →
    `workspace-next-occupied` (the next workspace that has windows,
    wrapping; the bare `+1` is `workspace-next`, which steps by index),
    `workspace previous` → `workspace-previous`, `focusmonitor +1|l|NAME`
@@ -371,7 +373,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 
 Omarchy implements several window and display chords as
 `omarchy-hyprland-*` scripts that drive the compositor through `hyprctl`.
-These five send only requests chonkstep's Hyprland IPC applies, so their
+These six send only requests chonkstep's Hyprland IPC applies, so their
 bindings, menu rows and autostart lines run as written. The list lives in
 `crates/wm-config/src/hyprland/dispatch.rs`, and
 `crates/chonk-hyprland-ipc/tests/protocol.rs` feeds every request each
@@ -385,6 +387,7 @@ script reads is missing. A script cannot join the list without that proof.
 | `omarchy-hyprland-window-close-all` | `CTRL + ALT + DELETE`: close every window, then show workspace 1 |
 | `omarchy-hyprland-monitor-scaling` | `SUPER + SLASH` / `SUPER + ALT + SLASH`: step the focused monitor's scale |
 | `omarchy-hyprland-workspace-layout-toggle` | The menu's Workspace Layout row. Its `SUPER + L` binding takes chonkstep's own `toggle-layout`. |
+| `omarchy-hyprland-window-tiled-fullscreen-toggle` | `SUPER + CTRL + F`: tell the window it is fullscreen in its tile, or stop. It reads `fullscreenClient` back to decide which. |
 
 On a Freeform workspace the pop-out's float toggle does nothing, because
 Freeform has no layout to float a window out of; the window is still
@@ -397,7 +400,6 @@ starts are refused with the piece they need:
 
 | Script | Why not here |
 |---|---|
-| `omarchy-hyprland-window-tiled-fullscreen-toggle` | needs client-only fullscreen, which ChonkStep does not model |
 | `omarchy-hyprland-window-transparency-toggle` | needs per-window opacity, which ChonkStep does not model |
 | `omarchy-hyprland-window-gaps-toggle` | toggles Hyprland's gaps, which ChonkStep does not read |
 | `omarchy-hyprland-window-single-square-aspect-toggle` | toggles a Hyprland layout option, which ChonkStep does not read |
@@ -755,8 +757,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=186 commands=120 env=8 autostart=4
-      float_rules=48 monitors=1 skipped=153
+      files=42 bindings=187 commands=121 env=8 autostart=4
+      float_rules=48 monitors=1 skipped=152
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

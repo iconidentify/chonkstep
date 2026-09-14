@@ -137,6 +137,9 @@ pub const SERVED_OMARCHY_SCRIPTS: &[&str] = &[
     "omarchy-hyprland-window-close-all",
     "omarchy-hyprland-monitor-scaling",
     "omarchy-hyprland-workspace-layout-toggle",
+    // Reads `.fullscreenClient` and sends `fullscreen_state`, both
+    // axes of which the IPC now serves.
+    "omarchy-hyprland-window-tiled-fullscreen-toggle",
 ];
 
 /// The `omarchy-hyprland-*` scripts Omarchy binds or starts whose
@@ -146,9 +149,6 @@ pub const SERVED_OMARCHY_SCRIPTS: &[&str] = &[
 /// [`SERVED_OMARCHY_SCRIPTS`] in the change that makes its requests
 /// served.
 pub const UNSERVED_OMARCHY_SCRIPTS: &[(&str, Unbound)] = &[
-    // It reads `.fullscreenClient` and asks for a window that keeps its
-    // tile while the client is told it is fullscreen.
-    ("omarchy-hyprland-window-tiled-fullscreen-toggle", Unbound::CLIENT_FULLSCREEN),
     ("omarchy-hyprland-window-transparency-toggle", Unbound::OPACITY),
     // Both rewrite a Hyprland config flag and run `hyprctl reload`.
     ("omarchy-hyprland-window-gaps-toggle", Unbound::GAPS),
@@ -197,6 +197,11 @@ pub fn commands_hyprland(program: &str) -> bool {
     hyprland_refusal(program).is_some()
 }
 
+/// One axis of `fullscreenstate`, in Hyprland's numbering.
+fn fullscreen_mode(level: &str) -> Option<wm_core::FullscreenMode> {
+    level.parse::<u8>().ok().and_then(wm_core::FullscreenMode::from_level)
+}
+
 /// Whether a command line contains shell grammar that argv splitting
 /// would destroy.
 fn needs_a_shell(command: &str) -> bool {
@@ -227,10 +232,18 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             "1" => Verb::Action(Action::ToggleMaximize),
             _ => Verb::Unbound(Unbound::NoVerb),
         },
-        // `fullscreenstate` sets the *client's* idea and the
-        // compositor's separately, which is how Omarchy builds "tiled
-        // fullscreen". Independent client/internal states are not modeled.
-        "fullscreenstate" => Verb::Unbound(Unbound::TilingOnly),
+        // `fullscreenstate <internal> <client>` sets the compositor's
+        // idea and the client's separately, which is how Omarchy's
+        // classic bindings spell "tiled fullscreen" (`0 2`). Both axes
+        // are required, each 0, 1 or 2; anything else is refused rather
+        // than rounded to a state the chord did not ask for.
+        "fullscreenstate" => match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [internal, client] => match (fullscreen_mode(internal), fullscreen_mode(client)) {
+                (Some(internal), Some(client)) => Verb::Action(Action::FullscreenState { internal, client }),
+                _ => Verb::Unbound(Unbound::NoVerb),
+            },
+            _ => Verb::Unbound(Unbound::NoVerb),
+        },
         "togglefloating" => Verb::Action(Action::Floating(None)),
         "setfloating" => Verb::Action(Action::Floating(Some(true))),
         "settiled" => Verb::Action(Action::Floating(Some(false))),

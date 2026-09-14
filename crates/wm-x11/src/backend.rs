@@ -3395,6 +3395,7 @@ impl Backend for X11Backend {
     fn publish_net_state(&mut self, window: Self::WindowId, state: wm_core::NetStateSnapshot) {
         let wm_core::NetStateSnapshot {
             fullscreen,
+            client_fullscreen,
             maximized_horizontally: max_h,
             maximized_vertically: max_v,
             shaded,
@@ -3402,7 +3403,9 @@ impl Backend for X11Backend {
             modal,
         } = state;
         let mut atoms = Vec::with_capacity(6);
-        if fullscreen {
+        // The property says what the client is told; client-only
+        // fullscreen is told the same word without the geometry.
+        if fullscreen || client_fullscreen {
             atoms.push(self.ewmh.net_wm_state_fullscreen);
         }
         if max_h {

@@ -1358,7 +1358,7 @@ mod tests {
         assert!(!is_hyprland_only("omarchy-hyprland-monitor-scaling up"));
         assert!(!is_hyprland_only("/usr/bin/omarchy-hyprland-window-pop"));
         assert!(!is_hyprland_only("omarchy-hyprland-workspace-layout-toggle"));
-        assert!(is_hyprland_only("omarchy-hyprland-window-tiled-fullscreen-toggle"));
+        assert!(!is_hyprland_only("omarchy-hyprland-window-tiled-fullscreen-toggle"));
         assert!(is_hyprland_only("omarchy-hyprland-some-future-script"));
     }
 

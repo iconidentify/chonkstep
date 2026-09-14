@@ -465,7 +465,10 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     // tiling tree.
     ("super+j", "layout-noop"),
     ("super+p", "layout-noop"),
-    ("super+ctrl+f", "toggle-maximize"),
+    // Omarchy's "Tiled full screen": the application is told it is
+    // fullscreen, drops its own toolbars, and stays in its tile with
+    // the bar visible. Hyprland's `fullscreenstate 0 2`.
+    ("super+ctrl+f", "toggle-tiled-fullscreen"),
     ("super+o", "run omarchy-window-pop"),
     ("super+alt+home", "run omarchy-window-width-save"),
     ("super+home", "run omarchy-window-width-restore"),
@@ -699,9 +702,6 @@ pub enum Unbound {
 }
 
 impl Unbound {
-    /// A window that keeps its tile while its client is told it is
-    /// fullscreen (Omarchy's tiled fullscreen).
-    pub const CLIENT_FULLSCREEN: Self = Self::Unserved("needs client-only fullscreen, which ChonkStep does not model");
     pub const OPACITY: Self = Self::Unserved("needs per-window opacity, which ChonkStep does not model");
     pub const GAPS: Self = Self::Unserved("toggles Hyprland's gaps, which ChonkStep does not read");
     pub const LAYOUT_OPTION: Self = Self::Unserved("toggles a Hyprland layout option, which ChonkStep does not read");
@@ -936,7 +936,6 @@ mod tests {
         // The intended aliases, as (action, how many chords reach it).
         let expected: BTreeMap<&str, usize> = [
             ("layout-noop", 2),
-            ("toggle-maximize", 2),
             ("run omarchy-browser", 2),
             ("run omarchy-menu", 2),
             ("run omarchy-menu-system", 2),

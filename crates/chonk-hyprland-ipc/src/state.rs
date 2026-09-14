@@ -173,7 +173,15 @@ pub struct Window {
     pub pid: i32,
     /// True for an X11 window managed through XWayland.
     pub xwayland: bool,
+    /// Compositor fullscreen: the window covers its output. This is
+    /// the only fullscreen `hasfullscreen` and the `fullscreen` event
+    /// follow.
     pub fullscreen: bool,
+    /// Maximized along both axes, Hyprland's fullscreen mode 1.
+    pub maximized: bool,
+    /// Told it is fullscreen while keeping its tile (`fullscreenstate 0
+    /// 2`). Reported on `fullscreenClient` only.
+    pub client_fullscreen: bool,
     /// Miniaturised. Hyprland's nearest concept is `hidden`, which
     /// `omarchy-capture-region` filters on (`select(.hidden != true)`)
     /// to keep iconified windows out of its rectangle list.
@@ -190,6 +198,32 @@ pub struct Window {
 }
 
 impl Window {
+    /// Hyprland's `fullscreen` field: the compositor's own mode — 2
+    /// fullscreen, 1 maximized, 0 neither.
+    pub fn fullscreen_mode(&self) -> i32 {
+        if self.fullscreen {
+            2
+        } else if self.maximized {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Hyprland's `fullscreenClient` field: what the window is told —
+    /// 2 for compositor or client-only fullscreen, 1 maximized, 0
+    /// neither. Omarchy's tiled-fullscreen toggle branches on this, so
+    /// it has to read 2 exactly while the window is told so.
+    pub fn fullscreen_client_mode(&self) -> i32 {
+        if self.fullscreen || self.client_fullscreen {
+            2
+        } else if self.maximized {
+            1
+        } else {
+            0
+        }
+    }
+
     /// The window's Hyprland address: `0x` followed by lowercase hex.
     ///
     /// Quickshell parses this with `toULongLong(&ok, 16)`, which accepts
@@ -553,8 +587,8 @@ impl Snapshot {
             pid: window.pid,
             xwayland: window.xwayland,
             pinned: window.pinned,
-            fullscreen: i32::from(window.fullscreen),
-            fullscreen_client: 0,
+            fullscreen: window.fullscreen_mode(),
+            fullscreen_client: window.fullscreen_client_mode(),
             grouped: Vec::new(),
             tags: window.tags.clone(),
             swallowing: "0x0".to_string(),
