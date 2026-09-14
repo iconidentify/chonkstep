@@ -77,6 +77,27 @@ topology.
 
 ## Validation
 
-VALIDATION
+On the release candidate `82b4982` and the test fix after it, on an aarch64
+laptop, in headless Weston sessions run one at a time:
 
-Validation results will be filled in from the release candidate build.
+- `scripts/check.sh lint`, `docs`, `unit` and `wayland-unit` pass.
+- The complete headless end-to-end suite ran 386 tests. 385 passed.
+  `restore_after_miniaturize_is_a_real_focus_cycle` failed on every run because
+  it judged its zenity dialog hidden by the window's own mapped flag, and the
+  dialog now wears edge chrome and hides with its frame. With the check reading
+  the frame, the `e2e` target passed 10 of 10 and that test three times.
+- Repeated runs of the fixed tests all passed: the appearance switch 10 times,
+  the capture tool's fractional window click 10 times, the heap high-water test
+  3 times, browser text selection twice (12 tests), shade through Overview 3
+  times and the lagged-fullscreen coordinates test 4 times.
+- Each regression was run with its fix reverted. The lagged-fullscreen test
+  never settles without the fullscreen size fix, and receives (93.75, 93.75)
+  for a motion at (300, 250) without the stretch fix. The fullscreen size and
+  maximized chrome refit unit tests fail without their fixes. A backend
+  replay guard written during the investigation made no difference to the
+  regression and was left out.
+- Real clients exercised: Chromium (Wayland and XWayland), LibreOffice Writer,
+  Nautilus with edge chrome, zenity and Fcitx.
+
+The required `test`, `wayland` and `lint` jobs on the pull request, and main's
+push run for the merge commit, gate the `preview-v0.6.0` tag.
