@@ -10,14 +10,14 @@ use wm_theme_api::{
 
 use crate::backend::Backend;
 use crate::client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorInfo};
-use crate::focus::{FocusDirection, FocusPolicy};
+use crate::focus::{FocusDirection, FocusPolicy, OutputTarget};
 use crate::hittest::{hit_test, HitTarget};
 use crate::placement::{self, FloatPolicy, IdleInhibitRule, PlacementPolicy};
 use crate::resize;
 use crate::snap;
 mod mac;
 mod spaces;
-pub use spaces::{DisplaySpace, DisplaySpacesSnapshot, Space, SpaceHomeGeometry};
+pub use spaces::{DisplaySpace, DisplaySpacesSnapshot, Space, SpaceHomeGeometry, FULLSCREEN_SPACE_STAYS_HOME, SHARED_DESKTOP_SPANS_DISPLAYS};
 use crate::types::{
     BackendEvent, ClientChrome, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
     NetStateSnapshot, SurfaceRef, WindowType,
@@ -316,6 +316,13 @@ pub struct WindowManager<B: Backend> {
     /// a client onto an index past the current row's end. Removing a
     /// workspace compacts memberships and retains at least one desktop.
     current_workspace: usize,
+    /// The workspace `current_workspace` was before the last switch, for
+    /// Hyprland's `workspace previous`. Written by the two switch paths
+    /// only, never by a display selection, so it reads as "where I was
+    /// before" rather than "where the pointer last crossed". Remapped by
+    /// workspace removal like every other index; `None` until the first
+    /// switch and after the workspace it named is removed.
+    previous_workspace: Option<usize>,
     workspace_count: usize,
     layouts: Vec<crate::spatial::WorkspaceLayout>,
     /// The style a workspace starts in when nothing chose one for it:
@@ -417,6 +424,7 @@ impl<B: Backend> WindowManager<B> {
             focus_policy: FocusPolicy::default(),
             raise_on_focus: true,
             current_workspace: 0,
+            previous_workspace: None,
             workspace_count: 1,
             layouts: vec![crate::spatial::WorkspaceLayout::default()],
             default_layout: crate::LayoutMode::Freeform,
@@ -1308,6 +1316,99 @@ impl<B: Backend> WindowManager<B> {
         self.workspace_count
     }
 
+    /// The output monitor-relative verbs count from: the display whose
+    /// Space is active under separate Spaces, else the one under the
+    /// pointer, which is what the Hyprland IPC reports as focused.
+    pub fn focused_output_index(&self) -> usize {
+        if self.separate_spaces() {
+            return self.active_output_index();
+        }
+        self.backend
+            .pointer_position()
+            .or(self.last_pointer)
+            .map(|point| self.monitor_index_at(point))
+            .or_else(|| self.focused.map(|id| self.client_output_index(id)))
+            .unwrap_or_else(|| self.primary_monitor_index())
+    }
+
+    /// The monitor index an [`OutputTarget`] names right now, or `None`
+    /// when nothing does: an unknown name, no output in that direction,
+    /// or no outputs at all. Resolved against the live list on purpose,
+    /// because the target was read from a config file or a socket some
+    /// time ago and an output can have gone since.
+    pub fn resolve_output_target(&self, target: &OutputTarget) -> Option<usize> {
+        let monitors = self.monitors_ref();
+        if monitors.is_empty() {
+            return None;
+        }
+        match target {
+            OutputTarget::Name(name) => monitors.iter().position(|monitor| monitor.name == *name),
+            OutputTarget::Relative(step) => {
+                let count = monitors.len() as i64;
+                let from = self.focused_output_index().min(monitors.len() - 1) as i64;
+                Some((from + i64::from(*step)).rem_euclid(count) as usize)
+            }
+            OutputTarget::Direction(direction) => {
+                self.output_in_direction(self.focused_output_index(), *direction)
+            }
+        }
+    }
+
+    /// The nearest other output in `direction` from output `from`, by
+    /// the same ranking directional window focus uses over frames.
+    fn output_in_direction(&self, from: usize, direction: FocusDirection) -> Option<usize> {
+        let monitors = self.monitors_ref();
+        let source = monitors.get(from)?.geometry;
+        monitors
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != from)
+            .filter_map(|(index, monitor)| {
+                directional_score(source, monitor.geometry, direction).map(|score| (index, score))
+            })
+            .min_by_key(|(_, score)| *score)
+            .map(|(index, _)| index)
+    }
+
+    /// Focuses the output at `index`: Hyprland's `focusmonitor`.
+    ///
+    /// The pointer is warped to the centre of that output's workarea, so
+    /// everything the desktop derives from the pointer follows — on the
+    /// shared desktop that includes where the next window is placed,
+    /// which is how Omarchy's screensaver puts one fullscreen terminal
+    /// on every display. Under separate Spaces the display is selected
+    /// as well, which moves placement there in that mode. Keyboard focus
+    /// goes to the most recently focused window on that output; when it
+    /// has none, focus stays where it was rather than going nowhere.
+    ///
+    /// `false` when no such output exists, which a hotplug between the
+    /// verb being read and applied can arrange.
+    pub fn focus_output(&mut self, index: usize) -> bool {
+        let Some(monitor) = self.monitors_ref().get(index).map(|monitor| monitor.geometry) else {
+            return false;
+        };
+        let area = self.workareas.get(index).copied().unwrap_or(monitor);
+        let center = Point::new(
+            area.pos.x.saturating_add((area.size.w / 2) as i32),
+            area.pos.y.saturating_add((area.size.h / 2) as i32),
+        );
+        self.backend.warp_pointer(center);
+        // The backend's motion event arrives later, if at all; placement
+        // must follow the verb now, not the next hardware motion.
+        self.last_pointer = Some(center);
+        self.select_output(index);
+        let next = self
+            .focus_history
+            .iter()
+            .rev()
+            .copied()
+            .find(|&id| self.is_focusable(id) && self.client_output_index(id) == index);
+        if let Some(next) = next {
+            self.focus_client(next);
+        }
+        true
+    }
+
     /// Includes minimized windows, but not withdrawn clients awaiting remap.
     pub fn workspace_has_windows(&self, workspace: usize) -> bool {
         self.clients.values().any(|client| {
@@ -1345,6 +1446,7 @@ impl<B: Backend> WindowManager<B> {
         }
         let previous = self.current_workspace;
         self.current_workspace = remap(previous);
+        self.previous_workspace = self.previous_workspace.filter(|&p| p != workspace).map(remap);
         self.workspace_count -= 1;
         let mut revealed = Vec::new();
         for (id, client) in &mut self.clients {
@@ -1396,6 +1498,43 @@ impl<B: Backend> WindowManager<B> {
         self.switch_workspace_to_focus(workspace, None);
     }
 
+    /// The workspace the desktop was on before the last switch, if any:
+    /// what Hyprland's `workspace previous` names.
+    pub fn previous_workspace(&self) -> Option<usize> {
+        self.previous_workspace.filter(|&index| index < self.workspace_count && index != self.current_workspace)
+    }
+
+    /// Switches back to [`Self::previous_workspace`]. Two presses flip
+    /// between the same two workspaces, because the switch records the
+    /// one being left. `false`, and nothing changes, when there is no
+    /// workspace to go back to yet.
+    pub fn switch_to_previous_workspace(&mut self) -> bool {
+        let Some(target) = self.previous_workspace() else { return false };
+        self.switch_workspace(target);
+        self.current_workspace == target
+    }
+
+    /// The workspace `delta` steps away along the row, counting only
+    /// workspaces that have windows plus the current one, and wrapping
+    /// at either end: Hyprland's `e+1` / `e-1`, "the next workspace that
+    /// exists". Unlike stepping by index this never lands on an empty
+    /// workspace and never grows the row. `None` when nothing else on
+    /// the row is occupied, so the caller stays put.
+    pub fn occupied_workspace_step(&self, delta: i32) -> Option<usize> {
+        let current = self.current_workspace;
+        let row: Vec<usize> = self
+            .workspace_row()
+            .into_iter()
+            .filter(|&space| space == current || self.workspace_has_windows(space))
+            .collect();
+        let at = row.iter().position(|&space| space == current)?;
+        if row.len() < 2 {
+            return None;
+        }
+        let count = row.len() as i64;
+        row.get((at as i64 + i64::from(delta)).rem_euclid(count) as usize).copied()
+    }
+
     /// [`Self::switch_workspace`], for a caller about to focus
     /// `arriving` on the destination.
     ///
@@ -1418,6 +1557,7 @@ impl<B: Backend> WindowManager<B> {
         }
         self.workspace_count = self.workspace_count.max(workspace + 1);
         self.grow_layouts();
+        self.previous_workspace = Some(self.current_workspace);
         self.current_workspace = workspace;
         self.bump_protocol_state_revision();
         self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
@@ -10946,6 +11086,7 @@ mod tests {
     }
     mod spatial;
     mod spaces;
+    mod monitors;
     mod restyle;
     mod system7;
     fn mac_windows() -> (WindowManager<FakeBackend>, [ClientId; 3]) {

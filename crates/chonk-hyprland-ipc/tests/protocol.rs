@@ -9,7 +9,7 @@
 //! becomes a silent wrong answer downstream, which is the exact failure
 //! this whole crate is built to prevent.
 
-use chonk_hyprland_ipc::dispatch::{self, Action, Fullscreen, LayoutTarget};
+use chonk_hyprland_ipc::dispatch::{self, Action, Direction, Fullscreen, LayoutTarget, MonitorTarget};
 use chonk_hyprland_ipc::request::Request;
 use chonk_hyprland_ipc::server::answer_payload;
 use chonk_hyprland_ipc::state::{Devices, Keyboard, Monitor, MonitorMode, Snapshot, Window, Workspace};
@@ -95,7 +95,19 @@ fn desktop() -> Snapshot {
         config_errors: Vec::new(),
         devices: Devices::default(),
         system_info: "test system".into(),
+        separate_spaces: false,
+        previous_workspace: None,
     }
+}
+
+/// The same desk with a second head to the right, as `monitors` reports
+/// it.
+fn two_heads() -> Snapshot {
+    let mut snapshot = desktop();
+    let mut second = monitor(1, "DP-1", false, 1);
+    second.x = 1280;
+    snapshot.monitors.push(second);
+    snapshot
 }
 
 /// The same desk with a session lock in force.
@@ -192,6 +204,148 @@ fn a_pointer_warp_parses_in_both_spellings_and_refuses_anything_else() {
 /// must report it rather than invent a focused window to fill the gap.
 /// The shape for "nothing focused" is an empty object, which is what
 /// the real `hyprctl activewindow -j` prints on a Hyprland box.
+/// Omarchy's screensaver focuses each monitor by the name `monitors -j`
+/// reports, its bindings by step (`CTRL+ALT+TAB`) and direction. Every
+/// spelling is an action; a name no output carries is refused by name;
+/// and behind a session lock the whole verb is refused, since it moves
+/// the pointer and the keyboard.
+#[test]
+fn monitor_focus_parses_every_spelling_and_refuses_an_unknown_output_by_name() {
+    let snapshot = two_heads();
+    for (wire, target) in [
+        ("/dispatch focusmonitor +1", MonitorTarget::Relative(1)),
+        ("/dispatch focusmonitor -1", MonitorTarget::Relative(-1)),
+        ("/dispatch focusmonitor current", MonitorTarget::Relative(0)),
+        ("/dispatch focusmonitor l", MonitorTarget::Direction(Direction::Left)),
+        ("/dispatch focusmonitor right", MonitorTarget::Direction(Direction::Right)),
+        ("/dispatch focusmonitor u", MonitorTarget::Direction(Direction::Up)),
+        ("/dispatch focusmonitor d", MonitorTarget::Direction(Direction::Down)),
+        ("/dispatch focusmonitor DP-1", MonitorTarget::Name("DP-1".into())),
+        ("/dispatch focusmonitor 1", MonitorTarget::Name("DP-1".into())),
+        ("/dispatch hl.dsp.focus({ monitor = \"DP-1\" })", MonitorTarget::Name("DP-1".into())),
+        ("/dispatch hl.dsp.focus({ monitor = \"+1\" })", MonitorTarget::Relative(1)),
+        ("/eval hl.dispatch(hl.dsp.focus({ monitor = \"eDP-1\" }))", MonitorTarget::Name("eDP-1".into())),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions, vec![Action::FocusMonitor(target)], "{wire}");
+    }
+    for wire in [
+        "/dispatch focusmonitor",
+        "/dispatch focusmonitor DP-9",
+        "/dispatch focusmonitor 7",
+        "/dispatch focusmonitor +",
+        "/dispatch hl.dsp.focus({ monitor = \"HDMI-A-2\" })",
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert!(actions.is_empty(), "{wire} must not act");
+        assert!(response.starts_with("Invalid dispatcher"), "{wire}: got {response:?}");
+    }
+    assert!(ask("/dispatch focusmonitor DP-9", &snapshot).contains("DP-9"), "refused by name");
+    // Something that has never been a focus target remains distinguishable
+    // from a monitor field.
+    assert!(ask("/dispatch hl.dsp.focus({ })", &snapshot).starts_with("Invalid dispatcher"));
+
+    let locked = Snapshot { locked: true, ..snapshot };
+    for wire in ["/dispatch focusmonitor +1", "/dispatch hl.dsp.focus({ monitor = \"DP-1\" })"] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &locked);
+        assert!(actions.is_empty(), "{wire} must not act behind the lock");
+        assert!(response.contains("locked"), "{wire}: got {response:?}");
+    }
+}
+
+/// Omarchy's SUPER+SHIFT+ALT+arrows. On the shared desktop the workspace
+/// already spans every display, so the request is refused with the
+/// setting that would change that — never answered `ok` and left undone.
+#[test]
+fn moving_the_workspace_to_a_monitor_needs_separate_spaces_and_is_refused_by_name_otherwise() {
+    let shared = two_heads();
+    let (response, actions) = answer_payload(b"/dispatch movecurrentworkspacetomonitor r", &shared);
+    assert!(actions.is_empty(), "the shared desktop must not act");
+    assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
+    assert!(response.contains("separate_spaces"), "the refusal names the setting: {response:?}");
+
+    let spaces = Snapshot { separate_spaces: true, ..two_heads() };
+    for (wire, target) in [
+        ("/dispatch movecurrentworkspacetomonitor r", MonitorTarget::Direction(Direction::Right)),
+        ("/dispatch movecurrentworkspacetomonitor -1", MonitorTarget::Relative(-1)),
+        ("/dispatch movecurrentworkspacetomonitor DP-1", MonitorTarget::Name("DP-1".into())),
+        ("/dispatch hl.dsp.workspace.move({ monitor = \"l\" })", MonitorTarget::Direction(Direction::Left)),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &spaces);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions, vec![Action::MoveWorkspaceToMonitor(target)], "{wire}");
+    }
+    let (response, actions) = answer_payload(b"/dispatch movecurrentworkspacetomonitor DP-9", &spaces);
+    assert!(actions.is_empty());
+    assert!(response.contains("DP-9"), "refused by name: {response:?}");
+
+    // A fullscreen Space is bound to the display of its window.
+    let mut fullscreen = spaces.clone();
+    fullscreen.workspaces[0].has_fullscreen = true;
+    let (response, actions) = answer_payload(b"/dispatch movecurrentworkspacetomonitor r", &fullscreen);
+    assert!(actions.is_empty());
+    assert!(response.contains("fullscreen"), "got {response:?}");
+
+    let locked = Snapshot { locked: true, ..spaces };
+    let (response, actions) = answer_payload(b"/dispatch movecurrentworkspacetomonitor r", &locked);
+    assert!(actions.is_empty());
+    assert!(response.contains("locked"), "got {response:?}");
+}
+
+/// `workspace previous` is the workspace before this one, which only the
+/// compositor knows; `e+1` / `e-1` walk the workspaces that have windows
+/// on them, plus the current one, and wrap rather than grow the row.
+/// The plain `+1` keeps stepping by index.
+#[test]
+fn workspace_previous_and_existing_steps_resolve_against_the_snapshot() {
+    let mut snapshot = desktop();
+    let (response, actions) = answer_payload(b"/dispatch workspace previous", &snapshot);
+    assert!(actions.is_empty(), "nothing to go back to yet");
+    assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
+    snapshot.previous_workspace = Some(2);
+    for wire in ["/dispatch workspace previous", "/dispatch hl.dsp.focus({ workspace = \"previous\" })"] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions, vec![Action::FocusWorkspace(2)], "{wire}");
+    }
+
+    // Windows on workspaces 1 and 3 (indices 0 and 2), on 1: e+1 goes
+    // to 3, and from 3 wraps back to 1, never to the empty 2 and never
+    // to a new 4.
+    snapshot.workspaces[2].windows = 1;
+    let step = |wire: &str, snapshot: &Snapshot| {
+        let (response, actions) = answer_payload(wire.as_bytes(), snapshot);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        actions
+    };
+    assert_eq!(step("/dispatch workspace e+1", &snapshot), vec![Action::FocusWorkspace(2)]);
+    assert_eq!(step("/dispatch workspace e-1", &snapshot), vec![Action::FocusWorkspace(2)]);
+    assert_eq!(step("/dispatch workspace +1", &snapshot), vec![Action::FocusWorkspace(1)], "by index, as before");
+    snapshot.monitors[0].active_workspace = 2;
+    assert_eq!(step("/dispatch workspace e+1", &snapshot), vec![Action::FocusWorkspace(0)], "wraps");
+    assert_eq!(step("/dispatch hl.dsp.focus({ workspace = \"e-1\" })", &snapshot), vec![Action::FocusWorkspace(0)]);
+    assert_eq!(step("/dispatch workspace +1", &snapshot), vec![Action::FocusWorkspace(3)], "past the end, growing");
+    // An empty current workspace is a stop on the way round.
+    snapshot.monitors[0].active_workspace = 1;
+    assert_eq!(step("/dispatch workspace e+1", &snapshot), vec![Action::FocusWorkspace(2)]);
+    assert_eq!(step("/dispatch workspace e-1", &snapshot), vec![Action::FocusWorkspace(0)]);
+    // Nothing else occupied: the answer is where the desktop already is.
+    snapshot.workspaces[0].windows = 0;
+    snapshot.workspaces[2].windows = 0;
+    assert_eq!(step("/dispatch workspace e+1", &snapshot), vec![Action::FocusWorkspace(1)]);
+
+    // Under separate Spaces only the focused display's row counts.
+    let mut spaces = Snapshot { separate_spaces: true, ..two_heads() };
+    spaces.workspaces[2].windows = 1;
+    spaces.workspaces[2].monitor = "DP-1".into();
+    spaces.workspaces[2].monitor_id = 1;
+    assert_eq!(step("/dispatch workspace e+1", &spaces), vec![Action::FocusWorkspace(0)], "the other display's row is not walked");
+    let (response, actions) = answer_payload(b"/dispatch workspace e+x", &spaces);
+    assert!(actions.is_empty());
+    assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
+}
+
 #[test]
 fn nothing_focused_is_reported_as_nothing_not_papered_over() {
     let mut snapshot = desktop();
@@ -264,6 +418,13 @@ fn an_ok_answer_always_comes_with_an_action() {
         "movetoworkspace 4",
         "focuswindow class:^(foot)$",
         "focuswindow class:^(absent)$",
+        "workspace previous",
+        "workspace e+1",
+        "workspace e-1",
+        "focusmonitor +1",
+        "focusmonitor eDP-1",
+        "focusmonitor DP-9",
+        "movecurrentworkspacetomonitor r",
     ] {
         let (response, actions) = answer_payload(format!("/dispatch {verb}").as_bytes(), &snapshot);
         let claimed = response.trim() == "ok";
@@ -1404,21 +1565,27 @@ fn a_reported_chonkstep_binding_replays_and_nothing_else_does() {
     assert_eq!(dispatch::parse("chonkstep reload", &locked), Outcome::Run(Action::Binding("reload".into())));
 }
 
-/// Omarchy's next and previous workspace steps, and the report of a
-/// ChonkStep next/previous binding, are signed steps. Read as integers,
-/// `+1` named workspace 1 and `-1` a special workspace.
+/// The report of a ChonkStep next/previous binding is a signed step by
+/// index. Read as integers, `+1` named workspace 1 and `-1` a special
+/// workspace. Omarchy's `e+1` / `e-1` are a different selector: the
+/// next workspace that has windows, so from an empty workspace 2 with
+/// only workspace 1 occupied both go to 1, and with 3 occupied as well
+/// `e+1` goes on to 3.
 #[test]
 fn signed_workspace_selectors_are_relative_steps() {
-    let desk = Snapshot { monitors: vec![monitor(0, "eDP-1", true, 1)], ..desktop() };
+    let mut desk = Snapshot { monitors: vec![monitor(0, "eDP-1", true, 1)], ..desktop() };
     for (wire, index) in [
         ("workspace +1", 2),
         ("workspace -1", 0),
-        ("workspace e+1", 2),
+        ("workspace e+1", 0),
         ("workspace e-1", 0),
         ("workspace 3", 2),
     ] {
         assert_eq!(dispatch::parse(wire, &desk), Outcome::Run(Action::FocusWorkspace(index)), "{wire}");
     }
+    desk.workspaces[2].windows = 1;
+    assert_eq!(dispatch::parse("workspace e+1", &desk), Outcome::Run(Action::FocusWorkspace(2)));
+    assert_eq!(dispatch::parse("workspace e-1", &desk), Outcome::Run(Action::FocusWorkspace(0)));
 }
 
 #[test]

@@ -1945,6 +1945,35 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.switch_workspace(wm.current_workspace() + 1);
                 }
             }
+            // Hyprland's `e+1` / `e-1`: only workspaces with windows on
+            // them, wrapping, and never a new one. Nothing else occupied
+            // means stay put.
+            Action::WorkspaceNextOccupied | Action::WorkspacePrevOccupied => {
+                let direction = if matches!(action, Action::WorkspaceNextOccupied) { 1 } else { -1 };
+                if let Some(next) = wm.occupied_workspace_step(direction) {
+                    wm.switch_workspace(next);
+                }
+            }
+            Action::WorkspacePrevious => {
+                wm.switch_to_previous_workspace();
+            }
+            // The verb resolves its target now, not when the binding
+            // was read: an output named then can have been unplugged.
+            Action::FocusMonitor(target) => {
+                if let Some(index) = wm.resolve_output_target(target) {
+                    wm.focus_output(index);
+                } else {
+                    tracing::info!(?target, "focus-monitor names no connected output");
+                }
+            }
+            Action::MoveWorkspaceToMonitor(target) => match wm.resolve_output_target(target) {
+                Some(index) => {
+                    if let Err(why) = wm.move_workspace_to_output(index) {
+                        tracing::info!(?target, why, "move-workspace-to-monitor refused");
+                    }
+                }
+                None => tracing::info!(?target, "move-workspace-to-monitor names no connected output"),
+            },
             // The same two verbs by number. No left-edge guard and no
             // right-edge guard: the index arrived from the parser
             // already range-checked and already converted out of the

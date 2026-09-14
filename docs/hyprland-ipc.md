@@ -130,8 +130,27 @@ actions. Supported families include:
 - move, resize, center, raise, pin, tags, and floating membership;
 - `layout freeform|mosaic|flow`, `togglelayout`, `togglefloating`, `setfloating`,
   `settiled`, and directional `movewindow`/`swapwindow`;
-- `workspace +1|-1` and `movetoworkspace +1|-1` as relative steps, with or
-  without Hyprland's `e` prefix;
+- `workspace +1|-1` and `movetoworkspace +1|-1` as relative steps by index,
+  growing the row past its end like the keyboard's `workspace-next`;
+  `workspace e+1|e-1` as Omarchy's "next existing workspace": only
+  workspaces with windows on them plus the current one, wrapping, never
+  creating a workspace; and `workspace previous`, the workspace before
+  this one, refused until there has been a switch;
+- `focusmonitor +N|-N|current|l|r|u|d|ID|NAME` and `hl.dsp.focus({ monitor
+  = … })`: the pointer warps to the centre of that output's workarea
+  through the same path as `movecursor`, the output is selected under
+  separate Spaces, and the keyboard goes to its most recently focused
+  window (or stays put when it has none). A window opened next lands on
+  that output, which is how `omarchy-launch-screensaver` covers every
+  display. A name no output carries is refused by name, and the whole
+  verb is refused while the session is locked;
+- `movecurrentworkspacetomonitor DIR|NAME` and `hl.dsp.workspace.move({
+  monitor = … })`: under separate Spaces the active Space is re-homed to
+  that display with its windows, keeping their position relative to the
+  display. On the shared desktop the workspace already spans every
+  display, so the request is refused with the setting that would change
+  that; a fullscreen Space is refused because it is bound to its window's
+  display. Never `ok` and left undone;
 - `chonkstep <name>`, which runs a ChonkStep binding `binds` reported with that
   label, exactly as its key would. Only reported labels are accepted, and while
   the session is locked only a binding marked locked;

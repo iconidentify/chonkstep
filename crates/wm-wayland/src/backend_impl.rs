@@ -833,6 +833,11 @@ impl Backend for WaylandBackend {
         self.pointer
     }
 
+    fn warp_pointer(&mut self, to: Point) {
+        // Recorded, not applied: see `WaylandBackend::pending_pointer_warp`.
+        self.pending_pointer_warp = Some(to);
+    }
+
     fn screen_size(&self) -> Size {
         // The union bounding box of every output, which is the extent
         // of the one coordinate space this backend stores rects in.

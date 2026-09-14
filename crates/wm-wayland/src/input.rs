@@ -1743,6 +1743,18 @@ pub(crate) fn warp_pointer(state: &mut Compositor, target: Point) -> bool {
     true
 }
 
+/// Applies the warp the window manager queued through
+/// `Backend::warp_pointer`, if any, through [`warp_pointer`]'s gate. Run
+/// from the dispatch drain, and by the IPC apply straight after a
+/// `focusmonitor` so the script's next `cursorpos` reads the new spot.
+pub(crate) fn flush_pointer_warp(state: &mut Compositor) {
+    if let Some(target) = state.wm.backend_mut().pending_pointer_warp.take() {
+        if !warp_pointer(state, target) {
+            tracing::debug!(?target, "pointer warp refused: locked or constrained");
+        }
+    }
+}
+
 /// Apply capture transitions before the next hardware dispatch. The settled
 /// scene also calls this after resource destruction, unmap, focus and lock
 /// changes, which need not produce another pointer-motion event.

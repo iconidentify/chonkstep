@@ -64,8 +64,13 @@ Each binding gets one of three answers:
 1. **A verb chonkstep also has** becomes that verb. `killactive` →
    `close`, `fullscreen 0` → `toggle-fullscreen`, `fullscreen 1` →
    `toggle-maximize`, `workspace 4` → `workspace 4`, `workspace e+1` →
-   `workspace-next`, `movefocus l/r/u/d` → geometry-ranked directional
-   focus.
+   `workspace-next-occupied` (the next workspace that has windows,
+   wrapping; the bare `+1` is `workspace-next`, which steps by index),
+   `workspace previous` → `workspace-previous`, `focusmonitor +1|l|NAME`
+   → `focus-monitor …`, `movecurrentworkspacetomonitor l|NAME` →
+   `move-workspace-to-monitor …` (a Space move under separate Spaces;
+   refused with a reason on the shared desktop), `movefocus l/r/u/d` →
+   geometry-ranked directional focus.
 2. **A command** becomes a `run` binding naming that command, declared
    automatically in `[commands]` under a generated `hypr:…` name. This
    is the whole "install chonkstep, keep your Omarchy" claim made
@@ -750,8 +755,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=179 commands=120 env=8 autostart=4
-      float_rules=48 monitors=1 skipped=160
+      files=42 bindings=186 commands=120 env=8 autostart=4
+      float_rules=48 monitors=1 skipped=153
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

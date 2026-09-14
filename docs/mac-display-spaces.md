@@ -15,7 +15,8 @@ separate_spaces = true  # default in Spaces
 
 Per-monitor Spaces and dedicated fullscreen Spaces are supported desktop features.
 Only `keyboard_mode = "mac"` is experimental. With Omarchy keys, Super-Tab and
-Super-Shift-Tab navigate the selected display; Super-F toggles dedicated fullscreen.
+Super-Shift-Tab navigate the selected display's Spaces that have windows (Omarchy's
+`e+1` / `e-1`); Super-F toggles dedicated fullscreen.
 The Mac-keyboard equivalents below apply when that keyboard profile is enabled.
 
 Set `separate_spaces = false` to use the previous linked-display desktop policy.

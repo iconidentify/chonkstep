@@ -107,7 +107,7 @@ example:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-154 bindings, including four native capture shortcuts, derived from Omarchy's
+161 bindings, including four native capture shortcuts, derived from Omarchy's
 own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
@@ -171,8 +171,15 @@ helpers are supported directly.
 | `super+right`            | `focus-right`                          | --                                                                                                                  |
 | `super+up`               | `focus-up`                             | --                                                                                                                  |
 | `super+down`             | `focus-down`                           | --                                                                                                                  |
-| `super+tab`              | `workspace-next`                       | --                                                                                                                  |
-| `super+shift+tab`        | `workspace-prev`                       | --                                                                                                                  |
+| `super+tab`              | `workspace-next-occupied`              | --                                                                                                                  |
+| `super+shift+tab`        | `workspace-prev-occupied`              | --                                                                                                                  |
+| `super+ctrl+tab`         | `workspace-previous`                   | --                                                                                                                  |
+| `super+shift+alt+left`   | `move-workspace-to-monitor left`       | --                                                                                                                  |
+| `super+shift+alt+right`  | `move-workspace-to-monitor right`      | --                                                                                                                  |
+| `super+shift+alt+up`     | `move-workspace-to-monitor up`         | --                                                                                                                  |
+| `super+shift+alt+down`   | `move-workspace-to-monitor down`       | --                                                                                                                  |
+| `ctrl+alt+tab`           | `focus-monitor +1`                     | --                                                                                                                  |
+| `ctrl+alt+shift+tab`     | `focus-monitor -1`                     | --                                                                                                                  |
 | `super+1`                | `workspace 1`                          | --                                                                                                                  |
 | `super+2`                | `workspace 2`                          | --                                                                                                                  |
 | `super+3`                | `workspace 3`                          | --                                                                                                                  |
@@ -292,7 +299,7 @@ helpers are supported directly.
 
 ### Deliberately unbound
 
-24 groups of Omarchy chords remain unbound in the static preset. The table
+21 groups of Omarchy chords remain unbound in the static preset. The table
 explains each limit; the live configuration reader supports additional chords.
 
 | Omarchy chord                                                                                      | What Omarchy does with it                                            | Why not here                                                |
@@ -306,9 +313,6 @@ explains each limit; the live configuration reader supports additional chords.
 | `super+alt+1..5` | focus the nth window of the group | requires window groups or a feature ChonkStep does not provide |
 | `super+alt/ctrl+minus/equal` | large resize increments | chonkstep has no verb for it, and no command can stand in |
 | `super+s`                                                                                          | toggle the scratchpad workspace                                      | chonkstep has no verb for it, and no command can stand in   |
-| `super+ctrl+tab`                                                                                   | the workspace before this one                                        | chonkstep has no verb for it, and no command can stand in   |
-| `super+shift+alt+left/right/up/down`                                                               | move the workspace to the monitor in that direction                  | chonkstep has no verb for it, and no command can stand in   |
-| `ctrl+alt+tab / ctrl+alt+shift+tab`                                                                | focus the next / previous monitor                                    | chonkstep has no verb for it, and no command can stand in   |
 | `super+mouse wheel, super+drag`                                                                    | scroll through workspaces; move and resize by mouse                  | not a key chord this config format can express              |
 | `super+k`                                                                                          | Omarchy's keybinding cheatsheet                                      | declined on purpose — see the note under the table          |
 | `super+shift+space`                                                                                | toggle Omarchy's top bar                                             | chonkstep has no verb for it, and no command can stand in   |

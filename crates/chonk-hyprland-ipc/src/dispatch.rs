@@ -93,6 +93,15 @@ pub enum Action {
     /// units `cursorpos` and `clients` report. The host refuses it while
     /// the session is locked or a client holds a pointer constraint.
     WarpPointer { x: i32, y: i32 },
+    /// Focus an output: warp the pointer to it and hand the keyboard to
+    /// its most recent window. Parsing has already refused it while the
+    /// session is locked; the host refuses it again against the live
+    /// lock, and resolves the target against the live output list
+    /// because an output can go between the answer and the apply.
+    FocusMonitor(MonitorTarget),
+    /// Re-home the active Space to another output, under separate Spaces
+    /// only: parsing refuses it by name on the shared desktop.
+    MoveWorkspaceToMonitor(MonitorTarget),
     ReloadConfig,
     SetDiagnostic { name: String, enabled: bool },
     SetLogFilter(String),
@@ -128,6 +137,19 @@ pub enum Direction {
     Right,
     Up,
     Down,
+}
+
+/// The output a `focusmonitor` / `movecurrentworkspacetomonitor`
+/// argument names, kept symbolic: a name is checked against the snapshot
+/// here and resolved again by the host, a step or direction only there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorTarget {
+    /// `+N` / `-N`, wrapping along the monitor list; `current` is `+0`.
+    Relative(i32),
+    /// `l` / `r` / `u` / `d`: the nearest output that way.
+    Direction(Direction),
+    /// A connector name exactly as `monitors` reports it.
+    Name(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,9 +386,9 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             }
         }
         "dpms" => parse_dpms(rest, snapshot),
-        "focusmonitor" | "movecurrentworkspacetomonitor" | "focuswindowbyclass" => {
-            Outcome::Unsupported(format!("{verb} is not implemented yet"))
-        }
+        "focusmonitor" => focus_monitor(rest, snapshot),
+        "movecurrentworkspacetomonitor" => move_workspace_to_monitor(rest, snapshot),
+        "focuswindowbyclass" => Outcome::Unsupported(format!("{verb} is not implemented yet")),
         other => Outcome::Unknown(format!("unknown dispatcher {other:?}")),
     }
 }
@@ -408,8 +430,18 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
                     None => Outcome::Unsupported(format!("no window matches {value:?}")),
                 };
             }
-            Outcome::Unknown("hl.dsp.focus with no workspace or window".to_string())
+            if let Some(value) = lua_field(&args, "monitor") {
+                return focus_monitor(&value, snapshot);
+            }
+            if let Some(value) = lua_field(&args, "direction") {
+                return parse_classic("movefocus", &value, snapshot);
+            }
+            Outcome::Unknown("hl.dsp.focus with no workspace, window, monitor or direction".to_string())
         }
+        "workspace.move" => match lua_field(&args, "monitor") {
+            Some(value) => move_workspace_to_monitor(&value, snapshot),
+            None => Outcome::Unsupported("hl.dsp.workspace.move requires a monitor".to_string()),
+        },
         "window.close" => match lua_field(&args, "window") {
             Some(value) => match resolve_window(&value, snapshot) {
                 Some(window) => Outcome::Run(Action::CloseWindow(window.id)),
@@ -1376,17 +1408,35 @@ fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> 
     if target.is_empty() {
         return Err("workspace with no argument".to_string());
     }
-    // Relative selectors first. `e+1`/`e-1` and `+1`/`-1` are what
-    // Omarchy's keybindings send for next/previous workspace, and read as
-    // integers `+1` is workspace 1 and `-1` a special workspace id.
-    let relative = target.strip_prefix('e').unwrap_or(target);
-    if let Some(delta) = relative.strip_prefix('+').and_then(|d| d.parse::<usize>().ok()) {
+    // Relative selectors first. `+1`/`-1` step by index, which grows the
+    // row past its end exactly as the keyboard's `workspace-next` does;
+    // read as integers `+1` would be workspace 1 and `-1` a special
+    // workspace id. `e+1`/`e-1`, what Omarchy binds to SUPER+TAB, are
+    // "the next workspace that exists": only workspaces with windows on
+    // them, plus the current one, wrapping and never creating a new one.
+    if let Some(existing) = target.strip_prefix('e') {
+        let step = existing
+            .strip_prefix('+')
+            .and_then(|d| d.parse::<i64>().ok())
+            .or_else(|| existing.strip_prefix('-').and_then(|d| d.parse::<i64>().ok()).map(|d| -d));
+        return match step {
+            Some(step) => occupied_workspace_step(step, snapshot),
+            None => Err(format!("unrecognised workspace selector {target:?}")),
+        };
+    }
+    if let Some(delta) = target.strip_prefix('+').and_then(|d| d.parse::<usize>().ok()) {
         let current = snapshot.active_workspace().map_or(0, |w| w.index);
         return in_range(current.saturating_add(delta));
     }
-    if let Some(delta) = relative.strip_prefix('-').and_then(|d| d.parse::<usize>().ok()) {
+    if let Some(delta) = target.strip_prefix('-').and_then(|d| d.parse::<usize>().ok()) {
         let current = snapshot.active_workspace().map_or(0, |w| w.index);
         return in_range(current.saturating_sub(delta));
+    }
+    if target == "previous" {
+        return snapshot
+            .previous_workspace
+            .filter(|&index| Some(index) != snapshot.active_workspace().map(|w| w.index))
+            .ok_or_else(|| "no workspace before this one yet".to_string());
     }
     if let Ok(id) = target.parse::<i32>() {
         let index = workspace_index_from_hypr_id(id).ok_or_else(|| format!("chonkstep has no workspace {id}"))?;
@@ -1400,6 +1450,121 @@ fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> 
         return Err(format!("chonkstep workspaces are numbered, not named ({name:?})"));
     }
     Err(format!("unrecognised workspace selector {target:?}"))
+}
+
+/// `e+N` / `e-N`: `step` workspaces along the occupied ones, plus the
+/// current, wrapping. Under separate Spaces only the focused display's
+/// row counts, which is the row the keyboard's own stepping walks. The
+/// current workspace when nothing else is occupied, so the answer is a
+/// switch to where the desktop already is rather than a refusal: the
+/// keyboard stays put in the same case.
+fn occupied_workspace_step(step: i64, snapshot: &Snapshot) -> Result<usize, String> {
+    let current = snapshot.active_workspace().map_or(0, |w| w.index);
+    let row: Vec<usize> = snapshot
+        .workspaces
+        .iter()
+        .filter(|workspace| {
+            !snapshot.separate_spaces
+                || snapshot.focused_monitor().is_none_or(|monitor| workspace.monitor == monitor.name)
+        })
+        .filter(|workspace| workspace.index == current || workspace.windows > 0)
+        .map(|workspace| workspace.index)
+        .collect();
+    let Some(at) = row.iter().position(|&index| index == current) else {
+        return in_range(current);
+    };
+    let count = row.len() as i64;
+    in_range(row[(at as i64 + step).rem_euclid(count) as usize])
+}
+
+/// Parse a `focusmonitor` argument, refusing the whole request while the
+/// session is locked: a script must not move focus or the pointer behind
+/// the lock surface, and the host refuses again against its live lock.
+fn focus_monitor(rest: &str, snapshot: &Snapshot) -> Outcome {
+    if snapshot.locked {
+        return Outcome::Unsupported("focusmonitor is refused while the session is locked".to_string());
+    }
+    match monitor_target(rest, snapshot) {
+        Ok(target) => Outcome::Run(Action::FocusMonitor(target)),
+        Err(why) => Outcome::Unsupported(why),
+    }
+}
+
+/// Parse a `movecurrentworkspacetomonitor` argument. On the shared
+/// desktop there is no Space to move, and a fullscreen Space is bound to
+/// its window's display; both are refused by name here rather than
+/// answered `ok` and left undone. The host re-checks both at apply.
+fn move_workspace_to_monitor(rest: &str, snapshot: &Snapshot) -> Outcome {
+    if snapshot.locked {
+        return Outcome::Unsupported("movecurrentworkspacetomonitor is refused while the session is locked".to_string());
+    }
+    if !snapshot.separate_spaces {
+        return Outcome::Unsupported(format!("movecurrentworkspacetomonitor: {SHARED_DESKTOP_SPANS_DISPLAYS}"));
+    }
+    if snapshot.active_workspace().is_some_and(|workspace| workspace.has_fullscreen) {
+        return Outcome::Unsupported(
+            "movecurrentworkspacetomonitor: a fullscreen Space is bound to the display of the window it came from"
+                .to_string(),
+        );
+    }
+    match monitor_target(rest, snapshot) {
+        Ok(target) => Outcome::Run(Action::MoveWorkspaceToMonitor(target)),
+        Err(why) => Outcome::Unsupported(why),
+    }
+}
+
+/// The refusal for a workspace move on the shared desktop, spelled to
+/// match `wm_core::SHARED_DESKTOP_SPANS_DISPLAYS` without depending on it.
+const SHARED_DESKTOP_SPANS_DISPLAYS: &str =
+    "the workspace already spans every display; `interaction_mode = \"spaces\"` with \
+     `[mac] separate_spaces = true` gives each display its own row of Spaces to move";
+
+/// The longest output name a monitor selector may carry: connector names
+/// are a dozen bytes, and the input is a socket's.
+const MAX_MONITOR_NAME: usize = 256;
+
+/// Resolve a monitor selector: `+N` / `-N`, `current`, a direction, a
+/// monitor id, or a name `monitors` reports. Only the name and id are
+/// checked here, because only they can be wrong on their own; a step
+/// wraps and a direction is answered by the host's live geometry.
+fn monitor_target(rest: &str, snapshot: &Snapshot) -> Result<MonitorTarget, String> {
+    let target = rest.trim();
+    if target.is_empty() {
+        return Err("monitor selector with no argument".to_string());
+    }
+    if target.len() > MAX_MONITOR_NAME || target.chars().any(char::is_control) {
+        return Err("monitor selector is not an output name".to_string());
+    }
+    if target.eq_ignore_ascii_case("current") {
+        return Ok(MonitorTarget::Relative(0));
+    }
+    if let Some(step) = target.strip_prefix('+').and_then(|d| d.parse::<i32>().ok()) {
+        return Ok(MonitorTarget::Relative(step));
+    }
+    if let Some(step) = target.strip_prefix('-').and_then(|d| d.parse::<i32>().ok()) {
+        return Ok(MonitorTarget::Relative(step.saturating_neg()));
+    }
+    match target.to_ascii_lowercase().as_str() {
+        "l" | "left" => return Ok(MonitorTarget::Direction(Direction::Left)),
+        "r" | "right" => return Ok(MonitorTarget::Direction(Direction::Right)),
+        "u" | "up" => return Ok(MonitorTarget::Direction(Direction::Up)),
+        "d" | "down" => return Ok(MonitorTarget::Direction(Direction::Down)),
+        _ => {}
+    }
+    if let Ok(id) = target.parse::<i32>() {
+        return snapshot
+            .monitors
+            .iter()
+            .find(|monitor| monitor.id == id)
+            .map(|monitor| MonitorTarget::Name(monitor.name.clone()))
+            .ok_or_else(|| format!("no output has id {id}"));
+    }
+    snapshot
+        .monitors
+        .iter()
+        .find(|monitor| monitor.name == target)
+        .map(|monitor| MonitorTarget::Name(monitor.name.clone()))
+        .ok_or_else(|| format!("no output named {target:?}"))
 }
 
 /// Resolve one of Hyprland's window selectors against the snapshot.

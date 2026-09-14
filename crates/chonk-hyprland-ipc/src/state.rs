@@ -226,6 +226,14 @@ pub struct Snapshot {
     /// Human-readable live compositor/build summary served by
     /// `hyprctl systeminfo`.
     pub system_info: String,
+    /// Whether each display has its own row of Spaces. On the shared
+    /// desktop a workspace spans every display, so
+    /// `movecurrentworkspacetomonitor` has nothing to move and `e+1`
+    /// steps the whole row rather than one display's.
+    pub separate_spaces: bool,
+    /// The 0-based workspace the desktop was on before the last switch:
+    /// what `workspace previous` names, absent before the first switch.
+    pub previous_workspace: Option<usize>,
 }
 
 /// One keybinding in the subset `hyprctl binds` exposes to menus.

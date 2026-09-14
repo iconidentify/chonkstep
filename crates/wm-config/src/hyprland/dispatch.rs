@@ -31,6 +31,7 @@
 
 use crate::preset::Unbound;
 use crate::{Action, FocusDirection};
+use wm_core::OutputTarget;
 
 use super::directive::Dispatcher;
 
@@ -273,13 +274,18 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             }
         }
         // Workspaces. `e+1`/`e-1` are "the next/previous workspace that
-        // exists", which is exactly what this desktop's two workspace
-        // verbs do; a bare number is a workspace by index, and
-        // `previous`, `special:…` and the monitor-relative forms are
-        // not verbs here.
+        // exists": only workspaces with windows on them, wrapping, which
+        // is what Omarchy's SUPER+TAB means and not what this desktop's
+        // own `workspace-next` does (step by index, grow the row), so
+        // each keeps its verb. `+1`/`-1` step by index; a bare number
+        // is a workspace by index; `previous` is the two-workspace flip;
+        // `special:…` and the monitor-relative forms are not verbs here.
         "workspace" | "focusworkspaceoncurrentmonitor" => match workspace_target(arg) {
             WorkspaceTarget::Next => Verb::Action(Action::WorkspaceNext),
             WorkspaceTarget::Prev => Verb::Action(Action::WorkspacePrev),
+            WorkspaceTarget::NextExisting => Verb::Action(Action::WorkspaceNextOccupied),
+            WorkspaceTarget::PrevExisting => Verb::Action(Action::WorkspacePrevOccupied),
+            WorkspaceTarget::Previous => Verb::Action(Action::WorkspacePrevious),
             WorkspaceTarget::Index(n) => match workspace_index_action(n) {
                 Some(action) => Verb::Action(action),
                 None => Verb::Unbound(Unbound::NoVerb),
@@ -301,9 +307,12 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             WorkspaceTarget::Special => Verb::Action(Action::Miniaturize),
             _ => Verb::Unbound(Unbound::NoVerb),
         },
+        // Carrying a window to the next existing workspace is carrying
+        // it to the next one: a window in tow makes the destination
+        // occupied either way.
         "movetoworkspace" => match workspace_target(arg) {
-            WorkspaceTarget::Next => Verb::Action(Action::WorkspaceCarryNext),
-            WorkspaceTarget::Prev => Verb::Action(Action::WorkspaceCarryPrev),
+            WorkspaceTarget::Next | WorkspaceTarget::NextExisting => Verb::Action(Action::WorkspaceCarryNext),
+            WorkspaceTarget::Prev | WorkspaceTarget::PrevExisting => Verb::Action(Action::WorkspaceCarryPrev),
             WorkspaceTarget::Index(n) => match workspace_carry_index_action(n) {
                 Some(action) => Verb::Action(action),
                 None => Verb::Unbound(Unbound::NoVerb),
@@ -316,13 +325,24 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             // than by the same chord. The preset made this call; it is
             // carried over here rather than re-argued.
             WorkspaceTarget::Special => Verb::Action(Action::Miniaturize),
-            WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
+            WorkspaceTarget::Previous | WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
         },
-        "togglespecialworkspace"
-        | "movecurrentworkspacetomonitor"
-        | "moveworkspacetomonitor"
-        | "focusmonitor"
-        | "swapactiveworkspaces" => Verb::Unbound(Unbound::NoVerb),
+        // Monitors. `focusmonitor` takes a step, a direction or an
+        // output name, and so does `movecurrentworkspacetomonitor`,
+        // which moves the active Space under separate Spaces and is
+        // refused with a reason on the shared desktop. The forms that
+        // name a workspace *and* a monitor stay unbound.
+        "focusmonitor" => match output_target(arg) {
+            Some(target) => Verb::Action(Action::FocusMonitor(target)),
+            None => Verb::Unbound(Unbound::NoVerb),
+        },
+        "movecurrentworkspacetomonitor" => match output_target(arg) {
+            Some(target) => Verb::Action(Action::MoveWorkspaceToMonitor(target)),
+            None => Verb::Unbound(Unbound::NoVerb),
+        },
+        "togglespecialworkspace" | "moveworkspacetomonitor" | "swapactiveworkspaces" => {
+            Verb::Unbound(Unbound::NoVerb)
+        }
         // Alt-Tab. This desktop's switcher is modal machinery rather
         // than a binding — while it is up the shell owns the keyboard —
         // so the chord is already answered, correctly, by something
@@ -362,15 +382,21 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
 /// What a workspace argument names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceTarget {
-    /// `e+1` / `+1` / `r+1`: the next workspace.
+    /// `+1` / `r+1`: the next workspace by index.
     Next,
-    /// `e-1` / `-1` / `r-1`.
+    /// `-1` / `r-1`.
     Prev,
+    /// `e+1`: the next workspace that has windows on it.
+    NextExisting,
+    /// `e-1`.
+    PrevExisting,
+    /// `previous`: the workspace before this one.
+    Previous,
     /// A bare index, 1-based as Hyprland counts them.
     Index(u32),
     /// `special`, `special:scratchpad`.
     Special,
-    /// `previous`, `empty`, `name:foo`, `m+1`, anything else.
+    /// `empty`, `name:foo`, `m+1`, anything else.
     Other,
 }
 
@@ -379,13 +405,18 @@ fn workspace_target(arg: &str) -> WorkspaceTarget {
     if arg.starts_with("special") {
         return WorkspaceTarget::Special;
     }
-    // `e`/`r` are Hyprland's "next existing" and "next in range";
-    // both are "the workspace after this one" for a desktop whose
-    // workspace list has no holes in it.
-    let relative = arg
-        .strip_prefix('e')
-        .or_else(|| arg.strip_prefix('r'))
-        .unwrap_or(arg);
+    if arg == "previous" {
+        return WorkspaceTarget::Previous;
+    }
+    // `e` is Hyprland's "next existing" and `r` its "next in range";
+    // the second is "the workspace after this one" for a desktop whose
+    // workspace list has no holes in it, the first is not.
+    match arg {
+        "e+1" => return WorkspaceTarget::NextExisting,
+        "e-1" => return WorkspaceTarget::PrevExisting,
+        _ => {}
+    }
+    let relative = arg.strip_prefix('r').unwrap_or(arg);
     match relative {
         "+1" => return WorkspaceTarget::Next,
         "-1" => return WorkspaceTarget::Prev,
@@ -395,6 +426,35 @@ fn workspace_target(arg: &str) -> WorkspaceTarget {
         Ok(n) if n >= 1 => WorkspaceTarget::Index(n),
         _ => WorkspaceTarget::Other,
     }
+}
+
+/// A monitor argument: `+N` / `-N`, `l`/`r`/`u`/`d` (or the words), or
+/// an output name as `hyprctl monitors` reports it. `None` for nothing,
+/// a name no config file should carry, or a step so large it can only
+/// be a mistake; a step wraps around the monitor list regardless.
+fn output_target(arg: &str) -> Option<OutputTarget> {
+    let arg = arg.trim();
+    if arg.is_empty() || arg.len() > 256 || arg.chars().any(char::is_control) {
+        return None;
+    }
+    if let Some(step) = arg.strip_prefix('+').and_then(|digits| digits.parse::<i32>().ok()) {
+        return (step.abs() <= 64).then_some(OutputTarget::Relative(step));
+    }
+    if let Some(step) = arg.strip_prefix('-').and_then(|digits| digits.parse::<i32>().ok()) {
+        return (step.abs() <= 64).then_some(OutputTarget::Relative(step.saturating_neg()));
+    }
+    // A sign that did not read as a step is a malformed step, not an
+    // output called `+`.
+    if arg.starts_with('+') || arg.starts_with('-') {
+        return None;
+    }
+    Some(match arg.to_ascii_lowercase().as_str() {
+        "l" | "left" => OutputTarget::Direction(FocusDirection::Left),
+        "r" | "right" => OutputTarget::Direction(FocusDirection::Right),
+        "u" | "up" => OutputTarget::Direction(FocusDirection::Up),
+        "d" | "down" => OutputTarget::Direction(FocusDirection::Down),
+        _ => OutputTarget::Name(arg.to_string()),
+    })
 }
 
 /// The verb for "switch to workspace `n`", if this desktop has one.

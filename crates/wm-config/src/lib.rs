@@ -50,8 +50,30 @@ pub enum Action {
     Focus(FocusDirection),
     WorkspaceNext,
     WorkspacePrev,
+    /// Step to the next / previous workspace that has windows on it,
+    /// wrapping, and counting the current one as a stop — Hyprland's
+    /// `workspace e+1` / `e-1`, which Omarchy binds to `SUPER + TAB`.
+    /// A distinct verb from [`Self::WorkspaceNext`] on purpose: that
+    /// one steps by index and grows the row past its end, which is
+    /// this desktop's own semantics and stays so; this one never lands
+    /// on an empty workspace and never creates one.
+    WorkspaceNextOccupied,
+    WorkspacePrevOccupied,
+    /// Go back to the workspace the desktop was on before the last
+    /// switch — Hyprland's `workspace previous`, a two-workspace flip.
+    WorkspacePrevious,
     WorkspaceCarryNext,
     WorkspaceCarryPrev,
+    /// Focus an output — Hyprland's `focusmonitor`: the pointer warps
+    /// to it, the keyboard goes to its most recent window, and the
+    /// next window opens there. `"focus-monitor +1"`, `"focus-monitor
+    /// left"`, `"focus-monitor DP-1"`.
+    FocusMonitor(wm_core::OutputTarget),
+    /// Move the active Space to another display under separate Spaces
+    /// — Hyprland's `movecurrentworkspacetomonitor`. Refused with a
+    /// reason on the shared desktop, where a workspace spans every
+    /// display. `"move-workspace-to-monitor right"`.
+    MoveWorkspaceToMonitor(wm_core::OutputTarget),
     /// Switch to a workspace by number — `"workspace 4"`.
     ///
     /// The payload is the **0-based** index `wm_core` speaks, already
@@ -204,6 +226,13 @@ impl Action {
             Action::Focus(to) => return Some(format!("focus-{}", direction(to))),
             Action::WorkspaceNext => "workspace-next",
             Action::WorkspacePrev => "workspace-prev",
+            Action::WorkspaceNextOccupied => "workspace-next-occupied",
+            Action::WorkspacePrevOccupied => "workspace-prev-occupied",
+            Action::WorkspacePrevious => "workspace-previous",
+            Action::FocusMonitor(target) => return Some(format!("focus-monitor {}", output_target_name(target))),
+            Action::MoveWorkspaceToMonitor(target) => {
+                return Some(format!("move-workspace-to-monitor {}", output_target_name(target)))
+            }
             Action::WorkspaceCarryNext => "workspace-carry-next",
             Action::WorkspaceCarryPrev => "workspace-carry-prev",
             Action::Workspace(index) => return Some(format!("workspace {}", index + 1)),
@@ -220,6 +249,56 @@ impl Action {
         };
         Some(name.to_string())
     }
+}
+
+/// The argument `focus-monitor` and `move-workspace-to-monitor` spell an
+/// output target with: `+N` / `-N`, `left` / `right` / `up` / `down`,
+/// or an output name as `chonkstep-ctl outputs` and `hyprctl monitors`
+/// report it. The inverse of [`output_target`].
+fn output_target_name(target: &wm_core::OutputTarget) -> String {
+    use wm_core::OutputTarget;
+    match target {
+        OutputTarget::Relative(step) => format!("{step:+}"),
+        OutputTarget::Direction(FocusDirection::Left) => "left".into(),
+        OutputTarget::Direction(FocusDirection::Right) => "right".into(),
+        OutputTarget::Direction(FocusDirection::Up) => "up".into(),
+        OutputTarget::Direction(FocusDirection::Down) => "down".into(),
+        OutputTarget::Name(name) => name.clone(),
+    }
+}
+
+/// Reads an output target as a binding spells it. A step is bounded to
+/// a small number because it wraps anyway; a name keeps its case, since
+/// connector names (`eDP-1`, `HDMI-A-1`) are case-sensitive, and is
+/// bounded the way every name in this file is.
+fn output_target(argument: &str) -> Option<wm_core::OutputTarget> {
+    use wm_core::OutputTarget;
+    let argument = argument.trim();
+    if argument.is_empty() || argument.len() > 256 || argument.chars().any(char::is_control) {
+        return None;
+    }
+    if let Some(step) = argument.strip_prefix('+').and_then(|digits| digits.parse::<i32>().ok()) {
+        return (step.abs() <= 64).then_some(OutputTarget::Relative(step));
+    }
+    if let Some(step) = argument.strip_prefix('-').and_then(|digits| digits.parse::<i32>().ok()) {
+        return (step.abs() <= 64).then_some(OutputTarget::Relative(step.saturating_neg()));
+    }
+    // A sign that did not read as a step is a malformed step, not an
+    // output called `+`.
+    if argument_starts_with_sign(argument) {
+        return None;
+    }
+    Some(match argument.to_ascii_lowercase().as_str() {
+        "l" | "left" => OutputTarget::Direction(FocusDirection::Left),
+        "r" | "right" => OutputTarget::Direction(FocusDirection::Right),
+        "u" | "up" => OutputTarget::Direction(FocusDirection::Up),
+        "d" | "down" => OutputTarget::Direction(FocusDirection::Down),
+        _ => OutputTarget::Name(argument.to_string()),
+    })
+}
+
+fn argument_starts_with_sign(argument: &str) -> bool {
+    argument.starts_with('+') || argument.starts_with('-')
 }
 
 /// Entry points to the native Wayland capture tool.
@@ -440,6 +519,14 @@ fn action_from_name(name: &str) -> Option<Action> {
         return (!app_id.is_empty() && !id.is_empty())
             .then(|| Action::GlobalShortcut(target.to_string()));
     }
+    // The two monitor verbs carry an output name, whose case matters,
+    // so their argument is read from the name as written.
+    if normalized.starts_with("focus-monitor ") {
+        return output_target(name.get("focus-monitor ".len()..)?).map(Action::FocusMonitor);
+    }
+    if normalized.starts_with("move-workspace-to-monitor ") {
+        return output_target(name.get("move-workspace-to-monitor ".len()..)?).map(Action::MoveWorkspaceToMonitor);
+    }
     match normalized.as_str() {
         "application-next" => Some(Action::CycleApplications(1)),
         "application-prev" => Some(Action::CycleApplications(-1)),
@@ -478,6 +565,9 @@ fn action_from_name(name: &str) -> Option<Action> {
         "focus-down" => Some(Action::Focus(FocusDirection::Down)),
         "workspace-next" => Some(Action::WorkspaceNext),
         "workspace-prev" => Some(Action::WorkspacePrev),
+        "workspace-next-occupied" => Some(Action::WorkspaceNextOccupied),
+        "workspace-prev-occupied" => Some(Action::WorkspacePrevOccupied),
+        "workspace-previous" => Some(Action::WorkspacePrevious),
         "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
         "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
         "capture-screen-clipboard" => Some(Action::Capture(CaptureMode::ScreenClipboard)),
@@ -3066,6 +3156,42 @@ numlock_by_default = false
         assert_eq!(workspace_index(&(MAX_WORKSPACE + 1).to_string()), None);
     }
 
+    /// The verbs Omarchy's monitor and workspace chords land on, by the
+    /// names `[keybindings]` spells them, round-tripping through
+    /// `config_name`. An output name keeps its case: `eDP-1` is not
+    /// `edp-1` to the compositor.
+    #[test]
+    fn monitor_and_occupied_workspace_verbs_parse_and_name_themselves() {
+        use wm_core::OutputTarget;
+        let names: &[(&str, Action)] = &[
+            ("workspace-next-occupied", Action::WorkspaceNextOccupied),
+            ("workspace-prev-occupied", Action::WorkspacePrevOccupied),
+            ("workspace-previous", Action::WorkspacePrevious),
+            ("focus-monitor +1", Action::FocusMonitor(OutputTarget::Relative(1))),
+            ("focus-monitor -1", Action::FocusMonitor(OutputTarget::Relative(-1))),
+            ("focus-monitor left", Action::FocusMonitor(OutputTarget::Direction(FocusDirection::Left))),
+            ("focus-monitor eDP-1", Action::FocusMonitor(OutputTarget::Name("eDP-1".into()))),
+            ("move-workspace-to-monitor right", Action::MoveWorkspaceToMonitor(OutputTarget::Direction(FocusDirection::Right))),
+            ("move-workspace-to-monitor up", Action::MoveWorkspaceToMonitor(OutputTarget::Direction(FocusDirection::Up))),
+            ("move-workspace-to-monitor down", Action::MoveWorkspaceToMonitor(OutputTarget::Direction(FocusDirection::Down))),
+            ("move-workspace-to-monitor HDMI-A-1", Action::MoveWorkspaceToMonitor(OutputTarget::Name("HDMI-A-1".into()))),
+        ];
+        let spec_for = |n: usize| format!("super+{}", (b'a' + n as u8) as char);
+        let mut text = String::from("[keybindings]\n");
+        for (n, (name, _)) in names.iter().enumerate() {
+            text.push_str(&format!("\"{}\" = \"{}\"\n", spec_for(n), name));
+        }
+        let config = parse(&text).unwrap();
+        for (n, (name, action)) in names.iter().enumerate() {
+            assert_eq!(action_for(&config, &spec_for(n)).as_ref(), Some(action), "{name}");
+            assert_eq!(action.config_name().as_deref(), Some(*name), "{name} names itself");
+        }
+        for bad in ["focus-monitor", "focus-monitor +", "focus-monitor +999", "move-workspace-to-monitor", "focus-monitor a\tb"] {
+            let config = parse(&format!("[keybindings]\n\"super+a\" = \"{bad}\"")).unwrap();
+            assert_eq!(action_for(&config, "super+a"), None, "{bad:?} must not bind");
+        }
+    }
+
     #[test]
     fn every_action_name_maps_to_its_variant() {
         let names: &[(&str, Action)] = &[
@@ -3933,7 +4059,7 @@ mod command_tests {
         assert!(config.interaction.clipboard_persistence);
         assert_eq!(config.drag_modifier, Some(Modifiers::SUPER));
         assert_eq!(action_for(&config, "super+w"), Some(Action::Close));
-        assert_eq!(action_for(&config, "super+tab"), Some(Action::WorkspaceNext));
+        assert_eq!(action_for(&config, "super+tab"), Some(Action::WorkspaceNextOccupied));
         assert_eq!(action_for(&config, "super+f"), Some(Action::ToggleFullscreen));
         assert_eq!(action_for(&config, "super+l"), Some(Action::ToggleLayout));
         assert_eq!(action_for(&config, "super+c"), None);

@@ -484,8 +484,19 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+right", "focus-right"),
     ("super+up", "focus-up"),
     ("super+down", "focus-down"),
-    ("super+tab", "workspace-next"),
-    ("super+shift+tab", "workspace-prev"),
+    // Omarchy writes these as `e+1` / `e-1`: the next workspace that
+    // has windows on it, wrapping, never one more pill on the bar. The
+    // desktop's own `workspace-next` steps by index and grows the row,
+    // which is not what SUPER+TAB means here.
+    ("super+tab", "workspace-next-occupied"),
+    ("super+shift+tab", "workspace-prev-occupied"),
+    ("super+ctrl+tab", "workspace-previous"),
+    ("super+shift+alt+left", "move-workspace-to-monitor left"),
+    ("super+shift+alt+right", "move-workspace-to-monitor right"),
+    ("super+shift+alt+up", "move-workspace-to-monitor up"),
+    ("super+shift+alt+down", "move-workspace-to-monitor down"),
+    ("ctrl+alt+tab", "focus-monitor +1"),
+    ("ctrl+alt+shift+tab", "focus-monitor -1"),
     // The twenty chords an Omarchy user has in their fingers before
     // they have a mouse in their hand: the workspace row by number,
     // and the same row with the window in tow. `SUPER + 0` is
@@ -741,9 +752,6 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+alt+1..5", "focus the nth window of the group", Unbound::TilingOnly),
     ("super+alt/ctrl+minus/equal", "large resize increments", Unbound::NoVerb),
     ("super+s", "toggle the scratchpad workspace", Unbound::NoVerb),
-    ("super+ctrl+tab", "the workspace before this one", Unbound::NoVerb),
-    ("super+shift+alt+left/right/up/down", "move the workspace to the monitor in that direction", Unbound::NoVerb),
-    ("ctrl+alt+tab / ctrl+alt+shift+tab", "focus the next / previous monitor", Unbound::NoVerb),
     ("super+mouse wheel, super+drag", "scroll through workspaces; move and resize by mouse", Unbound::NotAKey),
     // utilities.lua
     ("super+k", "Omarchy's keybinding cheatsheet", Unbound::Declined),
@@ -973,8 +981,6 @@ mod tests {
             "super+ctrl+left",
             "super+ctrl+right",
             "super+s",
-            "super+ctrl+tab",
-            "ctrl+alt+tab",
             "super+k",
             "super+shift+space",
             "super+ctrl+d",
@@ -1204,8 +1210,15 @@ mod tests {
         assert_eq!(action("super+w"), Some(Action::Close));
         assert_eq!(action("super+f"), Some(Action::ToggleFullscreen));
         assert_eq!(action("super+alt+f"), Some(Action::ToggleMaximize));
-        assert_eq!(action("super+tab"), Some(Action::WorkspaceNext));
-        assert_eq!(action("super+shift+tab"), Some(Action::WorkspacePrev));
+        assert_eq!(action("super+tab"), Some(Action::WorkspaceNextOccupied));
+        assert_eq!(action("super+shift+tab"), Some(Action::WorkspacePrevOccupied));
+        assert_eq!(action("super+ctrl+tab"), Some(Action::WorkspacePrevious));
+        assert_eq!(action("ctrl+alt+tab"), Some(Action::FocusMonitor(wm_core::OutputTarget::Relative(1))));
+        assert_eq!(action("ctrl+alt+shift+tab"), Some(Action::FocusMonitor(wm_core::OutputTarget::Relative(-1))));
+        assert_eq!(
+            action("super+shift+alt+left"),
+            Some(Action::MoveWorkspaceToMonitor(wm_core::OutputTarget::Direction(wm_core::FocusDirection::Left)))
+        );
         assert_eq!(action("super+alt+s"), Some(Action::Miniaturize));
         assert_eq!(
             action("super+space"),

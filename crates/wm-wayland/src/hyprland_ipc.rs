@@ -1,7 +1,7 @@
 
 use smithay::input::keyboard::{xkb, Keysym, Layout};
 
-use chonk_hyprland_ipc::dispatch::{Action, Fullscreen, LayoutTarget};
+use chonk_hyprland_ipc::dispatch::{Action, Fullscreen, LayoutTarget, MonitorTarget};
 use chonk_hyprland_ipc::state::{Binding, Devices, Keyboard, Monitor, PointerDevice, Snapshot, Window, Workspace};
 use chonk_hyprland_ipc::Server;
 use wm_core::{Backend, BackendEvent, Lifecycle, WindowManager};
@@ -396,6 +396,8 @@ fn build_snapshot(
             // off ordinary state publication.
             String::new()
         },
+        separate_spaces: wm.separate_spaces(),
+        previous_workspace: wm.previous_workspace(),
     }
 }
 
@@ -435,6 +437,11 @@ fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::Ses
         A::LayoutNoop => verb("layoutmsg", ""),
         A::WorkspaceNext => verb("workspace", "+1"),
         A::WorkspacePrev => verb("workspace", "-1"),
+        A::WorkspaceNextOccupied => verb("workspace", "e+1"),
+        A::WorkspacePrevOccupied => verb("workspace", "e-1"),
+        A::WorkspacePrevious => verb("workspace", "previous"),
+        A::FocusMonitor(target) => ("focusmonitor".to_string(), output_target_argument(target)),
+        A::MoveWorkspaceToMonitor(target) => ("movecurrentworkspacetomonitor".to_string(), output_target_argument(target)),
         A::WorkspaceCarryNext => verb("movetoworkspace", "+1"),
         A::WorkspaceCarryPrev => verb("movetoworkspace", "-1"),
         A::Workspace(index) => ("workspace".to_string(), (index + 1).to_string()),
@@ -446,6 +453,32 @@ fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::Ses
         modifiers: hypr_modmask(binding.combo.modifiers), key: keysym_name(binding.combo.keysym),
         description: binding.description.clone().unwrap_or_default(), dispatcher, argument,
         locked: binding.locked, repeating: binding.repeating, release: binding.release,
+    }
+}
+
+/// A monitor verb's argument as Hyprland spells it, which `dispatch`
+/// reads back to the same target.
+fn output_target_argument(target: &wm_core::OutputTarget) -> String {
+    match target {
+        wm_core::OutputTarget::Relative(step) => format!("{step:+}"),
+        wm_core::OutputTarget::Direction(wm_core::FocusDirection::Left) => "l".into(),
+        wm_core::OutputTarget::Direction(wm_core::FocusDirection::Right) => "r".into(),
+        wm_core::OutputTarget::Direction(wm_core::FocusDirection::Up) => "u".into(),
+        wm_core::OutputTarget::Direction(wm_core::FocusDirection::Down) => "d".into(),
+        wm_core::OutputTarget::Name(name) => name.clone(),
+    }
+}
+
+/// The window manager's spelling of a monitor selector the socket read.
+fn output_target(target: MonitorTarget) -> wm_core::OutputTarget {
+    use chonk_hyprland_ipc::dispatch::Direction;
+    match target {
+        MonitorTarget::Relative(step) => wm_core::OutputTarget::Relative(step),
+        MonitorTarget::Direction(Direction::Left) => wm_core::OutputTarget::Direction(wm_core::FocusDirection::Left),
+        MonitorTarget::Direction(Direction::Right) => wm_core::OutputTarget::Direction(wm_core::FocusDirection::Right),
+        MonitorTarget::Direction(Direction::Up) => wm_core::OutputTarget::Direction(wm_core::FocusDirection::Up),
+        MonitorTarget::Direction(Direction::Down) => wm_core::OutputTarget::Direction(wm_core::FocusDirection::Down),
+        MonitorTarget::Name(name) => wm_core::OutputTarget::Name(name),
     }
 }
 
@@ -834,6 +867,38 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             let physical = OutputCoordinates::for_output(comp.wm.backend(), index).physical_position(logical);
             crate::input::warp_pointer(comp, physical)
         }
+        Action::FocusMonitor(target) => {
+            // Parsing refused this against the snapshot's lock; the lock
+            // can have landed since, and a script must never move focus
+            // or the pointer behind the lock surface.
+            if comp.wm.backend().locked {
+                return false;
+            }
+            let Some(index) = comp.wm.resolve_output_target(&output_target(target)) else {
+                return false;
+            };
+            let focused = comp.wm.focus_output(index);
+            // The warp the window manager asked for, applied now rather
+            // than at the next drain, so a script that reads `cursorpos`
+            // straight after sees the pointer where it asked for it.
+            crate::input::flush_pointer_warp(comp);
+            focused
+        }
+        Action::MoveWorkspaceToMonitor(target) => {
+            if comp.wm.backend().locked {
+                return false;
+            }
+            let Some(index) = comp.wm.resolve_output_target(&output_target(target)) else {
+                return false;
+            };
+            match comp.wm.move_workspace_to_output(index) {
+                Ok(()) => true,
+                Err(why) => {
+                    tracing::warn!(why, "movecurrentworkspacetomonitor refused at apply");
+                    false
+                }
+            }
+        }
         Action::ReloadConfig => {
             comp.shell.reload_config(&mut comp.wm);
             true
@@ -1124,6 +1189,10 @@ mod binding_replay_tests {
             }],
             focused: Some(FOCUSED),
             bindings,
+            // Omarchy binds `workspace previous` and the workspace-to-
+            // monitor moves; both need a desk where they mean something.
+            separate_spaces: true,
+            previous_workspace: Some(0),
             ..Snapshot::default()
         }
     }
@@ -1189,6 +1258,18 @@ mod binding_replay_tests {
                     wm_config::Action::Move(wm_core::FocusDirection::Left) => Some(Action::MoveDirection(Direction::Left)),
                     wm_config::Action::WorkspaceNext => Some(Action::FocusWorkspace(2)),
                     wm_config::Action::WorkspacePrev => Some(Action::FocusWorkspace(0)),
+                    // Only workspace 1 (index 1) has a window: `e+1` and
+                    // `e-1` both stay on it rather than growing the row.
+                    wm_config::Action::WorkspaceNextOccupied | wm_config::Action::WorkspacePrevOccupied => {
+                        Some(Action::FocusWorkspace(1))
+                    }
+                    wm_config::Action::WorkspacePrevious => Some(Action::FocusWorkspace(0)),
+                    wm_config::Action::FocusMonitor(wm_core::OutputTarget::Relative(step)) => {
+                        Some(Action::FocusMonitor(chonk_hyprland_ipc::dispatch::MonitorTarget::Relative(*step)))
+                    }
+                    wm_config::Action::MoveWorkspaceToMonitor(wm_core::OutputTarget::Direction(wm_core::FocusDirection::Left)) => {
+                        Some(Action::MoveWorkspaceToMonitor(chonk_hyprland_ipc::dispatch::MonitorTarget::Direction(Direction::Left)))
+                    }
                     wm_config::Action::Workspace(index) => Some(Action::FocusWorkspace(*index)),
                     wm_config::Action::Run(_) | wm_config::Action::SpawnTerminal => Some(Action::ExecShell(row.argument.clone())),
                     _ if row.dispatcher == "chonkstep" => Some(Action::Binding(row.argument.clone())),

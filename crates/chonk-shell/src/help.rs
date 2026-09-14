@@ -117,6 +117,41 @@ fn action_label(action: &Action) -> (&'static str, String, bool) {
             "Go to the previous desktop".into(),
             true,
         ),
+        WorkspaceNextOccupied => (
+            "SPACES & WORKSPACES",
+            "Go to the next desktop with windows".into(),
+            true,
+        ),
+        WorkspacePrevOccupied => (
+            "SPACES & WORKSPACES",
+            "Go to the previous desktop with windows".into(),
+            true,
+        ),
+        WorkspacePrevious => (
+            "SPACES & WORKSPACES",
+            "Go back to the desktop you were on".into(),
+            true,
+        ),
+        FocusMonitor(target) => (
+            "SPACES & WORKSPACES",
+            match target {
+                wm_core::OutputTarget::Relative(step) if *step < 0 => "Focus the previous display".into(),
+                wm_core::OutputTarget::Relative(_) => "Focus the next display".into(),
+                wm_core::OutputTarget::Direction(d) => format!("Focus the display to the {}", direction(*d)),
+                wm_core::OutputTarget::Name(name) => format!("Focus display {name}"),
+            },
+            false,
+        ),
+        MoveWorkspaceToMonitor(target) => (
+            "SPACES & WORKSPACES",
+            match target {
+                wm_core::OutputTarget::Relative(step) if *step < 0 => "Move the desktop to the previous display".into(),
+                wm_core::OutputTarget::Relative(_) => "Move the desktop to the next display".into(),
+                wm_core::OutputTarget::Direction(d) => format!("Move the desktop to the display to the {}", direction(*d)),
+                wm_core::OutputTarget::Name(name) => format!("Move the desktop to display {name}"),
+            },
+            false,
+        ),
         WorkspaceCarryNext => (
             "SPACES & WORKSPACES",
             "Move window to next desktop and follow".into(),

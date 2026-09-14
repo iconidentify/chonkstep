@@ -99,6 +99,18 @@ impl SpaceHomeGeometry {
     }
 }
 
+/// Why a workspace cannot be moved between displays on the shared
+/// desktop. Names the setting that gives each display its own row, so
+/// the refusal tells the user what to change rather than only what
+/// failed.
+pub const SHARED_DESKTOP_SPANS_DISPLAYS: &str =
+    "the workspace already spans every display; `interaction_mode = \"spaces\"` with \
+     `[mac] separate_spaces = true` gives each display its own row of Spaces to move";
+
+/// Why a fullscreen Space stays where it is.
+pub const FULLSCREEN_SPACE_STAYS_HOME: &str =
+    "a fullscreen Space is bound to the display of the window it came from";
+
 pub(super) struct DisplaySpaces {
     pub snapshot: DisplaySpacesSnapshot,
     pub reconciling: bool,
@@ -780,6 +792,65 @@ impl<B: Backend> WindowManager<B> {
         self.publish_workarea_union();
     }
 
+    /// Re-homes the active Space to the display at `output`, carrying
+    /// its windows across with their geometry relative to the display:
+    /// Hyprland's `movecurrentworkspacetomonitor`. The Space becomes the
+    /// active one on its new display and stays the current workspace;
+    /// the display it left keeps at least one Space, appended if it has
+    /// no other.
+    ///
+    /// Refused with a reason, never silently, when there is no Space to
+    /// move: on the shared desktop the workspace already spans every
+    /// display, and a fullscreen Space is bound to the display of the
+    /// window it came from. `output` is re-checked here, because the
+    /// verb was read before this call and an output can have gone since.
+    pub fn move_workspace_to_output(&mut self, output: usize) -> Result<(), &'static str> {
+        if !self.separate_spaces() {
+            return Err(SHARED_DESKTOP_SPANS_DISPLAYS);
+        }
+        let monitors = self.monitors();
+        if output >= monitors.len() {
+            return Err("that display is no longer connected");
+        }
+        let space = self.current_workspace;
+        if self.mac_fullscreen.values().any(|(_, full)| *full == space) {
+            return Err(FULLSCREEN_SPACE_STAYS_HOME);
+        }
+        let Some(from) = self.workspace_output_index(space) else {
+            return Err("the current Space is not on a connected display");
+        };
+        if from == output {
+            return Ok(());
+        }
+        let key = self.space_display_key(&monitors, output);
+        let members: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(_, client)| client.workspace == space)
+            .map(|(id, _)| id)
+            .collect();
+        let state = self.display_spaces.as_mut().unwrap();
+        let Some(entry) = state.snapshot.spaces.get_mut(space) else {
+            return Err("the current Space is not on a connected display");
+        };
+        let id = entry.id;
+        entry.home_display.clone_from(&key);
+        entry.output_display.clone_from(&key);
+        if let Some(display) = state.snapshot.displays.iter_mut().find(|d| d.connected && d.key == key) {
+            display.active = id;
+        }
+        state.snapshot.selected = key;
+        // Reconciliation reads the Space as already owned by its new
+        // display, so the windows are carried here, once, and it only
+        // reflows, shows and publishes them.
+        let (from, to) = (monitors[from].geometry, monitors[output].geometry);
+        for member in members {
+            self.translate_client_between_displays(member, from, to);
+        }
+        self.reconcile_display_spaces();
+        Ok(())
+    }
+
     pub(super) fn translate_space_move(&mut self, id: ClientId, workspace: usize) {
         let Some(old) = self
             .clients
@@ -1049,6 +1120,7 @@ impl<B: Backend> WindowManager<B> {
         }
         display.active = space.id;
         state.snapshot.selected.clone_from(&display.key);
+        self.previous_workspace = Some(self.current_workspace);
         self.current_workspace = workspace;
         self.refresh_space_visibility();
         let next = self
@@ -1124,6 +1196,7 @@ impl<B: Backend> WindowManager<B> {
         }
         self.workspace_count -= 1;
         self.current_workspace = remap(self.current_workspace);
+        self.previous_workspace = self.previous_workspace.filter(|&p| p != workspace).map(remap);
         self.refresh_space_visibility();
         self.repair_space_focus();
         self.reflow_layouts();

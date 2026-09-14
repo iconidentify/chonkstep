@@ -215,6 +215,8 @@ pub struct FakeBackend {
     /// What `session_locked` reports, so a test can deliver an
     /// activation behind a session lock.
     pub session_locked: bool,
+    /// Every `warp_pointer` request, oldest first.
+    pub warped_pointers: Vec<Point>,
 }
 
 impl FakeBackend {
@@ -380,6 +382,9 @@ impl Backend for FakeBackend {
     }
     fn take_shell_scroll(&mut self) -> Option<(Self::ShellId, Point, ScrollDelta)> {
         self.queued_shell_scrolls.pop_front()
+    }
+    fn warp_pointer(&mut self, to: Point) {
+        self.warped_pointers.push(to);
     }
     fn paint_root_color(&mut self, _rgb: (u8, u8, u8)) { self.root_paint_count += 1; }
     fn paint_root_image(&mut self, _buffer: &DecorationBuffer) { self.root_paint_count += 1; }
