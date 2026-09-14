@@ -550,11 +550,20 @@ fn wayland_wire_events_accept_old_and_new_object_separators() {
 /// `wl_keyboard.leave` to it, and restoring it a fresh
 /// `wl_keyboard.enter` — the cycle is visible on the wire, never a
 /// dedup. (`publish_active_window(None)` → `FocusIntent::Nothing` in
-/// `wm-wayland`; the zenity guinea pig is CSD and frameless-managed,
-/// the same shape as Edge.)
+/// `wm-wayland`; the zenity guinea pig draws its own titlebar, like
+/// Edge, and as a libadwaita dialog wears edge chrome, so it hides and
+/// shows with its frame.)
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn restore_after_miniaturize_is_a_real_focus_cycle() {
+    /// Whether the dialog is on screen. A framed window hides by unmapping
+    /// its frame and keeps its surface mapped inside it; only a frameless
+    /// one unmaps the surface itself.
+    fn shown(world: &chonk_testkit::World) -> Option<bool> {
+        let window = world.windows.iter().find(|w| w.title.contains("TestMini"))?;
+        Some(world.frame_of(window.id).map_or(window.mapped, |frame| frame.mapped))
+    }
+
     let mut session =
         Session::boot("miniaturize-restore-focus", SessionOptions::default()).unwrap();
     session
@@ -618,12 +627,7 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
     {
         let door = session.door();
         poll_until(ACT, "the ledger to show the window hidden", || {
-            let world = door.windows().ok()?;
-            let now = world
-                .windows
-                .iter()
-                .find(|w| w.title.contains("TestMini"))?;
-            (!now.mapped).then_some(())
+            (shown(&door.windows().ok()?) == Some(false)).then_some(())
         })
         .expect("the miniaturize chord never hid the window");
     }
@@ -648,8 +652,7 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
     {
         let door = session.door();
         poll_until(ACT, "the ledger to show the window restored", || {
-            let world = door.windows().ok()?;
-            world.window_matching("TestMini").map(|_| ())
+            (shown(&door.windows().ok()?) == Some(true)).then_some(())
         })
         .expect("Alt-Tab never restored the window");
     }

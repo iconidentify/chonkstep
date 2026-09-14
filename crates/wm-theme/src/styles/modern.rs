@@ -84,6 +84,77 @@ pub(crate) fn layout(theme: &Theme, request: &DecorationRequest) -> DecorationLa
     }
 }
 
+/// The edge frame for a client that draws its own titlebar: the outline,
+/// input margin, shadow and corner shape of [`layout`], with the title band
+/// reduced to a border like the other three sides.
+pub(crate) fn layout_edges(theme: &Theme, request: &DecorationRequest) -> DecorationLayout {
+    let m = Chrome::from_theme(theme).frame.normalized();
+    let border = u32::from(m.border.max(1));
+    let margin = u32::from(m.input_margin);
+    let title = u32::from(m.title_height).max(border + 1);
+    let inset = margin + border;
+    let w = request.content_size.w.min(MAX_CLIENT_WINDOW_DIMENSION).saturating_add(inset * 2);
+    let h = request.content_size.h.min(MAX_CLIENT_WINDOW_DIMENSION).saturating_add(inset * 2);
+    let frame_size = Size::new(w, h);
+    let resize = if request.resizable {
+        // The full frame's corner reach, so a corner grip is where the
+        // hand expects it with or without a title band above.
+        super::edge_ring(frame_size, inset, inset, inset, inset, (title / 2).max(inset))
+    } else {
+        Vec::new()
+    };
+    DecorationLayout {
+        frame_size,
+        input_margin: margin,
+        client_offset: Point::new(inset as i32, inset as i32),
+        titlebar_height: 0,
+        button_hitboxes: Vec::new(),
+        resize_hitboxes: resize,
+        shaded_frame_height: h,
+    }
+}
+
+/// Paints [`layout_edges`]: four solid borders, with the shadow and corner
+/// shape a full frame of this theme wears.
+pub(crate) fn render_edges(theme: &Theme, request: &DecorationRequest, layout: &DecorationLayout) -> DecorationSurface {
+    let chrome = Chrome::from_theme(theme);
+    let visual = layout.visual_bounds();
+    let (w, h) = (visual.size.w, visual.size.h);
+    let border = u32::from(chrome.frame.border.max(1)).min(w / 2).min(h / 2);
+    let color = if request.focused {
+        theme.border.color_active
+    } else {
+        theme.border.color_inactive
+    };
+    let rgb = [color.r, color.g, color.b];
+    let mut solids = Vec::with_capacity(4);
+    let inner_h = h.saturating_sub(border * 2);
+    for (x, y, rw, rh) in [
+        (0, 0, w, border),
+        (0, h - border, w, border),
+        (0, border, border, inner_h),
+        (w - border, border, border, inner_h),
+    ] {
+        if rw > 0 && rh > 0 {
+            solids.push(DecorationSolid {
+                rect: Rect::new(
+                    Point::new(visual.pos.x + x as i32, visual.pos.y + y as i32),
+                    Size::new(rw, rh),
+                ),
+                rgb,
+            });
+        }
+    }
+    let (shadow, shape) = frame_effects(&chrome, visual, rgb);
+    DecorationSurface {
+        frame_size: layout.frame_size,
+        parts: Vec::new(),
+        solids,
+        shadow,
+        shape,
+    }
+}
+
 /// Cold-cache output retains only the compressed representation. The full title
 /// pixmap is discarded after splitting; it is never kept as a second cache.
 pub(crate) struct CachedTitle {
@@ -203,7 +274,24 @@ pub(crate) fn render(
             });
         }
     }
-    let shadow = chrome.shadow;
+    let (shadow, shape) = frame_effects(&chrome, visual, rgb);
+    DecorationSurface {
+        frame_size: layout.frame_size,
+        parts,
+        solids,
+        shadow,
+        shape,
+    }
+}
+
+/// The shadow and corner shape a modern frame wears around `visual`,
+/// whether or not it has a title band.
+fn frame_effects(
+    chrome: &Chrome,
+    visual: Rect,
+    rgb: [u8; 3],
+) -> (Option<wm_theme_api::DecorationShadow>, Option<wm_theme_api::DecorationShape>) {
+    let shadow = &chrome.shadow;
     let shadow = (shadow.color.a > 0).then_some(
         wm_theme_api::DecorationShadow {
             rect: visual,
@@ -228,13 +316,7 @@ pub(crate) fn render(
         }
         .normalized(),
     );
-    DecorationSurface {
-        frame_size: layout.frame_size,
-        parts,
-        solids,
-        shadow,
-        shape,
-    }
+    (shadow, shape)
 }
 
 /// A row is flat when its interior and each border run are uniform and opaque.

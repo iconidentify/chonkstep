@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-about"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-ui",
  "cosmic-text",
@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-btpair"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-ui",
  "cosmic-text",
@@ -439,14 +439,14 @@ dependencies = [
 
 [[package]]
 name = "chonk-build-info"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "object",
 ]
 
 [[package]]
 name = "chonk-hyprland-ipc"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-ipc",
  "serde",
@@ -457,14 +457,14 @@ dependencies = [
 
 [[package]]
 name = "chonk-ipc"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "chonk-netjoin"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-ui",
  "cosmic-text",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-shell"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-ipc",
  "cosmic-text",
@@ -495,11 +495,11 @@ dependencies = [
 
 [[package]]
 name = "chonk-test-support"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "chonk-testkit"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-hyprland-ipc",
  "chonk-test-support",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-toplevel"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "wayland-client",
  "wayland-protocols-wlr",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-ui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "tiny-skia",
  "toml",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-xsettings"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",
@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "chonkstep"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-build-info",
  "chonk-shell",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "chonkstep-wayland"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-build-info",
  "chonk-shell",
@@ -3363,7 +3363,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wm-config"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-test-support",
  "regex",
@@ -3376,7 +3376,7 @@ dependencies = [
 
 [[package]]
 name = "wm-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bitflags 2.13.1",
  "chonk-test-support",
@@ -3388,7 +3388,7 @@ dependencies = [
 
 [[package]]
 name = "wm-theme"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chonk-test-support",
  "cosmic-text",
@@ -3405,14 +3405,14 @@ dependencies = [
 
 [[package]]
 name = "wm-theme-api"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "wm-wayland"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "calloop 0.14.4",
  "chonk-build-info",
@@ -3441,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "wm-x11"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",

@@ -75,6 +75,7 @@
 //! | `protocol-ledgers` | replies with retained input-method popup, idle-inhibitor object, and lock-surface counts |
 //! | `protocol-publishes` | replies with native-control and Hyprland event-snapshot, foreign full-sync and foreign dragged-window-sync counters |
 //! | `hyprland-sources` | replies with desired and registered Hyprland IPC calloop-source counts |
+//! | `heap-in-use` | replies with glibc's live allocated bytes (`mallinfo2` in-use plus mmapped chunks) in every build; no payloads |
 //! | `memory-stats` | opt-in memory-profile builds only: Rust, allocator and glyph-cache counters; no payloads |
 //! | `selection-devices` | read-only retained core/primary/wlr/ext device counts, including dead resources |
 //! | `selection-transfers` | read-only retained XWM incoming/outgoing transfer counts; no cleanup or payloads |
@@ -903,6 +904,17 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 let _ = stream.write_all(b"selection-transfers unavailable\n");
             }
         }
+        Some("heap-in-use") => {
+            #[cfg(target_env = "gnu")]
+            {
+                // SAFETY: mallinfo2 takes no pointers and returns counters by
+                // value; startup's mallopt policy was set long before the door.
+                let info = unsafe { libc::mallinfo2() };
+                let _ = stream.write_all(format!("heap-in-use bytes={}\n", info.uordblks + info.hblkhd).as_bytes());
+            }
+            #[cfg(not(target_env = "gnu"))]
+            let _ = stream.write_all(b"heap-in-use unsupported\n");
+        }
         #[cfg(feature = "memory-profile")]
         Some("memory-stats") => {
             let rust = crate::memory_profile::rust_allocations();
@@ -1084,14 +1096,15 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 for window in &overview.windows {
                     let r = window.destination;
                     reply.push_str(&format!(
-                        "overview-window id={} x={} y={} w={} h={} source_w={} source_h={}\n",
+                        "overview-window id={} x={} y={} w={} h={} source_w={} source_h={} draw_content={}\n",
                         window.window.0,
                         r.pos.x,
                         r.pos.y,
                         r.size.w,
                         r.size.h,
                         window.source.size.w,
-                        window.source.size.h
+                        window.source.size.h,
+                        window.draw_content
                     ));
                 }
                 for (index, space) in overview.spaces.iter().enumerate() {

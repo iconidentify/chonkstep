@@ -59,8 +59,13 @@ enable_omarchy_posture() {
     [ -n "$config_home" ] || return 0
 
     local config="$config_home/chonkstep/config.toml"
-    local example
+    local example development
     example="$(system_path /usr/share/doc/chonkstep/config.example.toml)"
+    # The development package installs its documents under its own name.
+    development="$(system_path /usr/share/doc/chonkstep-git/config.example.toml)"
+    if [ ! -r "$example" ] && [ -r "$development" ]; then
+        example="$development"
+    fi
 
     if [ ! -e "$config" ]; then
         [ -r "$example" ] || {

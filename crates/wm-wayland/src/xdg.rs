@@ -1191,6 +1191,7 @@ impl Compositor {
             // (buffer-less) role setup and now awaits a configure. Sent
             // with no size — the client picks, and its answer becomes
             // the map-time geometry below.
+            self.wm.backend_mut().anticipate_client_chrome(id);
             toplevel.send_configure();
             return;
         }
@@ -2112,7 +2113,7 @@ impl XdgDecorationHandler for Compositor {
             // a rule says otherwise, which is checked here so the very
             // first configure already carries the final answer.
             if let Some(record) = backend.windows.get(&id) {
-                client_side = backend.xdg_client_draws_own_chrome(record);
+                client_side = backend.xdg_client_chrome(record) != wm_core::ClientChrome::Full;
             }
             backend.queue(WmEvent::ChromeChanged(id));
         }
@@ -2148,7 +2149,7 @@ impl XdgDecorationHandler for Compositor {
                 record.decoration.xdg_client_side = Some(asked_client_side);
             }
             if let Some(record) = backend.windows.get(&id) {
-                client_side = backend.xdg_client_draws_own_chrome(record);
+                client_side = backend.xdg_client_chrome(record) != wm_core::ClientChrome::Full;
             }
             if client_side != asked_client_side {
                 tracing::debug!(
@@ -2180,7 +2181,7 @@ impl XdgDecorationHandler for Compositor {
                 record.decoration.xdg_client_side = None;
             }
             if let Some(record) = backend.windows.get(&id) {
-                client_side = backend.xdg_client_draws_own_chrome(record);
+                client_side = backend.xdg_client_chrome(record) != wm_core::ClientChrome::Full;
             }
             backend.queue(WmEvent::ChromeChanged(id));
         }

@@ -1,7 +1,7 @@
 # Network controls
 
 The built-in dock, instrument host, tile protocol and dock SDKs were retired in
-the 0.5.0 development series on both Wayland and X11. Their earlier design is
+0.6.0 on both Wayland and X11. Their earlier design is
 available in Git history. They are no longer built or installed.
 
 Omarchy supplies system panels and workspace indicators through its menu bar.

@@ -205,10 +205,12 @@ impl Overview {
                     // A minimized X11 client may have released its surface. Reuse
                     // its already-cached icon snapshot only in that case; never
                     // request a capture or retain a new full-size window copy.
+                    // A shaded window is unmapped too, but its full-size snapshot
+                    // must not appear under its rolled-up strip.
                     let fallback = backend
                         .windows
                         .get(&w.window)
-                        .filter(|r| !r.mapped)
+                        .filter(|r| !r.mapped && w.draw_content)
                         .and_then(|r| r.snapshot.as_ref())
                         .and_then(|b| import_buffer(b, true));
                     let old = old_windows.remove(&w.window);
@@ -230,7 +232,7 @@ impl Overview {
                         border,
                         desktop_visible: backend.scene_index.is_presented(w.window)
                             && backend.windows.get(&w.window).is_some_and(|r| r.mapped),
-                        draw_content: true,
+                        draw_content: w.draw_content,
                         sticky: false,
                     }
                 })
@@ -967,7 +969,7 @@ mod refresh_tests {
         wm_core::OverviewScene {
             geometry: Rect::new(Point::new(0, 0), Size::new(800, 600)),
             windows: vec![wm_core::OverviewWindow { window: WlWindowId(7), frame: None,
-                source: rect, destination: rect, label: label() }],
+                source: rect, destination: rect, draw_content: true, label: label() }],
             spaces: vec![wm_core::OverviewWorkspace { rect, label: label(), drop_label: label(),
                 card: None, status: None,
                 close: Some((rect, label())), windows: vec![wm_core::OverviewThumbnail {
@@ -975,6 +977,19 @@ mod refresh_tests {
                 }] }],
             workspace: 0, selected: 0, gap: 4, chrome: None,
         }
+    }
+
+    /// A shaded window stays rolled up in Overview: its card shows the
+    /// titlebar strip, never the live content or a stale full-window
+    /// snapshot under it. This was hardcoded to draw every grid window.
+    #[test]
+    fn a_shaded_window_keeps_its_content_hidden_in_overview() {
+        let display = Display::<crate::state::Compositor>::new().unwrap();
+        let backend = WaylandBackend::new(display.handle(), Vec::new(), 1.0);
+        let mut shaded = scene(7);
+        shaded.windows[0].draw_content = false;
+        assert!(!Overview::new(WlShellId(3), shaded, &backend).windows[0].draw_content);
+        assert!(Overview::new(WlShellId(3), scene(7), &backend).windows[0].draw_content);
     }
 
     #[test]

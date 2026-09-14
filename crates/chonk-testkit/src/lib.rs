@@ -72,15 +72,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-/// How long [`Session::boot`] waits for the compositor to open its
-/// wayland socket and its test door. GitHub's cold llvmpipe path has
-/// taken 16 seconds in `eglInitialize` alone before falling back from
-/// Zink, leaving the former 20-second bound only a few seconds for the
-/// rest of boot and producing a false red build. This larger bound does
-/// not slow a success (the poll returns immediately) or hide a crashed
-/// compositor (`try_wait` fails fast); it only gives a genuinely slow
-/// software renderer enough time to become observable.
-const BOOT_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long [`Session::boot`] tolerates a compositor that shows no sign
+/// of work (no log output, CPU time, major faults or storage reads) while
+/// it waits for the wayland socket and the test door. Boot is bounded by
+/// stalling, not by age: the first boot on a fresh CI runner pages the
+/// graphics stack in from a cold disk, 15 silent seconds between winit
+/// init and EGL platform selection, which is progress. A wedged
+/// compositor shows none and fails here; a crashed one fails at once.
+const BOOT_STALL: Duration = Duration::from_secs(10);
+
+/// Upper bound on a boot that keeps showing progress.
+const BOOT_LIMIT: Duration = Duration::from_secs(120);
 
 /// Default deadline for everything after boot: a window appearing, a
 /// barrier acking, grim finishing. Anything slower than this on an
@@ -147,6 +149,55 @@ pub fn poll_until<T>(timeout: Duration, what: &str, mut condition: impl FnMut() 
         }
         if Instant::now() >= deadline {
             return Err(format!("timed out after {timeout:?} waiting for {what}"));
+        }
+        std::thread::sleep(POLL_STEP);
+    }
+}
+
+/// A compositor's observable boot activity: log length, CPU ticks plus
+/// major faults, and bytes read from storage. Library page-ins show up
+/// in the last two even when nothing is logged.
+fn boot_activity(pid: u32, log: &Path) -> (u64, u64, u64) {
+    let logged = std::fs::metadata(log).map_or(0, |metadata| metadata.len());
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    // proc(5) numbers fields from 1; the text after the parenthesised
+    // command name starts at field 3, so field n is index n - 3.
+    let fields: Vec<u64> = stat
+        .rsplit_once(')')
+        .map_or(Vec::new(), |(_, rest)| rest.split_whitespace().map(|field| field.parse().unwrap_or(0)).collect());
+    let field = |n: usize| fields.get(n - 3).copied().unwrap_or(0);
+    let worked = field(12) + field(14) + field(15);
+    let read = std::fs::read_to_string(format!("/proc/{pid}/io"))
+        .ok()
+        .and_then(|io| io.lines().find_map(|line| line.strip_prefix("read_bytes:")?.trim().parse().ok()))
+        .unwrap_or(0);
+    (logged, worked, read)
+}
+
+/// [`poll_until`] for a boot condition, failing on [`BOOT_STALL`] without
+/// activity from compositor `pid` or at [`BOOT_LIMIT`].
+fn poll_while_booting<T>(pid: u32, log: &Path, what: &str, mut condition: impl FnMut() -> Option<T>) -> Result<T, String> {
+    let started = Instant::now();
+    let mut activity = boot_activity(pid, log);
+    let mut active = started;
+    loop {
+        if let Some(value) = condition() {
+            return Ok(value);
+        }
+        let now = Instant::now();
+        let current = boot_activity(pid, log);
+        if current != activity {
+            activity = current;
+            active = now;
+        }
+        if now - active >= BOOT_STALL {
+            return Err(format!(
+                "no compositor log output, CPU time, page-ins or storage reads for {BOOT_STALL:?} while waiting {:?} for {what}",
+                now - started
+            ));
+        }
+        if now - started >= BOOT_LIMIT {
+            return Err(format!("still booting after {BOOT_LIMIT:?} waiting for {what}"));
         }
         std::thread::sleep(POLL_STEP);
     }
@@ -545,10 +596,11 @@ impl Session {
         // names the wayland socket, then the door accepts a connect.
         // Both bounded; a compositor that died meanwhile fails fast
         // with its log tail instead of timing out mutely.
+        let pid = session.compositor.id();
         let announced_display = {
             let log_path = session.log_path.clone();
             let compositor = &mut session.compositor;
-            poll_until(BOOT_TIMEOUT, "the compositor to announce its wayland socket", || {
+            poll_while_booting(pid, &log_path, "the compositor to announce its wayland socket", || {
                 if let Ok(Some(status)) = compositor.try_wait() {
                     return Some(Err(format!("compositor exited during boot: {status}")));
                 }
@@ -568,7 +620,8 @@ impl Session {
             Ok(Ok(display)) => display,
             Ok(Err(error)) | Err(error) => return Err(session.boot_error(error)),
         };
-        let door = poll_until(BOOT_TIMEOUT, "the test door to accept a connection", || Door::connect(&door_path).ok())
+        let log_path = session.log_path.clone();
+        let door = poll_while_booting(pid, &log_path, "the test door to accept a connection", || Door::connect(&door_path).ok())
             .map_err(|error| session.boot_error(error))?;
         session.door = door;
         // Connecting only proves the listener is bound (that happens
@@ -712,10 +765,13 @@ impl Session {
 
     /// Most recently announced private XWayland display, including its colon.
     /// Never uses the caller's ambient DISPLAY, including after a restart.
+    /// Waits for the EWMH readiness line, not "XWayland ready": the server
+    /// accepts connections before the compositor watches the root window,
+    /// and a pager message sent in that gap is never seen.
     pub fn x11_display(&self) -> Result<String, String> {
         let display: u32 = poll_until(Duration::from_secs(10), "this session's XWayland display", || {
             let log = self.log();
-            let line = log.lines().rev().find(|line| line.contains("XWayland ready"))?;
+            let line = log.lines().rev().find(|line| line.contains("EWMH ready on the XWayland root"))?;
             line.split("display=").nth(1)?.trim().parse().ok()
         })?;
         Ok(format!(":{display}"))
@@ -847,7 +903,8 @@ impl Session {
     pub fn restart(&mut self) -> Result<(), String> {
         let previous = self.log().matches("wayland socket listening").count();
         std::fs::write(self.dir.join("state/chonkstep/restart"), []).map_err(|e| e.to_string())?;
-        let display = poll_until(BOOT_TIMEOUT, "the restarted Wayland display", || {
+        let (pid, log_path) = (self.compositor.id(), self.log_path.clone());
+        let display = poll_while_booting(pid, &log_path, "the restarted Wayland display", || {
             let log = self.log();
             let lines: Vec<_> = log.lines().filter(|line| line.contains("wayland socket listening")).collect();
             if lines.len() <= previous { return None; }
@@ -855,7 +912,7 @@ impl Session {
         }).map_err(|error| self.boot_error(error))?;
         self.wayland_display = display;
         let path = self.dir.join("door.sock");
-        self.door = poll_until(BOOT_TIMEOUT, "the restarted input door", || Door::connect(&path).ok())?;
+        self.door = poll_while_booting(pid, &log_path, "the restarted input door", || Door::connect(&path).ok())?;
         self.door.barrier()
     }
 
@@ -1212,6 +1269,8 @@ pub struct OverviewWindowInfo {
     pub id: u64,
     pub rect: wm_theme_api::Rect,
     pub source: wm_theme_api::Size,
+    /// False when the card shows only a shaded window's titlebar strip.
+    pub draw_content: bool,
 }
 
 impl World {
@@ -1756,6 +1815,17 @@ impl Door {
         MemoryStatistics::parse(&self.read_line()?)
     }
 
+    /// Bytes the compositor's glibc allocator has handed out and not taken
+    /// back (`mallinfo2` in-use plus mmapped chunks), in every build. Unlike
+    /// resident pages, this falls when a transient is freed.
+    pub fn heap_in_use(&mut self) -> Result<usize, String> {
+        self.send("heap-in-use")?;
+        let line = self.read_line()?;
+        line.strip_prefix("heap-in-use bytes=")
+            .and_then(|bytes| bytes.parse().ok())
+            .ok_or_else(|| format!("unexpected heap-in-use reply: {line}"))
+    }
+
     /// Whether active pointer capture is suspending touchpad typing suppression.
     pub fn touchpad_captured(&mut self) -> Result<bool, String> {
         self.send("touchpad-capture")?;
@@ -1989,6 +2059,7 @@ impl Door {
                         field(&line, "source_w=").unwrap_or_default(),
                         field(&line, "source_h=").unwrap_or_default(),
                     ),
+                    draw_content: line.contains(" draw_content=true"),
                 });
             } else if line.starts_with("err ") {
                 return Err(format!("door reported: {line}"));

@@ -207,6 +207,17 @@ grep -qx 'desktop = "omarchy"' "$fresh_home/chonkstep/config.toml" \
 grep -q '^# Focus policy' "$fresh_home/chonkstep/config.toml" \
     || fail "fresh integration did not seed the documented config template"
 
+# The development package, chonkstep-git, installs its documents under its
+# own name. A fresh integration from it must still seed the template.
+development="$work/development"
+stage_package "$development"
+write_fresh_omarchy "$development"
+mv "$development/usr/share/doc/chonkstep" "$development/usr/share/doc/chonkstep-git"
+development_home="$work/development-config-home"
+CHONKSTEP_TEST_CONFIG_HOME="$development_home" scripts/omarchy-install-desktop-chonkstep --root "$development"
+grep -qx 'desktop = "omarchy"' "$development_home/chonkstep/config.toml" \
+    || fail "development-package integration did not find the config template"
+
 scripts/omarchy-remove-desktop-chonkstep --root "$encrypted"
 assert_absent "$encrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"
 assert_absent "$encrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf"

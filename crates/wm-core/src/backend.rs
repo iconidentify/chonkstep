@@ -14,6 +14,9 @@ pub struct OverviewWindow<W, F> {
     pub frame: Option<F>,
     pub source: Rect,
     pub destination: Rect,
+    /// False for a shaded window: Overview shows only its rolled-up
+    /// titlebar strip, never the content hidden under the shade.
+    pub draw_content: bool,
     pub label: DecorationBuffer,
 }
 
@@ -613,8 +616,8 @@ pub trait Backend {
     /// `None` removes the grabs. Called when a window is managed and
     /// whenever the configured modifier changes.
     fn set_drag_gesture_grab(&mut self, _window: Self::WindowId, _modifier: Option<Modifiers>) {}
-    /// Hands the backend the user's per-application decoration
-    /// overrides, so [`Self::client_draws_own_chrome`] can consult them.
+    /// Hands the backend the user's decoration overrides, so
+    /// [`Self::client_chrome`] can consult them.
     ///
     /// On the backend rather than in `wm-core` because the rules have
     /// to reach further than the framing decision: both decoration
@@ -638,21 +641,34 @@ pub trait Backend {
     /// Applies libinput-owned pointer settings where the backend owns
     /// those devices. X11 leaves them to its display server.
     fn set_pointer_config(&mut self, _config: crate::PointerConfig) {}
-    /// Whether the client has already drawn its own window chrome, and
-    /// so must not be framed. See [`crate::ClientChrome`] for why this is not
-    /// derivable from [`Self::window_type`].
+    /// Which chrome this window should wear, from what its client has
+    /// told the backend and the decoration rules above that: a full frame,
+    /// edges around a titlebar the client draws itself, or nothing. See
+    /// [`crate::ClientChrome`] for why this is not derivable from
+    /// [`Self::window_type`].
     ///
     /// Read at map time and again whenever the backend reports the
     /// answer may have changed (`BackendEvent::ChromeChanged`) — X11
     /// clients are entitled to change their mind by rewriting
     /// `_MOTIF_WM_HINTS` on a mapped window, and several real ones do.
     ///
-    /// Defaulted to `false`: a backend that cannot ask keeps the
-    /// historic behaviour of framing everything it manages.
-    fn client_draws_own_chrome(&self, window: Self::WindowId) -> bool {
+    /// Defaulted to [`crate::ClientChrome::Full`]: a backend that cannot
+    /// ask keeps the historic behaviour of framing everything it manages.
+    fn client_chrome(&self, window: Self::WindowId) -> crate::ClientChrome {
         let _ = window;
-        false
+        crate::ClientChrome::Full
     }
+    /// Tells the backend the chrome `wm-core` settled on for a managed
+    /// window: at map, before its frame is created or it is shown, and
+    /// again on every change.
+    ///
+    /// For a backend that can tell a client how it is framed. The Wayland
+    /// session tells an edge-framed toplevel it is tiled on all four
+    /// sides, which is what makes a header-bar client stop drawing the
+    /// shadow and resize band it would otherwise put outside its window:
+    /// pixels that would lie over this desktop's borders, around handles
+    /// nobody could reach. Defaulted to a no-op.
+    fn set_window_chrome(&mut self, _window: Self::WindowId, _chrome: crate::ClientChrome) {}
     /// Moves the client window within its frame. Reparenting fixes the
     /// client at the theme's chrome offset and normal reflows never
     /// change it, so this only matters when the offset itself changes:

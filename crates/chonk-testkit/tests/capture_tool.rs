@@ -314,6 +314,9 @@ fn set_cursor_hidden(session: &mut Session, hidden: bool) {
 }
 
 fn diagnostic(session: &mut Session, name: &str) -> Screenshot {
+    // The marker captures what the compositor has painted. Input sent just
+    // before, such as a motion that moves the cursor, must land first.
+    session.door().barrier().unwrap();
     let path = session.dir.join(format!("{name}.png"));
     let marker = session.dir.join("state/chonkstep/screenshot");
     let pending = marker.with_extension("pending");

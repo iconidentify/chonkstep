@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions};
+use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions, WindowInfo};
 
 const EVENT: Duration = Duration::from_secs(10);
 const PROBE: &str = "chonk-input-probe";
@@ -32,6 +32,98 @@ fn event_after(session: &Session, after: u64, kind: &str) -> Option<InputEvent> 
 fn wait_event(session: &Session, after: u64, kind: &str) -> InputEvent {
     poll_until(EVENT, "client's next pointer event", || event_after(session, after, kind))
         .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(PROBE)))
+}
+
+/// A client may acknowledge a configure and commit before it redraws, so its
+/// settled buffer is smaller than the interior it was given; Chromium does
+/// this entering fullscreen. Stretching that buffer to the interior scaled
+/// every click and selection drag by the size ratio.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn a_settled_buffer_smaller_than_its_fullscreen_interior_is_not_stretched() {
+    let (mut session, window) = fullscreen_probe("pointer-coordinates-lagged-fullscreen", "lagged-fullscreen");
+    session.door().barrier().unwrap();
+    // Every configure sent so far is acknowledged and answered with the old
+    // 400x300 buffer, and the compositor has processed each answer.
+    poll_until(EVENT, "every configure answered with the old buffer", || {
+        let log = session.client_log(PROBE);
+        let last = |prefix: &str| log.lines().rev().find_map(|line| line.strip_prefix(prefix)?.parse::<u32>().ok());
+        let configured = last("surface configure ")?;
+        (last("configure answered ") == Some(configured)).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(PROBE)));
+    session.door().barrier().unwrap();
+
+    let (x, y) = (300.0, 250.0);
+    let event = motion_received_at(&mut session, &window, (x, y));
+    assert!(
+        (event.x - x).abs() < 0.01 && (event.y - y).abs() < 0.01,
+        "a settled 400x300 buffer in a {}x{} interior must receive ({x}, {y}), got {event:?}",
+        window.w,
+        window.h
+    );
+}
+
+/// Chromium can present its fullscreen buffer while its last window geometry
+/// is still the windowed one. A configure in flight at that moment, such as the
+/// activation a click books, stretched the full-size buffer by the windowed
+/// ratio and scaled every click with it.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn a_buffer_filling_its_fullscreen_interior_is_not_stretched_by_stale_geometry() {
+    let (mut session, window) = fullscreen_probe("pointer-coordinates-stale-geometry", "stale-geometry-fullscreen");
+    // The fullscreen configure is answered with a full-size buffer under the
+    // pinned 400x300 geometry, and a later configure is left unacknowledged.
+    poll_until(EVENT, "a configure left pending after the full-size answer", || {
+        let log = session.client_log(PROBE);
+        (log.contains("configure answered ") && log.contains(" unanswered")).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(PROBE)));
+    session.door().barrier().unwrap();
+
+    let (x, y) = (300.0, 250.0);
+    let event = motion_received_at(&mut session, &window, (x, y));
+    assert!(
+        (event.x - x).abs() < 0.01 && (event.y - y).abs() < 0.01,
+        "a full-size buffer under a stale 400x300 geometry must receive ({x}, {y}), got {event:?}"
+    );
+}
+
+/// Boots a session whose input probe runs in `mode`, which requests
+/// fullscreen, and waits for the ledger to hold it at the output's size.
+fn fullscreen_probe(name: &str, mode: &str) -> (Session, WindowInfo) {
+    let mut session = Session::boot(
+        name,
+        SessionOptions { scale: Some(1.0), config_extra: "show_dock = false\n".into(), ..SessionOptions::default() },
+    )
+    .expect("nested compositor");
+    let binary = profile_binary(PROBE).expect("input probe built");
+    session.launch(binary.to_str().unwrap(), &["1", "resizable", mode]).expect("probe launches");
+    session.wait_for_window("input-probe").expect("probe maps");
+    let window = poll_until(EVENT, "the fullscreen ledger rectangle", || {
+        let world = session.world().ok()?;
+        let window = world.window_matching("input-probe")?.clone();
+        (window.w == world.output_w && window.h == world.output_h).then_some(window)
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}", session.client_log(PROBE)));
+    (session, window)
+}
+
+/// What the probe receives for a pointer motion to `at` within its window.
+/// A first motion is sent and fenced beforehand, because it may arrive as an
+/// enter rather than a motion.
+fn motion_received_at(session: &mut Session, window: &WindowInfo, at: (f64, f64)) -> InputEvent {
+    let origin = (f64::from(window.x - window.offset_x), f64::from(window.y - window.offset_y));
+    session.door().motion(origin.0 + 200.0, origin.1 + 150.0).unwrap();
+    session.door().barrier().unwrap();
+    let seen = session
+        .client_log(PROBE)
+        .lines()
+        .filter_map(|line| line.strip_prefix("input ")?.split_whitespace().next()?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    session.door().motion(origin.0 + at.0, origin.1 + at.1).unwrap();
+    wait_event(session, seen, "motion")
 }
 
 fn drag_at_scale(scale: f32, subsurface: bool) {

@@ -115,6 +115,37 @@ impl DecorationLayout {
         Rect::new(Point::new(margin as i32, margin as i32),
             Size::new(self.frame_size.w - margin * 2, self.frame_size.h - margin * 2))
     }
+
+    /// This layout with its titlebar band taken out: the frame shortened by
+    /// `titlebar_height`, the client moved up into the space, no buttons, and
+    /// every resize hitbox squeezed across the removed band so the handles
+    /// above and below it still meet.
+    ///
+    /// The generic answer to [`ThemeEngine::edges_layout_at`], exact for any
+    /// recipe whose titlebar band ends where the client begins and does not
+    /// include the frame's top border. The built-in recipes do not all draw
+    /// their titlebar that way and implement edge frames themselves.
+    pub fn without_titlebar(&self) -> DecorationLayout {
+        let bottom = self.client_offset.y;
+        let strip = self.titlebar_height.min(bottom.max(0) as u32) as i32;
+        let top = bottom - strip;
+        let squeeze = |y: i32| if y <= top { y } else if y >= bottom { y - strip } else { top };
+        let resize_hitboxes = self.resize_hitboxes.iter().filter_map(|&(edge, rect)| {
+            let (y0, y1) = (squeeze(rect.pos.y), squeeze(rect.pos.y + rect.size.h as i32));
+            (y1 > y0).then(|| (edge, Rect::new(Point::new(rect.pos.x, y0), Size::new(rect.size.w, (y1 - y0) as u32))))
+        }).collect();
+        let frame_size = Size::new(self.frame_size.w, self.frame_size.h - strip as u32);
+        DecorationLayout {
+            frame_size,
+            input_margin: self.input_margin,
+            client_offset: Point::new(self.client_offset.x, top),
+            titlebar_height: 0,
+            button_hitboxes: Vec::new(),
+            resize_hitboxes,
+            // No titlebar to roll up into: an edge frame cannot be shaded.
+            shaded_frame_height: frame_size.h,
+        }
+    }
 }
 
 /// Rasterized decoration pixels: RGBA8, row-major, no row padding
@@ -213,5 +244,63 @@ pub trait ThemeEngine {
     ) -> DecorationSurface {
         let _ = scale;
         self.render_surface(request, layout)
+    }
+
+    /// Layout for an *edge frame*: this theme's borders and resize hitboxes
+    /// around a client that draws its own titlebar, with a `titlebar_height`
+    /// of zero and no buttons. The window still has exactly one titlebar, the
+    /// client's, and the frame still resizes.
+    ///
+    /// The default removes the titlebar band from [`Self::layout_at`]; see
+    /// [`DecorationLayout::without_titlebar`] for when that is exact.
+    fn edges_layout_at(&self, request: &DecorationRequest, scale: f32) -> DecorationLayout {
+        self.layout_at(request, scale).without_titlebar()
+    }
+
+    /// Paints an [`Self::edges_layout_at`] layout: borders only, no title and
+    /// no buttons. The default hands the layout to the ordinary renderer,
+    /// which is correct for a theme that paints from the layout it is given.
+    fn render_edges_at(&self, request: &DecorationRequest, layout: &DecorationLayout, scale: f32) -> DecorationSurface {
+        self.render_surface_at(request, layout, scale)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A titlebar band below a one-pixel top border, with a corner arm
+    /// reaching down into the band and a side handle running through it.
+    #[test]
+    fn removing_the_titlebar_closes_the_band_and_keeps_every_handle_joined() {
+        let full = DecorationLayout {
+            frame_size: Size::new(120, 122),
+            input_margin: 0,
+            client_offset: Point::new(1, 21),
+            titlebar_height: 20,
+            button_hitboxes: vec![(ButtonKind::Close, Rect::new(Point::new(4, 4), Size::new(14, 14)))],
+            resize_hitboxes: vec![
+                (ResizeEdge::NorthWest, Rect::new(Point::new(0, 0), Size::new(1, 10))),
+                (ResizeEdge::North, Rect::new(Point::new(10, 0), Size::new(100, 1))),
+                (ResizeEdge::West, Rect::new(Point::new(0, 10), Size::new(1, 102))),
+                (ResizeEdge::SouthEast, Rect::new(Point::new(110, 112), Size::new(10, 10))),
+            ],
+            shaded_frame_height: 22,
+        };
+        let edges = full.without_titlebar();
+        assert_eq!(edges.frame_size, Size::new(120, 102));
+        assert_eq!(edges.client_offset, Point::new(1, 1), "the client moves up into the band");
+        assert_eq!(edges.titlebar_height, 0);
+        assert!(edges.button_hitboxes.is_empty());
+        assert_eq!(edges.shaded_frame_height, 102, "there is nothing to shade into");
+        assert_eq!(
+            edges.resize_hitboxes,
+            vec![
+                (ResizeEdge::NorthWest, Rect::new(Point::new(0, 0), Size::new(1, 1))),
+                (ResizeEdge::North, Rect::new(Point::new(10, 0), Size::new(100, 1))),
+                (ResizeEdge::West, Rect::new(Point::new(0, 1), Size::new(1, 91))),
+                (ResizeEdge::SouthEast, Rect::new(Point::new(110, 92), Size::new(10, 10))),
+            ]
+        );
     }
 }

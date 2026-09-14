@@ -159,21 +159,47 @@ pub enum WindowType {
 /// window manager has no way to notice, because "Normal" was the only
 /// thing it ever asked.
 ///
+/// Three answers rather than two, because "the client draws its own
+/// titlebar" does not settle who draws the rest. A header-bar application
+/// (GTK4, libadwaita) draws a titlebar and nothing a pointer can resize it
+/// by: its resize band lives in an invisible shadow, and the band goes
+/// away entirely once the window is tiled. Left bare, such a window has
+/// one titlebar and no usable edges; framed in full, it has two
+/// titlebars. [`Self::Edges`] is the answer between.
+///
 /// Every client kind answers in its own dialect and the backends
-/// translate: Wayland toplevels through xdg-decoration, X11 and
-/// XWayland clients through `_MOTIF_WM_HINTS`. A client that says
-/// nothing at all is [`Self::ServerDrawn`] — the historic default, and
-/// the one that keeps an ordinary X11 application framed.
+/// translate: Wayland toplevels through the two decoration protocols, X11
+/// and XWayland clients through `_MOTIF_WM_HINTS`. A client that says
+/// nothing at all is [`Self::Full`] — the historic default, and the one
+/// that keeps an ordinary X11 application framed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ClientChrome {
-    /// The window manager draws the frame. The default, and what every
-    /// client that expresses no preference gets.
+    /// The window manager draws the whole frame: titlebar, buttons,
+    /// borders and resize handles. The default, and what every client
+    /// that expresses no preference gets.
     #[default]
-    ServerDrawn,
-    /// The client drew its own titlebar and borders; this window must
-    /// be managed (focused, moved, stacked, put on a workspace) but
-    /// never framed.
-    ClientDrawn,
+    Full,
+    /// The client draws its own titlebar and the window manager draws
+    /// only the theme's borders and resize handles around it: one
+    /// titlebar, the client's, in a frame that still resizes. With no
+    /// titlebar of ours to roll up into, the window cannot be shaded;
+    /// everything else, maximize and fullscreen included, is exactly as
+    /// for a [`Self::Full`] frame.
+    Edges,
+    /// No chrome from the window manager at all: the window is managed
+    /// (focused, moved, stacked, put on a workspace) but never framed.
+    /// Reserved for a client that asked for exactly that — through a
+    /// `[decorations] client_side` rule, or an X11 client whose Motif
+    /// hint declines decoration, which is how games say it.
+    Bare,
+}
+
+impl ClientChrome {
+    /// Whether this chrome puts a frame of the window manager's around
+    /// the client.
+    pub fn is_framed(self) -> bool {
+        self != Self::Bare
+    }
 }
 
 /// Events a `Backend` reports back to the core event loop.
@@ -192,7 +218,7 @@ pub enum BackendEvent<Win, Frame> {
     /// then just keeps whatever title was known at map time.
     TitleChanged(Win),
     /// The client may have changed its mind about drawing its own
-    /// chrome — re-read [`Backend::client_draws_own_chrome`] and add or
+    /// chrome — re-read [`Backend::client_chrome`] and add, reshape or
     /// drop the frame to match.
     ///
     /// A separate event rather than folding into `TitleChanged`,
@@ -202,7 +228,7 @@ pub enum BackendEvent<Win, Frame> {
     /// never emit it, and every window then keeps whatever the answer
     /// was at map time.
     ///
-    /// [`Backend::client_draws_own_chrome`]: crate::Backend::client_draws_own_chrome
+    /// [`Backend::client_chrome`]: crate::Backend::client_chrome
     ChromeChanged(Win),
     /// Committed minimum/maximum sizes or resize increments changed.
     SizeHintsChanged(Win),
@@ -362,11 +388,19 @@ pub enum BackendEvent<Win, Frame> {
 /// Neither list needs an entry for correctness: under xdg-decoration
 /// the compositor has the last word and takes it, and under the KDE
 /// protocol a client's declaration is believed (see `wm-wayland`'s
-/// `decoration` module). They exist for the two ways that can still
-/// go wrong — a KDE or X11 client that declares its own chrome and
-/// draws none, which `server_side` fixes in one line, and an xdg
-/// client whose bare surface is the point (a borderless game, a
-/// kiosk), which `client_side` lets stay bare. Both empty by default.
+/// `decoration` module) and answered with edge chrome, this desktop's
+/// borders and resize handles around the client's own titlebar. The
+/// lists exist for the two ways that can still go wrong — a KDE or X11
+/// client that declares its own chrome and draws none, which
+/// `server_side` fixes in one line, and a client whose bare surface is
+/// the point (a borderless game, a kiosk), which `client_side` lets stay
+/// bare. Both empty by default.
+///
+/// Precedence, strongest first: a `server_side` entry (full chrome); a
+/// `client_side` entry (none); a client's explicit declaration (KDE
+/// `request_mode(Client)` gives edge chrome, a Motif hint declining
+/// decoration gives none); and only then [`Self::frame_client_drawn`],
+/// which reaches the one signal that is inferred rather than stated.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecorationRules {
     /// Draw this desktop's chrome whatever the client asks for. The
@@ -377,6 +411,17 @@ pub struct DecorationRules {
     /// Never draw chrome for these; the client's own is the only one.
     /// The direction the old `self_decorating_apps` list held alone.
     pub client_side: Vec<String>,
+    /// Give full chrome, titlebar and buttons, to every client that is
+    /// *silently* client-drawn: one that bound KDE's decoration manager
+    /// and created no decoration object, which is how a GTK4 header-bar
+    /// window says it draws its own titlebar. Such a window then wears
+    /// this desktop's titlebar above its own. `false` by default, which
+    /// gives it edge chrome instead.
+    ///
+    /// Only the silent signal: a client that declared its chrome in so
+    /// many words keeps what it declared, and a list entry naming the
+    /// application outranks this in either direction.
+    pub frame_client_drawn: bool,
 }
 
 /// The keyboard half of the config's `input` block, as the shell reads
@@ -594,6 +639,6 @@ impl DecorationRules {
     /// that explains a decoration decision without making the common
     /// case say "no rules matched" on every window.
     pub fn is_empty(&self) -> bool {
-        self.server_side.is_empty() && self.client_side.is_empty()
+        self.server_side.is_empty() && self.client_side.is_empty() && !self.frame_client_drawn
     }
 }

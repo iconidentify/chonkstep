@@ -338,24 +338,24 @@ has a workaround listed in
 | `alt` + drag, right      | Resize the window, from anywhere on it              |
 
 The last two are the ones that matter for a window with no titlebar.
-Every xdg-decoration negotiation on this desktop ends server-side, as
-it does on Hyprland, so a Wayland client that merely *asked* to draw
-its own chrome gets a frame anyway. But a client that *declares* its
-own chrome — over KDE's server-decoration protocol, which is the one
-GTK speaks, or through `_MOTIF_WM_HINTS` on X11 — is believed, and a
-few of those declare a titlebar and then draw nothing at all. Those
-windows have no titlebar to drag and no resize bar to pull, so the
-gesture is grabbed on the window's own content and works on every
+Every xdg-decoration negotiation on this desktop ends server-side, so a
+Wayland client that merely *asked* to draw its own chrome gets a frame
+anyway. A client that *declares* its own chrome over KDE's
+server-decoration protocol, which is the one GTK speaks, keeps its own
+titlebar and wears this desktop's borders and resize handles around it.
+One that declines decoration through `_MOTIF_WM_HINTS` on X11 is left
+bare, and a few clients declare a titlebar and then draw nothing at all.
+Those windows have no titlebar of ours to drag, and bare ones have no
+resize bar to pull either, so the gesture is grabbed on the window's own content and works on every
 window, framed or not; `control+escape` reaches its commands menu for
-the same reason. Window Maker binds both the same way, and for the
-same case.
+the same reason.
 
 The modifier is `drag_modifier` in the config: `"alt"` by default,
 `"super"` if an application (CAD, GIMP, Blender) wants Alt+drag for
 itself, `"none"` to turn the gesture off. To give such a bare window
 its titlebar back permanently instead, name it in `[decorations]
-server_side`; to keep an xdg client bare on purpose, name it in
-`client_side` — see `docs/config.example.toml`.
+server_side`; to keep a client bare on purpose, edges and all, name it
+in `client_side` — see `docs/config.example.toml`.
 
 Two more actions exist and are deliberately unbound by default —
 give them keys in your config:

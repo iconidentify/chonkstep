@@ -175,6 +175,44 @@ else
 fi
 cargo build "${cargo_profile[@]}" "${build_packages[@]}" --quiet
 
+# The first compositor boot otherwise pays for paging the graphics
+# stack (libEGL, Mesa's EGL vendor library, libgallium, libLLVM) in from
+# a cold disk: 15 silent seconds on a fresh CI runner, billed to
+# whichever test boots first. Read those files once, here, visibly.
+warm_graphics_stack() {
+    command -v ldconfig >/dev/null 2>&1 || return 0
+    local started=$SECONDS name path bytes vendor libraries=()
+    local names=(libEGL.so.1 libGLESv2.so.2 libgbm.so.1)
+    for vendor in /usr/share/glvnd/egl_vendor.d/*.json; do
+        if [ -r "$vendor" ]; then
+            name=$(sed -n 's/.*"library_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$vendor")
+            if [ -n "$name" ]; then names+=("$name"); fi
+        fi
+    done
+    for name in "${names[@]}"; do
+        case "$name" in
+            /*) path=$name ;;
+            # No early awk exit: under pipefail, SIGPIPE on ldconfig would
+            # fail the assignment and with it the whole script.
+            *) path=$(ldconfig -p | awk -v name="$name" '$1 == name && !found++ { print $NF }') ;;
+        esac
+        if [ -n "$path" ] && [ -r "$path" ]; then
+            libraries+=("$path")
+            while read -r dependency; do
+                libraries+=("$dependency")
+            done < <(ldd "$path" 2>/dev/null | awk '$2 == "=>" && $3 ~ /^\// { print $3 }')
+        fi
+    done
+    # Mesa before libgallium loads its driver with dlopen, invisible to ldd.
+    for path in /usr/lib/dri/swrast_dri.so /usr/lib64/dri/swrast_dri.so /usr/lib/*-linux-gnu/dri/swrast_dri.so; do
+        if [ -r "$path" ]; then libraries+=("$path"); fi
+    done
+    if [ "${#libraries[@]}" -eq 0 ]; then return 0; fi
+    bytes=$( { cat "${libraries[@]}" 2>/dev/null || true; } | wc -c)
+    echo "Warmed the graphics stack: ${#libraries[@]} files, $((bytes / 1048576)) MiB, $((SECONDS - started)) s"
+}
+warm_graphics_stack
+
 # Every integration-test target in the harness crate, in one run:
 # `--ignored` selects exactly the nesting tests (the crash supervisor's
 # tests in tests/supervisor.rs need no session and run un-ignored
@@ -200,9 +238,9 @@ if "$headless"; then
     # startup deadline. A private session bus gives every nested test a
     # syntactically valid, responsive endpoint and is reaped
     # automatically with the cargo process.
-    dbus-run-session -- cargo test "${cargo_profile[@]}" -p chonk-testkit "${cargo_tests[@]}" -- --ignored --test-threads=1 "$@"
+    dbus-run-session -- cargo test "${cargo_profile[@]}" --no-fail-fast -p chonk-testkit "${cargo_tests[@]}" -- --ignored --test-threads=1 "$@"
 else
-    cargo test "${cargo_profile[@]}" -p chonk-testkit "${cargo_tests[@]}" -- --ignored --test-threads=1 "$@"
+    cargo test "${cargo_profile[@]}" --no-fail-fast -p chonk-testkit "${cargo_tests[@]}" -- --ignored --test-threads=1 "$@"
 fi
 
 # The unit tests that read the Omarchy installed on this machine are

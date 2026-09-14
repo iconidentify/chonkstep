@@ -1218,6 +1218,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         host_omarchy_shell(&verdict, &theme.id, state.appearance, state.scale);
 
         crate::appearance::publish(state.appearance);
+        // Header bars take their window buttons from GSettings, where the
+        // stock layout is Close alone; see `appearance::button_layout`.
+        crate::appearance::publish_button_layout();
 
         // Take the configured grabs through the same delta the applier
         // uses, from an empty starting set: one implementation, so a
@@ -2094,6 +2097,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             Some(self.desktop.chrome()), inverted, &self.theme, &mut fonts, &mut swash, text, width, label_h);
         let windows = clients.iter().zip(sources).zip(&layout.cells).map(|(((_, c), source), destination)| {
             wm_core::OverviewWindow { window: c.window, frame: c.frame, source, destination: *destination,
+                draw_content: !c.flags.contains(ClientFlags::SHADED),
                 label: if cards {DecorationBuffer {width:0,height:0,pixels:Vec::new()}}
                     else{label(&c.title, (tile * 6).min(geometry.size.w), true)} }
         }).collect();
@@ -2223,6 +2227,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 title: client.title.clone(),
                 preview: None,
                 frame: client.frame,
+                draw_content: !client.flags.contains(ClientFlags::SHADED),
                 geometry: if client.frame.is_some() {
                     client.visual_geometry()
                 } else {
@@ -2288,7 +2293,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             .map(|item| item.window);
         self.dismiss_overview(wm, Some(false));
         if let Some(window) = target {
-            wm.dispatch(BackendEvent::ActivateRequested(window));
+            // Not an ordinary activation: a shaded card stays shaded.
+            wm.activate_from_overview(window);
         }
     }
 

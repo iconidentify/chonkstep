@@ -472,12 +472,7 @@ impl<B: Backend> WindowManager<B> {
                 .iter()
                 .map(|&id| {
                     let c = &self.clients[id];
-                    if c.chrome == ClientChrome::ClientDrawn {
-                        frameless_layout(c.geometry.size)
-                    } else {
-                        self.theme
-                            .layout_at(&Self::decoration_request(c, None), scale as f32)
-                    }
+                    self.chrome_layout(c.chrome, &Self::decoration_request(c, None), scale as f32)
                 })
                 .collect();
             let items: Vec<_> = ids

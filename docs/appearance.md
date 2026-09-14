@@ -187,9 +187,11 @@ written at session startup and again on every switch. It doubles as
 the persisted choice the next session starts from.
 
 `appearance-request` is consumed the way the `reload`/`restart`
-markers are: the shell polls once per housekeeping tick (~16 ms),
-reads the file, deletes it, then acts -- so a request is honored
-exactly once. Values are trimmed and case-insensitive; an unparsable
+markers are: the shell checks for it at most every 100 ms, reads the
+file, deletes it, then acts -- so a request is honored exactly once.
+An empty file less than a second old is left alone, because that is
+a shell redirect caught between truncating the file and writing the
+word. Values are trimmed and case-insensitive; an unparsable
 request is consumed and warned about in the session log, never
 guessed at. A request naming the mode the session is already in is
 consumed and does nothing.
@@ -221,7 +223,16 @@ gate the desktop's own repaint):
    member of an installed light/dark pair this desktop knows
    (Adwaita/Adwaita-dark, or adw-gtk3/adw-gtk3-dark), it is flipped to
    the matching member so GTK3 applications follow too; a hand-picked
-   third-party theme is never overwritten.
+   third-party theme is never overwritten. Once per session, and on the
+   same terms, the shell publishes
+   `org.gnome.desktop.wm.preferences button-layout` as
+   `appmenu:minimize,maximize,close`, so GTK and libadwaita header bars
+   show the minimize and maximize buttons the compositor supports. It
+   replaces only the stock `appmenu:close`, and only when `dconf`
+   confirms no database sets the key, the user's or a site default;
+   any other layout, or a system without `dconf`, is left exactly as it
+   is. The published layout stays in the user's settings, so another
+   desktop on the same account shows the same buttons.
 5. **XSETTINGS (X11/XWayland clients)** -- on the X11 session the
    binary republishes `Net/ThemeName`/`Gtk/ThemeName` with the
    matching member of that same installed pair. If no known pair is

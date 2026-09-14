@@ -958,6 +958,25 @@ mod tests {
         // explicit overrides above must work regardless of that host state.
     }
 
+    /// `[decorations]` reaches the backend through `SessionState`, and a
+    /// reload re-decides every open window's chrome from it, so each edit
+    /// of the file has to arrive whole: the lists and
+    /// `frame_client_drawn` together, flipped in both directions.
+    #[test]
+    fn decoration_rules_resolve_from_config_on_every_reload() {
+        for (text, frame_client_drawn) in [
+            ("[decorations]\nframe_client_drawn = true\nclient_side = [\"kiosk\"]\n", true),
+            ("[decorations]\nclient_side = [\"kiosk\"]\n", false),
+            ("[decorations]\nframe_client_drawn = true\n", true),
+            ("", false),
+        ] {
+            let config = wm_config::parse(text).unwrap();
+            let state = SessionState::resolve(&config);
+            assert_eq!(state.decorations, config.decorations, "{text:?}");
+            assert_eq!(state.decorations.frame_client_drawn, frame_client_drawn, "{text:?}");
+        }
+    }
+
     #[test]
     fn a_session_state_scales_a_theme_it_keeps_at_1x() {
         let base = wm_theme::default_theme::nextstep_classic();
