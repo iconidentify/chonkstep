@@ -2108,6 +2108,18 @@ fn reindex_after_removal(output: Option<usize>, removed: usize) -> Option<usize>
     }
 }
 
+/// Where `output` sits in `outputs`, by identity, or `None` once it has
+/// left. The pure half of [`Compositor::output_index_of`], taking any
+/// list of outputs so a ledger's tests can drive it without a
+/// compositor.
+pub(crate) fn output_index_in<'a>(
+    outputs: impl IntoIterator<Item = &'a Output>,
+    output: &smithay::output::WeakOutput,
+) -> Option<usize> {
+    let output = output.upgrade()?;
+    outputs.into_iter().position(|candidate| *candidate == output)
+}
+
 pub(crate) fn apply_connector_hotplug(
     comp: &mut Compositor,
     removed: &[usize],
@@ -2222,7 +2234,7 @@ pub(crate) fn apply_connector_hotplug(
         for rect in departed { comp.wm.rescue_clients_from_removed_monitor(rect); }
     }
     crate::input::reconcile_pointer_after_output_change(comp);
-    crate::gamma::outputs_changed(&mut comp.gamma, &comp.graphics, &comp.display_handle);
+    crate::gamma::outputs_changed(comp);
     comp.output_mgmt.mark_dirty();
     comp.session_lock.mark_dirty();
     comp.layer_shell.needs_arrange = true;
@@ -3385,6 +3397,29 @@ impl Compositor {
         self.sync_monitor_outputs();
     }
 
+    /// Where `output` sits in [`Compositor::outputs`] now, or `None`
+    /// once it has left.
+    ///
+    /// The one identity-to-position lookup for every protocol that
+    /// keeps per-output state across requests (gamma, CTM, output
+    /// power). They hold a `WeakOutput` and resolve it here per
+    /// request, so a hotplug that shifts positions cannot hand one
+    /// client's state to a different monitor.
+    pub(crate) fn output_index_of(&self, output: &smithay::output::WeakOutput) -> Option<usize> {
+        output_index_in(self.outputs.iter().map(|entry| &entry.output), output)
+    }
+
+    /// The identity of the output a client's `wl_output` names, or
+    /// `None` for a resource that is not one of ours or whose output
+    /// has already left.
+    pub(crate) fn output_identity(
+        &self,
+        resource: &smithay::reexports::wayland_server::protocol::wl_output::WlOutput,
+    ) -> Option<smithay::output::WeakOutput> {
+        let output = Output::from_resource(resource)?.downgrade();
+        self.output_index_of(&output).map(|_| output)
+    }
+
     /// Mirrors each output's EDID identity and mode list onto the
     /// backend, where the IPC snapshot can reach them.
     ///
@@ -3920,7 +3955,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // gamma LUT — every nested one, and some real crtcs — is refused
     // honestly, and a session where no output can be tinted advertises
     // no global at all rather than one that lies.
-    let gamma = crate::gamma::init(&display_handle, &graphics);
+    let gamma = crate::gamma::init(&display_handle, &graphics, &outputs);
     let ctm = crate::ctm::init(&display_handle, crate::gamma::available(&gamma));
     // And again for the one protocol with no crate behind it: this is
     // the global Omarchy's Quickshell looks for the moment it connects,

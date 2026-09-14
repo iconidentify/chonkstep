@@ -130,15 +130,26 @@
 //!
 //! One field on [`Compositor`], one `init` in `run` before the
 //! listening socket exists, one [`refresh`] per dispatch pass, one
-//! [`restore_all`] as the session ends, and one flag set from the
-//! seat-activation handler in `session.rs` (a VT switch hands the crtcs
-//! to another session, which resets their LUTs; [`refresh`] programs
-//! the live ramp back when the seat comes home).
+//! [`restore_all`] as the session ends, one [`outputs_changed`] from
+//! connector hotplug, and one flag set from the seat-activation handler
+//! in `session.rs` (a VT switch hands the crtcs to another session,
+//! which resets their LUTs; [`refresh`] programs the live ramp back
+//! when the seat comes home).
+//!
+//! # Hotplug: identity, not position
+//!
+//! A control names its output by identity (`WeakOutput`), and so does
+//! every slot. A dock, an undock or a projector shifts positions in
+//! `Compositor::outputs`; it cannot make a control resolve to a crtc
+//! its client did not choose. That is what lets a hotplug keep every
+//! surviving output's owner, captured original and live ramp, so a
+//! night-light daemon keeps working and its exit still restores the
+//! screen. Only a control whose output left is told `failed`.
 
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileExt;
 
-use smithay::output::Output;
+use smithay::output::WeakOutput;
 use smithay::reexports::wayland_protocols_wlr::gamma_control::v1::server::zwlr_gamma_control_manager_v1::{
     self, ZwlrGammaControlManagerV1,
 };
@@ -156,7 +167,8 @@ use crate::state::Compositor;
 const GAMMA_CONTROL_VERSION: u32 = 1;
 
 /// Everything the global keeps between dispatch passes: one slot per
-/// output, index-aligned with `Compositor::outputs`.
+/// output, index-aligned with `Compositor::outputs` and naming the
+/// output it belongs to.
 pub(crate) struct GammaControl {
     /// `None` on a backend that cannot set gamma — the nested one — in
     /// which case no global was created and every function here is a
@@ -181,6 +193,10 @@ pub(crate) struct GammaControl {
 
 /// One output's gamma state.
 struct OutputGamma {
+    /// The output this slot belongs to. Controls and staged CTMs are
+    /// matched against this, never against the slot's position, and
+    /// [`outputs_changed`] carries the slot across a hotplug by it.
+    output: WeakOutput,
     /// The ramp length this output's hardware wants, and the number
     /// [`gamma_size`](zwlr_gamma_control_v1::Event::GammaSize)
     /// advertises. Zero means the hardware cannot do it, and every
@@ -204,12 +220,21 @@ struct OutputGamma {
     pending: Option<Ramps>,
 }
 
-/// Per-`zwlr_gamma_control_v1` data: which output it was created for.
+impl OutputGamma {
+    /// A slot nobody has touched: no owner, nothing captured, nothing
+    /// to program.
+    fn fresh(output: WeakOutput, size: usize) -> Self {
+        OutputGamma { output, size, owner: None, original: None, live: None, pending: None }
+    }
+}
+
+/// Per-`zwlr_gamma_control_v1` data: which output it was created for,
+/// by identity, or `None` for a `wl_output` that was never ours.
 /// Whether it is *live* is not stored here — that is
 /// `OutputGamma::owner`, so there is exactly one place exclusivity can
 /// be decided from and no second flag to fall out of step with it.
 struct ControlData {
-    index: usize,
+    output: Option<WeakOutput>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,14 +386,15 @@ impl Ramps {
 /// hardware session whose driver exposes no gamma at all — no global is
 /// created and a night-light tool finds nothing to bind, which is the
 /// honest answer.
-pub(crate) fn init(display_handle: &DisplayHandle, graphics: &crate::state::Graphics) -> GammaControl {
-    let mut sizes = crate::session::gamma_ramp_sizes(graphics);
+pub(crate) fn init(
+    display_handle: &DisplayHandle,
+    graphics: &crate::state::Graphics,
+    outputs: &[crate::state::OutputEntry],
+) -> GammaControl {
     // The end-to-end stand-in, described in the module header: a ramp
     // length for the nested backend's crtc-less output, so a real
-    // client can be run against the real protocol. Only ever fills in
-    // for an output the hardware said it cannot do — it never overrides
-    // a real crtc's answer — and only on the nested backend, so no
-    // hardware session can reach this branch at all.
+    // client can be run against the real protocol. Only on the nested
+    // backend, so no hardware session can reach this branch at all.
     let simulated = simulated_ramp_size().filter(|_| matches!(graphics, crate::state::Graphics::Winit(_)));
     if let Some(size) = simulated {
         tracing::warn!(
@@ -376,15 +402,11 @@ pub(crate) fn init(display_handle: &DisplayHandle, graphics: &crate::state::Grap
             "CHONKSTEP_TEST_GAMMA_SIZE is set: this session ADVERTISES gamma control and RECORDS \
              the ramps instead of displaying them. Test apparatus — nothing on a desktop sets this."
         );
-        for entry in sizes.iter_mut().filter(|size| **size == 0) {
-            *entry = size;
-        }
     }
+    let sizes = ramp_sizes(graphics, outputs.len(), simulated);
     let simulated = simulated.is_some();
-    let outputs: Vec<OutputGamma> = sizes
-        .iter()
-        .map(|&size| OutputGamma { size: size as usize, owner: None, original: None, live: None, pending: None })
-        .collect();
+    let outputs: Vec<OutputGamma> =
+        outputs.iter().zip(&sizes).map(|(entry, &size)| OutputGamma::fresh(entry.output.downgrade(), size)).collect();
     if outputs.iter().all(|output| output.size == 0) {
         tracing::info!(
             outputs = outputs.len(),
@@ -423,14 +445,21 @@ pub(crate) fn ctm_manager_is(gamma: &GammaControl, id: &ObjectId) -> bool {
 /// Stages a diagonal CTM as three scaled identity ramps. Outputs not
 /// named in `scales` are restored to identity on this commit, matching
 /// the CTM protocol's transaction semantics.
-pub(crate) fn commit_ctm(comp: &mut Compositor, id: &ObjectId, scales: &[(usize, [f64; 3])]) {
+///
+/// `scales` names outputs by identity, matched against the slots as
+/// they are at commit time: a matrix staged for an output unplugged
+/// since matches nothing, and one for an output a hotplug moved still
+/// reaches that output.
+pub(crate) fn commit_ctm(comp: &mut Compositor, id: &ObjectId, scales: &[(WeakOutput, [f64; 3])]) {
     if comp.gamma.ctm_manager.as_ref() != Some(id) {
         return;
     }
     for index in 0..comp.gamma.outputs.len() {
-        let diagonal =
-            scales.iter().find_map(|(candidate, value)| (*candidate == index).then_some(*value)).unwrap_or([1.0; 3]);
         let slot = &mut comp.gamma.outputs[index];
+        let diagonal = scales
+            .iter()
+            .find_map(|(candidate, value)| (*candidate == slot.output).then_some(*value))
+            .unwrap_or([1.0; 3]);
         if slot.size == 0 {
             tracing::info!(index, "CTM skipped: this output has no hardware gamma ramp");
             continue;
@@ -484,6 +513,28 @@ fn simulated_ramp_size() -> Option<u32> {
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|size| *size > 0)
     })
+}
+
+/// The ramp length for each of `count` outputs, index-aligned with
+/// `Compositor::outputs`: what the hardware reports, with the
+/// `CHONKSTEP_TEST_GAMMA_SIZE` stand-in filled in when `simulated`
+/// carries its size.
+///
+/// Always exactly `count` long. The nested backend answers a single
+/// zero however many heads the test door has given it, and a list one
+/// short would silently leave the last output without a slot.
+fn ramp_sizes(graphics: &crate::state::Graphics, count: usize, simulated: Option<u32>) -> Vec<usize> {
+    let mut sizes = crate::session::gamma_ramp_sizes(graphics);
+    // An output the hardware said nothing about cannot be controlled.
+    sizes.resize(count, 0);
+    // The stand-in only ever fills in for an output the hardware said
+    // it cannot do; it never overrides a real crtc's answer.
+    if let Some(size) = simulated {
+        for entry in sizes.iter_mut().filter(|size| **size == 0) {
+            *entry = size;
+        }
+    }
+    sizes.into_iter().map(|size| size as usize).collect()
 }
 
 /// The once-per-pass reconciliation: program whatever ramp each output
@@ -596,31 +647,87 @@ pub(crate) fn note_session_resumed(gamma: &mut GammaControl) {
     }
 }
 
-/// Rebuilds the index-aligned hardware slots after connector hotplug.
-/// Existing controls become inert (their recorded object id owns no
-/// new slot), preventing a stale handle from programming a different
-/// CRTC that happened to inherit its old index.
-pub(crate) fn outputs_changed(
-    gamma: &mut GammaControl,
-    graphics: &crate::state::Graphics,
-    display_handle: &DisplayHandle,
-) {
-    let sizes = crate::session::gamma_ramp_sizes(graphics);
-    gamma.outputs = sizes
+/// Which slot each output keeps across a connector hotplug, decided by
+/// identity and never by position.
+///
+/// `previous` and `current` are the (output, ramp size) pairs before
+/// and after, each in `Compositor::outputs` order. The answer has one
+/// entry per `current` output: the position in `previous` of the slot
+/// it keeps, or `None` for an output that needs a fresh one. A previous
+/// slot nobody keeps has left, and its owner is owed `failed`.
+///
+/// The same output at a different ramp size is *not* kept. The size is
+/// the crtc's, so a different size is a different crtc, and a ramp built
+/// for the old one, or an original captured from it, must not be
+/// programmed onto the new one.
+///
+/// Pure and generic over the identity, like [`claim`], so the tests at
+/// the bottom of this file can drive it with plain names.
+fn carry_over<I: PartialEq>(previous: &[(I, usize)], current: &[(I, usize)]) -> Vec<Option<usize>> {
+    let mut kept = vec![false; previous.len()];
+    current
+        .iter()
+        .map(|now| {
+            let at = (0..previous.len()).find(|&at| !kept[at] && previous[at] == *now)?;
+            kept[at] = true;
+            Some(at)
+        })
+        .collect()
+}
+
+/// Rebuilds the slots after a connector hotplug, once
+/// `Compositor::outputs` holds the new set.
+///
+/// The slots stay index-aligned with `Compositor::outputs`, because
+/// `session::write_gamma` programs by position, but which slot an
+/// output gets is [`carry_over`]'s decision. An output that stayed
+/// keeps its owner, its captured original and its live ramp, so its
+/// daemon's next `set_gamma` still lands, its exit still restores the
+/// screen, and a second daemon's claim is still refused. Nothing is
+/// programmed here: a kept slot's ramp did not change, and the blocking
+/// ioctl stays [`refresh`]'s.
+///
+/// A slot whose output left, or changed ramp size, is dropped, and a
+/// wlr control that owned it is sent `failed`: the protocol's event for
+/// a control that is no longer valid. That control then resolves to no
+/// slot and stays inert. The CTM manager owns the colour pipeline
+/// rather than one output, so its ownership survives, and its next
+/// commit reprograms every output, a new one included.
+///
+/// A pending VT-switch reprogram is left armed: a resume that also
+/// changed connectors still owes the surviving outputs their ramps.
+pub(crate) fn outputs_changed(comp: &mut Compositor) {
+    let simulated = comp.gamma.simulated.then(simulated_ramp_size).flatten();
+    let sizes = ramp_sizes(&comp.graphics, comp.outputs.len(), simulated);
+    let current: Vec<(WeakOutput, usize)> =
+        comp.outputs.iter().zip(sizes).map(|(entry, size)| (entry.output.downgrade(), size)).collect();
+    let before: Vec<(WeakOutput, usize)> =
+        comp.gamma.outputs.iter().map(|slot| (slot.output.clone(), slot.size)).collect();
+    let kept = carry_over(&before, &current);
+    let mut previous: Vec<Option<OutputGamma>> =
+        std::mem::take(&mut comp.gamma.outputs).into_iter().map(Some).collect();
+    comp.gamma.outputs = current
         .into_iter()
-        .map(|size| OutputGamma {
-            size: size as usize,
-            owner: None,
-            original: None,
-            live: None,
-            pending: None,
+        .zip(kept)
+        .map(|((output, size), at)| {
+            at.and_then(|at| previous[at].take()).unwrap_or_else(|| OutputGamma::fresh(output, size))
         })
         .collect();
-    gamma.ctm_manager = None;
-    gamma.reprogram_after_vt_switch = false;
-    if gamma._global.is_none() && gamma.outputs.iter().any(|output| output.size > 0) {
-        gamma._global = Some(
-            display_handle.create_global::<Compositor, ZwlrGammaControlManagerV1, ()>(
+    for gone in previous.into_iter().flatten() {
+        let Some(Owner::Wlr(owner)) = gone.owner else {
+            continue;
+        };
+        tracing::info!(
+            output = %gone.output.upgrade().map(|output| output.name()).unwrap_or_default(),
+            "gamma control failed: its output was unplugged or changed ramp size"
+        );
+        if let Ok(owner) = ZwlrGammaControlV1::from_id(&comp.display_handle, owner) {
+            owner.failed();
+        }
+    }
+    if comp.gamma._global.is_none() && available(&comp.gamma) {
+        comp.gamma._global = Some(
+            comp.display_handle.create_global::<Compositor, ZwlrGammaControlManagerV1, ()>(
                 GAMMA_CONTROL_VERSION,
                 (),
             ),
@@ -628,16 +735,19 @@ pub(crate) fn outputs_changed(
     }
 }
 
-/// Which entry of `Compositor::outputs` a `wl_output` names, or `None`
-/// for a resource that is not one of ours. Same derivation as
-/// `lock.rs` and `protocols.rs` use — the client named a specific
-/// output and `Output::from_resource` answers exactly that.
-pub(crate) fn output_index(
-    comp: &Compositor,
-    resource: &smithay::reexports::wayland_server::protocol::wl_output::WlOutput,
-) -> Option<usize> {
-    let output = Output::from_resource(resource)?;
-    comp.outputs.iter().position(|entry| entry.output == output)
+/// The position of the slot for `output`, which is also its position
+/// in `Compositor::outputs` and the one `session::write_gamma`
+/// programs, or `None` once that output has left.
+///
+/// Resolved per request through [`Compositor::output_index_of`], the
+/// lookup this module shares with `ctm.rs` and `output_power.rs`. The
+/// slot's own identity is checked too. Slots are rebuilt in the same
+/// pass that changes the outputs, so the two cannot disagree, but a
+/// ramp on a crtc its client did not choose is the one outcome this
+/// must never produce.
+fn slot_index(comp: &Compositor, output: &WeakOutput) -> Option<usize> {
+    let index = comp.output_index_of(output)?;
+    (comp.gamma.outputs.get(index)?.output == *output).then_some(index)
 }
 
 /// Reads a client's gamma table off the file descriptor it sent.
@@ -729,23 +839,22 @@ impl Dispatch<ZwlrGammaControlManagerV1, ()> for Compositor {
     ) {
         match request {
             zwlr_gamma_control_manager_v1::Request::GetGammaControl { id, output } => {
-                // The index is resolved before the resource exists so a
+                // The output is resolved before the resource exists so a
                 // `wl_output` from some other compositor's world — or
                 // one already being torn down — produces an inert
-                // control rather than a panic. `usize::MAX` can never
-                // match a real slot, so such a control owns nothing and
-                // every later request on it is ignored.
-                let index = output_index(state, &output);
-                let control = data_init.init(id, ControlData { index: index.unwrap_or(usize::MAX) });
-                let Some(index) = index else {
+                // control rather than a panic: it names no output, so
+                // it owns nothing and every later request on it is
+                // ignored. A control keeps its output's identity, never
+                // a position, so no hotplug can point it at another
+                // crtc.
+                let output = state.output_identity(&output);
+                let control = data_init.init(id, ControlData { output: output.clone() });
+                let Some(index) = output.as_ref().and_then(|output| slot_index(state, output)) else {
                     tracing::debug!("gamma control asked for an output that is not ours");
                     control.failed();
                     return;
                 };
-                let Some(slot) = state.gamma.outputs.get_mut(index) else {
-                    control.failed();
-                    return;
-                };
+                let slot = &mut state.gamma.outputs[index];
                 let size = match claim(slot.size, slot.owner.is_some() || state.gamma.ctm_manager.is_some()) {
                     Ok(size) => size,
                     Err(refusal) => {
@@ -805,12 +914,13 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Compositor {
     ) {
         match request {
             zwlr_gamma_control_v1::Request::SetGamma { fd } => {
-                let index = data.index;
-                let Some(slot) = state.gamma.outputs.get_mut(index) else {
-                    // An inert control (a refused claim). The fd is
-                    // dropped — and so closed — with this scope.
+                let Some(index) = data.output.as_ref().and_then(|output| slot_index(state, output)) else {
+                    // An inert control: a `wl_output` that was never
+                    // ours, or one unplugged since. The fd is dropped —
+                    // and so closed — with this scope.
                     return;
                 };
+                let slot = &mut state.gamma.outputs[index];
                 // The object was sent `failed` and is inert, or it never
                 // owned this output. Either way it does not get to move
                 // the screen; the owner is the only object that can.
@@ -845,9 +955,12 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Compositor {
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwlrGammaControlV1, data: &ControlData) {
-        let Some(slot) = state.gamma.outputs.get_mut(data.index) else {
+        // A control whose output was unplugged resolves to nothing: it
+        // was sent `failed` and has no crtc left to restore.
+        let Some(index) = data.output.as_ref().and_then(|output| slot_index(state, output)) else {
             return;
         };
+        let slot = &mut state.gamma.outputs[index];
         if slot.owner.as_ref() != Some(&Owner::Wlr(resource.id())) {
             return;
         }
@@ -860,7 +973,7 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Compositor {
         // that runs `refresh` is the very next one.
         slot.pending = restore_target(slot.live.as_ref(), slot.original.as_ref());
         if slot.pending.is_some() {
-            tracing::info!(index = data.index, "gamma control released; restoring the original ramp");
+            tracing::info!(index, "gamma control released; restoring the original ramp");
         }
     }
 }
@@ -1005,5 +1118,70 @@ mod tests {
         assert_eq!(reprogram_target(None, Some(&original)), Some(original));
         // An output nobody has ever claimed is left alone.
         assert_eq!(reprogram_target(None, None), None);
+    }
+
+    // --- Hotplug.
+    //
+    // Which slot survives a connector change is `carry_over`'s
+    // decision, over identities. These drive it with connector names;
+    // the last pins that the identity in production is the `Output`
+    // object itself, not the name a replugged connector comes back with.
+
+    #[test]
+    fn an_output_that_stays_keeps_its_slot_wherever_it_moves() {
+        // DP-1 is unplugged and DP-2 plugged in. HDMI-A-1 moves from
+        // position 2 to 1 and must keep its own slot, not DP-1's.
+        let previous = [("eDP-1", 256), ("DP-1", 256), ("HDMI-A-1", 1024)];
+        let current = [("eDP-1", 256), ("HDMI-A-1", 1024), ("DP-2", 256)];
+        assert_eq!(carry_over(&previous, &current), vec![Some(0), Some(2), None]);
+    }
+
+    #[test]
+    fn a_departed_output_leaves_its_slot_to_nobody() {
+        // The output that inherits a departed one's position gets a
+        // fresh slot, never that owner or its ramp, even at the same
+        // ramp size. A slot kept by nobody is how `outputs_changed`
+        // knows whose control to fail.
+        let previous = [("eDP-1", 256), ("DP-1", 256)];
+        let kept = carry_over(&previous, &[("eDP-1", 256), ("DP-2", 256)]);
+        assert_eq!(kept, vec![Some(0), None]);
+        assert!(!kept.contains(&Some(1)));
+        // Everything unplugged at once keeps nothing.
+        assert_eq!(carry_over(&previous, &[]), Vec::<Option<usize>>::new());
+        // And a first output plugged into an empty session is new.
+        assert_eq!(carry_over::<&str>(&[], &[("eDP-1", 256)]), vec![None]);
+    }
+
+    #[test]
+    fn an_output_whose_ramp_size_changed_is_treated_as_new() {
+        // A different size is a different crtc: the old owner's ramp
+        // and captured original were built for the other one.
+        let previous = [("eDP-1", 256)];
+        assert_eq!(carry_over(&previous, &[("eDP-1", 1024)]), vec![None]);
+        assert_eq!(carry_over(&previous, &[("eDP-1", 0)]), vec![None]);
+    }
+
+    #[test]
+    fn a_replugged_connector_is_a_new_output_not_the_old_one() {
+        use smithay::output::{Output, PhysicalProperties, Subpixel};
+
+        let output = |name: &str| {
+            Output::new(
+                name.to_string(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "test".into(),
+                    model: "test".into(),
+                },
+            )
+        };
+        let panel = output("eDP-1");
+        let dock = output("DP-1");
+        let previous = [(panel.downgrade(), 256), (dock.downgrade(), 256)];
+        drop(dock);
+        let replugged = output("DP-1");
+        let current = [(panel.downgrade(), 256), (replugged.downgrade(), 256)];
+        assert_eq!(carry_over(&previous, &current), vec![Some(0), None]);
     }
 }

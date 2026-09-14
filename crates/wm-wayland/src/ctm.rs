@@ -6,9 +6,9 @@
 //! real KMS CTM property and are refused explicitly; approximating them
 //! would produce a different color transform than the client requested.
 
-use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use smithay::output::WeakOutput;
 use smithay::reexports::wayland_server::backend::{ClientId, GlobalId};
 use smithay::reexports::wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
 
@@ -32,7 +32,12 @@ use bindings::hyprland_ctm_control_manager_v1::{self, HyprlandCtmControlManagerV
 
 #[derive(Debug)]
 struct ManagerData {
-    staged: Mutex<BTreeMap<usize, [f64; 3]>>,
+    /// Matrices set since the last commit, by output identity. A
+    /// hotplug between `set_ctm_for_output` and `commit` can move an
+    /// output's position in `Compositor::outputs`, never its identity,
+    /// so the commit resolves these against the outputs as they are
+    /// then.
+    staged: Mutex<Vec<(WeakOutput, [f64; 3])>>,
 }
 
 pub(crate) struct CtmControl {
@@ -58,7 +63,7 @@ impl GlobalDispatch<HyprlandCtmControlManagerV1, ()> for Compositor {
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        let resource = data_init.init(resource, ManagerData { staged: Mutex::new(BTreeMap::new()) });
+        let resource = data_init.init(resource, ManagerData { staged: Mutex::new(Vec::new()) });
         let blocked = !crate::gamma::claim_ctm_manager(&mut state.gamma, resource.id());
         // Ownership remains authoritative for every later request. The
         // blocked event is only the bind-time notification required by
@@ -118,15 +123,20 @@ impl Dispatch<HyprlandCtmControlManagerV1, ManagerData> for Compositor {
                     );
                     return;
                 }
-                let Some(index) = crate::gamma::output_index(state, &output) else {
+                let Some(output) = state.output_identity(&output) else {
                     tracing::warn!("CTM ignored for an output that does not belong to this compositor");
                     return;
                 };
-                data.staged.lock().unwrap().insert(index, diagonal);
+                // One entry per output, the newest matrix winning, so a
+                // client re-setting before it commits grows nothing.
+                let mut staged = data.staged.lock().unwrap();
+                match staged.iter_mut().find(|(candidate, _)| *candidate == output) {
+                    Some((_, value)) => *value = diagonal,
+                    None => staged.push((output, diagonal)),
+                }
             }
             hyprland_ctm_control_manager_v1::Request::Commit => {
-                let scales: Vec<(usize, [f64; 3])> =
-                    std::mem::take(&mut *data.staged.lock().unwrap()).into_iter().collect();
+                let scales = std::mem::take(&mut *data.staged.lock().unwrap());
                 crate::gamma::commit_ctm(state, &resource.id(), &scales);
             }
             hyprland_ctm_control_manager_v1::Request::Destroy => {}

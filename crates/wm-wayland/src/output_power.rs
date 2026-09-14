@@ -130,7 +130,7 @@ impl Dispatch<ZwlrOutputPowerManagerV1, ()> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if let zwlr_output_power_manager_v1::Request::GetOutputPower { id, output } = request {
-            let index = crate::gamma::output_index(state, &output);
+            let index = state.output_identity(&output).and_then(|output| state.output_index_of(&output));
             let resource = data_init.init(id, PowerData { index: index.unwrap_or(usize::MAX) });
             let Some(index) = index else {
                 resource.failed();

@@ -4,6 +4,11 @@
 //! exposing the cases a daemon cannot conveniently be asked to send:
 //! a second manager, an off-diagonal matrix, and a client that is
 //! killed while its transform is live.
+//!
+//! `follow` holds like `hold`, and re-commits a matrix for the first
+//! output every time the set of outputs changes, the way hyprsunset
+//! answers a dock or an undock. It alternates between two matrices so
+//! each re-commit is a new white point in the compositor's log.
 
 use std::io::Write;
 
@@ -42,7 +47,16 @@ struct Probe {
     manager_global: Option<(u32, u32)>,
     outputs: Vec<WlOutput>,
     blocked: Vec<u32>,
+    /// Registry names of the `wl_output` globals currently advertised.
+    output_names: Vec<u32>,
+    /// Every `wl_output` global announced or removed so far.
+    output_events: usize,
 }
+
+/// The warm transform every holding mode starts with.
+const WARM: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 0.70, 0.0, 0.0, 0.0, 0.40];
+/// A cooler one, so a re-commit is distinguishable from the first.
+const COOLER: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 0.85, 0.0, 0.0, 0.0, 0.60];
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
     fn event(
@@ -53,23 +67,33 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            match interface.as_str() {
-                "wl_output" => probe
-                    .outputs
-                    .push(registry.bind(name, version.min(4), qh, ())),
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } => match interface.as_str() {
+                "wl_output" => {
+                    probe
+                        .outputs
+                        .push(registry.bind(name, version.min(4), qh, ()));
+                    probe.output_names.push(name);
+                    probe.output_events += 1;
+                }
                 "hyprland_ctm_control_manager_v1" => {
                     let version = version.min(2);
                     probe.manager_global = Some((name, version));
                     probe.manager = Some(registry.bind(name, version, qh, ()));
                 }
                 _ => {}
+            },
+            wl_registry::Event::GlobalRemove { name } => {
+                if let Some(at) = probe.output_names.iter().position(|known| *known == name) {
+                    probe.output_names.remove(at);
+                    probe.output_events += 1;
+                }
             }
+            _ => {}
         }
     }
 }
@@ -139,23 +163,35 @@ fn main() {
 
     match mode.as_str() {
         "report" => {}
-        "set" | "hold" => {
-            set(
-                &manager,
-                &output,
-                [1.0, 0.0, 0.0, 0.0, 0.70, 0.0, 0.0, 0.0, 0.40],
-            );
+        "set" | "hold" | "follow" => {
+            set(&manager, &output, WARM);
             queue
                 .roundtrip(&mut probe)
                 .unwrap_or_else(|error| fatal(&format!("diagonal CTM refused: {error}")));
             println!("**diagonal CTM accepted**");
-            if mode == "hold" {
+            if mode != "set" {
                 println!("**holding**");
                 let _ = std::io::stdout().flush();
+                let baseline = probe.output_events;
+                let mut followed = 0;
                 loop {
                     if queue.blocking_dispatch(&mut probe).is_err() {
                         return;
                     }
+                    let changes = probe.output_events - baseline;
+                    if mode != "follow" || changes == followed {
+                        continue;
+                    }
+                    // Chosen by the count of changes, so two changes
+                    // coalesced into one dispatch still land where a
+                    // test expects.
+                    followed = changes;
+                    set(&manager, &output, if changes % 2 == 1 { COOLER } else { WARM });
+                    queue.roundtrip(&mut probe).unwrap_or_else(|error| {
+                        fatal(&format!("CTM refused after an output change: {error}"))
+                    });
+                    println!("**reapplied after {changes} output change(s)**");
+                    let _ = std::io::stdout().flush();
                 }
             }
         }
