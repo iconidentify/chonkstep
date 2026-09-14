@@ -68,7 +68,7 @@ use smithay::backend::allocator::{Format, Fourcc, Modifier};
 use smithay::backend::drm::compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{
-    DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmEventTime, DrmNode, NodeType,
+    DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmError, DrmEvent, DrmEventTime, DrmNode, NodeType,
     PlaneInfo, VrrSupport,
 };
 use smithay::backend::egl::{EGLContext, EGLDisplay};
@@ -305,6 +305,46 @@ fn rescan_plan(
         .map(|(handle, _)| *handle)
         .collect();
     RescanPlan { remove, adopt, reserved }
+}
+
+/// `DRM_MODE_LINK_STATUS_BAD`: enum value 1 of the `link-status`
+/// connector property. The kernel sets it when a DisplayPort (or
+/// USB-C/Thunderbolt) link fails to train and sends a hotplug uevent;
+/// the sink shows nothing until userspace performs a modeset that
+/// writes the property back to `GOOD` (0). The kernel does that on
+/// its own only for legacy `SETCRTC` callers, never for an atomic one.
+const DRM_MODE_LINK_STATUS_BAD: u64 = 1;
+
+/// The pure half of [`connector_link_bad`]: whether a connector's
+/// property table, given as `(name, raw value)` pairs, says the link
+/// is `BAD`. A driver that exposes no `link-status` property reads as
+/// healthy, and so does any value other than `BAD`.
+fn link_status_is_bad<'a>(properties: impl IntoIterator<Item = (&'a str, u64)>) -> bool {
+    properties
+        .into_iter()
+        .any(|(name, value)| name == "link-status" && value == DRM_MODE_LINK_STATUS_BAD)
+}
+
+/// Whether the kernel has marked this connector's link `BAD`. Mirrors
+/// [`connector_is_non_desktop`]: one property-set read plus one name
+/// lookup per property, which is why it belongs in the debounced
+/// connector rescan and never in the udev callback itself. Unreadable
+/// properties read as healthy, the same as a driver without the
+/// property.
+fn connector_link_bad(drm: &DrmDeviceFd, connector: connector::Handle) -> bool {
+    let Ok(props) = drm.get_properties(connector) else {
+        return false;
+    };
+    let (ids, values) = props.as_props_and_values();
+    let named: Vec<(String, u64)> = ids
+        .iter()
+        .zip(values.iter())
+        .filter_map(|(&id, &value)| {
+            let name = drm.get_property(id).ok()?.name().to_str().ok()?.to_owned();
+            Some((name, value))
+        })
+        .collect();
+    link_status_is_bad(named.iter().map(|(name, value)| (name.as_str(), *value)))
 }
 
 /// The stable, user-facing portion of a connector's EDID. This is the
@@ -648,6 +688,147 @@ const FLIP_STALL_RECOVERY: Duration = Duration::from_secs(5);
 /// a modeset.
 const LOOP_BLOCK_GRACE: Duration = Duration::from_millis(250);
 
+/// How many consecutive commit failures an output accumulates before
+/// the session stops retrying the identical crtc state and recovers
+/// the output instead.
+///
+/// Three rather than one because a single rejected commit is ordinary
+/// on some drivers (a transient `EBUSY` while a previous flip drains,
+/// an atomic test that fails once after a VT switch) and the recovery
+/// costs a modeset's worth of flicker. On Apple's DCP that modeset can
+/// block the caller for seconds (see [`LOOP_BLOCK_GRACE`]), which is
+/// why a reset per failed frame was never an option.
+const COMMIT_FAILURE_THRESHOLD: u32 = 3;
+
+/// The first wait between two recoveries of the same output. Doubles
+/// on every recovery up to [`COMMIT_RESET_BACKOFF_MAX`], so an output
+/// whose commits keep failing is retried at 1 s, 2 s, 4 s, … rather
+/// than modeset at the render cadence.
+const COMMIT_RESET_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+const COMMIT_RESET_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Which recovery an output whose commits keep failing gets next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryRung {
+    /// Re-read the crtc's state from the kernel and drop the swapchain,
+    /// so the next frame is a full one. This is a modeset only if the
+    /// kernel's view of the crtc has diverged from ours.
+    Reset,
+    /// The reset did not take: force a real `ALLOW_MODESET` commit that
+    /// also writes `link-status = GOOD` on the crtc's connectors — the
+    /// one thing a rejected commit or a bad link is guaranteed to need
+    /// and a plain retry can never produce.
+    Modeset,
+}
+
+/// Per-output commit-failure accounting. Separate from the flip-stall
+/// timing in [`service_pending_flips`], which watches flips the kernel
+/// *accepted*; this counts the ones it refused.
+#[derive(Clone, Copy, Debug)]
+struct CommitHealth {
+    /// Failed `render_frame`/`queue_frame` calls since the last frame
+    /// the device accepted. `DeviceInactive` is never counted: a VT
+    /// that belongs to someone else is not a broken output.
+    consecutive_failures: u32,
+    /// Before this instant no further recovery runs, however many more
+    /// failures arrive. `None` until the first recovery.
+    next_reset_allowed: Option<Instant>,
+    /// The wait the *next* recovery will arm.
+    backoff: Duration,
+    /// Recoveries since the last accepted frame; selects the rung.
+    resets: u32,
+}
+
+impl Default for CommitHealth {
+    fn default() -> Self {
+        Self {
+            consecutive_failures: 0,
+            next_reset_allowed: None,
+            backoff: COMMIT_RESET_BACKOFF_INITIAL,
+            resets: 0,
+        }
+    }
+}
+
+impl CommitHealth {
+    /// Whether the failures have reached the threshold and the backoff
+    /// from the previous recovery, if any, has elapsed.
+    fn should_reset(&self, now: Instant) -> bool {
+        self.consecutive_failures >= COMMIT_FAILURE_THRESHOLD
+            && self.next_reset_allowed.is_none_or(|at| now >= at)
+    }
+
+    /// Starts the wait before the next recovery and doubles the one
+    /// after it, capped at [`COMMIT_RESET_BACKOFF_MAX`].
+    fn arm_backoff(&mut self, now: Instant) {
+        self.next_reset_allowed = Some(now + self.backoff);
+        self.backoff = self.backoff.saturating_mul(2).min(COMMIT_RESET_BACKOFF_MAX);
+        self.resets = self.resets.saturating_add(1);
+    }
+
+    /// The rung the next recovery takes: a reset first, and a forced
+    /// modeset for every recovery after a reset that did not take.
+    fn next_rung(&self) -> RecoveryRung {
+        if self.resets == 0 {
+            RecoveryRung::Reset
+        } else {
+            RecoveryRung::Modeset
+        }
+    }
+
+    /// Records one refused commit. Returns the recovery to perform now,
+    /// or `None` while the threshold is unmet or a backoff is running.
+    /// A returned rung has already armed its backoff.
+    fn note_failure(&mut self, now: Instant) -> Option<RecoveryRung> {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if !self.should_reset(now) {
+            return None;
+        }
+        let rung = self.next_rung();
+        self.arm_backoff(now);
+        Some(rung)
+    }
+}
+
+/// Test-only fault injection: how many of the next `queue_frame`
+/// submissions fail before reaching the driver. Read once from
+/// `CHONKSTEP_TEST_QUEUE_FRAME_FAILURES`, and only when
+/// `CHONKSTEP_TEST_SOCKET` opens the private test door — a user session
+/// pays one atomic load per queued frame and nothing else. The same
+/// shape as `CHONKSTEP_TEST_READBACK_DELAY_MS` in `readback.rs`.
+static INJECTED_QUEUE_FAILURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static INJECTED_QUEUE_FAILURES_ARMED: OnceLock<()> = OnceLock::new();
+
+/// Consumes one injected failure, if any remain. The injected error is
+/// a rejected atomic test on this crtc — the shape a driver produces
+/// when it refuses a commit — and it counts toward [`CommitHealth`]
+/// exactly like a real one.
+fn take_injected_queue_failure() -> bool {
+    INJECTED_QUEUE_FAILURES_ARMED.get_or_init(|| {
+        if std::env::var_os("CHONKSTEP_TEST_SOCKET").is_none() {
+            return;
+        }
+        let count = std::env::var("CHONKSTEP_TEST_QUEUE_FRAME_FAILURES")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0);
+        INJECTED_QUEUE_FAILURES.store(count, std::sync::atomic::Ordering::Relaxed);
+    });
+    INJECTED_QUEUE_FAILURES
+        .fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |remaining| remaining.checked_sub(1),
+        )
+        .is_ok()
+}
+
+#[cfg(test)]
+fn inject_queue_failures(count: u32) {
+    INJECTED_QUEUE_FAILURES_ARMED.get_or_init(|| ());
+    INJECTED_QUEUE_FAILURES.store(count, std::sync::atomic::Ordering::Release);
+}
+
 /// Whether to force full-output damage on every frame instead of
 /// trusting the damage tracker's per-element result.
 ///
@@ -861,6 +1042,9 @@ struct SessionOutput {
     /// composition actually consumes. Rendering is armed late enough
     /// to sample fresh input while retaining a measured safety budget.
     frame_clock: FrameClock,
+    /// Refused commits since the last accepted frame, and when this
+    /// output may next be recovered — see [`escalate_commit_failure`].
+    commit_health: CommitHealth,
 }
 
 const INITIAL_RENDER_MEAN: Duration = Duration::from_millis(2);
@@ -1497,6 +1681,12 @@ pub(crate) fn init(
             UdevEvent::Changed { device_id } => {
                 let Graphics::Session(session) = &mut comp.graphics else { return };
                 if session.drm.device_id() == device_id {
+                    // The rescan also reads `link-status` on every
+                    // driven connector: a link that failed to train
+                    // arrives as exactly this event, with the connector
+                    // set unchanged. Reading it here would put one
+                    // property walk per connector on a callback that
+                    // fires in bursts.
                     session.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
                     tracing::debug!(?device_id, "connector change noticed; debounced rescan armed");
                 }
@@ -1626,6 +1816,9 @@ pub(crate) fn init(
                             &mut output.scanout_scene,
                             &mut output.client_scanout_active,
                         );
+                        // The crtc was rebuilt from scratch; whatever
+                        // was failing before the switch is history.
+                        output.commit_health = CommitHealth::default();
                     }
                     // Marks every output dirty on the next render pass
                     // (see `render_frame_session`), which is what
@@ -1646,6 +1839,12 @@ pub(crate) fn init(
             }
         })
         .map_err(|error| format!("failed to register the seat session source: {error}"))?;
+
+    // System sleep. A suspend does not pause the seat, so nothing above
+    // runs on the way back; logind's `PrepareForSleep(false)` is the
+    // signal, and `sleep_bus` delivers it as an edge into
+    // [`note_system_resumed`].
+    crate::sleep_bus::init(loop_handle);
 
     // 6. Hand the assembled stack back to `run`, which registers an
     //    output global per output and builds the damage trackers from
@@ -1913,6 +2112,7 @@ fn attach_output(
                 Refresh::Unknown
             },
             frame_clock: FrameClock::new(*mode),
+            commit_health: CommitHealth::default(),
         },
         OutputSetup {
             output,
@@ -2017,6 +2217,9 @@ pub(crate) fn service_connector_hotplug(comp: &mut Compositor) {
         return;
     }
 
+    // Before the presence diff: a connector whose link failed to train
+    // is still present, still driven, and skipped by the diff below.
+    retrain_bad_links(session);
     match rescan_session_outputs(session) {
         Ok((removed, added)) if removed.is_empty() && added.is_empty() => {
             tracing::debug!("connector rescan found no output changes");
@@ -2024,6 +2227,53 @@ pub(crate) fn service_connector_hotplug(comp: &mut Compositor) {
         Ok((removed, added)) => crate::state::apply_connector_hotplug(comp, &removed, added),
         Err(error) => tracing::warn!(%error, "connector rescan failed; keeping the current output set"),
     }
+}
+
+/// Reads `link-status` on every driven connector and schedules the
+/// retraining modeset for each one the kernel marked `BAD`.
+///
+/// Powered-off outputs are skipped: their link is down by design and a
+/// modeset would switch them back on. Nothing here touches the crtc
+/// directly — the retrain rides the next frame, which is built from
+/// the ledger like any other, so a locked session repaints locked.
+fn retrain_bad_links(session: &mut SessionGraphics) {
+    for output in session.outputs.iter_mut() {
+        if !output.powered || !connector_link_bad(session.drm.device_fd(), output.connector) {
+            continue;
+        }
+        if !output.drm_compositor.request_link_retrain() {
+            tracing::warn!(output = %output.name, "link-status is BAD but this surface cannot retrain it");
+            continue;
+        }
+        tracing::warn!(output = %output.name, "link-status is BAD; the next frame is a modeset that retrains the link");
+        output.dirty = true;
+    }
+}
+
+/// The system is back from suspend, per logind. Called from the
+/// `sleep_bus` channel callback on the compositor thread.
+///
+/// Deliberately not a crtc reset: [`escalate_commit_failure`] and
+/// [`retrain_bad_links`] handle the outputs that actually fail, and a
+/// blanket modeset costs a visible flicker on every wake. What resume
+/// owes is a look — the connector set may have changed, a docked
+/// monitor's link may not have retrained, the LUTs may be linear — and
+/// a full repaint, because firmware may have painted over the screens.
+/// Display state only: the lock-before-suspend flow is untouched, and
+/// the repaint is built from the ledger like every other frame.
+pub(crate) fn note_system_resumed(comp: &mut Compositor) {
+    let Compositor { graphics, wm, gamma, .. } = comp;
+    let Graphics::Session(session) = graphics else {
+        return;
+    };
+    tracing::info!("system resumed from sleep: rescanning connectors and checking every link");
+    // The rescan reads `link-status` on every output before the
+    // presence diff, so one armed scan covers both.
+    session.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
+    let backend = wm.backend_mut();
+    backend.mark_damaged();
+    backend.full_damage_required = true;
+    crate::gamma::note_session_resumed(gamma);
 }
 
 /// Walks every connector after a hotplug or VT resume and applies the
@@ -2205,45 +2455,78 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
     }
 
     for output in session.outputs.iter_mut() {
-        // Forces the next `render_frame` to report a non-empty result
-        // and the next `queue_frame` to go out as a full modeset commit
-        // rather than a page flip. That is the part that actually
-        // unwedges a crtc the kernel still believes has a flip
-        // outstanding, and the reason a plain retry would not: further
-        // page flips against a pending one come back `EBUSY`.
-        if let Err(error) = output.drm_compositor.reset_state() {
-            tracing::error!(
-                ?error,
-                output = %output.name,
-                "could not reset the crtc state after a stalled page flip"
-            );
-        }
-        // The swapchain slot the lost flip is holding will never come
-        // back through `frame_submitted`. Dropping every buffer is what
-        // keeps the frames after the reset from failing with
-        // `NoFreeSlotsError`.
-        output.drm_compositor.reset_buffers();
-        // A late completion for the flip just abandoned finds this
-        // `None` (or, if the reset's own frame is already out, a newer
-        // flip's `Some`) and calls `frame_submitted` with nothing
-        // pending, which smithay answers `Ok(None)`. Harmless, and the
-        // same shape the pause/resume path has always had.
-        output.frame_pending = None;
-        output.last_vblank = None;
-        // The abandoned pending scene and the buffer that was current
-        // before the reset both go: reset_state disabled the planes,
-        // so the display engine can no longer read either.
-        clear_scene_holds(
-            &mut output.pending_scene,
-            &mut output.scanout_scene,
-            &mut output.client_scanout_active,
-        );
-        if let Some(mut feedback) = output.presentation.take() {
-            feedback.discarded();
-        }
-        output.dirty = true;
+        recover_output(output, RecoveryRung::Reset);
     }
     true
+}
+
+/// Tears down one output's crtc bookkeeping so its next frame goes out
+/// as a full commit rather than a page flip. Shared by the stall
+/// watchdog above, which runs it for every output after a device-wide
+/// reset, and by [`escalate_commit_failure`], which runs it for the one
+/// output whose commits the kernel keeps refusing while its neighbours
+/// keep flipping.
+fn recover_output(output: &mut SessionOutput, rung: RecoveryRung) {
+    // Forces the next `render_frame` to report a non-empty result
+    // and the next `queue_frame` to go out as a full modeset commit
+    // rather than a page flip. That is the part that actually
+    // unwedges a crtc the kernel still believes has a flip
+    // outstanding, and the reason a plain retry would not: further
+    // page flips against a pending one come back `EBUSY`.
+    if let Err(error) = output.drm_compositor.reset_state() {
+        tracing::error!(?error, output = %output.name, "could not reset the crtc state");
+    }
+    // `reset_state` re-reads the kernel's view of the crtc, and the
+    // commit it provokes is a modeset only where that view differs
+    // from ours. A commit the kernel refuses with the state it already
+    // holds needs a forced `ALLOW_MODESET` commit — and, for a link
+    // that failed to train, `link-status = GOOD` in the same request.
+    if rung == RecoveryRung::Modeset && !output.drm_compositor.request_link_retrain() {
+        tracing::warn!(output = %output.name, "this surface cannot force a modeset; repeating the reset");
+    }
+    // The swapchain slot the lost flip is holding will never come
+    // back through `frame_submitted`. Dropping every buffer is what
+    // keeps the frames after the reset from failing with
+    // `NoFreeSlotsError`.
+    output.drm_compositor.reset_buffers();
+    // A late completion for the flip just abandoned finds this
+    // `None` (or, if the reset's own frame is already out, a newer
+    // flip's `Some`) and calls `frame_submitted` with nothing
+    // pending, which smithay answers `Ok(None)`. Harmless, and the
+    // same shape the pause/resume path has always had.
+    output.frame_pending = None;
+    output.last_vblank = None;
+    // The abandoned pending scene and the buffer that was current
+    // before the reset both go: reset_state disabled the planes,
+    // so the display engine can no longer read either.
+    clear_scene_holds(
+        &mut output.pending_scene,
+        &mut output.scanout_scene,
+        &mut output.client_scanout_active,
+    );
+    if let Some(mut feedback) = output.presentation.take() {
+        feedback.discarded();
+    }
+    output.dirty = true;
+}
+
+/// Counts one refused commit against an output and recovers it once
+/// [`CommitHealth`] says so: at [`COMMIT_FAILURE_THRESHOLD`] failures,
+/// then no sooner than the doubling backoff allows. Per output, so a
+/// healthy neighbour keeps flipping; the device-wide reset stays with
+/// the stall watchdog.
+fn escalate_commit_failure(output: &mut SessionOutput, now: Instant) {
+    let Some(rung) = output.commit_health.note_failure(now) else {
+        return;
+    };
+    tracing::warn!(
+        output = %output.name,
+        failures = output.commit_health.consecutive_failures,
+        ?rung,
+        next_attempt_no_sooner_than = ?output.commit_health.next_reset_allowed.map(|at| at.saturating_duration_since(now)),
+        "commits keep failing; recovering this output's crtc state"
+    );
+    recover_output(output, rung);
 }
 
 /// Whether a mode change to `mode_index` on output `index` could be
@@ -2901,14 +3184,20 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             Err(error) => {
                 // Includes the atomic test failures a returning VT
                 // switch can produce; the seat-activation handler above
-                // resets the device and marks damage, so the recovery
-                // path is there rather than duplicated here.
+                // resets the device and marks damage for that case.
+                // Failures that outlive it are counted here and
+                // escalate per output once they persist. This cannot
+                // be `DeviceInactive`: the pass checked `is_active`
+                // above, and only the pause handler on this thread
+                // clears it.
                 if crate::renderer::note_frame_failure() {
                     tracing::warn!(?error, output = %output.name, "DRM render failed; keeping this output dirty for a retry");
                 }
                 output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
                 stats.finish("render_failed", render_started.elapsed());
                 output.scene_scratch.clear();
+                drop(stats);
+                escalate_commit_failure(output, Instant::now());
                 continue;
             }
         };
@@ -2957,7 +3246,11 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         let client_scanout = direct_scanout || stats.current.overlays > 0 || stats.current.cursor;
         if rendered {
             let queue_started = Instant::now();
-            let queue = output.drm_compositor.queue_frame(());
+            let queue = if take_injected_queue_failure() {
+                Err(FrameError::DrmError(DrmError::TestFailed(output.crtc)))
+            } else {
+                output.drm_compositor.queue_frame(())
+            };
             stats.stage(6, queue_started.elapsed());
             let feedback_started = Instant::now();
             match queue {
@@ -2968,6 +3261,10 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                         client_scanout,
                         stall_reported: false,
                     });
+                    // The device accepted a frame: whatever was
+                    // failing is over, and the backoff starts from
+                    // scratch next time.
+                    output.commit_health = CommitHealth::default();
                     frame_queued = true;
                     if let (Some(entry), Some(monitor)) =
                         (output_entries.get(output_index), wm.backend().monitors.get(output_index))
@@ -3032,6 +3329,13 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                     output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
                     stats.finish("queue_failed", render_started.elapsed());
                     output.scene_scratch.clear();
+                    // A VT that belongs to someone else is not a
+                    // broken output; every other refusal counts.
+                    let device_inactive = matches!(error, FrameError::DrmError(DrmError::DeviceInactive));
+                    drop(stats);
+                    if !device_inactive {
+                        escalate_commit_failure(output, Instant::now());
+                    }
                     continue;
                 }
             }
@@ -3740,5 +4044,86 @@ mod tests {
         assert_eq!(clock.margin, period / 2, "GPU correction cannot consume a whole refresh");
         clock.disarm();
         assert!(clock.last_late_presentation.is_none());
+    }
+
+    /// Two refusals are a transient; the third is a pattern. Once a
+    /// recovery has run, more failures inside its backoff must not
+    /// run another, however many arrive.
+    #[test]
+    fn should_reset_needs_the_threshold_and_an_elapsed_backoff() {
+        let now = Instant::now();
+        let mut health = CommitHealth::default();
+        assert!(!health.should_reset(now));
+        health.consecutive_failures = COMMIT_FAILURE_THRESHOLD - 1;
+        assert!(!health.should_reset(now));
+        health.consecutive_failures = COMMIT_FAILURE_THRESHOLD;
+        assert!(health.should_reset(now));
+
+        health.arm_backoff(now);
+        assert!(!health.should_reset(now));
+        assert!(!health.should_reset(now + COMMIT_RESET_BACKOFF_INITIAL - Duration::from_millis(1)));
+        assert!(health.should_reset(now + COMMIT_RESET_BACKOFF_INITIAL));
+    }
+
+    /// 1 s, 2 s, 4 s, … capped at 30 s, and the rung steps up after the
+    /// first reset so a failure that survives it gets a real modeset.
+    #[test]
+    fn backoff_doubles_to_thirty_seconds_and_escalates_the_rung() {
+        let start = Instant::now();
+        let mut health = CommitHealth::default();
+        assert_eq!(health.next_rung(), RecoveryRung::Reset);
+        let mut now = start;
+        let mut waits = Vec::new();
+        for _ in 0..7 {
+            health.arm_backoff(now);
+            let allowed = health.next_reset_allowed.unwrap();
+            waits.push(allowed.duration_since(now).as_secs());
+            now = allowed;
+            assert_eq!(health.next_rung(), RecoveryRung::Modeset);
+        }
+        assert_eq!(waits, vec![1, 2, 4, 8, 16, 30, 30]);
+        assert_eq!(health.backoff, COMMIT_RESET_BACKOFF_MAX);
+    }
+
+    /// Only the enum value the kernel defines as BAD counts, only under
+    /// the kernel's property name, and a driver without the property
+    /// reads as healthy.
+    #[test]
+    fn link_status_match_flags_only_the_bad_value_under_the_right_name() {
+        assert!(link_status_is_bad([("DPMS", 0), ("link-status", 1)]));
+        assert!(!link_status_is_bad([("DPMS", 0), ("link-status", 0)]));
+        assert!(!link_status_is_bad([("non-desktop", 1), ("CRTC_ID", 1)]));
+        assert!(!link_status_is_bad(std::iter::empty()));
+        assert!(!link_status_is_bad([("link-status", 2)]));
+    }
+
+    /// The fault-injection switch feeds the same accounting a driver's
+    /// refusals do: five injected failures produce exactly one recovery,
+    /// at the third, and none inside the backoff it arms. Once the
+    /// budget is spent the switch is inert.
+    #[test]
+    fn injected_queue_failures_escalate_once_after_the_threshold_and_not_inside_the_backoff() {
+        let start = Instant::now();
+        let mut health = CommitHealth::default();
+        inject_queue_failures(5);
+        let mut outcomes = Vec::new();
+        let mut now = start;
+        while take_injected_queue_failure() {
+            outcomes.push(health.note_failure(now));
+            now += Duration::from_millis(100);
+        }
+        assert_eq!(outcomes, vec![None, None, Some(RecoveryRung::Reset), None, None]);
+        assert!(!take_injected_queue_failure(), "a spent budget injects nothing");
+        assert_eq!(health.consecutive_failures, 5);
+
+        // Past the backoff the next refusal escalates, to the modeset rung.
+        let later = start + COMMIT_RESET_BACKOFF_INITIAL + Duration::from_millis(500);
+        assert_eq!(health.note_failure(later), Some(RecoveryRung::Modeset));
+        assert_eq!(health.note_failure(later + Duration::from_millis(100)), None);
+
+        // An accepted frame forgets everything, backoff included.
+        health = CommitHealth::default();
+        assert_eq!(health.note_failure(later), None);
+        assert_eq!(health.backoff, COMMIT_RESET_BACKOFF_INITIAL);
     }
 }

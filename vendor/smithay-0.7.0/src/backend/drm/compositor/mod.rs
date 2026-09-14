@@ -2555,6 +2555,29 @@ where
         Ok(())
     }
 
+    /// Forces the next [`queue_frame`](DrmCompositor::queue_frame) to
+    /// submit a full frame as an `ALLOW_MODESET` commit that writes
+    /// `link-status = GOOD` on the crtc's connectors, even when the crtc
+    /// state is otherwise unchanged. See
+    /// [`DrmSurface::request_link_retrain`].
+    ///
+    /// Unlike [`reset_state`](DrmCompositor::reset_state), which only
+    /// produces a modeset when the kernel's view of the crtc has
+    /// diverged from this compositor's, this guarantees one. Calls to
+    /// [`render_frame`](DrmCompositor::render_frame) report a non-empty
+    /// result until that frame is queued, so an idle scene still
+    /// produces the submission.
+    ///
+    /// Returns `false` when the underlying surface cannot honour the
+    /// request (legacy KMS); nothing is scheduled in that case.
+    pub fn request_link_retrain(&mut self) -> bool {
+        let requested = self.surface.request_link_retrain();
+        if requested {
+            self.reset_pending = true;
+        }
+        requested
+    }
+
     #[profiling::function]
     fn submit(&mut self) -> FrameResult<(), A, F> {
         let QueuedFrame {

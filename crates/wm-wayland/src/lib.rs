@@ -72,6 +72,7 @@ mod layout_scene;
 mod selection;
 mod multi_gpu;
 mod session;
+mod sleep_bus;
 mod termination;
 mod state;
 // End-to-end test injection door — inert unless CHONKSTEP_TEST_SOCKET
