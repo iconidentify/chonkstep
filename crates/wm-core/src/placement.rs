@@ -296,7 +296,7 @@ pub enum IdleInhibitRule {
 /// These are deliberately separate from [`FloatDecision`]: a rule such
 /// as `no_initial_focus` says nothing about placement and must not
 /// accidentally opt the window into centered placement.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WindowRuleDecision {
     /// When this window keeps the idle notifier inhibited.
     pub idle_inhibit: IdleInhibitRule,
@@ -312,6 +312,9 @@ pub struct WindowRuleDecision {
     pub fullscreen: bool,
     /// Enter full horizontal-and-vertical maximize after mapping.
     pub maximize: bool,
+    /// The touchpad scroll factor while the pointer is over this window,
+    /// replacing the global touchpad factor (`scroll_touchpad`).
+    pub touchpad_scroll_factor: Option<f64>,
 }
 
 impl WindowRuleDecision {

@@ -177,6 +177,10 @@ pub struct WindowManager<B: Backend> {
     /// map rather than every managed client on every Wayland dispatch
     /// pass; most desktops keep it empty for the entire session.
     idle_inhibit_clients: HashMap<ClientId, IdleInhibitRule>,
+    /// Windows whose `scroll_touchpad` rule sets their own touchpad scroll
+    /// factor. Sparse like the idle index: the axis path consults it only
+    /// while it is non-empty.
+    touchpad_scroll_rules: HashMap<ClientId, f64>,
     focused: Option<ClientId>,
     /// Every client that has ever held focus and still exists, oldest
     /// first, each appearing exactly once.
@@ -387,6 +391,7 @@ impl<B: Backend> WindowManager<B> {
             window_index: HashMap::new(),
             frame_index: HashMap::new(),
             idle_inhibit_clients: HashMap::new(),
+            touchpad_scroll_rules: HashMap::new(),
             focused: None,
             active_move: None,
             drag_grab: None,
@@ -982,6 +987,17 @@ impl<B: Backend> WindowManager<B> {
                 IdleInhibitRule::Focus => self.focused == Some(id),
                 IdleInhibitRule::Fullscreen => client.flags.contains(ClientFlags::FULLSCREEN),
             }
+    }
+
+    /// Whether any window carries a `scroll_touchpad` rule, so the axis
+    /// path can skip the per-event lookup on desktops that write none.
+    pub fn has_touchpad_scroll_rules(&self) -> bool {
+        !self.touchpad_scroll_rules.is_empty()
+    }
+
+    /// This window's `scroll_touchpad` factor, if a rule set one.
+    pub fn client_touchpad_scroll_factor(&self, id: ClientId) -> Option<f64> {
+        self.touchpad_scroll_rules.get(&id).copied()
     }
 
     /// Sets a client's attention state (xdg-system-bell/EWMH urgency).
@@ -1993,6 +2009,9 @@ impl<B: Backend> WindowManager<B> {
         if window_rule.idle_inhibit != IdleInhibitRule::None {
             self.idle_inhibit_clients.insert(id, window_rule.idle_inhibit);
         }
+        if let Some(factor) = window_rule.touchpad_scroll_factor {
+            self.touchpad_scroll_rules.insert(id, factor);
+        }
         self.window_index.insert(window, id);
         if self.spaces_mode() && self.mac_hidden.iter().any(|other| self.same_application(*other, id)) {
             self.mac_hidden.insert(id);
@@ -2148,6 +2167,7 @@ impl<B: Backend> WindowManager<B> {
         self.restore_title_metrics.remove(&(id, RestoreKind::Fullscreen));
         if let Some(state) = self.display_spaces.as_mut() { state.home_geometry.remove(&id); }
         self.idle_inhibit_clients.remove(&id);
+        self.touchpad_scroll_rules.remove(&id);
         if let Some(client) = self.clients.remove(id) {
             if let Some(frame) = client.frame {
                 self.frame_index.remove(&frame);
@@ -8596,6 +8616,37 @@ mod tests {
         wm.focus_client(first);
         assert!(wm.client_inhibits_idle(first), "focus moves inhibition with it");
         assert!(!wm.client_inhibits_idle(second));
+    }
+
+    /// A `scroll_touchpad` rule — the shape Omarchy's terminal rules take.
+    #[derive(Debug)]
+    struct ScrollsFaster;
+
+    impl FloatPolicy for ScrollsFaster {
+        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+            None
+        }
+
+        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+            crate::placement::WindowRuleDecision { touchpad_scroll_factor: Some(1.5), ..Default::default() }
+        }
+    }
+
+    #[test]
+    fn a_touchpad_scroll_rule_lives_exactly_as_long_as_its_window() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        assert!(!wm.has_touchpad_scroll_rules());
+        wm.set_float_policy(Some(std::sync::Arc::new(ScrollsFaster)));
+
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert!(wm.has_touchpad_scroll_rules());
+        assert_eq!(wm.client_touchpad_scroll_factor(id), Some(1.5));
+
+        wm.dispatch(BackendEvent::Destroyed(window));
+        assert!(!wm.has_touchpad_scroll_rules(), "destroying the window drops its rule");
     }
 
     #[test]

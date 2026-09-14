@@ -1313,11 +1313,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         });
         wm.backend_mut().set_pointer_config(wm_core::PointerConfig {
             sensitivity: next.input.sensitivity,
-            natural_scroll: next.input.natural_scroll,
+            pointer: wm_core::ScrollClass {
+                natural_scroll: next.input.natural_scroll,
+                scroll_factor: next.input.scroll_factor,
+            },
+            touchpad: wm_core::ScrollClass {
+                natural_scroll: next.input.touchpad_natural_scroll,
+                scroll_factor: next.input.touchpad_scroll_factor,
+            },
             tap_to_click: next.input.tap_to_click,
             disable_while_typing: next.input.disable_while_typing,
             clickfinger_behavior: next.input.clickfinger_behavior,
-            scroll_factor: next.input.scroll_factor,
             left_handed: next.input.left_handed,
             accel_profile: next.input.accel_profile.clone(),
         });

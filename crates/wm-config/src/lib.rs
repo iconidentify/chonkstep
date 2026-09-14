@@ -187,11 +187,17 @@ pub struct InputConfig {
     /// Libinput pointer/touchpad settings. `scroll_factor` is applied
     /// after libinput so it scales both continuous and v120 axes.
     pub sensitivity: Option<f64>,
+    /// Mouse-class scrolling: `[input]`, `input:natural_scroll`.
     pub natural_scroll: Option<bool>,
     pub tap_to_click: Option<bool>,
     pub disable_while_typing: Option<bool>,
     pub clickfinger_behavior: Option<bool>,
     pub scroll_factor: Option<f64>,
+    /// Touchpad-class scrolling: `[input.touchpad]`, `input:touchpad:*`.
+    /// Kept apart from the mouse pair so Omarchy's touchpad settings never
+    /// invert and slow a wheel.
+    pub touchpad_natural_scroll: Option<bool>,
+    pub touchpad_scroll_factor: Option<f64>,
     pub left_handed: Option<bool>,
     pub accel_profile: Option<String>,
 }
@@ -1110,6 +1116,7 @@ fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &s
                 _ => tracing::warn!(key = %setting, value = ?value, "config: input sensitivity must be a number from -1 to 1, ignoring it"),
             },
             "natural_scroll" => match value.as_bool() {
+                Some(enabled) if prefix == "touchpad" => config.touchpad_natural_scroll = Some(enabled),
                 Some(enabled) => config.natural_scroll = Some(enabled),
                 None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
             },
@@ -1130,6 +1137,7 @@ fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &s
                 None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
             },
             "scroll_factor" => match input_number(value) {
+                Some(factor) if factor > 0.0 && prefix == "touchpad" => config.touchpad_scroll_factor = Some(factor),
                 Some(factor) if factor > 0.0 => config.scroll_factor = Some(factor),
                 _ => tracing::warn!(key = %setting, value = ?value, "config: input scroll_factor must be a positive number, ignoring it"),
             },
@@ -2281,15 +2289,29 @@ scroll_factor = 0.4
         assert_eq!(config.input.sensitivity, Some(-0.35));
         assert_eq!(config.input.accel_profile.as_deref(), Some("flat"));
         assert_eq!(config.input.left_handed, Some(true));
-        assert_eq!(config.input.natural_scroll, Some(true));
+        assert_eq!(config.input.touchpad_natural_scroll, Some(true));
+        assert_eq!(config.input.natural_scroll, None, "a touchpad setting must not reach mice");
         assert_eq!(config.input.tap_to_click, Some(true));
         assert_eq!(config.input.disable_while_typing, Some(false));
         assert_eq!(config.input.clickfinger_behavior, Some(true));
-        assert_eq!(config.input.scroll_factor, Some(0.4));
+        assert_eq!(config.input.touchpad_scroll_factor, Some(0.4));
+        assert_eq!(config.input.scroll_factor, None);
         assert_eq!(
             config.provenance.get("input").map(String::as_str),
             Some("config file")
         );
+    }
+
+    #[test]
+    fn mouse_and_touchpad_scroll_settings_stay_apart() {
+        let config = parse(
+            "[input]\nnatural_scroll = false\nscroll_factor = 2.0\n[input.touchpad]\nnatural_scroll = true\nscroll_factor = 0.4\n",
+        )
+        .unwrap();
+        assert_eq!(config.input.natural_scroll, Some(false));
+        assert_eq!(config.input.scroll_factor, Some(2.0));
+        assert_eq!(config.input.touchpad_natural_scroll, Some(true));
+        assert_eq!(config.input.touchpad_scroll_factor, Some(0.4));
     }
 
     #[test]
@@ -2313,7 +2335,7 @@ scroll_factor = 0.4
                 distance: 125.0
             }
         );
-        assert_eq!(config.input.natural_scroll, Some(false));
+        assert_eq!(config.input.touchpad_natural_scroll, Some(false));
         for value in [
             "distance = nan",
             "distance = inf",

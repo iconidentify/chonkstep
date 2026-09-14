@@ -1005,8 +1005,11 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
                 why: "pointer sensitivity must be between -1 and 1".into(),
             }),
         },
-        "natural_scroll" | "touchpad:natural_scroll" => {
+        "natural_scroll" => {
             parse_input_bool(reading, name, &value, |input, enabled| input.natural_scroll = Some(enabled))
+        }
+        "touchpad:natural_scroll" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.touchpad_natural_scroll = Some(enabled))
         }
         "tap_to_click" | "touchpad:tap_to_click" => {
             parse_input_bool(reading, name, &value, |input, enabled| input.tap_to_click = Some(enabled))
@@ -1022,7 +1025,11 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
         }
         "scroll_factor" | "touchpad:scroll_factor" => match value.parse::<f64>() {
             Ok(factor) if factor.is_finite() && (0.01..=10.0).contains(&factor) => {
-                reading.input.scroll_factor = Some(factor)
+                if name.starts_with("touchpad:") {
+                    reading.input.touchpad_scroll_factor = Some(factor)
+                } else {
+                    reading.input.scroll_factor = Some(factor)
+                }
             }
             _ => reading.skipped.push(Skipped {
                 kind: "input".into(),

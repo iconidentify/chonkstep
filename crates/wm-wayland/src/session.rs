@@ -50,6 +50,7 @@
 //! - **No DRM leasing.** A crtc is never handed to another process,
 //!   so a VR headset cannot take one over.
 
+mod scroll;
 mod touchpad;
 
 use std::collections::BTreeMap;
@@ -2360,12 +2361,10 @@ fn configure_libinput_device(device: &mut libinput_crate::Device, config: &wm_co
             rejected.push(format!("accel_profile: {error:?}"));
         }
     }
-    if let Some(enabled) = config.natural_scroll {
-        if !device.config_scroll_has_natural_scroll() {
-            rejected.push("natural_scroll: unsupported".to_string());
-        } else if let Err(error) = device.config_scroll_set_natural_scroll_enabled(enabled) {
-            rejected.push(format!("natural_scroll: {error:?}"));
-        }
+    match scroll::configure(device, config) {
+        Ok(scroll::Outcome::Unsupported) => rejected.push("natural_scroll: unsupported".to_string()),
+        Ok(scroll::Outcome::Unchanged | scroll::Outcome::Changed) => {}
+        Err(error) => rejected.push(format!("natural_scroll: {error:?}")),
     }
     if let Some(enabled) = config.tap_to_click {
         if device.config_tap_finger_count() == 0 {

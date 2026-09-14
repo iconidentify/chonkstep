@@ -497,11 +497,13 @@ o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
     assert_eq!(reading.input.repeat_delay, Some(250));
     assert_eq!(reading.input.sensitivity, Some(-0.25));
     assert_eq!(reading.input.accel_profile.as_deref(), Some("flat"));
-    assert_eq!(reading.input.natural_scroll, Some(true));
+    assert_eq!(reading.input.touchpad_natural_scroll, Some(true));
+    assert_eq!(reading.input.natural_scroll, None, "Omarchy's touchpad table must not reach mice");
     assert_eq!(reading.input.tap_to_click, Some(false));
     assert_eq!(reading.input.disable_while_typing, Some(false));
     assert_eq!(reading.input.clickfinger_behavior, Some(true));
-    assert_eq!(reading.input.scroll_factor, Some(0.4));
+    assert_eq!(reading.input.touchpad_scroll_factor, Some(0.4));
+    assert_eq!(reading.input.scroll_factor, None);
     assert!(
         skipped_why(&reading, "follow_mouse")
             .is_some_and(|why| why.contains("focus policy belongs to chonkstep")),
@@ -1061,6 +1063,38 @@ fn every_window_rule_syntax_hyprland_has_shipped_is_read() {
         compiled.decision_for("modern", "").and_then(|d| d.size),
         Some(wm_core::Size::new(400, 300)),
         "0.53+ match: form"
+    );
+}
+
+#[test]
+fn a_scroll_touchpad_rule_sets_that_windows_touchpad_factor() {
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = scroll_touchpad 1.5, match:class (Alacritty|kitty|foot)\n",
+            "windowrule = scroll_touchpad 0.2, match:class com.mitchellh.ghostty\n",
+            "windowrule = scroll_touchpad fast, match:class ^odd$\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    assert_eq!(rules.window_decision_for("foot", "").touchpad_scroll_factor, Some(1.5));
+    assert_eq!(rules.window_decision_for("com.mitchellh.ghostty", "").touchpad_scroll_factor, Some(0.2));
+    assert_eq!(rules.window_decision_for("firefox", "").touchpad_scroll_factor, None);
+    assert_eq!(rules.window_decision_for("odd", "").touchpad_scroll_factor, None);
+    assert!(notes.iter().any(|note| note.contains("\"fast\"")), "{notes:?}");
+    assert!(
+        !notes.iter().any(|note| note.contains("scroll_touchpad is not implemented")),
+        "the property is read now: {notes:?}"
     );
 }
 
@@ -2205,7 +2239,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert_eq!(
         reading.float_rules.len(),
-        45,
+        47,
         "window behaviors resolved through Omarchy's tags"
     );
     // The skipped count is quoted too, in the guide's sample log line.
@@ -2214,7 +2248,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        165,
+        163,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -2224,7 +2258,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=161 commands=113 env=8 autostart=4")
-            && GUIDE.contains("float_rules=45 monitors=1 skipped=165"),
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=163"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

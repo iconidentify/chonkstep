@@ -397,16 +397,33 @@ pub struct KeyboardConfig {
     pub repeat_delay: Option<i32>,
 }
 
+/// Scroll settings for one class of pointing device.
+///
+/// Mice and touchpads are configured apart because a setting written for
+/// one is wrong for the other: a touchpad's natural scrolling inverts a
+/// wheel, and a factor tuned for finger travel slows a detent to a crawl.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScrollClass {
+    /// `None` leaves each device on its libinput default.
+    pub natural_scroll: Option<bool>,
+    /// Multiplies axis motion after libinput, so it also applies on the
+    /// nested backend. `None` is 1.
+    pub scroll_factor: Option<f64>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PointerConfig {
     pub sensitivity: Option<f64>,
-    pub natural_scroll: Option<bool>,
+    /// `input:natural_scroll`, `input:scroll_factor` and `[input]`: wheels,
+    /// trackpoints and every other device that is not a touchpad.
+    pub pointer: ScrollClass,
+    /// `input:touchpad:*` and `[input.touchpad]`.
+    pub touchpad: ScrollClass,
     pub tap_to_click: Option<bool>,
     /// Typing suppression outside application pointer capture; None restores
     /// each device's libinput default. Active locks/confinement suspend it.
     pub disable_while_typing: Option<bool>,
     pub clickfinger_behavior: Option<bool>,
-    pub scroll_factor: Option<f64>,
     pub left_handed: Option<bool>,
     pub accel_profile: Option<String>,
 }

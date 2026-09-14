@@ -110,7 +110,7 @@ windowrule   = float on, match:class steam               # 0.53+
 
 The supported properties are `float`, `size`, `center`, `idle_inhibit`,
 `pin`, `no_focus`, `no_initial_focus`, `focus_on_activate`,
-`fullscreen`, and `maximize`. They match `class` and `title` as regular
+`fullscreen`, `maximize`, and `scroll_touchpad`. They match `class` and `title` as regular
 expressions, matched against the entire class or title, as in Hyprland's
 `RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
@@ -275,12 +275,23 @@ default usable keymap instead of aborting the login.
 
 Pointer configuration is also carried from both classic `input {}` /
 `touchpad {}` blocks and Omarchy's Lua tables. `sensitivity` and
-`accel_profile` configure libinput acceleration; `natural_scroll`,
-`tap_to_click`, `disable_while_typing`, `clickfinger_behavior`, and `left_handed` are applied
-where the device advertises them. `scroll_factor` multiplies continuous
-and wheel-axis motion after libinput so the configured speed also works
-on the nested backend. Unsupported capabilities are named per device
-without rejecting the rest of the configuration.
+`accel_profile` configure libinput acceleration; `tap_to_click`,
+`disable_while_typing`, `clickfinger_behavior`, and `left_handed` are applied
+where the device advertises them.
+
+Scrolling is configured per device class. `input:natural_scroll` and
+`input:scroll_factor` (or `[input]` in `config.toml`) apply to mice,
+trackpoints and every other device that is not a touchpad;
+`input:touchpad:natural_scroll` and `input:touchpad:scroll_factor` (or
+`[input.touchpad]`) apply only to touchpads, so Omarchy's touchpad settings
+never invert or slow a mouse wheel. Removing a natural-scroll key restores
+each device's libinput default. `scroll_factor` multiplies axis motion after
+libinput, chosen by the event's source (finger scrolling is touchpad-class),
+so the configured speed also works on the nested backend, and
+high-resolution wheel units keep their fraction between events instead of
+rounding it away. A `scroll_touchpad` window rule replaces the touchpad
+factor while the pointer is over a matching window. Unsupported capabilities
+are named per device without rejecting the rest of the configuration.
 
 Active pointer locks and confinement temporarily suspend `disable_while_typing`
 so games can receive keyboard and touchpad motion together. This includes
@@ -487,7 +498,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=161 commands=113 env=8 autostart=4
-      float_rules=45 monitors=1 skipped=165
+      float_rules=47 monitors=1 skipped=163
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

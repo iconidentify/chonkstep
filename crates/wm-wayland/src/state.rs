@@ -685,8 +685,10 @@ pub struct WaylandBackend {
     pub(crate) pending_keyboard: Option<wm_core::KeyboardConfig>,
     pub(crate) pending_pointer: Option<wm_core::PointerConfig>,
     pub(crate) pointer_config: wm_core::PointerConfig,
-    /// Post-libinput axis multiplier, also used by the nested backend.
-    pub(crate) scroll_factor: f64,
+    /// Post-libinput axis multipliers, also used by the nested backend:
+    /// one for wheel, tilt and button scrolling, one for finger scrolling.
+    pub(crate) pointer_scroll_factor: f64,
+    pub(crate) touchpad_scroll_factor: f64,
     /// The xkb layout actually installed on the seat.
     ///
     /// What IPC reports, rather than the config's own `kb_layout`: the
@@ -1083,7 +1085,8 @@ impl WaylandBackend {
             pending_keyboard: None,
             pending_pointer: None,
             pointer_config: wm_core::PointerConfig::default(),
-            scroll_factor: 1.0,
+            pointer_scroll_factor: 1.0,
+            touchpad_scroll_factor: 1.0,
             keyboard_layout: String::new(),
             keyboard_layouts: Vec::new(),
             active_keyboard_layout: 0,
@@ -2596,7 +2599,9 @@ impl Compositor {
         crate::layout_scene::tick(self);
         self.apply_pending_keyboard();
         if let Some(config) = self.wm.backend_mut().pending_pointer.take() {
-            self.wm.backend_mut().scroll_factor = config.scroll_factor.unwrap_or(1.0);
+            let backend = self.wm.backend_mut();
+            backend.pointer_scroll_factor = config.pointer.scroll_factor.unwrap_or(1.0);
+            backend.touchpad_scroll_factor = config.touchpad.scroll_factor.unwrap_or(1.0);
             crate::session::apply_pointer_config(&mut self.graphics, &config, self.touchpad_pointer_captured);
         }
         tracing::debug_span!("dispatch_phase", phase = "connector_hotplug")

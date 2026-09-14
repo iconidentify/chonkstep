@@ -110,6 +110,8 @@ struct Rule {
     focus_on_activate: Option<bool>,
     fullscreen: Option<bool>,
     maximize: Option<bool>,
+    /// The touchpad scroll factor over this window.
+    scroll_touchpad: Option<f64>,
 }
 
 impl Rule {
@@ -183,6 +185,9 @@ impl FloatRules {
                     }
                     Some(wm_core::IdleInhibitRule::None) | None => {}
                 }
+                if let Some(factor) = rule.scroll_touchpad {
+                    what.push(format!("touchpad scroll x{factor}"));
+                }
                 for (enabled, label) in [
                     (rule.pin, "pinned"),
                     (rule.no_focus, "never focused"),
@@ -255,6 +260,9 @@ impl FloatPolicy for FloatRules {
             }
             if let Some(value) = rule.idle_inhibit {
                 decision.idle_inhibit = value;
+            }
+            if let Some(factor) = rule.scroll_touchpad {
+                decision.touchpad_scroll_factor = Some(factor);
             }
             if let Some(value) = rule.pin {
                 decision.pin = value;
@@ -458,6 +466,16 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                 spec.maximize = Some(truthy(value));
                 any = true;
             }
+            "scroll_touchpad" | "scrolltouchpad" => match value.trim().parse::<f64>() {
+                Ok(factor) if factor.is_finite() && (0.01..=10.0).contains(&factor) => {
+                    spec.scroll_touchpad = Some(factor);
+                    any = true;
+                }
+                _ => notes.push(format!(
+                    "window rule scroll_touchpad {value:?} on {} must be a number from 0.01 to 10: property skipped",
+                    describe_matchers(rule)
+                )),
+            },
             // `tag +name` is consumed by compile's first pass. A tag
             // matcher likewise participates in expansion, so neither
             // is a silently dropped property.
@@ -484,6 +502,7 @@ struct Spec {
     focus_on_activate: Option<bool>,
     fullscreen: Option<bool>,
     maximize: Option<bool>,
+    scroll_touchpad: Option<f64>,
 }
 
 fn push(
@@ -535,6 +554,7 @@ fn push(
         focus_on_activate: spec.focus_on_activate,
         fullscreen: spec.fullscreen,
         maximize: spec.maximize,
+        scroll_touchpad: spec.scroll_touchpad,
     });
 }
 
