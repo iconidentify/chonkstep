@@ -1146,12 +1146,17 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
             }),
         },
         "hl.on" => out.push(Directive::Ignored { kind: "event", detail: "hl.on event handlers other than the start handler's body".into() }),
-        // Hyprland's animation machinery, the Lua spelling of the
-        // `bezier` and `animation` lines the conf reader names.
-        "hl.curve" | "hl.animation" => out.push(Directive::Ignored {
+        // Hyprland's animation curves, the Lua spelling of `bezier`.
+        // This desktop's motion is one spring; the switch on each
+        // `hl.animation` leaf is read, the curve never is.
+        "hl.curve" => out.push(Directive::Ignored {
             kind: "animation",
-            detail: format!("{path}(…): Hyprland's animations; this desktop draws its own"),
+            detail: format!(
+                "hl.curve({}): Hyprland's animation curves; this desktop's motion is one spring",
+                describe(&arg(0))
+            ),
         }),
+        "hl.animation" => emit_animation(&arg(0), out),
         // Calls that act while Hyprland runs rather than configure it.
         runtime if runtime == "hl.timer" || runtime == "hl.dispatch" || runtime.starts_with("hl.get_") => {
             out.push(Directive::Ignored {
@@ -1369,10 +1374,84 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
         }),
         None => {}
     }
-    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor" | "binds"))) {
+    match root.iter().find(|(key, _)| key.as_deref() == Some("animations")).map(|(_, value)| value) {
+        Some(Value::Table(fields)) => {
+            for (key, value) in fields {
+                let Some(key) = key else { continue };
+                out.push(match (key.as_str(), value) {
+                    ("enabled", Value::Bool(enabled)) => Directive::Animation { leaf: "global".into(), enabled: *enabled },
+                    ("enabled", other) => Directive::Ignored {
+                        kind: "animation",
+                        detail: format!("animations.enabled = {}: computed at runtime, not carried over", describe(other)),
+                    },
+                    _ => Directive::Ignored {
+                        kind: "animation",
+                        detail: format!("animations.{key}: Hyprland's; only animations.enabled is read"),
+                    },
+                });
+            }
+        }
+        Some(_) => out.push(Directive::Ignored {
+            kind: "animation",
+            detail: "hl.config animations table is unreadable".into(),
+        }),
+        None => {}
+    }
+    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor" | "binds" | "animations"))) {
         out.push(Directive::Ignored {
             kind: "config",
-            detail: "hl.config settings outside input, cursor, binds and general.layout are not carried over".into(),
+            detail: "hl.config settings outside input, cursor, binds, animations and general.layout are not carried over".into(),
+        });
+    }
+}
+
+/// `hl.animation({ leaf = NAME, enabled = BOOL, speed = …, bezier = …,
+/// style = … })`: the switch is carried under its leaf name, and the
+/// speed, curve and style are declined by that same name. A leaf or
+/// switch only running code could give is refused rather than guessed.
+fn emit_animation(value: &Value, out: &mut Vec<Directive>) {
+    let Value::Table(fields) = value else {
+        out.push(Directive::Ignored {
+            kind: "animation",
+            detail: format!("hl.animation({}): not a table", describe(value)),
+        });
+        return;
+    };
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(k, _)| k.as_deref() == Some(name))
+            .map(|(_, v)| v)
+    };
+    let Some(leaf) = field("leaf").and_then(as_string).filter(|leaf| !leaf.is_empty()) else {
+        out.push(Directive::Ignored {
+            kind: "animation",
+            detail: format!("hl.animation(…) with an unreadable leaf: {}", describe(field("leaf").unwrap_or(&Value::Nil))),
+        });
+        return;
+    };
+    out.push(match field("enabled") {
+        Some(Value::Bool(enabled)) => Directive::Animation { leaf: leaf.clone(), enabled: *enabled },
+        Some(other) => Directive::Ignored {
+            kind: "animation",
+            detail: format!("hl.animation leaf {leaf:?}: enabled = {}: computed at runtime, not carried over", describe(other)),
+        },
+        None => Directive::Ignored {
+            kind: "animation",
+            detail: format!("hl.animation leaf {leaf:?}: no enabled switch to read"),
+        },
+    });
+    let styled: Vec<&str> = ["speed", "bezier", "style"]
+        .into_iter()
+        .filter(|name| field(name).is_some())
+        .collect();
+    if !styled.is_empty() {
+        out.push(Directive::Ignored {
+            kind: "animation",
+            detail: format!(
+                "hl.animation leaf {leaf:?}: {} not applied; this desktop's motion is one spring whose speed is [motion] speed",
+                styled.join(", ")
+            ),
         });
     }
 }

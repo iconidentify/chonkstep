@@ -36,7 +36,7 @@ pub use client::{
     Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo,
 };
 pub use focus::{FocusDirection, FocusPolicy, OutputTarget};
-pub use gestures::{physics as gesture_physics, DesktopGesture, GestureConfig, SwipeAxis, SwipeMotion, SwipeTracker};
+pub use gestures::{physics as gesture_physics, physics::MotionPolicy, DesktopGesture, GestureConfig, SwipeAxis, SwipeMotion, SwipeTracker};
 pub use hittest::{hit_test, HitTarget};
 pub use interaction::{AppProfile, InteractionConfig, InteractionMode, KeyboardMode};
 pub use manager::{

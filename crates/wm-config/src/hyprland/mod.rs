@@ -87,18 +87,22 @@
 //!
 //! # What is deliberately not read
 //!
-//! - **Gaps, borders, rounding, blur, shadows, animations.** These are
-//!   Hyprland's look, and this desktop has its own — a theme, a
-//!   titlebar, a decoration policy. Following them would mean drawing
-//!   a NeXTSTEP frame with Hyprland's border colour on it. The
-//!   *layout name* is the one exception: `general.layout` and the
-//!   per-workspace `workspace` rules decide whether windows tile at
-//!   all, not how they look, and `dwindle` and `scrolling` are names
-//!   this desktop's own Mosaic and Flow already answer to. They are
-//!   read as [`Reading::default_layout`] and
+//! - **Gaps, borders, rounding, blur, shadows, animation curves, speeds
+//!   and styles.** These are Hyprland's look, and this desktop has its
+//!   own — a theme, a titlebar, a decoration policy, one spring.
+//!   Following them would mean drawing a NeXTSTEP frame with Hyprland's
+//!   border colour on it. Two exceptions. The *layout name*:
+//!   `general.layout` and the per-workspace `workspace` rules decide
+//!   whether windows tile at all, not how they look, and `dwindle` and
+//!   `scrolling` are names this desktop's own Mosaic and Flow already
+//!   answer to. They are read as [`Reading::default_layout`] and
 //!   [`Reading::workspace_layouts`]; every other layout setting
 //!   (`dwindle { … }`, `master { … }`, `scrolling { … }`) stays
-//!   Hyprland's.
+//!   Hyprland's. And the animation *switches*: turning motion off is a
+//!   comfort and accessibility preference, not a look, so
+//!   `animations.enabled` and the `global`, `windows` and `windowsMove`
+//!   leaves are read into [`crate::Config::motion`]. Every other leaf is
+//!   named and skipped.
 //! - **Layer rules.** They configure Hyprland's layer-shell
 //!   implementation; this compositor has its own.
 //! - **Unsupported input settings.** Keyboard xkb/repeat values are
@@ -313,6 +317,9 @@ pub struct Reading {
     /// What was skipped, and why. Logged by [`Reading::report`] and
     /// carried so the docs and the tests can name a specific skip.
     pub skipped: Vec<Skipped>,
+    /// The animation switches, later winning. Only the switches: the
+    /// speed stays at its default for the `[motion]` table to set.
+    pub motion: wm_core::MotionPolicy,
 }
 
 /// One thing this read declined to act on.
@@ -352,7 +359,7 @@ impl Reading {
         // future category cannot silently disappear at this loading boundary.
         let Self {
             keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
-            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, files: _, skipped: _,
+            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, files: _, skipped: _, motion,
         } = self;
         keybindings.is_empty()
             && explicit_keys.is_empty()
@@ -368,6 +375,7 @@ impl Reading {
             && default_layout.is_none()
             && workspace_layouts.is_empty()
             && hide_special_on_workspace_change.is_none()
+            && *motion == wm_core::MotionPolicy::default()
     }
 
     /// Logs the read: one summary line, and one line per thing
@@ -591,6 +599,7 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
     config.float_policy = reading.float_rules.clone().policy();
     config.default_layout = reading.default_layout;
     config.workspace_layouts = reading.workspace_layouts.clone();
+    config.motion = reading.motion.sanitized();
 }
 
 // ---- the file graph ---------------------------------------------------
@@ -1002,6 +1011,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
                     why: "not a style this desktop has; dwindle (Mosaic) and scrolling (Flow) are read".into(),
                 }),
             },
+            Directive::Animation { leaf, enabled } => animation(&mut reading, &leaf, enabled),
             Directive::Ignored { kind, detail } => reading.skipped.push(Skipped {
                 kind: kind.to_string(),
                 what: detail,
@@ -1328,6 +1338,26 @@ fn refuse_input(reading: &mut Reading, name: &str, value: &str, why: &str) {
         what: format!("{name} = {value}"),
         why: why.into(),
     });
+}
+
+/// The animation switches this desktop has a transition for: `global`
+/// is every compositor-started motion, `windows` and `windowsMove` are
+/// window geometry, which here is a layout reflow. Later wins, so a
+/// user's file overrides Omarchy's defaults. Every other leaf — borders,
+/// fades, layers, workspaces — animates something this desktop draws
+/// differently or not at all, and is declined by name.
+fn animation(reading: &mut Reading, leaf: &str, enabled: bool) {
+    if leaf.eq_ignore_ascii_case("global") {
+        reading.motion.enabled = enabled;
+    } else if leaf.eq_ignore_ascii_case("windows") || leaf.eq_ignore_ascii_case("windowsMove") {
+        reading.motion.layout = enabled;
+    } else {
+        reading.skipped.push(Skipped {
+            kind: "animation".into(),
+            what: format!("animation leaf {leaf} (enabled = {enabled})"),
+            why: "no such transition here; only global, windows and windowsMove are read".into(),
+        });
+    }
 }
 
 /// A Hyprland boolean, in any of the spellings its config accepts.

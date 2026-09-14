@@ -1025,6 +1025,118 @@ fn omarchys_persisted_device_disable_is_read_as_data_and_never_as_lua() {
 /// decide when the pointer hides arrive from either syntax, the warp key
 /// Omarchy sets beside it is declined by name, and the rest of the
 /// section is still reported rather than dropped.
+/// Omarchy's stock animation configuration, in both syntaxes: motion
+/// stays on, the leaves this desktop has no transition for are named,
+/// and the curves are declined as curves rather than as unknown calls.
+#[test]
+fn omarchys_default_animations_leave_motion_on_and_name_every_leaf_not_read() {
+    for (root, curve) in [(machine(), "hl.curve(\"easeOutQuint\")"), (conf_machine(), "bezier = easeOutQuint")] {
+        let reading = read(&root);
+        assert_eq!(reading.motion, wm_core::MotionPolicy::default(), "{root:?}");
+        for leaf in ["workspaces", "border", "layersIn"] {
+            assert!(
+                reading.skipped.iter().any(|skip| skip.kind == "animation" && skip.what.contains(&format!("leaf {leaf} "))),
+                "{root:?}: {leaf} must be declined by name: {:?}",
+                reading.skipped
+            );
+        }
+        assert!(
+            reading.skipped.iter().any(|skip| skip.kind == "animation" && skip.what.contains(curve)),
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(
+            !reading.skipped.iter().any(|skip| skip.kind == "lua-call" && skip.what.contains("hl.animation")),
+            "{root:?}: hl.animation is read, not an unplaced call: {:?}",
+            reading.skipped
+        );
+    }
+}
+
+/// The switch Omarchy's own override template offers ("Disable all
+/// animations"), uncommented, in every spelling a user can write it.
+#[test]
+fn animation_off_switches_reach_the_motion_policy_in_both_syntaxes() {
+    let lua_cases: [(&str, wm_core::MotionPolicy); 6] = [
+        ("hl.config({ animations = { enabled = false } })\n", wm_core::MotionPolicy { enabled: false, ..Default::default() }),
+        ("hl.animation({ leaf = \"global\", enabled = false })\n", wm_core::MotionPolicy { enabled: false, ..Default::default() }),
+        ("hl.animation({ leaf = \"windows\", enabled = false, speed = 3.79, bezier = \"easeOutQuint\" })\n", wm_core::MotionPolicy { layout: false, ..Default::default() }),
+        ("hl.animation({ leaf = \"windowsMove\", enabled = false })\n", wm_core::MotionPolicy { layout: false, ..Default::default() }),
+        // Later wins, the way a user's file lands on Omarchy's defaults.
+        ("hl.animation({ leaf = \"global\", enabled = false })\nhl.config({ animations = { enabled = true } })\n", wm_core::MotionPolicy::default()),
+        // A switch only running code could decide is refused, not guessed.
+        ("x = y or false\nhl.animation({ leaf = \"global\", enabled = x })\nhl.config({ animations = { enabled = x } })\n", wm_core::MotionPolicy::default()),
+    ];
+    for (index, (source, expected)) in lua_cases.iter().enumerate() {
+        let home = scratch(&format!("animation-lua-{index}"));
+        write(&home.join(".config/hypr/hyprland.lua"), source);
+        let reading = read(&Roots::under(&home));
+        assert_eq!(reading.motion, *expected, "{source}: {:?}", reading.skipped);
+        assert!(
+            !reading.skipped.iter().any(|skip| skip.what.contains("outside input")),
+            "{source}: animations is a read table: {:?}",
+            reading.skipped
+        );
+    }
+    let styled = read(&Roots::under(&{
+        let home = scratch("animation-lua-styled");
+        write(&home.join(".config/hypr/hyprland.lua"), lua_cases[2].0);
+        home
+    }));
+    assert!(
+        styled.skipped.iter().any(|skip| skip.kind == "animation" && skip.what.contains("\"windows\"") && skip.what.contains("speed, bezier")),
+        "the speed and curve on a read leaf are declined by name: {:?}",
+        styled.skipped
+    );
+    let runtime = read(&Roots::under(&{
+        let home = scratch("animation-lua-runtime");
+        write(&home.join(".config/hypr/hyprland.lua"), lua_cases[5].0);
+        home
+    }));
+    assert_eq!(
+        runtime.skipped.iter().filter(|skip| skip.what.contains("computed at runtime") && skip.kind == "animation").count(),
+        2,
+        "{:?}",
+        runtime.skipped
+    );
+
+    let conf_cases: [(&str, wm_core::MotionPolicy); 4] = [
+        ("animations {\n    enabled = no\n}\n", wm_core::MotionPolicy { enabled: false, ..Default::default() }),
+        ("animations {\n    enabled = yes\n    animation = windows, 0, 3.79, easeOutQuint\n}\n", wm_core::MotionPolicy { layout: false, ..Default::default() }),
+        ("animation = global, 0, 10, default\n", wm_core::MotionPolicy { enabled: false, ..Default::default() }),
+        ("animations {\n    enabled = yes, please :)\n    animation = windows, maybe, 3.79, easeOutQuint\n}\n", wm_core::MotionPolicy::default()),
+    ];
+    for (index, (source, expected)) in conf_cases.iter().enumerate() {
+        let home = scratch(&format!("animation-conf-{index}"));
+        write(&home.join(".config/hypr/hyprland.conf"), source);
+        let reading = read(&Roots::under(&home));
+        assert_eq!(reading.motion, *expected, "{source}: {:?}", reading.skipped);
+        assert!(
+            !reading.skipped.iter().any(|skip| skip.kind == "block" && skip.what.contains("animations")),
+            "{source}: the block is read line by line, not refused whole: {:?}",
+            reading.skipped
+        );
+    }
+    let unreadable = read(&Roots::under(&{
+        let home = scratch("animation-conf-unreadable");
+        write(&home.join(".config/hypr/hyprland.conf"), conf_cases[3].0);
+        home
+    }));
+    assert!(unreadable.skipped.iter().any(|skip| skip.what.contains("yes, please")), "{:?}", unreadable.skipped);
+    assert!(unreadable.skipped.iter().any(|skip| skip.what.contains("windows, maybe")), "{:?}", unreadable.skipped);
+
+    // Through the whole precedence: the read lands under config.toml.
+    let home = scratch("animation-precedence");
+    write(&home.join(".config/hypr/hyprland.lua"), lua_cases[0].0);
+    let live = || Some(read(&Roots::under(&home)));
+    let config = crate::parse_with("desktop = \"omarchy\"", &live).unwrap();
+    assert!(!config.motion.enabled);
+    assert_eq!(config.provenance.get("motion").map(String::as_str), Some("live Hyprland config"));
+    let config = crate::parse_with("desktop = \"omarchy\"\n[motion]\nenabled = true\nspeed = 2\n", &live).unwrap();
+    assert_eq!(config.motion, wm_core::MotionPolicy { speed: 2.0, ..Default::default() });
+    assert_eq!(config.provenance.get("motion").map(String::as_str), Some("config file"));
+}
+
 #[test]
 fn the_cursor_table_carries_when_the_pointer_hides_and_declines_warps() {
     let lua = scratch("cursor-table-lua");
@@ -1079,7 +1191,7 @@ hl.config({
             reading.skipped
         );
         assert!(
-            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input, cursor and binds")),
+            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input, cursor, binds, animations")),
             "{root:?}: the rest of the configuration is still reported: {:?}",
             reading.skipped
         );
@@ -3624,6 +3736,9 @@ fn an_if_without_then_is_skipped_whole() {
 /// The module promises that everything it meets and does not act on is
 /// logged. Calls were the gap: Omarchy's animation curves, its
 /// persisted touchpad disable and every runtime-only call vanished.
+/// Of the sixteen `hl.animation` leaves, the switch on each is read;
+/// fourteen carry a speed and curve, declined by leaf, and fourteen
+/// name a transition this desktop does not have, declined by leaf.
 #[test]
 fn every_call_the_lua_reader_meets_is_recorded() {
     let reading = read(&machine());
@@ -3635,7 +3750,9 @@ fn every_call_the_lua_reader_meets_is_recorded() {
             .count()
     };
     assert_eq!(count("animation", "hl.curve("), 5, "{:?}", reading.skipped);
-    assert_eq!(count("animation", "hl.animation("), 16);
+    assert_eq!(count("animation", "hl.animation leaf"), 14, "{:?}", reading.skipped);
+    assert_eq!(count("animation", "(enabled = "), 14, "{:?}", reading.skipped);
+    assert_eq!(count("animation", "hl.animation("), 0);
     // Omarchy's persisted touchpad and touchscreen disables are read as
     // data now, and the captured machine has none.
     assert_eq!(count("lua-call", "disabled_input_device("), 0);
@@ -3920,7 +4037,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        150,
+        162,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -3930,7 +4047,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=188 commands=121 env=8 autostart=4")
-            && GUIDE.contains("float_rules=49 monitors=1 skipped=150"),
+            && GUIDE.contains("float_rules=49 monitors=1 skipped=162"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

@@ -495,7 +495,7 @@ impl<B: Backend> WindowManager<B> {
             source,
             client_frame_rect(c),
             clip,
-            self.active_resize.is_none(),
+            self.active_resize.is_none() && self.motion.enabled && self.motion.layout,
         );
     }
 

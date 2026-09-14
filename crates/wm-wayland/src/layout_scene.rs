@@ -266,6 +266,10 @@ pub(crate) fn tick(comp: &mut Compositor) {
         })
         .min()
         .unwrap_or(Duration::from_nanos(1_000_000_000 / 60));
+    // Read every frame, so a reload that turns motion off lands each
+    // window in flight on its target rather than its origin.
+    let policy = comp.wm.motion_policy();
+    let policy = policy.gate(policy.layout);
     let backend = comp.wm.backend_mut();
     let scene = &mut backend.layout_scene;
     let mut damaged = scene.animating();
@@ -284,7 +288,7 @@ pub(crate) fn tick(comp: &mut Compositor) {
         }
         if p.motion
             .as_mut()
-            .is_some_and(|motion| motion.spring.advance(dt))
+            .is_some_and(|motion| motion.spring.advance_with(dt, &policy))
         {
             p.motion = None;
         }

@@ -520,6 +520,110 @@ fn adjacent_live_workspace_has_no_focus_until_the_single_commit_and_then_stops_a
     );
 }
 
+/// `[motion] enabled = false`: the fingers still move the desktop 1:1
+/// while held — that is input, not motion — but a released swipe and a
+/// keyboard Overview toggle complete within the one frame the door's
+/// barrier renders, through the same completion the spring would have
+/// reached: same workspace, same focus, Overview's grab released.
+#[test]
+#[ignore = "requires nested Wayland: scripts/e2e.sh --headless --test desktop_gestures"]
+fn with_motion_off_released_swipes_and_keyboard_overview_complete_within_one_frame() {
+    let mut outcomes = Vec::new();
+    for enabled in [true, false] {
+        let mut session = Session::boot(
+            &format!("gesture-motion-{enabled}"),
+            SessionOptions {
+                scale: Some(1.0),
+                config_extra: format!(
+                    "show_dock = false\nhyprland_config = false\n[keybindings]\n\"super+2\" = \"workspace 2\"\n\"super+o\" = \"overview\"\n[motion]\nenabled = {enabled}\n"
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let red = probe(&mut session, 1.0);
+        session.door().chord(keys::LEFTMETA, keys::TWO).unwrap();
+        let green = terminal(&mut session);
+        session.door().barrier().unwrap();
+        let initial = session.world().unwrap();
+        assert_eq!(
+            (initial.current_workspace, initial.logical_focus, initial.seat_focus),
+            (1, Some(green), Some(green))
+        );
+
+        session.door().swipe_begin_at(3, 0).unwrap();
+        assert_eq!(following(&mut session, 40.0, 0.0, 20).progress, -0.25);
+        let held = following(&mut session, 100.0, 0.0, 200);
+        assert_eq!(held.progress, -0.875, "finger tracking stays 1:1 under any policy");
+        assert!(!held.settling);
+        assert_eq!(session.world().unwrap().current_workspace, 1, "motion alone does not commit");
+        session.door().swipe_end_at(false, 350).unwrap();
+        session.door().barrier().unwrap();
+        if !enabled {
+            let released = session.world().unwrap();
+            assert!(
+                released.gesture.is_none(),
+                "a released swipe completes within one frame: {:?}",
+                released.gesture
+            );
+            assert_eq!(released.current_workspace, 0);
+        }
+        settled(&mut session);
+        session.door().barrier().unwrap();
+        let switched = session.world().unwrap();
+
+        session.door().chord(keys::LEFTMETA, 24).unwrap();
+        if !enabled {
+            let opened = session.world().unwrap();
+            assert!(opened.gesture.is_none(), "{:?}", opened.gesture);
+            assert_eq!(opened.overview.as_ref().map(|o| o.progress), Some(1.0));
+        }
+        let opened = poll_until(Duration::from_secs(4), "Overview open", || {
+            let world = session.world().ok()?;
+            (world.gesture.is_none() && world.overview.as_ref()?.progress == 1.0).then_some(world)
+        })
+        .unwrap();
+        assert!(opened.overview.is_some());
+        session.door().chord(keys::LEFTMETA, 24).unwrap();
+        if !enabled {
+            let closed = session.world().unwrap();
+            assert!(closed.gesture.is_none() && closed.overview.is_none(), "{closed:?}");
+        }
+        let closed = settled(&mut session);
+        assert!(closed.overview.is_none());
+        session.door().barrier().unwrap();
+        let closed = session.world().unwrap();
+        session.door().tap_key(30).unwrap();
+        poll_until(Duration::from_secs(3), "keyboard returns to the app", || {
+            session.client_log("chonk-input-probe").contains("keyboard key 30 down").then_some(())
+        })
+        .unwrap();
+        if !enabled {
+            session.door().frame_stats().unwrap();
+            let until = std::time::Instant::now() + Duration::from_millis(160);
+            poll_until(Duration::from_secs(2), "snapped scenes remain idle", || {
+                (std::time::Instant::now() >= until).then_some(())
+            })
+            .unwrap();
+            assert_eq!(
+                session.door().frame_stats().unwrap().render_calls,
+                0,
+                "a policy that animates nothing schedules no frames"
+            );
+        }
+        outcomes.push((
+            switched.current_workspace,
+            switched.logical_focus == Some(red),
+            switched.seat_focus == Some(red),
+            closed.current_workspace,
+            closed.logical_focus == Some(red),
+            closed.seat_focus == Some(red),
+        ));
+    }
+    assert_eq!(outcomes[0], (0, true, true, 0, true, true));
+    assert_eq!(outcomes[0], outcomes[1], "snapped and animated transitions end in the same state");
+}
+
 #[test]
 #[ignore = "requires nested Wayland"]
 fn lock_and_held_client_pointer_grabs_cannot_inherit_partial_desktop_scenes() {

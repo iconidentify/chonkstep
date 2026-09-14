@@ -1348,6 +1348,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         wm.set_snap_threshold(next.edge_resistance);
         wm.set_drag_modifier(next.drag_modifier);
         wm.set_interaction_config(next.interaction.clone());
+        // Read by every transition on its next frame, so a reload that
+        // turns motion off lands the scenes in flight on their targets.
+        wm.set_motion_policy(next.motion);
         // The scale belongs in this list rather than in the metrics
         // step below: `wm-core` re-lays-out nothing on it — every pixel
         // it draws comes pre-scaled from the theme engine step 3 swaps

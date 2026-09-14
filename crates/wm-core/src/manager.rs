@@ -367,6 +367,10 @@ pub struct WindowManager<B: Backend> {
     /// Chrome invalidated by an interactive drag. Drains once at the render
     /// boundary, not once per input event.
     pending_decorations: HashSet<ClientId>,
+    /// Whether and how fast the transitions this manager starts move
+    /// (`set_motion_policy`). Layout reflows consult it here; the
+    /// backend's own scenes read it back through `motion_policy`.
+    motion: crate::MotionPolicy,
 }
 
 struct CycleSession {
@@ -456,7 +460,20 @@ impl<B: Backend> WindowManager<B> {
             fullscreen_restore: HashMap::new(),
             restore_title_metrics: HashMap::new(),
             pending_decorations: HashSet::new(),
+            motion: crate::MotionPolicy::default(),
         }
+    }
+
+    /// Installs the motion policy a config load or reload resolved,
+    /// sanitized here so an out-of-range speed from a file never reaches
+    /// a spring. Takes effect on the next transition and, through
+    /// [`Self::motion_policy`], on any transition already in flight.
+    pub fn set_motion_policy(&mut self, policy: crate::MotionPolicy) {
+        self.motion = policy.sanitized();
+    }
+
+    pub fn motion_policy(&self) -> crate::MotionPolicy {
+        self.motion
     }
 
     /// Switches between click-to-focus (the default) and focus-follows-

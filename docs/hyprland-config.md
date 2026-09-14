@@ -358,6 +358,58 @@ nothing to the real bus.
 Editing an `env` line takes effect at your next login, not on the live
 re-read. A process's environment is fixed when it starts.
 
+### Animations → `[motion]`
+
+Turning motion off is a comfort and accessibility preference, not a
+look, so the switches are read even though the styling around them is
+not. Omarchy's own override template offers it as a commented-out
+block; uncommented, it works here:
+
+```lua
+hl.config({
+  animations = {
+    -- Disable all animations.
+    enabled = false,
+  },
+})
+```
+
+or, in conf, `animations { enabled = no }`. Either turns off every
+transition this desktop starts on its own: spatial-layout reflows,
+Overview opening and closing from the keyboard, and the settle after a
+released swipe. Fingers on a touchpad still move the desktop 1:1 while
+they are down — that is input, never animation.
+
+Per-leaf switches are read for the leaves this desktop has a
+transition for:
+
+| Hyprland leaf | What it turns off here |
+|---|---|
+| `global` (`hl.animation({ leaf = "global", enabled = false })`, `animation = global, 0, …`) | Everything, exactly like `animations.enabled = false`. |
+| `windows`, `windowsMove` | Window geometry motion: the reflow when a spatial layout changes. |
+
+Later wins, so a switch in your own file lands over Omarchy's
+defaults. Every other leaf — `border`, `fade*`, `layers*`,
+`workspaces`, `specialWorkspace` — names something this desktop draws
+differently or not at all and is logged by name. The speed, curve and
+style on any line, and every `bezier`/`hl.curve` definition, are
+declined: this desktop's motion is one critically damped spring, and
+its one knob is the native table below.
+
+The native table in `config.toml` wins over all of it:
+
+```toml
+[motion]
+enabled = true          # false: every compositor-started transition completes in one frame
+layout = true           # spatial-layout reflow motion
+overview = true         # keyboard and pointer Overview open/close
+gesture_settle = true   # the spring after a released swipe
+speed = 1.0             # multiplies the spring's stiffness; 0.25..=4
+```
+
+A reload applies it to transitions already in flight, which land on
+their targets.
+
 ---
 
 ## What is deliberately not read
@@ -368,7 +420,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Not read | Why |
 |---|---|
 | Hyprland requests chonkstep does not serve — `hyprctl`, and `omarchy-hyprland-*` scripts outside [the list below](#omarchys-hyprland-scripts) | Chonkstep answers Hyprland's IPC, but only with the requests it can apply, and `hyprctl` exits zero on a refusal, so a binding whose request is refused would be a key that silently does nothing. A script therefore runs only when every request it sends is proven served. The same rule filters chonkstep's Omarchy menu rows and `exec-once` lines. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
-| Gaps, borders, rounding, blur, shadows, animations (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. `general.layout` is the exception, [read above](#workspace-layout); the per-layout tables (`dwindle { … }`, `master { … }`, `scrolling { … }`) are not. |
+| Gaps, borders, rounding, blur, shadows, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. Two exceptions: `general.layout`, [read above](#workspace-layout) (the per-layout tables `dwindle { … }`, `master { … }`, `scrolling { … }` are not), and the animation *switches*, because turning motion off is a preference, not a look — see [Animations](#animations). |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
 | Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use `focus_follows_mouse` and native [`[input.gestures]`](gestures.md). Arbitrary Hyprland gesture bindings remain declined. Device properties listed below are applied; remaining declined values are logged. |
 | Unsupported window-rule properties | `opacity`, `no_blur`, `workspace`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
@@ -376,7 +428,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | A `size` or `move` written in a form other than a number or a layout expression (`move cursor 0 0`, `size 50% 50%`, `move onscreen`) | Only the arithmetic Omarchy's rules use is read — see [window rules](#window-rules). The property is skipped with its text; the rule's other properties still apply. |
 | Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
-| `submap`, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| `submap`, workspace rules, `plugin`, `bezier` (Lua `hl.curve`), and the speed, curve and style of every `animation` line (Lua `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. This desktop's motion is one spring; only the on/off switch of an animation line is read, and only for the leaves named under [Animations](#animations). |
 | Workspace rules other than `layout`, and rules for `special:`, `name:` and range selectors | Only [the layout of a numbered workspace](#workspace-layout) is read. Every other rule and every other selector is logged by name. |
 | Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (such as `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
@@ -787,7 +839,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=188 commands=121 env=8 autostart=4
-      float_rules=49 monitors=1 skipped=150
+      float_rules=49 monitors=1 skipped=162
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

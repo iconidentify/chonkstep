@@ -48,9 +48,10 @@ pub fn read(
 ) {
     // Depth of `name { … }` block nesting. Everything inside a block is
     // a setting for a Hyprland subsystem this desktop does not have —
-    // `general`, `decoration`, `input`, `animations` — so blocks are
-    // skipped whole rather than half-read. Their contents are reported
-    // once, by name, on the way in.
+    // `general`, `decoration`, `layout` — so blocks are skipped whole
+    // rather than half-read. Their contents are reported once, by name,
+    // on the way in. `input`, `cursor`, `device` and `animations` are
+    // the blocks read line by line.
     let mut block: Vec<String> = Vec::new();
     // Hyprland submaps are modal scopes, not annotations on the next
     // line. Keep the scope until `submap = reset`; otherwise a bare
@@ -89,6 +90,7 @@ pub fn read(
                 } else if !name.eq_ignore_ascii_case("input")
                     && !name.eq_ignore_ascii_case("cursor")
                     && !name.eq_ignore_ascii_case("binds")
+                    && !name.eq_ignore_ascii_case("animations")
                 {
                     out.push(Directive::Ignored {
                         kind: "block",
@@ -159,6 +161,16 @@ pub fn read(
                     }),
                     None => out.push(Directive::Ignored {
                         kind: "binds",
+                        detail: truncate(line),
+                    }),
+                }
+            } else if block.len() == 1 && block[0].eq_ignore_ascii_case("animations") {
+                match line.split_once('=') {
+                    Some((name, value)) => {
+                        animation_setting(name.trim(), &substitute(value.trim(), vars), out)
+                    }
+                    None => out.push(Directive::Ignored {
+                        kind: "animation",
                         detail: truncate(line),
                     }),
                 }
@@ -238,6 +250,67 @@ pub fn read(
     }
 }
 
+/// One line of `animations { … }`, or a bare `animation =` / `bezier =`.
+/// `enabled` is the global switch; `animation = NAME, ONOFF, SPEED,
+/// CURVE[, STYLE]` carries its switch under its leaf name and declines
+/// the rest of the line by that name; `bezier` defines a curve this
+/// desktop has no use for.
+fn animation_setting(key: &str, value: &str, out: &mut Vec<Directive>) {
+    let lower = key.to_ascii_lowercase();
+    match lower.as_str() {
+        "enabled" => out.push(match toggle(value) {
+            Some(enabled) => Directive::Animation { leaf: "global".into(), enabled },
+            None => Directive::Ignored {
+                kind: "animation",
+                detail: format!("animations:enabled = {}: not a boolean", truncate(value)),
+            },
+        }),
+        "animation" => {
+            let mut fields = value.split(',').map(str::trim);
+            match (fields.next(), fields.next().and_then(toggle)) {
+                (Some(leaf), Some(enabled)) if !leaf.is_empty() => {
+                    out.push(Directive::Animation { leaf: leaf.to_string(), enabled });
+                    if fields.next().is_some() {
+                        out.push(Directive::Ignored {
+                            kind: "animation",
+                            detail: format!(
+                                "animation = {leaf}, …: speed, curve and style not applied; this desktop's motion is one spring whose speed is [motion] speed"
+                            ),
+                        });
+                    }
+                }
+                _ => out.push(Directive::Ignored {
+                    kind: "animation",
+                    detail: format!("animation = {}: no readable leaf and on/off switch", truncate(value)),
+                }),
+            }
+        }
+        "bezier" => out.push(Directive::Ignored {
+            kind: "animation",
+            detail: format!(
+                "bezier = {}: Hyprland's animation curves; this desktop's motion is one spring",
+                truncate(value)
+            ),
+        }),
+        _ => out.push(Directive::Ignored {
+            kind: "animation",
+            detail: format!(
+                "animations:{key} = {}: Hyprland's; only enabled and the animation switches are read",
+                truncate(value)
+            ),
+        }),
+    }
+}
+
+/// A Hyprland boolean, in the spellings its config accepts.
+fn toggle(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 /// The `device { … }` block being read. A block may give its `name` after
 /// its settings, so the directive is emitted only when the block closes.
 #[derive(Default)]
@@ -310,10 +383,13 @@ fn directive(keyword: &str, value: &str, out: &mut Vec<Directive>) {
         // sourced file exactly where its line sat — which is what makes
         // "the user's file is read after the defaults" true.
         "source" => out.push(Directive::Include(Include::Path(value.to_string()))),
+        // The animation switches work outside their block too, as they
+        // do in Hyprland.
+        "animation" | "bezier" => animation_setting(keyword, value, out),
         // Hyprland's own machinery is unsupported here, but it must be
         // reported like every other declined directive. Silence made a
         // plugin or debug setting look successfully applied.
-        "plugin" | "bezier" | "animation" | "blurls" | "debug" => out.push(Directive::Ignored {
+        "plugin" | "blurls" | "debug" => out.push(Directive::Ignored {
             kind: "keyword",
             detail: format!("{keyword} = {} (Hyprland-only machinery)", truncate(value)),
         }),

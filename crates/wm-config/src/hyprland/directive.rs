@@ -91,6 +91,14 @@ pub enum Directive {
     /// act on, kept so it can be logged with its own words rather than
     /// dropped into silence. The brief's rule: ignore loudly.
     Ignored { kind: &'static str, detail: String },
+    /// One animation switch, still in Hyprland's words: `animations {
+    /// enabled = … }` / `hl.config({ animations = { enabled = … } })`
+    /// arrive as the `global` leaf; `animation = NAME, ONOFF, …` /
+    /// `hl.animation({ leaf = NAME, enabled = … })` as their own. Which
+    /// leaves this desktop honours is decided downstream, once. Speeds,
+    /// curves and styles never get this far — they are reported as
+    /// [`Self::Ignored`] by the front ends.
+    Animation { leaf: String, enabled: bool },
 }
 
 /// Behavioral suffix/options carried by a Hyprland binding.
