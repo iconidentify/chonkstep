@@ -564,6 +564,10 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+ctrl+s", "run omarchy-menu-share"),
     ("super+ctrl+space", "run omarchy-menu-background"),
     ("super+shift+ctrl+space", "run omarchy-menu-theme"),
+    // Omarchy runs `omarchy-hyprland-window-transparency-toggle`, a
+    // script that sets the active window's `opaque` property through
+    // `hyprctl`; the native verb is the same session toggle.
+    ("super+backspace", "toggle-opaque"),
     ("super+ctrl+e", "run omarchy-emojis"),
     ("super+alt+k", "run omarchy-keybindings-tmux"),
     ("super+ctrl+k", "run omarchy-keybindings-herdr"),
@@ -699,7 +703,6 @@ pub enum Unbound {
 }
 
 impl Unbound {
-    pub const OPACITY: Self = Self::Unserved("needs per-window opacity, which ChonkStep does not model");
     pub const GAPS: Self = Self::Unserved("toggles Hyprland's gaps, which ChonkStep does not read");
     pub const LAYOUT_OPTION: Self = Self::Unserved("toggles a Hyprland layout option, which ChonkStep does not read");
     pub const OUTPUT_DISABLE: Self = Self::Unserved("disables an output, which ChonkStep does not do");
@@ -753,7 +756,6 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+k", "Omarchy's keybinding cheatsheet", Unbound::Declined),
     ("super+shift+space", "toggle Omarchy's top bar", Unbound::NoVerb),
     ("super+ctrl+d", "Omarchy's display panel", Unbound::HyprlandOnly),
-    ("super+backspace", "window transparency", Unbound::OPACITY),
     ("super+shift+backspace", "window gaps", Unbound::GAPS),
     ("super+ctrl+backspace", "single-window square aspect", Unbound::LAYOUT_OPTION),
     ("super+ctrl+delete", "toggle the laptop display", Unbound::OUTPUT_DISABLE),

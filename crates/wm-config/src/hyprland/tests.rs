@@ -647,7 +647,6 @@ fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
         assert_eq!(argv_for(&reading, chord), Some(argv), "{chord} runs its served script");
     }
     for (chord, what, reason) in [
-        ("super+backspace", "SUPER + BACKSPACE (Toggle window transparency)", Unbound::OPACITY),
         ("super+shift+backspace", "SUPER + SHIFT + BACKSPACE (Toggle window gaps)", Unbound::GAPS),
         (
             "super+ctrl+backspace",
@@ -664,6 +663,13 @@ fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
         assert_eq!(action_for(&reading, chord), None, "{chord} must stay unbound");
         assert_eq!(skipped_why(&reading, what), Some(reason.reason().to_string()), "{what}");
     }
+    // The transparency toggle's script sends only requests the IPC
+    // serves now, and its chord takes the native toggle directly.
+    assert_eq!(
+        action_for(&reading, "super+backspace"),
+        Some(Action::ToggleOpaque),
+        "SUPER + BACKSPACE toggles the focused window opaque"
+    );
     // The clamshell half of Omarchy's lid bindings binds as a switch and
     // then meets the script filter: it disables outputs through requests
     // this desktop does not serve.
@@ -1035,6 +1041,118 @@ fn omarchys_persisted_device_disable_is_read_as_data_and_never_as_lua() {
 /// decide when the pointer hides arrive from either syntax, the warp key
 /// Omarchy sets beside it is declined by name, and the rest of the
 /// section is still reported rather than dropped.
+/// Omarchy's stock animation configuration, in both syntaxes: motion
+/// stays on, the leaves this desktop has no transition for are named,
+/// and the curves are declined as curves rather than as unknown calls.
+#[test]
+fn omarchys_default_animations_leave_motion_on_and_name_every_leaf_not_read() {
+    for (root, curve) in [(machine(), "hl.curve(\"easeOutQuint\")"), (conf_machine(), "bezier = easeOutQuint")] {
+        let reading = read(&root);
+        assert_eq!(reading.motion, wm_core::MotionPolicy::default(), "{root:?}");
+        for leaf in ["workspaces", "border", "layersIn"] {
+            assert!(
+                reading.skipped.iter().any(|skip| skip.kind == "animation" && skip.what.contains(&format!("leaf {leaf} "))),
+                "{root:?}: {leaf} must be declined by name: {:?}",
+                reading.skipped
+            );
+        }
+        assert!(
+            reading.skipped.iter().any(|skip| skip.kind == "animation" && skip.what.contains(curve)),
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(
+            !reading.skipped.iter().any(|skip| skip.kind == "lua-call" && skip.what.contains("hl.animation")),
+            "{root:?}: hl.animation is read, not an unplaced call: {:?}",
+            reading.skipped
+        );
+    }
+}
+
+/// The switch Omarchy's own override template offers ("Disable all
+/// animations"), uncommented, in every spelling a user can write it.
+#[test]
+fn animation_off_switches_reach_the_motion_policy_in_both_syntaxes() {
+    let lua_cases: [(&str, wm_core::MotionPolicy); 6] = [
+        ("hl.config({ animations = { enabled = false } })\n", wm_core::MotionPolicy { enabled: false, ..Default::default() }),
+        ("hl.animation({ leaf = \"global\", enabled = false })\n", wm_core::MotionPolicy { enabled: false, ..Default::default() }),
+        ("hl.animation({ leaf = \"windows\", enabled = false, speed = 3.79, bezier = \"easeOutQuint\" })\n", wm_core::MotionPolicy { layout: false, ..Default::default() }),
+        ("hl.animation({ leaf = \"windowsMove\", enabled = false })\n", wm_core::MotionPolicy { layout: false, ..Default::default() }),
+        // Later wins, the way a user's file lands on Omarchy's defaults.
+        ("hl.animation({ leaf = \"global\", enabled = false })\nhl.config({ animations = { enabled = true } })\n", wm_core::MotionPolicy::default()),
+        // A switch only running code could decide is refused, not guessed.
+        ("x = y or false\nhl.animation({ leaf = \"global\", enabled = x })\nhl.config({ animations = { enabled = x } })\n", wm_core::MotionPolicy::default()),
+    ];
+    for (index, (source, expected)) in lua_cases.iter().enumerate() {
+        let home = scratch(&format!("animation-lua-{index}"));
+        write(&home.join(".config/hypr/hyprland.lua"), source);
+        let reading = read(&Roots::under(&home));
+        assert_eq!(reading.motion, *expected, "{source}: {:?}", reading.skipped);
+        assert!(
+            !reading.skipped.iter().any(|skip| skip.what.contains("outside input")),
+            "{source}: animations is a read table: {:?}",
+            reading.skipped
+        );
+    }
+    let styled = read(&Roots::under(&{
+        let home = scratch("animation-lua-styled");
+        write(&home.join(".config/hypr/hyprland.lua"), lua_cases[2].0);
+        home
+    }));
+    assert!(
+        styled.skipped.iter().any(|skip| skip.kind == "animation" && skip.what.contains("\"windows\"") && skip.what.contains("speed, bezier")),
+        "the speed and curve on a read leaf are declined by name: {:?}",
+        styled.skipped
+    );
+    let runtime = read(&Roots::under(&{
+        let home = scratch("animation-lua-runtime");
+        write(&home.join(".config/hypr/hyprland.lua"), lua_cases[5].0);
+        home
+    }));
+    assert_eq!(
+        runtime.skipped.iter().filter(|skip| skip.what.contains("computed at runtime") && skip.kind == "animation").count(),
+        2,
+        "{:?}",
+        runtime.skipped
+    );
+
+    let conf_cases: [(&str, wm_core::MotionPolicy); 4] = [
+        ("animations {\n    enabled = no\n}\n", wm_core::MotionPolicy { enabled: false, ..Default::default() }),
+        ("animations {\n    enabled = yes\n    animation = windows, 0, 3.79, easeOutQuint\n}\n", wm_core::MotionPolicy { layout: false, ..Default::default() }),
+        ("animation = global, 0, 10, default\n", wm_core::MotionPolicy { enabled: false, ..Default::default() }),
+        ("animations {\n    enabled = yes, please :)\n    animation = windows, maybe, 3.79, easeOutQuint\n}\n", wm_core::MotionPolicy::default()),
+    ];
+    for (index, (source, expected)) in conf_cases.iter().enumerate() {
+        let home = scratch(&format!("animation-conf-{index}"));
+        write(&home.join(".config/hypr/hyprland.conf"), source);
+        let reading = read(&Roots::under(&home));
+        assert_eq!(reading.motion, *expected, "{source}: {:?}", reading.skipped);
+        assert!(
+            !reading.skipped.iter().any(|skip| skip.kind == "block" && skip.what.contains("animations")),
+            "{source}: the block is read line by line, not refused whole: {:?}",
+            reading.skipped
+        );
+    }
+    let unreadable = read(&Roots::under(&{
+        let home = scratch("animation-conf-unreadable");
+        write(&home.join(".config/hypr/hyprland.conf"), conf_cases[3].0);
+        home
+    }));
+    assert!(unreadable.skipped.iter().any(|skip| skip.what.contains("yes, please")), "{:?}", unreadable.skipped);
+    assert!(unreadable.skipped.iter().any(|skip| skip.what.contains("windows, maybe")), "{:?}", unreadable.skipped);
+
+    // Through the whole precedence: the read lands under config.toml.
+    let home = scratch("animation-precedence");
+    write(&home.join(".config/hypr/hyprland.lua"), lua_cases[0].0);
+    let live = || Some(read(&Roots::under(&home)));
+    let config = crate::parse_with("desktop = \"omarchy\"", &live).unwrap();
+    assert!(!config.motion.enabled);
+    assert_eq!(config.provenance.get("motion").map(String::as_str), Some("live Hyprland config"));
+    let config = crate::parse_with("desktop = \"omarchy\"\n[motion]\nenabled = true\nspeed = 2\n", &live).unwrap();
+    assert_eq!(config.motion, wm_core::MotionPolicy { speed: 2.0, ..Default::default() });
+    assert_eq!(config.provenance.get("motion").map(String::as_str), Some("config file"));
+}
+
 #[test]
 fn the_cursor_table_carries_when_the_pointer_hides_and_declines_warps() {
     let lua = scratch("cursor-table-lua");
@@ -1089,7 +1207,7 @@ hl.config({
             reading.skipped
         );
         assert!(
-            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input, cursor and binds")),
+            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input, cursor, binds, animations, decoration")),
             "{root:?}: the rest of the configuration is still reported: {:?}",
             reading.skipped
         );
@@ -2568,6 +2686,224 @@ fn non_geometric_window_rules_are_combined_property_by_property() {
     assert!(decision.maximize && decision.fullscreen);
 }
 
+/// Omarchy's opacity rules, as shipped, resolve to what Omarchy means
+/// by them. The whole scheme rests on tag removal: every window is
+/// tagged `default-opacity` first, each app file that wants an opaque
+/// window removes the tag again, and the opacity for the tag comes
+/// last — so a reader that ignored `-default-opacity` would make mpv
+/// translucent and give Chromium the terminal's alpha.
+#[test]
+fn omarchys_opacity_rules_resolve_as_authored() {
+    use wm_core::OpacityRule;
+    let reading = read(&machine());
+    let policy = reading.float_rules;
+    let opacity = |class: &str, title: &str| policy.window_decision_for(class, title).opacity;
+    // A terminal: the default, through the tag alone.
+    assert_eq!(
+        opacity("org.codeberg.dnkl.foot", ""),
+        Some(OpacityRule { active: 0.985, inactive: 0.96, fullscreen: None }),
+        "a terminal takes Omarchy's default opacity"
+    );
+    // Chromium: `apps/browser.lua` removes the default tag on the
+    // strength of the `chromium-based-browser` tag and sets its own.
+    assert_eq!(
+        opacity("chromium", ""),
+        Some(OpacityRule { active: 1.0, inactive: 0.985, fullscreen: None }),
+        "a browser is opaque while focused"
+    );
+    assert_eq!(opacity("firefox", ""), Some(OpacityRule { active: 1.0, inactive: 0.985, fullscreen: None }));
+    // Media, games and colour-critical work: `-default-opacity` and
+    // an explicit `1 1`.
+    for class in ["mpv", "steam", "steam_app_123", "resolve", "DaVinci Resolve"] {
+        assert_eq!(
+            opacity(class, ""),
+            Some(OpacityRule { active: 1.0, inactive: 1.0, fullscreen: None }),
+            "{class} is opaque in both focus states"
+        );
+    }
+    // A YouTube web app: only the tag is removed. No rule names an
+    // opacity for it, and no rule may, so it is drawn opaque.
+    assert_eq!(
+        opacity("chrome-youtube.com__-Default", "YouTube"),
+        None,
+        "tag removal alone takes the web app out of the default"
+    );
+    // The webcam overlay asks to be left alone by `dim_inactive`.
+    let overlay = policy.window_decision_for("WebcamOverlay-small", "WebcamOverlay");
+    assert!(overlay.no_dim, "the webcam overlay is never dimmed");
+    assert_eq!(overlay.opacity, Some(OpacityRule { active: 1.0, inactive: 1.0, fullscreen: None }));
+    assert!(
+        !policy.window_decision_for("org.codeberg.dnkl.foot", "").no_dim,
+        "no_dim is the overlay's, not everybody's"
+    );
+    assert!(
+        !reading.skipped.iter().any(|skip| skip.what.contains("tag removal is not followed")
+            || skip.what.contains("property opacity")
+            || skip.what.contains("property no_dim")),
+        "opacity, no_dim and tag removal are read now: {:?}",
+        reading.skipped.iter().filter(|skip| skip.kind == "window-rule").map(|skip| &skip.what).collect::<Vec<_>>()
+    );
+}
+
+/// The order Omarchy writes its tag rules in is not the order a
+/// one-pass reader would need. `floating-window`'s consumers sit above
+/// the lines that add the tag, while `default-opacity`'s removals sit
+/// between the add and the consumer; both have to come out the way
+/// Hyprland's repeated passes settle them.
+#[test]
+fn tag_removal_follows_file_order() {
+    let compile = |text: &str| {
+        let mut vars = BTreeMap::new();
+        let mut out = Vec::new();
+        conf::read(text, &mut vars, &mut out);
+        let parsed: Vec<_> = out
+            .into_iter()
+            .filter_map(|directive| match directive {
+                Directive::WindowRule(rule) => Some(rule),
+                _ => None,
+            })
+            .collect();
+        rules::compile(&parsed)
+    };
+    // Add, remove, consume: the removal between them holds.
+    let (rules, notes) = compile(concat!(
+        "windowrule = tag +translucent, match:class .*\n",
+        "windowrule = tag -translucent, match:class ^mpv$\n",
+        "windowrule = opacity 0.9, match:tag translucent\n",
+    ));
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(rules.window_decision_for("foot", "").opacity.map(|o| o.active), Some(0.9));
+    assert_eq!(rules.window_decision_for("mpv", "").opacity, None, "removed before the rule");
+    // Consume, add, remove: a rule above the add still sees the tag
+    // (the second pass does), and the removal after it still holds.
+    let (rules, notes) = compile(concat!(
+        "windowrule = float on, match:tag floating\n",
+        "windowrule = tag +floating, match:class ^(btop|mpv)$\n",
+        "windowrule = tag -floating, match:class ^mpv$\n",
+    ));
+    assert!(notes.is_empty(), "{notes:?}");
+    assert!(rules.decision_for("btop", "").is_some(), "tagged below the rule that reads the tag");
+    assert!(rules.decision_for("mpv", "").is_none(), "removed below both");
+    // Add, remove, add again: the last word wins.
+    let (rules, _) = compile(concat!(
+        "windowrule = tag +x, match:class ^a$\n",
+        "windowrule = tag -x, match:class ^a$\n",
+        "windowrule = tag +x, match:class ^a$\n",
+        "windowrule = pin on, match:tag x\n",
+    ));
+    assert!(rules.window_decision_for("a", "").pin);
+    // A removal on the strength of another tag is followed one level,
+    // exactly as Omarchy's browser file writes it.
+    let (rules, notes) = compile(concat!(
+        "windowrule = tag +default-opacity, match:class .*\n",
+        "windowrule = tag +browser, match:class ^(chromium|firefox)$\n",
+        "windowrule = tag -default-opacity, match:tag browser\n",
+        "windowrule = opacity 1.0 0.985, match:tag browser\n",
+        "windowrule = opacity 0.985 0.96, match:tag default-opacity\n",
+    ));
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(rules.window_decision_for("chromium", "").opacity.map(|o| o.inactive), Some(0.985));
+    assert_eq!(rules.window_decision_for("foot", "").opacity.map(|o| o.inactive), Some(0.96));
+    // Two levels is where following stops, loudly.
+    let (rules, notes) = compile(concat!(
+        "windowrule = tag +a, match:class ^x$\n",
+        "windowrule = tag +b, match:tag a\n",
+        "windowrule = tag +c, match:tag b\n",
+        "windowrule = pin on, match:tag c\n",
+    ));
+    assert!(!rules.window_decision_for("x", "").pin, "a chain of two tags is not followed");
+    assert!(notes.iter().any(|note| note.contains("chained tags are not followed")), "{notes:?}");
+}
+
+/// `opacity` in its three shapes, clamped, with the unreadable
+/// refused by name rather than read as something.
+#[test]
+fn opacity_values_are_read_clamped_and_refused_when_unreadable() {
+    use wm_core::OpacityRule;
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = opacity 0.8, match:class ^one$\n",
+            "windowrule = opacity 0.9 0.7, match:class ^two$\n",
+            "windowrule = opacity 0.9 0.7 0.5, match:class ^three$\n",
+            "windowrule = opacity 1.5 -2 override, match:class ^clamped$\n",
+            "windowrule = opacity nan, match:class ^nan$\n",
+            "windowrule = opacity inf 1, match:class ^inf$\n",
+            "windowrule = opacity 1 2 3 4, match:class ^many$\n",
+            "windowrule = opacity, match:class ^none$\n",
+            "windowrule = no_dim on, match:class ^nodim$\n",
+            "windowrule = no_dim off, match:class ^dimmed$\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    let opacity = |class: &str| rules.window_decision_for(class, "").opacity;
+    assert_eq!(opacity("one"), Some(OpacityRule { active: 0.8, inactive: 0.8, fullscreen: None }));
+    assert_eq!(opacity("two"), Some(OpacityRule { active: 0.9, inactive: 0.7, fullscreen: None }));
+    assert_eq!(opacity("three"), Some(OpacityRule { active: 0.9, inactive: 0.7, fullscreen: Some(0.5) }));
+    assert_eq!(opacity("clamped"), Some(OpacityRule { active: 1.0, inactive: 0.0, fullscreen: None }));
+    for class in ["nan", "inf", "many", "none"] {
+        assert_eq!(opacity(class), None, "{class} is refused");
+    }
+    assert_eq!(
+        notes.iter().filter(|note| note.contains("window rule opacity") && note.contains("property skipped")).count(),
+        4,
+        "{notes:?}"
+    );
+    assert!(rules.window_decision_for("nodim", "").no_dim);
+    assert!(!rules.window_decision_for("dimmed", "").no_dim);
+}
+
+/// `decoration:dim_inactive` and `dim_strength`, in both syntaxes,
+/// with the rest of the decoration table still declined by name.
+#[test]
+fn dim_inactive_is_read_from_the_decoration_table() {
+    let home = scratch("dim-lua");
+    write(
+        &home.join(".config/hypr/hyprland.lua"),
+        "hl.config({ decoration = { rounding = 8, dim_inactive = true, dim_strength = 0.15 } })\n",
+    );
+    let reading = read(&Roots::under(&home));
+    assert_eq!(reading.dim_inactive, Some(0.15));
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what.contains("decoration.rounding")),
+        "the rest of the table is still declined by name: {:?}",
+        reading.skipped
+    );
+    let mut config = crate::Config::default_config();
+    apply(&mut config, Some(&reading));
+    assert_eq!(config.decorations.dim_inactive, Some(0.15));
+
+    let home = scratch("dim-conf");
+    write(
+        &home.join(".config/hypr/hyprland.conf"),
+        "decoration {\n    rounding = 8\n    dim_inactive = true\n    dim_strength = 0.4\n    blur {\n        enabled = true\n    }\n}\n",
+    );
+    let reading = read(&Roots::under(&home));
+    assert_eq!(reading.dim_inactive, Some(0.4));
+
+    // Hyprland's default strength applies when only the switch is set;
+    // an out-of-range strength is refused and the default kept.
+    let home = scratch("dim-default");
+    write(&home.join(".config/hypr/hyprland.lua"), "hl.config({ decoration = { dim_inactive = true, dim_strength = 7 } })\n");
+    let reading = read(&Roots::under(&home));
+    assert_eq!(reading.dim_inactive, Some(0.5));
+    assert!(reading.skipped.iter().any(|skip| skip.what.contains("dim_strength = 7")), "{:?}", reading.skipped);
+
+    let home = scratch("dim-off");
+    write(&home.join(".config/hypr/hyprland.lua"), "hl.config({ decoration = { dim_strength = 0.3 } })\n");
+    assert_eq!(read(&Roots::under(&home)).dim_inactive, None, "a strength without the switch dims nothing");
+}
+
 #[test]
 fn unsupported_rule_properties_are_named_without_discarding_supported_siblings() {
     let mut vars = BTreeMap::new();
@@ -3634,6 +3970,9 @@ fn an_if_without_then_is_skipped_whole() {
 /// The module promises that everything it meets and does not act on is
 /// logged. Calls were the gap: Omarchy's animation curves, its
 /// persisted touchpad disable and every runtime-only call vanished.
+/// Of the sixteen `hl.animation` leaves, the switch on each is read;
+/// fourteen carry a speed and curve, declined by leaf, and fourteen
+/// name a transition this desktop does not have, declined by leaf.
 #[test]
 fn every_call_the_lua_reader_meets_is_recorded() {
     let reading = read(&machine());
@@ -3645,7 +3984,9 @@ fn every_call_the_lua_reader_meets_is_recorded() {
             .count()
     };
     assert_eq!(count("animation", "hl.curve("), 5, "{:?}", reading.skipped);
-    assert_eq!(count("animation", "hl.animation("), 16);
+    assert_eq!(count("animation", "hl.animation leaf"), 14, "{:?}", reading.skipped);
+    assert_eq!(count("animation", "(enabled = "), 14, "{:?}", reading.skipped);
+    assert_eq!(count("animation", "hl.animation("), 0);
     // Omarchy's persisted touchpad and touchscreen disables are read as
     // data now, and the captured machine has none.
     assert_eq!(count("lua-call", "disabled_input_device("), 0);
@@ -3911,7 +4252,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     let reading = read(&machine());
     assert_eq!(
         reading.keybindings.len(),
-        188,
+        189,
         "bindings read from the captured machine"
     );
     assert_eq!(
@@ -3921,7 +4262,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert_eq!(
         reading.float_rules.len(),
-        49,
+        40,
         "window behaviors resolved through Omarchy's tags"
     );
     // The skipped count is quoted too, in the guide's sample log line.
@@ -3930,17 +4271,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        150,
+        139,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("188\nbindings over 121 commands") || MODE.contains("188 bindings over 121 commands"),
-        "docs/omarchy-mode.md no longer quotes the 188 bindings over 121 commands this machine produces"
+        MODE.contains("189\nbindings over 121 commands") || MODE.contains("189 bindings over 121 commands"),
+        "docs/omarchy-mode.md no longer quotes the 189 bindings over 121 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=188 commands=121 env=8 autostart=4")
-            && GUIDE.contains("float_rules=49 monitors=1 skipped=150"),
+        GUIDE.contains("files=42 bindings=189 commands=121 env=8 autostart=4")
+            && GUIDE.contains("float_rules=40 monitors=1 skipped=139"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }
@@ -3959,4 +4300,120 @@ fn screensaver_defaults_survive_unrelated_rules_and_allow_explicit_opt_out() {
     write(&path, "windowrule = fullscreen off, match:class ^org\\.omarchy\\.screensaver$\n");
     let reading = read(&Roots::under(&root));
     assert!(!reading.float_rules.window_decision_for("org.omarchy.screensaver", "foot").fullscreen);
+}
+
+// ---- Omarchy's toggle directory ---------------------------------------
+
+/// A scratch home wearing the fixture's Omarchy defaults, so the real
+/// `toggles.lua` — `require_all.files(toggles_dir, nil, { exclude = … })`
+/// over `paths.state_home .. "/omarchy/toggles/hypr"` — is what the
+/// reader meets.
+fn scratch_with_omarchy_defaults(tag: &str) -> PathBuf {
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+    let root = scratch(tag);
+    copy_tree(&fixtures().join("machine/omarchy"), &root.join("omarchy"));
+    root
+}
+
+/// Omarchy's clamshell and laptop-display toggles each write one
+/// `hl.monitor({ output = …, disabled = true })` line into the toggle
+/// directory and reload. Those two files are read; the two legacy names
+/// Omarchy's own loader excludes are not, whatever they contain.
+#[test]
+fn omarchys_toggle_directory_is_read_and_its_excluded_names_are_not() {
+    let root = scratch_with_omarchy_defaults("toggles-dir");
+    write(&root.join(".config/hypr/hyprland.lua"), "require(\"default.hypr.toggles\")\n");
+    let toggles = root.join(".local/state/omarchy/toggles/hypr");
+    write(
+        &toggles.join("internal-monitor-clamshell.lua"),
+        "hl.monitor({ output = \"eDP-1\", disabled = true })\n",
+    );
+    write(
+        &toggles.join("internal-monitor-disable.lua"),
+        "hl.monitor({ output = \"DP-3\", disabled = true })\n",
+    );
+    for legacy in ["touchpad-disabled", "touchscreen-disabled"] {
+        write(
+            &toggles.join(format!("{legacy}.lua")),
+            "hl.monitor({ output = \"NEVER\", disabled = true })\no.bind(\"SUPER + F11\", nil, \"never\")\n",
+        );
+    }
+    // Not a toggle: the loader takes `*.lua` only, as Omarchy's does.
+    write(&toggles.join("notes.txt"), "hl.monitor({ output = \"NEVER\", disabled = true })\n");
+
+    let reading = read(&Roots::under(&root));
+    let disabled: Vec<(&str, &[String])> = reading
+        .monitors
+        .lines
+        .iter()
+        .map(|line| (line.output.as_str(), line.extra.as_slice()))
+        .collect();
+    assert_eq!(
+        disabled,
+        [("eDP-1", &["disabled".to_string(), "on".to_string()][..]), ("DP-3", &["disabled".to_string(), "on".to_string()][..])],
+        "{:?}",
+        reading.skipped
+    );
+    assert!(
+        reading.files.iter().any(|file| file.ends_with("internal-monitor-clamshell.lua"))
+            && reading.files.iter().any(|file| file.ends_with("internal-monitor-disable.lua")),
+        "{:?}",
+        reading.files
+    );
+    assert!(
+        !reading.files.iter().any(|file| file.ends_with("touchpad-disabled.lua") || file.ends_with("touchscreen-disabled.lua")),
+        "an excluded name must never be read: {:?}",
+        reading.files
+    );
+    assert!(action_for(&reading, "super+f11").is_none());
+    assert!(
+        !reading.skipped.iter().any(|skip| skip.what.contains("no module prefix")),
+        "the toggle fan-out is followed, not recorded as ignored: {:?}",
+        reading.skipped
+    );
+}
+
+/// Only the one shape Omarchy writes is followed. A nil-prefix fan-out
+/// over any other directory expression is still recorded as ignored,
+/// and a suffix that would climb out of the state home is refused.
+#[test]
+fn only_omarchys_toggle_fan_out_is_followed_without_a_module_prefix() {
+    let root = scratch_with_omarchy_defaults("toggles-dir-shape");
+    write(
+        &root.join(".local/state/etc/marker.lua"),
+        "o.bind(\"SUPER + F11\", nil, \"never\")\n",
+    );
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        concat!(
+            "local paths = require(\"default.hypr.paths\")\n",
+            "local require_all = require(\"default.hypr.require_all\")\n",
+            "local elsewhere = require(\"default.hypr.helpers\")\n",
+            "require_all.files(paths.config_home .. \"/hypr\", nil, {})\n",
+            "require_all.files(\"/etc\", nil)\n",
+            "require_all.files(elsewhere.state_home .. \"/etc\", nil)\n",
+            "require_all.files(paths.state_home .. \"/omarchy/../etc\", nil)\n",
+            "require_all.files(paths.state_home .. \"etc\", nil)\n",
+            "require_all.files(paths.state_home .. \"/etc\", nil, { exclude = { [\"marker\"] = true } })\n",
+        ),
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(
+        reading.skipped.iter().filter(|skip| skip.what.contains("require_all.files with no module prefix")).count(),
+        5,
+        "{:?}",
+        reading.skipped
+    );
+    assert!(action_for(&reading, "super+f11").is_none(), "an excluded file is skipped");
+    assert!(!reading.files.iter().any(|file| file.ends_with("marker.lua")), "{:?}", reading.files);
 }

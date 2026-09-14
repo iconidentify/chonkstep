@@ -197,8 +197,8 @@ between "chonkstep knows what Omarchy's chords were in August" and
 "Omarchy's menu still configures your machine": rebind a key through
 their UI and the running session follows it within a second.
 
-On the machine this was developed on the live read produced **188
-bindings over 121 commands**, against the baked table's 162 over 86 —
+On the machine this was developed on the live read produced **189
+bindings over 121 commands**, against the baked table's 163 over 86 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
 file test that only a live read can make, and Omarchy's twelve keyboard
@@ -219,7 +219,7 @@ what the live read falls back to.
 
 Both tables live in the keybinding card, beside chonkstep's own:
 **[keybindings.md](keybindings.md), under "The Omarchy keymap"**
-— 162 bindings over 86 declared commands, then the 20 groups of Omarchy
+— 163 bindings over 86 declared commands, then the 19 groups of Omarchy
 chords that remain unbound and why. Both are transcribed
 from `crates/wm-config/src/preset.rs`, which is the authoritative list;
 `crates/wm-config/tests/preset_doc.rs` fails if the card and the table

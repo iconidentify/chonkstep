@@ -5,6 +5,51 @@ output geometry, configuration, clients, and measurement interval. The harness
 in `scripts/bench-compositor.py` writes individual samples and raw process
 accounting so a reported median can be checked against the underlying runs.
 
+## Window opacity rules — 2026-09-14
+
+Omarchy's default window rules composite ordinary windows at 0.985
+focused and 0.96 unfocused. Smithay drops a surface's opaque regions once
+its alpha is below 1, so nothing beneath a translucent window can be
+culled. This records what that costs in scene elements, and what the
+cheaper `dim_inactive` cue costs instead, so the `window_opacity = false`
+kill switch is a measured choice rather than a guess.
+
+Measured on the headless nested session only — `scripts/e2e.sh --headless`'s
+Weston host with its pixman renderer, the debug `chonkstep-wayland` on Mesa
+llvmpipe, one 1280×800 output at scale 1, no Omarchy shell, bar or Dock.
+The configuration is the captured Omarchy 4 machine under
+`crates/wm-config/tests/fixtures/hyprland/machine` with `desktop = "omarchy"`,
+so the rules are Omarchy's shipped `default-opacity` set. The workload is
+four `foot` terminals in the Mosaic layout, one focused. The counts are
+the `scene_elements` line of the control socket's `debug scene` report
+after a screenshot-forced frame: elements built for the frame, elements
+the damage tracker composited, and elements it skipped as fully occluded.
+No native DRM/KMS session was measured, and no scanout claim is made from
+these numbers; a fullscreen window keeps alpha 1.0 unless a rule names a
+third value, which leaves the direct-scanout path untouched by construction.
+
+| Configuration | Built | Composited | Skipped as occluded |
+| --- | ---: | ---: | ---: |
+| Omarchy rules, `window_opacity` default (on) | 22 | 22 | 0 |
+| Omarchy rules, `window_opacity = false` | 26 | 22 | 4 |
+| `window_opacity = false`, `decoration:dim_inactive = true` at `dim_strength = 0.15` | 29 | 25 | 4 |
+
+The composited element count is the same with the rules on and off. With
+them on, the four opaque black resize fills behind the client bodies are
+not pushed at all (they would show through), and nothing is skipped
+because a translucent body occludes nothing. With them off, the four fills
+are built and every one is culled behind its opaque client. Dimming adds
+one blended quad per unfocused window — three here — and leaves the
+windows opaque, so the four fills stay culled.
+
+The element count is therefore not where translucency costs. What changes
+is fragment work the tracker cannot count: under the rules the wallpaper
+beneath every terminal is drawn in full and the terminal is blended over
+it, where an opaque terminal lets the tracker leave those pixels alone.
+On four tiled terminals that is the whole desktop area drawn twice. A user
+who wants that occlusion back sets `window_opacity = false`; `dim_inactive`
+keeps the focus cue at the price of one quad per unfocused window.
+
 ## Decoration-style baseline — 2026-09-11
 
 Before refactoring the chrome renderer, main `22f5590` was measured on i9beef

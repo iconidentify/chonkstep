@@ -87,27 +87,32 @@
 //!
 //! # What is deliberately not read
 //!
-//! - **Gaps, borders, rounding, blur, shadows, animations.** These are
-//!   Hyprland's look, and this desktop has its own — a theme, a
-//!   titlebar, a decoration policy. Following them would mean drawing
-//!   a NeXTSTEP frame with Hyprland's border colour on it. The
-//!   *layout name* is the one exception: `general.layout` and the
-//!   per-workspace `workspace` rules decide whether windows tile at
-//!   all, not how they look, and `dwindle` and `scrolling` are names
-//!   this desktop's own Mosaic and Flow already answer to. They are
-//!   read as [`Reading::default_layout`] and
+//! - **Gaps, borders, rounding, blur, shadows, animation curves, speeds
+//!   and styles.** These are Hyprland's look, and this desktop has its
+//!   own — a theme, a titlebar, a decoration policy, one spring.
+//!   Following them would mean drawing a NeXTSTEP frame with Hyprland's
+//!   border colour on it. Two exceptions. The *layout name*:
+//!   `general.layout` and the per-workspace `workspace` rules decide
+//!   whether windows tile at all, not how they look, and `dwindle` and
+//!   `scrolling` are names this desktop's own Mosaic and Flow already
+//!   answer to. They are read as [`Reading::default_layout`] and
 //!   [`Reading::workspace_layouts`]; every other layout setting
 //!   (`dwindle { … }`, `master { … }`, `scrolling { … }`) stays
-//!   Hyprland's.
+//!   Hyprland's. And the animation *switches*: turning motion off is a
+//!   comfort and accessibility preference, not a look, so
+//!   `animations.enabled` and the `global`, `windows` and `windowsMove`
+//!   leaves are read into [`crate::Config::motion`]. Every other leaf is
+//!   named and skipped.
 //! - **Layer rules.** They configure Hyprland's layer-shell
 //!   implementation; this compositor has its own.
 //! - **Unsupported input settings.** Keyboard xkb/repeat values are
 //!   carried. Whole-desktop behavior such as `follow_mouse`, touchpad
 //!   policy, and gestures belongs to chonkstep and is named and skipped.
 //! - **Unsupported `monitor =` lines.** Preferred and explicit modes,
-//!   position, scale, and 0/90/180/270-degree transforms are applied
-//!   once outputs exist. Disable, mirror, and other extras refuse their
-//!   whole line.
+//!   position, scale, 0/90/180/270-degree transforms and `disable`
+//!   (Lua `disabled = true`) are applied once outputs exist, at
+//!   startup, at hotplug and on an explicit reload. Mirror and other
+//!   extras refuse their whole line.
 //! - **Hyprland requests chonkstep does not serve.** `hyprctl` and any
 //!   `omarchy-hyprland-*` script outside
 //!   [`dispatch::SERVED_OMARCHY_SCRIPTS`] stay unbound, with a reason
@@ -307,12 +312,18 @@ pub struct Reading {
     /// `binds:hide_special_on_workspace_change`, when the configuration
     /// says either way.
     pub hide_special_on_workspace_change: Option<bool>,
+    /// `decoration:dim_inactive` at `decoration:dim_strength`: how much
+    /// to darken every unfocused window, or `None` to leave them alone.
+    pub dim_inactive: Option<f32>,
     /// Every file actually read, in order. The [`Watch`]'s signature is
     /// taken over exactly this list.
     pub files: Vec<PathBuf>,
     /// What was skipped, and why. Logged by [`Reading::report`] and
     /// carried so the docs and the tests can name a specific skip.
     pub skipped: Vec<Skipped>,
+    /// The animation switches, later winning. Only the switches: the
+    /// speed stays at its default for the `[motion]` table to set.
+    pub motion: wm_core::MotionPolicy,
 }
 
 /// One thing this read declined to act on.
@@ -352,9 +363,10 @@ impl Reading {
         // future category cannot silently disappear at this loading boundary.
         let Self {
             keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
-            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, files: _, skipped: _,
+            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, dim_inactive, files: _, skipped: _, motion,
         } = self;
         keybindings.is_empty()
+            && dim_inactive.is_none()
             && explicit_keys.is_empty()
             && bindings.is_empty()
             && layer_bindings.is_empty()
@@ -368,6 +380,7 @@ impl Reading {
             && default_layout.is_none()
             && workspace_layouts.is_empty()
             && hide_special_on_workspace_change.is_none()
+            && *motion == wm_core::MotionPolicy::default()
     }
 
     /// Logs the read: one summary line, and one line per thing
@@ -404,7 +417,8 @@ impl Reading {
                 mode = %line.mode,
                 position = %line.position,
                 scale = %line.scale,
-                "hyprland-config: monitor line applied at startup and on connector hotplug only; a reload does not re-apply it (see docs/hyprland-config.md)"
+                extra = %line.extra.join(","),
+                "hyprland-config: monitor line read; applied at startup, on connector hotplug and on an explicit reload, never from the file watch (see docs/hyprland-config.md)"
             );
         }
     }
@@ -444,7 +458,7 @@ pub fn read(roots: &Roots) -> Reading {
         // bindings shipped in `/usr/share`, and reading them is better
         // than reading nothing. The defaults are what the entry file
         // would have required anyway.
-        loader.directory(&roots.defaults.join("bindings"), &mut stream, 0);
+        loader.directory(&roots.defaults.join("bindings"), &[], &mut stream, 0);
     }
     let mut reading = lower(stream, loader.finish());
     // Any xkb setting the configuration leaves unset — including one it
@@ -591,6 +605,8 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
     config.float_policy = reading.float_rules.clone().policy();
     config.default_layout = reading.default_layout;
     config.workspace_layouts = reading.workspace_layouts.clone();
+    config.motion = reading.motion.sanitized();
+    config.decorations.dim_inactive = reading.dim_inactive;
 }
 
 // ---- the file graph ---------------------------------------------------
@@ -731,20 +747,34 @@ impl<'a> Loader<'a> {
                 ),
             },
             Include::ModuleDirectory { prefix } => match self.resolve_directory(prefix) {
-                Some(dir) => self.directory(&dir, out, depth + 1),
+                Some(dir) => self.directory(&dir, &[], out, depth + 1),
                 None => self.note(
                     "include",
                     format!("require_all.files(…, \"{prefix}\")"),
                     "no directory of that name on the search path",
                 ),
             },
+            // Omarchy's toggle directory, under the state home. Absent
+            // until the first toggle is written, and `require_all`
+            // itself reads nothing from a directory that is not there,
+            // so a missing one is the ordinary case of nothing toggled.
+            Include::StateDirectory { relative, exclude } => {
+                let Some(root) = self.roots.facts.state_root() else {
+                    return;
+                };
+                let dir = root.join(relative);
+                if dir.is_dir() {
+                    self.directory(&dir, exclude, out, depth + 1);
+                }
+            }
         }
     }
 
     /// Every `*.lua`/`*.conf` directly under a directory, sorted —
     /// Omarchy's own `require_all.files` sorts, and so does the shell
-    /// glob its conf-syntax equivalent expands.
-    fn directory(&mut self, dir: &Path, out: &mut Vec<Directive>, depth: u32) {
+    /// glob its conf-syntax equivalent expands. A base name in
+    /// `exclude` is skipped, as Omarchy's own loader skips it.
+    fn directory(&mut self, dir: &Path, exclude: &[String], out: &mut Vec<Directive>, depth: u32) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             self.note("include", dir.display().to_string(), "unreadable directory");
             return;
@@ -758,6 +788,10 @@ impl<'a> Loader<'a> {
                         p.extension().and_then(|e| e.to_str()),
                         Some("lua") | Some("conf")
                     )
+                    && !p
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .is_some_and(|stem| exclude.iter().any(|name| name == stem))
             })
             .collect();
         paths.sort();
@@ -916,6 +950,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
     };
     let mut window_rules = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
+    let mut dim = Dim::default();
     for entry in stream {
         match entry {
             Directive::Bind {
@@ -972,6 +1007,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
             Directive::Input { name, value } => input(&mut reading, &name, &value),
             Directive::Cursor { name, value } => cursor(&mut reading, &name, &value),
             Directive::Binds { name, value } => binds(&mut reading, &name, &value),
+            Directive::Decoration { name, value } => decoration(&mut dim, &mut reading, &name, &value),
             Directive::Device { name, settings } => device(&mut reading, name, settings),
             Directive::ExecOnce { command } => autostart(&mut reading, &command),
             Directive::WindowRule(rule) => window_rules.push(rule),
@@ -1002,6 +1038,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
                     why: "not a style this desktop has; dwindle (Mosaic) and scrolling (Flow) are read".into(),
                 }),
             },
+            Directive::Animation { leaf, enabled } => animation(&mut reading, &leaf, enabled),
             Directive::Ignored { kind, detail } => reading.skipped.push(Skipped {
                 kind: kind.to_string(),
                 what: detail,
@@ -1013,6 +1050,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
     }
     let (float_rules, notes) = rules::compile(&window_rules);
     reading.float_rules = float_rules;
+    reading.dim_inactive = dim.enabled.then_some(dim.strength);
     for note in notes {
         reading.skipped.push(Skipped {
             kind: "window-rule".into(),
@@ -1177,6 +1215,38 @@ fn switch_bind(
     });
 }
 
+/// Hyprland's `decoration:dim_inactive` and `dim_strength`, gathered
+/// as they are met: the strength keeps Hyprland's default until a line
+/// names one, whichever order the two are written in.
+struct Dim {
+    enabled: bool,
+    strength: f32,
+}
+
+impl Default for Dim {
+    fn default() -> Self {
+        Self { enabled: false, strength: 0.5 }
+    }
+}
+
+fn decoration(dim: &mut Dim, reading: &mut Reading, name: &str, value: &str) {
+    let value = value.trim().trim_matches(['\"', '\'']).to_string();
+    match name {
+        "dim_inactive" => {
+            dim.enabled = matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "on" | "yes")
+        }
+        "dim_strength" => match value.parse::<f32>() {
+            Ok(strength) if strength.is_finite() && (0.0..=1.0).contains(&strength) => dim.strength = strength,
+            _ => reading.skipped.push(Skipped {
+                kind: "decoration".into(),
+                what: format!("dim_strength = {value}"),
+                why: "dim strength must be a number from 0 to 1".into(),
+            }),
+        },
+        _ => {}
+    }
+}
+
 fn input(reading: &mut Reading, name: &str, value: &str) {
     let value = value.trim().trim_matches(['\"', '\'']).to_string();
     match name.trim().to_ascii_lowercase().as_str() {
@@ -1328,6 +1398,26 @@ fn refuse_input(reading: &mut Reading, name: &str, value: &str, why: &str) {
         what: format!("{name} = {value}"),
         why: why.into(),
     });
+}
+
+/// The animation switches this desktop has a transition for: `global`
+/// is every compositor-started motion, `windows` and `windowsMove` are
+/// window geometry, which here is a layout reflow. Later wins, so a
+/// user's file overrides Omarchy's defaults. Every other leaf — borders,
+/// fades, layers, workspaces — animates something this desktop draws
+/// differently or not at all, and is declined by name.
+fn animation(reading: &mut Reading, leaf: &str, enabled: bool) {
+    if leaf.eq_ignore_ascii_case("global") {
+        reading.motion.enabled = enabled;
+    } else if leaf.eq_ignore_ascii_case("windows") || leaf.eq_ignore_ascii_case("windowsMove") {
+        reading.motion.layout = enabled;
+    } else {
+        reading.skipped.push(Skipped {
+            kind: "animation".into(),
+            what: format!("animation leaf {leaf} (enabled = {enabled})"),
+            why: "no such transition here; only global, windows and windowsMove are read".into(),
+        });
+    }
 }
 
 /// A Hyprland boolean, in any of the spellings its config accepts.

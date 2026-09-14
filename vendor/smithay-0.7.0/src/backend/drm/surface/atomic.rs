@@ -171,8 +171,18 @@ pub struct AtomicDrmSurface {
     prop_mapping: Arc<RwLock<PropMapping>>,
     state: RwLock<State>,
     pending: RwLock<State>,
+    /// Local patch (see `vendor/README.md`, "link-status retrain"):
+    /// the next submission must be a full `ALLOW_MODESET` commit that
+    /// writes `link-status = GOOD` on every connector of this crtc,
+    /// even when `pending` and `state` already agree.
+    link_retrain: AtomicBool,
     pub(super) span: tracing::Span,
 }
+
+/// `DRM_MODE_LINK_STATUS_GOOD`: raw value 0 of the `link-status`
+/// connector property. Userspace may only ever write this value; the
+/// kernel sets `BAD` (1) itself when a link fails to train.
+const LINK_STATUS_GOOD: property::Value<'static> = property::Value::UnsignedRange(0);
 
 impl AtomicDrmSurface {
     #[allow(clippy::too_many_arguments)]
@@ -218,6 +228,7 @@ impl AtomicDrmSurface {
             prop_mapping,
             state: RwLock::new(state),
             pending: RwLock::new(pending),
+            link_retrain: AtomicBool::new(false),
             span,
         };
 
@@ -674,7 +685,40 @@ impl AtomicDrmSurface {
     }
 
     pub fn commit_pending(&self) -> bool {
-        *self.pending.read().unwrap() != *self.state.read().unwrap()
+        self.link_retrain.load(Ordering::SeqCst) || *self.pending.read().unwrap() != *self.state.read().unwrap()
+    }
+
+    /// Requests that the next submission is a full `ALLOW_MODESET`
+    /// commit which writes `link-status = GOOD` on every pending
+    /// connector, regardless of whether the pending state differs from
+    /// the current one.
+    ///
+    /// This is what the KMS documentation expects of atomic userspace
+    /// after the kernel marked a connector's `link-status` `BAD`: only a
+    /// modeset that sets the property back to `GOOD` retrains the link.
+    /// Connectors without the property are committed unchanged, so the
+    /// request degrades to a plain forced modeset there. The flag is
+    /// cleared by the first commit that the device accepts.
+    pub fn request_link_retrain(&self) {
+        self.link_retrain.store(true, Ordering::SeqCst);
+    }
+
+    /// Adds `link-status = GOOD` for every connector that has the
+    /// property, when a retrain is pending. Only a modeset commit may
+    /// carry it: the kernel treats a `link-status` change as a
+    /// connector change and rejects it without `ALLOW_MODESET`.
+    fn add_link_retrain<'a>(
+        &self,
+        req: &mut AtomicRequest<'a>,
+        connectors: impl IntoIterator<Item = &'a connector::Handle>,
+    ) -> Result<(), Error> {
+        if !self.link_retrain.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        for conn in connectors {
+            req.set_connector_link_good(*conn)?;
+        }
+        Ok(())
     }
 
     #[instrument(level = "trace", parent = &self.span, skip(self, planes))]
@@ -708,7 +752,7 @@ impl AtomicDrmSurface {
         let removed = current_conns.difference(&pending_conns);
         let prop_mapping = self.prop_mapping.read().unwrap();
 
-        let req = AtomicRequest::build_request(
+        let mut req = AtomicRequest::build_request(
             &prop_mapping,
             self.crtc,
             Some(pending.blob),
@@ -717,6 +761,9 @@ impl AtomicDrmSurface {
             removed,
             &*planes,
         )?;
+        if allow_modeset {
+            self.add_link_retrain(&mut req, &pending_conns)?;
+        }
 
         let flags = if allow_modeset {
             AtomicCommitFlags::ALLOW_MODESET | AtomicCommitFlags::TEST_ONLY
@@ -780,7 +827,7 @@ impl AtomicDrmSurface {
         // test the new config and return the request if it would be accepted by the driver.
         let prop_mapping = self.prop_mapping.read().unwrap();
         let req = {
-            let req = AtomicRequest::build_request(
+            let mut req = AtomicRequest::build_request(
                 &prop_mapping,
                 self.crtc,
                 Some(pending.blob),
@@ -789,6 +836,7 @@ impl AtomicDrmSurface {
                 removed,
                 &*planes,
             )?;
+            self.add_link_retrain(&mut req, &pending_conns)?;
 
             if let Err(err) = self.fd.atomic_commit(
                 AtomicCommitFlags::ALLOW_MODESET | AtomicCommitFlags::TEST_ONLY,
@@ -839,6 +887,9 @@ impl AtomicDrmSurface {
 
         if result.is_ok() {
             *current = pending.clone();
+            // The device accepted the modeset that carried the property;
+            // ordinary page flips resume from here.
+            self.link_retrain.store(false, Ordering::SeqCst);
             for plane in planes.iter() {
                 if plane.config.is_some() {
                     used_planes.insert(plane.handle);
@@ -1157,6 +1208,14 @@ impl<'a> AtomicRequest<'a> {
         Ok(())
     }
 
+    fn set_connector_link_good(&mut self, conn: connector::Handle) -> Result<(), Error> {
+        if self.mapping.conn_prop_handle(conn, "link-status").is_ok() {
+            let connector_props = self.connector_props.entry(conn).or_default();
+            connector_props.insert("link-status", LINK_STATUS_GOOD);
+        }
+        Ok(())
+    }
+
     fn set_crtc(
         &mut self,
         crtc: crtc::Handle,
@@ -1356,6 +1415,13 @@ impl<'a> AtomicRequest<'a> {
             self.mapping.conn_prop_handle(conn, "CRTC_ID")?,
             property::Value::CRTC(None),
         );
+        Ok(())
+    }
+
+    fn set_connector_link_good(&mut self, conn: connector::Handle) -> Result<(), Error> {
+        if let Ok(prop) = self.mapping.conn_prop_handle(conn, "link-status") {
+            self.request.add_property(conn, prop, LINK_STATUS_GOOD);
+        }
         Ok(())
     }
 

@@ -49,6 +49,109 @@ fn boot_with(name: &str, hyprland: &str, probe_modes: &[&str]) -> Session {
     session
 }
 
+/// Boots a session whose Hyprland configuration gives probe windows a
+/// body alpha or a dim, and opens two red probe windows in it. Red on
+/// purpose: a focus cue that lives in the pixels has to be read from
+/// the pixels, and a solid red body makes "opaque" one exact colour.
+fn boot_two_red_windows(name: &str, hyprland: &str) -> (Session, chonk_testkit::WindowInfo, chonk_testkit::WindowInfo) {
+    let mut session = Session::boot(
+        name,
+        SessionOptions {
+            config_extra: "omarchy_menu = false\nhyprland_config = true\nshow_dock = false\n".into(),
+            config_root_files: vec![("hypr/hyprland.conf".into(), hyprland.to_string())],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Use the harness's committed solid buffer: foot's color section
+    // changed in 1.28, and a rejected override maps an error terminal
+    // instead of the color these assertions need to measure.
+    let color = session.dir.join("opacity-rgb");
+    std::fs::write(&color, [255, 0, 0]).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+    let mut windows = Vec::new();
+    for title in ["Opacity One", "Opacity Two"] {
+        session
+            .launch_isolated("env", &[&format!("CHONKSTEP_PROBE_COLOR_FILE={}", color.display()),
+                probe.to_str().unwrap(), title, "opacity-probe"])
+            .unwrap();
+        windows.push(session.wait_for_window(title).unwrap());
+    }
+    let two = windows.pop().unwrap();
+    let one = windows.pop().unwrap();
+    (session, one, two)
+}
+
+/// The mean colour of the middle of a window's body, well away from
+/// the surrounding frame.
+fn body_rgb(shot: &chonk_testkit::Screenshot, window: &chonk_testkit::WindowInfo) -> [f64; 3] {
+    let x = window.x as u32 + window.w / 2 - 8;
+    let y = window.y as u32 + window.h / 2 - 8;
+    shot.mean_rgb(x, y, 16, 16)
+}
+
+fn is_pure_red([r, g, b]: [f64; 3]) -> bool {
+    r > 245.0 && g < 10.0 && b < 10.0
+}
+
+fn focus_by_click(session: &mut Session, window: &chonk_testkit::WindowInfo) {
+    session.door().click(f64::from(window.x) + f64::from(window.w) / 2.0, f64::from(window.y) + f64::from(window.h) / 2.0).unwrap();
+    session.door().barrier().unwrap();
+    let id = window.id;
+    poll_until(EVENT, "the clicked window to take focus", || {
+        (session.world().ok()?.logical_focus == Some(id)).then_some(())
+    })
+    .unwrap();
+}
+
+/// An `opacity` rule is a focus cue: the focused window's body is
+/// composited at the active alpha and every other window's at the
+/// inactive one, and a focus change repaints both on the next frame
+/// without anything else damaging the scene.
+#[test]
+#[ignore = "needs a nested session; scripts/e2e.sh --headless --test keyboard_focus"]
+fn a_focus_change_updates_the_body_alpha_on_the_next_frame() {
+    let (mut session, one, two) =
+        boot_two_red_windows("keyboard-focus-opacity", "windowrule = opacity 1.0 0.5, match:class ^opacity-probe$\n");
+    // The second window mapped last and holds focus: opaque red. The
+    // first is unfocused at half alpha: red mixed with whatever lies
+    // beneath it, which is not red.
+    focus_by_click(&mut session, &two);
+    let shot = session.screenshot("two-focused").unwrap();
+    assert!(is_pure_red(body_rgb(&shot, &two)), "focused body is opaque: {:?} {}", body_rgb(&shot, &two), shot.path.display());
+    assert!(!is_pure_red(body_rgb(&shot, &one)), "unfocused body is translucent: {:?} {}", body_rgb(&shot, &one), shot.path.display());
+
+    focus_by_click(&mut session, &one);
+    let shot = session.screenshot("one-focused").unwrap();
+    assert!(is_pure_red(body_rgb(&shot, &one)), "the newly focused body is opaque: {:?} {}", body_rgb(&shot, &one), shot.path.display());
+    assert!(!is_pure_red(body_rgb(&shot, &two)), "the window that lost focus is translucent: {:?} {}", body_rgb(&shot, &two), shot.path.display());
+    assert!(session.compositor_alive());
+}
+
+/// `dim_inactive` darkens every unfocused window and only those: the
+/// focused body stays exactly its own colour, the unfocused one is the
+/// same red under a half-strength black quad — still red, with nothing
+/// from beneath the window mixed in, because the window stays opaque.
+#[test]
+#[ignore = "needs a nested session; scripts/e2e.sh --headless --test keyboard_focus"]
+fn dim_inactive_darkens_only_the_unfocused_windows() {
+    let (mut session, one, two) = boot_two_red_windows(
+        "keyboard-focus-dim",
+        "decoration {\n    dim_inactive = true\n    dim_strength = 0.5\n}\n",
+    );
+    let dimmed = |[r, g, b]: [f64; 3]| (100.0..=160.0).contains(&r) && g < 10.0 && b < 10.0;
+    focus_by_click(&mut session, &two);
+    let shot = session.screenshot("dim-two-focused").unwrap();
+    assert!(is_pure_red(body_rgb(&shot, &two)), "the focused body is untouched: {:?} {}", body_rgb(&shot, &two), shot.path.display());
+    assert!(dimmed(body_rgb(&shot, &one)), "the unfocused body is dimmed red: {:?} {}", body_rgb(&shot, &one), shot.path.display());
+
+    focus_by_click(&mut session, &one);
+    let shot = session.screenshot("dim-one-focused").unwrap();
+    assert!(is_pure_red(body_rgb(&shot, &one)), "{:?} {}", body_rgb(&shot, &one), shot.path.display());
+    assert!(dimmed(body_rgb(&shot, &two)), "{:?} {}", body_rgb(&shot, &two), shot.path.display());
+    assert!(session.compositor_alive());
+}
+
 fn event_count(session: &Session, event: &str) -> usize {
     session
         .client_log(PROBE)

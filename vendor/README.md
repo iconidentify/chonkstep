@@ -277,3 +277,46 @@ exactly one region before using existing scaled opacity APIs to prove a modern
 client fully covers its resize fill. Complex declarations keep the fill and do
 not allocate new opacity copies. This avoids applying rounded coverage twice
 behind opaque clients while preserving transparent clients and resize gaps.
+
+## Local patch: link-status retrain and forced modeset on request
+
+`src/backend/drm/surface/atomic.rs`, `src/backend/drm/surface/mod.rs` and
+`src/backend/drm/compositor/mod.rs`:
+
+- `AtomicDrmSurface::request_link_retrain` sets a flag that makes
+  `commit_pending` report true until the device accepts a commit. The next
+  submission therefore takes the `commit` path (`ALLOW_MODESET`) even when the
+  pending and current crtc states are equal, and that request — and the
+  `ALLOW_MODESET` test that precedes it — carries `link-status = GOOD` (raw 0)
+  for every pending connector that exposes the property. Connectors without it
+  are committed unchanged, so on such drivers the request degrades to a plain
+  forced modeset. Non-modeset tests (`test_state` with `allow_modeset = false`,
+  which is what `render_frame` runs) never carry the property, because the
+  kernel treats a `link-status` change as a connector change and would reject
+  the test without `ALLOW_MODESET`. The flag clears on the first accepted commit.
+- `DrmSurface::request_link_retrain` forwards to the atomic surface and returns
+  `false` on a legacy surface, which has no property commits.
+- `DrmCompositor::request_link_retrain` forwards to the surface and, when
+  honoured, sets the existing `reset_pending` so the next `render_frame` is a
+  full, non-empty frame and an idle scene still produces the submission.
+- No existing public API changes shape or behaviour: without the request the
+  `commit_pending` comparison, the request builders and the commit flags are
+  exactly upstream's.
+
+Why: the kernel's KMS documentation for `link-status` says a DisplayPort link
+that fails to train leaves the sink with no pixels until userspace performs a
+modeset that writes the property back to `GOOD`; the kernel does that itself
+only for legacy `SETCRTC` callers. Smithay 0.7 writes only `CRTC_ID` on
+connectors and takes the commit path only when its own pending state differs
+from the current one, so an atomic compositor on it had no way to retrain a
+link, and no way to force a modeset for a crtc whose commits the driver keeps
+refusing with the state it already holds. `wm-wayland`'s session backend uses
+this seam from its debounced connector rescan (`link-status` read as `BAD`)
+and as the second rung of its per-output commit-failure escalation.
+
+Evidence: `wm-wayland`'s unit tests cover the pure `link-status` match and
+the escalation schedule that reaches this seam; the seam itself needs a real
+KMS device and is exercised by the hardware check recorded on the issue that
+introduced it (docked suspend/resume on DisplayPort). Remove this patch once an
+adopted upstream release exposes an equivalent connector-property seam or a
+forced-modeset request on `DrmCompositor`.

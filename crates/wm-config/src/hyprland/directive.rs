@@ -53,6 +53,10 @@ pub enum Directive {
     Cursor { name: String, value: String },
     /// One key from Hyprland's `binds {}` table.
     Binds { name: String, value: String },
+    /// One of the two keys read from Hyprland's `decoration {}` table,
+    /// `dim_inactive` and `dim_strength`. The rest of the table is
+    /// Hyprland's look and stays declined.
+    Decoration { name: String, value: String },
     /// `device { name = …; … }` / `hl.device({ name = …, … })`: settings
     /// for one input device, named exactly, still in the file's own words.
     Device { name: String, settings: Vec<(String, String)> },
@@ -91,6 +95,14 @@ pub enum Directive {
     /// act on, kept so it can be logged with its own words rather than
     /// dropped into silence. The brief's rule: ignore loudly.
     Ignored { kind: &'static str, detail: String },
+    /// One animation switch, still in Hyprland's words: `animations {
+    /// enabled = … }` / `hl.config({ animations = { enabled = … } })`
+    /// arrive as the `global` leaf; `animation = NAME, ONOFF, …` /
+    /// `hl.animation({ leaf = NAME, enabled = … })` as their own. Which
+    /// leaves this desktop honours is decided downstream, once. Speeds,
+    /// curves and styles never get this far — they are reported as
+    /// [`Self::Ignored`] by the front ends.
+    Animation { leaf: String, enabled: bool },
 }
 
 /// Behavioral suffix/options carried by a Hyprland binding.
@@ -185,6 +197,15 @@ pub enum Include {
     /// directly under a directory, in sorted order — the fan-out
     /// Omarchy uses for its `bindings/` and `apps/` folders.
     ModuleDirectory { prefix: String },
+    /// `require_all.files(toggles_dir, nil, { exclude = { … } })` in
+    /// Omarchy's `toggles.lua`, where `toggles_dir` is
+    /// `paths.state_home .. "/omarchy/toggles/hypr"`: every `*.lua`
+    /// directly under that directory of `$XDG_STATE_HOME`, in sorted
+    /// order, except the base names in `exclude`. The only fan-out
+    /// without a module prefix this reader follows, because it is the
+    /// directory Omarchy's display and clamshell toggles write their
+    /// monitor rules into.
+    StateDirectory { relative: String, exclude: Vec<String> },
 }
 
 /// The most bytes a workspace selector may be before it is refused

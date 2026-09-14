@@ -559,3 +559,47 @@ fn last_white_point_on(log: &str, index: usize) -> Option<(u16, u16, u16)> {
     let line = log.lines().rfind(on_index)?;
     last_white_point(line)
 }
+
+/// One request to the session's Hyprland socket, in `hyprctl`'s shape.
+fn hypr_request(session: &Session, command: &str) -> String {
+    use std::io::{Read, Write};
+    let path = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap())
+        .join("hypr")
+        .join(hyprland_signature(session))
+        .join(".socket.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.write_all(command.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+/// Disabling and re-enabling the *other* output — a laptop lid closing
+/// and opening — must leave a night-light daemon owning the screen it
+/// warmed, exactly as a hotplug does: parking runs the same path.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn a_night_light_daemon_keeps_its_screen_while_another_output_is_disabled_and_enabled() {
+    let mut session = Session::boot("gamma-park", with_gamma()).unwrap();
+    session.door().set_virtual_outputs("split").unwrap();
+
+    run_probe(&mut session, &["follow", "3000", "4500"], "**holding**");
+    let warm = wait_for_white_point_on(&session, 0, "the warm ramp", |_| true);
+    assert!(warm.2 < warm.0, "3000K pulls blue down: {warm:?}");
+
+    assert_eq!(hypr_request(&session, "keyword monitor chonkstep-right,disable").trim(), "ok");
+    wait_for_client(&session, "chonk-gamma-probe", "**reapplied at 4500K after 1 output change(s)**");
+    let cooler = wait_for_white_point_on(&session, 0, "the ramp sent after the other output was disabled", |white| {
+        white != warm
+    });
+    assert!(cooler.2 > warm.2, "4500K is cooler than 3000K: {cooler:?} after {warm:?}");
+
+    assert_eq!(hypr_request(&session, "keyword monitor chonkstep-right,preferred,auto,auto").trim(), "ok");
+    wait_for_client(&session, "chonk-gamma-probe", "**reapplied at 3000K after 2 output change(s)**");
+    wait_for_white_point_on(&session, 0, "the ramp sent after the other output came back", |white| white == warm);
+
+    session.kill_client("chonk-gamma-probe");
+    wait_for_log(&mut session, "restoring the original ramp");
+    wait_for_white_point_on(&session, 0, "the original ramp to come back", |white| white == NEUTRAL);
+}

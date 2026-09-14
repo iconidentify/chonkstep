@@ -687,6 +687,41 @@ pub(crate) fn render_layout_window(
     destination: Rect,
     viewport: Rect,
 ) {
+    // A tiled window is drawn on its presentation transform rather than
+    // through the stacking walk's frame branch, so `dim_inactive`'s quad
+    // is placed here on the same transform: in front of the window,
+    // over its visual rect, masked to its frame's silhouette.
+    if let Some(record) = backend.windows.get(&window.window) {
+        if let Some(strength) = backend.window_dim(window.window, record) {
+            let source = window.source;
+            let sx = destination.size.w as f64 / source.size.w.max(1) as f64;
+            let sy = destination.size.h as f64 / source.size.h.max(1) as f64;
+            let (rect, shape) = match window.frame.and_then(|f| backend.frames.get(&f)) {
+                Some(frame) => {
+                    let visual = frame.visual_geometry();
+                    let local = Rect::new(
+                        Point::new(visual.pos.x - frame.geometry.pos.x, visual.pos.y - frame.geometry.pos.y),
+                        visual.size,
+                    );
+                    (
+                        scaled_chrome_rect(local, frame.geometry.pos, source.pos, destination.pos, sx, sy),
+                        crate::rounded::translated_shape(
+                            frame.effects.as_ref().and_then(|e| e.shape),
+                            frame.geometry.pos, source.pos, destination.pos, sx, sy,
+                        ),
+                    )
+                }
+                None => (
+                    scaled_chrome_rect(
+                        Rect::new(Point::new(0, 0), record.content.size),
+                        record.content.pos, source.pos, destination.pos, sx, sy,
+                    ),
+                    None,
+                ),
+            };
+            crate::renderer::push_dim(elements, renderer, Some(strength), &record.dim_id, rect, viewport, shape);
+        }
+    }
     render_window_scaled(elements, renderer, backend, window, destination, 1.0, true, Some(viewport), None);
 }
 
@@ -710,6 +745,11 @@ fn render_window_scaled(
     else {
         return;
     };
+    // The window's own translucency multiplies whatever this
+    // presentation fades it by, so a 0.96 window stays a 0.96 window
+    // in the Overview and through a layout transition.
+    let body_alpha = backend.window_alpha(window.window, record);
+    let alpha = alpha * body_alpha;
     let scale = (destination.size.w as f64 / source.size.w.max(1) as f64)
         .min(destination.size.h as f64 / source.size.h.max(1) as f64);
     if scale <= 0.0 {
@@ -884,7 +924,10 @@ fn render_window_scaled(
         crate::rounded::mask_frame_solids(elements,solid_start,renderer,shape,lower_border_drawn);
         crate::frame_effects::push_shadow(elements, renderer, frame.effects.as_ref(), frame.geometry.pos,
             source.pos, destination.pos, sx, sy, alpha);
-        if record.mapped && !opaque_client {
+        // A translucent body gets no black fill behind it: the fill
+        // would show through as exactly the darkening the rule did
+        // not ask for.
+        if record.mapped && !opaque_client && body_alpha >= 1.0 {
             let fill_start=elements.len();
             solid(elements, &frame.fill_id, requested, Color32F::new(0.0, 0.0, 0.0, alpha));
             crate::rounded::mask_plane(elements,fill_start,renderer,shape,true);

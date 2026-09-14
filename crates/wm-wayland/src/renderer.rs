@@ -374,7 +374,7 @@ pub(crate) fn build_scene_into(
     for window in backend.scene_index.unmanaged() {
         if let Some(record) = backend.windows.get(&window).filter(|record| record.mapped) {
             let start = elements.len();
-            push_window_content(elements, renderer, backend, record.content, record, viewport, None);
+            push_window_content(elements, renderer, backend, record.content, record, viewport, None, 1.0);
             if let Some(name) = backend.space_output_for(record) {
                 if let Some(monitor) = backend.monitors.iter().find(|m| m.name == name) {
                     let mut rect = monitor.geometry;
@@ -405,7 +405,10 @@ pub(crate) fn build_scene_into(
                 return;
             };
             if record.mapped && backend.scene_index.is_presented(*id) {
-                push_window_content(elements, renderer, backend, record.content, record, viewport, None);
+                push_dim(elements, renderer, backend.window_dim(*id, record), &record.dim_id,
+                    viewport_relative(record.content, viewport), Rect::new(Point::new(0, 0), viewport.size), None);
+                let alpha = backend.window_alpha(*id, record);
+                push_window_content(elements, renderer, backend, record.content, record, viewport, None, alpha);
             }
         }
         if let StackEntry::Frame(id) = entry {
@@ -416,18 +419,30 @@ pub(crate) fn build_scene_into(
                 return;
             }
             let window = backend.windows.get(&frame.window);
+            let shape = crate::rounded::translated_shape(frame.effects.as_ref().and_then(|e|e.shape),
+                frame.geometry.pos, viewport.pos, Point::new(0,0), 1.0, 1.0);
+            // The window's body alpha and dim, both read from the same
+            // ledger the hit-test reads: neither changes where a click
+            // lands. The dim goes first so it lands in front of the
+            // content and the chrome alike, masked to the frame's own
+            // rounded silhouette.
+            let alpha = window.map_or(1.0, |record| backend.window_alpha(frame.window, record));
+            if let Some(record) = window.filter(|record| record.mapped) {
+                push_dim(elements, renderer, backend.window_dim(frame.window, record), &record.dim_id,
+                    viewport_relative(frame.visual_geometry(), viewport), Rect::new(Point::new(0, 0), viewport.size), shape);
+            }
             // Content above chrome: the client's tree first
             // (front-to-back), then the decoration buffer. A
             // shaded window keeps its frame mapped with the
             // content unmapped (`set_client_mapped(false)`), which
             // falls out naturally here.
             let content_draw = window.filter(|record| record.mapped).map(|record| {
-                push_window_content(elements, renderer, backend, record.content, record, viewport, Some(frame))
+                push_window_content(elements, renderer, backend, record.content, record, viewport, Some(frame), alpha)
             }).unwrap_or_default();
             let opaque_client = content_draw.opaque_client;
             if overlap_area(frame.geometry, viewport) == 0 {
                 crate::frame_effects::push_shadow(elements, renderer, frame.effects.as_ref(), frame.geometry.pos,
-                    viewport.pos, Point::new(0,0), 1.0, 1.0, 1.0);
+                    viewport.pos, Point::new(0,0), 1.0, 1.0, alpha);
                 return;
             }
             for part in &frame.parts {
@@ -439,7 +454,7 @@ pub(crate) fn build_scene_into(
                     renderer,
                     location,
                     &part.buffer,
-                    None,
+                    (alpha < 1.0).then_some(alpha),
                     None,
                     None,
                     Kind::Unspecified,
@@ -455,13 +470,11 @@ pub(crate) fn build_scene_into(
                 let mut rect = solid.solid.rect;
                 rect.pos.x += frame.geometry.pos.x - viewport.pos.x;
                 rect.pos.y += frame.geometry.pos.y - viewport.pos.y;
-                elements.push(solid.element(rect, 1.0).into());
+                elements.push(solid.element(rect, alpha).into());
             }
-            let shape = crate::rounded::translated_shape(frame.effects.as_ref().and_then(|e|e.shape),
-                frame.geometry.pos, viewport.pos, Point::new(0,0), 1.0, 1.0);
             crate::rounded::mask_frame_solids(elements, solid_start, renderer, shape, content_draw.lower_border_drawn);
             crate::frame_effects::push_shadow(elements, renderer, frame.effects.as_ref(), frame.geometry.pos,
-                viewport.pos, Point::new(0,0), 1.0, 1.0, 1.0);
+                viewport.pos, Point::new(0,0), 1.0, 1.0, alpha);
             // Preserve the opaque mid-resize/unshade gap that the former
             // window-sized pixel buffer supplied, but as four floats plus a
             // stable id instead of frame-width * frame-height * 4 retained
@@ -471,7 +484,10 @@ pub(crate) fn build_scene_into(
             // black underneath the correctly alpha-masked chrome bands.
             // An opaque modern client already supplies the requested interior.
             // A second rounded black fill would apply corner coverage twice.
-            if opaque_client { return; }
+            // A translucent body gets no fill either: opaque black behind a
+            // 0.96 window is exactly the darkening the rule did not ask for,
+            // and what lies beneath is composited through the window instead.
+            if opaque_client || alpha < 1.0 { return; }
             let Some(content) = window.filter(|record| record.mapped).map(|record| record.content) else { return; };
             let geometry = SRect::<i32, Physical>::new(
                 (
@@ -986,6 +1002,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     } else {
         winit_backend.buffer_age().unwrap_or(0)
     };
+    let scene_total = scene_scratch.len();
     let rendered = (|| {
         let (renderer, mut framebuffer) = winit_backend.bind().map_err(|error| {
             if note_frame_failure() {
@@ -1036,6 +1053,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     };
 
     note_frame_success();
+    wm.backend_mut().scene_elements = crate::state::SceneElementCounts::from_states(scene_total, &render_states);
     let output_rect = wm.backend().monitors.first().map(|monitor| monitor.geometry).unwrap_or_default();
     let mut feedback = take_presentation_feedback(surface_outputs, wm.backend(), output, output_rect, &render_states, cursor_status, *pointer_location);
     surface_outputs.send_feedback(output, &render_states, dmabuf);
@@ -1094,6 +1112,7 @@ fn render_frame_winit_outputs(comp: &mut Compositor, capture_pending: bool) -> b
     let states = match result { Ok(Some(states)) => states, Ok(None) => { wm.backend_mut().damage = false; return false; },
         Err(error) => { tracing::warn!(?error, "nested display render failed"); return false; } };
     if backend.submit(Some(&[SRect::from_size(backend.window_size())])).is_err() { return false; }
+    wm.backend_mut().scene_elements = crate::state::SceneElementCounts::from_states(elements.len(), &states);
     for entry in outputs.iter() {
         let rect = Rect::new(entry.position, entry.size);
         let mut feedback = take_presentation_feedback(surface_outputs, wm.backend(), &entry.output, rect,
@@ -1362,6 +1381,58 @@ struct ContentDraw {
     lower_border_drawn: bool,
 }
 
+fn viewport_relative(rect: Rect, viewport: Rect) -> Rect {
+    Rect::new(Point::new(rect.pos.x - viewport.pos.x, rect.pos.y - viewport.pos.y), rect.size)
+}
+
+/// One black quad at `strength` in front of an unfocused window under
+/// `dim_inactive`, masked to the frame's rounded silhouette. The window
+/// underneath stays opaque and keeps occluding what it covers — one
+/// blended quad, rather than everything beneath the window composited
+/// through it, is what makes this the cheap focus cue. Retained under
+/// the window's own id so the damage tracker sees one element that
+/// comes and goes; the strength rides on the commit counter so a
+/// reload that changes it repaints. `rect` and `visible` are both
+/// viewport-relative, like `shape`, so the tiled path can hand in a
+/// rect on its own presentation transform.
+pub(crate) fn push_dim(
+    elements: &mut Vec<SceneElement>,
+    renderer: &mut GlesRenderer,
+    strength: Option<f32>,
+    id: &smithay::backend::renderer::element::Id,
+    rect: Rect,
+    visible: Rect,
+    shape: Option<wm_theme_api::DecorationShape>,
+) {
+    let Some(strength) = strength else {
+        return;
+    };
+    if overlap_area(rect, visible) == 0 {
+        return;
+    }
+    let geometry = SRect::<i32, Physical>::new(
+        (rect.pos.x, rect.pos.y).into(),
+        (rect.size.w as i32, rect.size.h as i32).into(),
+    );
+    let start = elements.len();
+    elements.push(
+        SolidColorRenderElement::new(
+            id.clone(),
+            geometry,
+            CommitCounter::from((strength.clamp(0.0, 1.0) * 1000.0) as usize),
+            Color32F::new(0.0, 0.0, 0.0, strength.clamp(0.0, 1.0)),
+            Kind::Unspecified,
+        )
+        .into(),
+    );
+    crate::rounded::mask_plane(elements, start, renderer, shape, false);
+}
+
+/// `alpha` is the window's body alpha: its content, its popups and its
+/// lower border ring all take it, so a translucent window is
+/// translucent as one thing rather than a solid menu over a see-through
+/// page.
+#[allow(clippy::too_many_arguments)]
 fn push_window_content(
     elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
@@ -1370,6 +1441,7 @@ fn push_window_content(
     record: &crate::state::WindowRecord,
     viewport: Rect,
     frame: Option<&crate::state::FrameRecord>,
+    alpha: f32,
 ) -> ContentDraw {
     if !record.surface.alive() {
         return ContentDraw::default();
@@ -1430,13 +1502,13 @@ fn push_window_content(
             global.x - viewport.pos.x,
             global.y - viewport.pos.y,
         ));
-        push_surface_tree(elements, renderer, popup_surface, location, popup_factor, 1.0, Kind::Unspecified);
+        push_surface_tree_alpha(elements, renderer, popup_surface, location, popup_factor, 1.0, Kind::Unspecified, alpha);
     }
     let effects = frame.and_then(|frame|frame.effects.as_ref());
     let shape = crate::rounded::translated_shape(effects.and_then(|e|e.shape),
         frame.map_or(Point::new(0,0),|frame|frame.geometry.pos), viewport.pos, Point::new(0,0), 1.0, 1.0);
     let lower_border_drawn = effects.is_some_and(|effects| {
-        crate::rounded::push_border(elements, renderer, shape, &effects.border_ids, effects.commit, 1.0)
+        crate::rounded::push_border(elements, renderer, shape, &effects.border_ids, effects.commit, alpha)
     });
     let (presentation_origin, presentation_scale) = backend.window_presentation(record, frame.is_some());
     let origin = SPoint::<i32, Physical>::from((
@@ -1445,7 +1517,7 @@ fn push_window_content(
     ));
     if surface_tree_reaches_viewport(&surface, presentation_origin, content, presentation_scale, viewport) {
         let start = elements.len();
-        push_surface_tree_alpha(elements, renderer, &surface, origin, presentation_scale, 1.0, Kind::Unspecified, 1.0);
+        push_surface_tree_alpha(elements, renderer, &surface, origin, presentation_scale, 1.0, Kind::Unspecified, alpha);
         let requested = Rect::new(Point::new(content.pos.x - viewport.pos.x,
             content.pos.y - viewport.pos.y), content.size);
         let opaque = shape.is_some_and(|shape| shape.radius > 0)

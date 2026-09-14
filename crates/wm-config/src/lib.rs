@@ -155,6 +155,11 @@ pub enum Action {
     /// UI scale, focus policy, placement, edge resistance and these
     /// very bindings, with no restart and nothing closed.
     Reload,
+    /// Force the focused window opaque for the rest of the session, or
+    /// let its opacity rule apply again — Omarchy's `SUPER + BACKSPACE`.
+    /// A session toggle only: nothing is written anywhere, and a window
+    /// no rule makes translucent is unchanged by it.
+    ToggleOpaque,
     /// Re-exec the session's on-disk binary. Distinct from [`Self::Reload`]
     /// on purpose: reloading applies a changed *config*, restarting
     /// applies a changed *build*, and only the second one has to cost
@@ -270,6 +275,7 @@ impl Action {
             Action::GlobalShortcut(target) => return Some(format!("global-shortcut {target}")),
             Action::WindowMenu => "window-menu",
             Action::Reload => "reload",
+            Action::ToggleOpaque => "toggle-opaque",
             Action::Restart => "restart",
             Action::Run(name) => return Some(format!("run {name}")),
         };
@@ -613,6 +619,7 @@ fn action_from_name(name: &str) -> Option<Action> {
         "help" => Some(Action::Help),
         "window-menu" => Some(Action::WindowMenu),
         "reload" => Some(Action::Reload),
+        "toggle-opaque" => Some(Action::ToggleOpaque),
         "restart" => Some(Action::Restart),
         // The two verbs that carry a workspace *number* rather than a
         // name. Parameterised rather than eighteen literal spellings
@@ -928,6 +935,11 @@ pub struct Config {
     /// Last writer of each effective setting: built-in, preset, live
     /// Hyprland configuration, or the chonkstep config file.
     pub provenance: BTreeMap<String, String>,
+    /// Whether, and how fast, the compositor's own transitions move: the
+    /// `[motion]` table, over Omarchy's `animations.enabled` and
+    /// `hl.animation` switches (see [`hyprland`]). Always sanitized:
+    /// `speed` is within `MotionPolicy::MIN_SPEED..=MAX_SPEED`.
+    pub motion: wm_core::MotionPolicy,
 }
 
 /// The `hyprland_config` key, read out of the raw table before the
@@ -1082,6 +1094,7 @@ impl Config {
             ],
             diagnostics: Vec::new(),
             provenance: BTreeMap::new(),
+            motion: wm_core::MotionPolicy::default(),
         };
         for key in [
             "focus_follows_mouse",
@@ -1108,9 +1121,11 @@ impl Config {
             "desktop",
             "keymap",
             "hyprland_config",
+            "window_opacity",
             "input",
             "monitor_rules",
             "keybindings",
+            "motion",
         ] {
             config
                 .provenance
@@ -1456,6 +1471,33 @@ fn input_number(value: &toml::Value) -> Option<f64> {
 /// Omarchy users already know. Until per-device matching lands, both the
 /// flat and nested spellings describe the libinput pointer fallback; the
 /// nested table is applied last so an explicitly touchpad-shaped value wins.
+/// `[motion]`: four switches and a speed. Every key is validated on its
+/// own and an invalid one keeps the inherited value, so a typo in one
+/// line cannot turn motion back on or off elsewhere in the table.
+fn apply_motion_table(policy: &mut wm_core::MotionPolicy, entries: &toml::Table) {
+    for (key, value) in entries {
+        match (key.as_str(), value) {
+            ("enabled", toml::Value::Boolean(on)) => policy.enabled = *on,
+            ("layout", toml::Value::Boolean(on)) => policy.layout = *on,
+            ("overview", toml::Value::Boolean(on)) => policy.overview = *on,
+            ("gesture_settle", toml::Value::Boolean(on)) => policy.gesture_settle = *on,
+            ("speed", value)
+                if input_number(value).is_some_and(|speed| {
+                    (wm_core::MotionPolicy::MIN_SPEED..=wm_core::MotionPolicy::MAX_SPEED)
+                        .contains(&speed)
+                }) =>
+            {
+                policy.speed = input_number(value).unwrap();
+            }
+            _ => tracing::warn!(
+                %key, ?value,
+                "config: invalid [motion] setting; use enabled, layout, overview, gesture_settle (booleans) or speed (0.25..=4)"
+            ),
+        }
+    }
+    *policy = policy.sanitized();
+}
+
 fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &str) {
     for (key, value) in entries {
         let setting = if prefix.is_empty() {
@@ -1726,6 +1768,7 @@ pub fn parse_with(
                 "monitor_rules",
                 "default_layout",
                 "workspace_layouts",
+                "motion",
             ] {
                 config
                     .provenance
@@ -1766,6 +1809,17 @@ pub fn parse_with(
                 other => tracing::warn!(
                     value = ?other,
                     "config: autoraise must be a boolean, keeping default"
+                ),
+            },
+            // The kill switch for `opacity` window rules. `false` draws
+            // every window opaque and gives back the occlusion a
+            // translucent window costs; the session toggle and
+            // `dim_inactive` are unaffected.
+            "window_opacity" => match value {
+                toml::Value::Boolean(enabled) => config.decorations.opacity_rules_disabled = !enabled,
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: window_opacity must be a boolean, keeping default"
                 ),
             },
             "scale" => match scale_from_value(value) {
@@ -1983,6 +2037,15 @@ pub fn parse_with(
                     "config: [input] must be a table, ignoring it"
                 ),
             },
+            // Over the live Hyprland configuration's animation switches,
+            // like every key in this walk.
+            "motion" => match value {
+                toml::Value::Table(entries) => apply_motion_table(&mut config.motion, entries),
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: [motion] must be a table, ignoring it"
+                ),
+            },
             // Read after the live Hyprland configuration, like every key in
             // this walk, so a `[cursor]` setting here overrides Omarchy's.
             "cursor" => match value {
@@ -2075,6 +2138,7 @@ pub fn parse_with(
             | "show_dock"
             | "minimized_previews"
             | "hyprland_config"
+            | "window_opacity"
                 if value.is_bool() =>
             {
                 Some(key.as_str())
@@ -2115,6 +2179,7 @@ pub fn parse_with(
             "self_decorating_apps" if value.is_array() => Some("decorations"),
             "decorations" if value.is_table() => Some("decorations"),
             "input" if value.is_table() => Some("input"),
+            "motion" if value.is_table() => Some("motion"),
             "commands" if value.is_table() => Some("commands"),
             "autostart" if value.is_array() => Some("autostart"),
             "keybindings" if value.is_table() => Some("keybindings"),
@@ -2314,6 +2379,7 @@ pub fn effective_config_report(config: &Config) -> String {
     line("restore_session", config.restore_session.to_string());
     line("omarchy_bar", format!("{:?}", config.omarchy_bar));
     line("input", format!("{:?}", config.input));
+    line("motion", format!("{:?}", config.motion));
     line("monitor_rules", config.monitor_rules.len().to_string());
     line("default_layout", format!("{:?}", config.default_layout));
     line("workspace_layouts", config.workspace_layouts.len().to_string());
@@ -2901,7 +2967,7 @@ numlock_by_default = false
             "focus-left", "focus-right", "focus-up", "focus-down", "workspace-next", "workspace-prev",
             "workspace-carry-next", "workspace-carry-prev", "capture-screen-clipboard", "capture-area-clipboard",
             "capture-window-clipboard", "capture-screen", "capture-area", "capture-window", "capture",
-            "capture-stop", "overview", "root-menu", "help", "window-menu", "reload", "restart",
+            "capture-stop", "overview", "root-menu", "help", "window-menu", "reload", "restart", "toggle-opaque",
             "workspace 4", "workspace-send 10", "workspace-carry 1", "global-shortcut org.example:toggle",
             "run lock",
         ] {
@@ -2946,6 +3012,27 @@ numlock_by_default = false
             let config = parse(&format!("[input.gestures]\n{value}\n")).unwrap();
             assert_eq!(config.input.gestures, wm_core::GestureConfig::default());
         }
+    }
+
+    #[test]
+    fn the_motion_table_is_read_key_by_key_and_its_speed_is_clamped() {
+        let config = parse("[motion]\nenabled = false\nlayout = false\noverview = false\ngesture_settle = false\nspeed = 2.5\n").unwrap();
+        assert_eq!(
+            config.motion,
+            wm_core::MotionPolicy { enabled: false, layout: false, overview: false, gesture_settle: false, speed: 2.5 }
+        );
+        assert_eq!(config.provenance.get("motion").map(String::as_str), Some("config file"));
+        assert_eq!(parse("").unwrap().motion, wm_core::MotionPolicy::default());
+        assert_eq!(parse("").unwrap().provenance.get("motion").map(String::as_str), Some("built-in"));
+        // One bad line keeps its own inherited value and nothing else's.
+        let config = parse("[motion]\nlayout = false\nenabled = 0\nspeed = 'fast'\n").unwrap();
+        assert_eq!(config.motion, wm_core::MotionPolicy { layout: false, ..Default::default() });
+        for value in ["speed = nan", "speed = inf", "speed = -1", "speed = 0", "speed = 0.2", "speed = 4.5", "speed = 1e300"] {
+            let config = parse(&format!("[motion]\n{value}\n")).unwrap();
+            assert_eq!(config.motion.speed, 1.0, "{value}");
+        }
+        assert_eq!(parse("[motion]\nspeed = 4\n").unwrap().motion.speed, 4.0);
+        assert_eq!(parse("motion = 'off'\n").unwrap().motion, wm_core::MotionPolicy::default());
     }
 
     #[test]

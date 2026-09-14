@@ -135,11 +135,13 @@ configuration holds at most 32 switch bindings.
 On a stock Omarchy install, closing the lid runs
 `omarchy-system-lid-close`, which locks the session straight away when
 no external monitor is connected. The clamshell handler Omarchy binds
-beside it, `omarchy-hyprland-monitor-clamshell`, stays unbound: it
-disables outputs through Hyprland requests ChonkStep does not serve, so
-it is reported like any other script outside the served list. The baked
-Omarchy keymap holds key chords only, so switch bindings come from the
-live configuration.
+beside it, `omarchy-hyprland-monitor-clamshell`, writes
+`hl.monitor({ output = "<eDP>", disabled = true })` into
+`~/.local/state/omarchy/toggles/hypr/` and runs `hyprctl reload`, which
+this desktop reads and applies (see [Monitors](#monitors) below); the
+script itself stays outside the served list until its every request is
+proved served there. The baked Omarchy keymap holds key chords only, so
+switch bindings come from the live configuration.
 
 ### Window rules
 
@@ -155,7 +157,7 @@ windowrule   = float on, match:class steam               # 0.53+
 The supported properties are `float`, `size`, `move`, `center`,
 `idle_inhibit`, `pin`, `no_focus`, `no_initial_focus`,
 `focus_on_activate`, `fullscreen`, `maximize`, `suppress_event`,
-`scroll_touchpad`, and `workspace`. They match `class` and `title` as regular
+`scroll_touchpad`, `workspace`, `opacity` and `no_dim`. They match `class` and `title` as regular
 expressions, matched against the entire class or title, as in Hyprland's
 `RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
@@ -232,6 +234,30 @@ workspaces are numbered. `hl.workspace_rule` for a special workspace
 (`gaps_out`, `on_created_empty` and `dim_special`, which Omarchy's
 agent console sets for `special:scratchpad`) is not read yet.
 
+`opacity` is Omarchy's focus cue. It takes one to three numbers, each
+clamped to `0..1`: the body alpha while the window is focused, while it
+is not, and — a third value — while it is fullscreen. Omarchy's default
+is `0.985 0.96` for every window, `1.0 0.985` for browsers, and `1 1`
+for video players, games, virtual machines and colour-critical work,
+which it writes by removing the `default-opacity` tag (below). With no
+third value a fullscreen window is opaque whatever the other two say,
+so direct scanout is untouched by a translucent rule. The alpha
+applies to the whole window — content, popups, chrome, border and
+shadow — and never to input: a click lands where it always did.
+`SUPER + BACKSPACE` (Omarchy's `omarchy-hyprland-window-transparency-toggle`,
+the native `toggle-opaque`, or `hyprctl dispatch setprop … opaque toggle`)
+forces the focused window opaque for the rest of the session and back.
+Translucency is not free: everything beneath a translucent window is
+composited too. `window_opacity = false` in `config.toml` draws every
+window opaque and gives that occlusion back; `docs/performance.md`
+records the element counts either way.
+
+`no_dim` exempts a window from `decoration:dim_inactive`, the one part
+of Hyprland's `decoration` table this desktop reads: `dim_inactive = true`
+with `dim_strength` (Hyprland's default `0.5`) darkens every unfocused
+window by drawing one black quad in front of it. The window itself stays
+opaque, which is what makes dimming the cheaper focus cue of the two.
+
 Every unsupported property produces its own `Skipped` line naming both
 the property and matcher. A rule with an unsupported matcher is refused
 whole, so a partially understood condition can never broaden the rule.
@@ -245,6 +271,15 @@ o.window({ tag = "floating-window" }, { float = true, size = { 875, 600 } })
 ```
 
 A reader that skipped tags would conclude Omarchy floats nothing.
+**Tag removal is followed too**, in file order: `tag -default-opacity`
+in an app file takes that window out of the opacity rule written for
+the tag afterwards, and a removal made on the strength of another tag
+(`match:tag chromium-based-browser` → `tag -default-opacity`) is
+followed when that tag is carried by class or title. Membership settles
+the way Hyprland's repeated rule passes settle it — the last matching
+add or remove decides — so Omarchy's `floating-window` rules, written
+above the lines that add the tag, still resolve. A tag whose carriers
+are themselves tag-matched is refused with a log line.
 
 This replaces a hardcoded rule that used to live in `wm-core`: any
 window whose app-id started `org.omarchy.` mapped at 875×600. That
@@ -358,6 +393,58 @@ nothing to the real bus.
 Editing an `env` line takes effect at your next login, not on the live
 re-read. A process's environment is fixed when it starts.
 
+### Animations → `[motion]`
+
+Turning motion off is a comfort and accessibility preference, not a
+look, so the switches are read even though the styling around them is
+not. Omarchy's own override template offers it as a commented-out
+block; uncommented, it works here:
+
+```lua
+hl.config({
+  animations = {
+    -- Disable all animations.
+    enabled = false,
+  },
+})
+```
+
+or, in conf, `animations { enabled = no }`. Either turns off every
+transition this desktop starts on its own: spatial-layout reflows,
+Overview opening and closing from the keyboard, and the settle after a
+released swipe. Fingers on a touchpad still move the desktop 1:1 while
+they are down — that is input, never animation.
+
+Per-leaf switches are read for the leaves this desktop has a
+transition for:
+
+| Hyprland leaf | What it turns off here |
+|---|---|
+| `global` (`hl.animation({ leaf = "global", enabled = false })`, `animation = global, 0, …`) | Everything, exactly like `animations.enabled = false`. |
+| `windows`, `windowsMove` | Window geometry motion: the reflow when a spatial layout changes. |
+
+Later wins, so a switch in your own file lands over Omarchy's
+defaults. Every other leaf — `border`, `fade*`, `layers*`,
+`workspaces`, `specialWorkspace` — names something this desktop draws
+differently or not at all and is logged by name. The speed, curve and
+style on any line, and every `bezier`/`hl.curve` definition, are
+declined: this desktop's motion is one critically damped spring, and
+its one knob is the native table below.
+
+The native table in `config.toml` wins over all of it:
+
+```toml
+[motion]
+enabled = true          # false: every compositor-started transition completes in one frame
+layout = true           # spatial-layout reflow motion
+overview = true         # keyboard and pointer Overview open/close
+gesture_settle = true   # the spring after a released swipe
+speed = 1.0             # multiplies the spring's stiffness; 0.25..=4
+```
+
+A reload applies it to transitions already in flight, which land on
+their targets.
+
 ---
 
 ## What is deliberately not read
@@ -368,19 +455,19 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Not read | Why |
 |---|---|
 | Hyprland requests chonkstep does not serve — `hyprctl`, and `omarchy-hyprland-*` scripts outside [the list below](#omarchys-hyprland-scripts) | Chonkstep answers Hyprland's IPC, but only with the requests it can apply, and `hyprctl` exits zero on a refusal, so a binding whose request is refused would be a key that silently does nothing. A script therefore runs only when every request it sends is proven served. The same rule filters chonkstep's Omarchy menu rows and `exec-once` lines. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
-| Gaps, borders, rounding, blur, shadows, animations (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. `general.layout` is the exception, [read above](#workspace-layout); the per-layout tables (`dwindle { … }`, `master { … }`, `scrolling { … }`) are not. |
+| Gaps, borders, rounding, blur, shadows, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. Three exceptions: `general.layout`, [read above](#workspace-layout) (the per-layout tables `dwindle { … }`, `master { … }`, `scrolling { … }` are not); the animation *switches*, because turning motion off is a preference, not a look — see [Animations](#animations); and `decoration:dim_inactive` with `dim_strength`, a focus cue rather than a look, read as described under [window rules](#window-rules). |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
 | Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use `focus_follows_mouse` and native [`[input.gestures]`](gestures.md). Arbitrary Hyprland gesture bindings remain declined. Device properties listed below are applied; remaining declined values are logged. |
-| Unsupported window-rule properties | `opacity`, `no_blur`, `workspace`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
+| Unsupported window-rule properties | `no_blur`, `keep_aspect_ratio`, `rounding`, … are each logged with their matcher. Tags used to select another supported rule are resolved, removals included. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
 | A `size` or `move` written in a form other than a number or a layout expression (`move cursor 0 0`, `size 50% 50%`, `move onscreen`) | Only the arithmetic Omarchy's rules use is read — see [window rules](#window-rules). The property is skipped with its text; the rule's other properties still apply. |
 | Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
-| `submap`, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| `submap`, `plugin`, `bezier` (Lua `hl.curve`), and the speed, curve and style of every `animation` line (Lua `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. This desktop's motion is one spring; only the on/off switch of an animation line is read, and only for the leaves named under [Animations](#animations). |
 | Workspace rules other than `layout`, and rules for `special:`, `name:` and range selectors | Only [the layout of a numbered workspace](#workspace-layout) is read. Every other rule and every other selector is logged by name. |
 | Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (such as `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
-| Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |
+| Unsupported `monitor =` lines | A line containing mirror, or an extra field other than a 0/90/180/270-degree transform or `disabled`, is refused whole. Explicit modes, those transforms and `disable` are supported as described below. |
 
 ### Omarchy's Hyprland scripts
 
@@ -401,6 +488,7 @@ script reads is missing. A script cannot join the list without that proof.
 | `omarchy-hyprland-monitor-scaling` | `SUPER + SLASH` / `SUPER + ALT + SLASH`: step the focused monitor's scale |
 | `omarchy-hyprland-workspace-layout-toggle` | The menu's Workspace Layout row. Its `SUPER + L` binding takes chonkstep's own `toggle-layout`. |
 | `omarchy-hyprland-window-tiled-fullscreen-toggle` | `SUPER + CTRL + F`: tell the window it is fullscreen in its tile, or stop. It reads `fullscreenClient` back to decide which. |
+| `omarchy-hyprland-window-transparency-toggle` | `SUPER + BACKSPACE`: force the focused window opaque, or let its opacity rule apply again. The binding takes chonkstep's own `toggle-opaque`; the script's `setprop … opaque` requests are served for a menu row or a shell. |
 
 On a Freeform workspace the pop-out's float toggle does nothing, because
 Freeform has no layout to float a window out of; the window is still
@@ -413,7 +501,6 @@ starts are refused with the piece they need:
 
 | Script | Why not here |
 |---|---|
-| `omarchy-hyprland-window-transparency-toggle` | needs per-window opacity, which ChonkStep does not model |
 | `omarchy-hyprland-window-gaps-toggle` | toggles Hyprland's gaps, which ChonkStep does not read |
 | `omarchy-hyprland-window-single-square-aspect-toggle` | toggles a Hyprland layout option, which ChonkStep does not read |
 | `omarchy-hyprland-monitor-internal` | disables an output, which ChonkStep does not do |
@@ -621,11 +708,39 @@ The supported transaction is:
 
 Negative positions are normalized together so the logical desktop
 starts at zero without changing relative placement. An unadvertised
-mode, unsupported field, `disable`, `mirror`, or malformed
+mode, unsupported field, `mirror`, or malformed
 position/scale refuses the whole line with the output and field in the log. The same
 output state backs IPC and `zwlr_output_management`, so advertised
 scale, renderer scale, shell geometry, and application fractional scale
 cannot diverge.
+
+`monitor = eDP-1, disable` and Lua `hl.monitor({ output = "eDP-1",
+disabled = true })` take a connected output out of the desktop layout.
+The output is *parked*: no `wl_output` global, no place in the layout,
+no workspaces, and on the DRM session a cleared crtc with the connector
+kept, so putting it back is the DPMS-on path rather than a fresh
+modeset. Its windows move to the remaining outputs and its lock surface
+is released the way an unplug releases one, while the other outputs stay
+covered; when it returns, the locked scene is presented on it before any
+client content. A rule that disables every connected output keeps the
+first, and the log says so: the desktop is never without an output. A
+line with `disabled` carries no geometry, and one given beside it is
+not applied. Mirroring is still refused whole. The same disable is
+available live, from `hyprctl keyword monitor NAME,disable`,
+`hyprctl eval hl.monitor({ output = NAME, disabled = true })` and
+wlr-output-management, and `monitors all` lists a parked output with
+`disabled: true`; see [hyprland-ipc.md](hyprland-ipc.md).
+
+Omarchy's toggle directory, `~/.local/state/omarchy/toggles/hypr/`, is
+read: its `toggles.lua` loads every `*.lua` there through
+`require_all.files(toggles_dir, nil, { exclude = … })`, and that one
+fan-out — `paths.state_home` plus a literal, with no module prefix — is
+followed, honouring the `exclude` table so the legacy
+`touchpad-disabled` and `touchscreen-disabled` names are never read as
+code. This is where `omarchy-hyprland-monitor-clamshell` and
+`omarchy-hyprland-monitor-internal` write their `disabled = true` line
+before running `hyprctl reload`. Any other `require_all.files` call
+without a module prefix stays ignored, and named as such.
 
 ---
 
@@ -705,14 +820,21 @@ reports the layout actually in force rather than the one that was asked
 for.
 
 What a live re-read cannot change is `env` (see above), `autostart` (it
-has already run), and `monitor` lines. Monitor rules are applied at
-startup and when a connector is hot-plugged, not on reload: re-applying
-a mode or a position to a live output is a modeset, and doing it from a
-config re-read would move windows and reflow the desk on every save of
-an unrelated key. Changing an output live has its own verb —
-`hyprctl eval hl.monitor({ output = …, scale = … })` — and the log names
-each monitor line it read for this reason rather than implying it took
-effect.
+has already run), and — from the file watch — `monitor` lines. Monitor
+rules are applied at startup, when a connector is hot-plugged, and on an
+**explicit reload** (`hyprctl reload`, the reload marker, a bound
+`reload` key), never from the one-second file watch or from Omarchy
+theme following: re-applying a mode or a position to a live output is a
+modeset, and doing it on every save of an unrelated key would reflow
+the desk. A reload compares each connector's resolved rule with the one
+last applied and touches only the connectors whose rule changed: a
+changed scale, position, mode or transform is applied to that live
+output; a rule that now disables the output parks it; a rule that no
+longer does puts it back. A reload that changes no monitor rule performs
+no modeset and moves no output, and an output disabled or enabled at
+runtime keeps that state across a reload whose rule for it did not
+change — a changed rule wins. Changing an output live without a reload
+has its own verb, `hyprctl eval hl.monitor({ output = …, … })`.
 
 ---
 
@@ -786,8 +908,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=188 commands=121 env=8 autostart=4
-      float_rules=49 monitors=1 skipped=150
+      files=42 bindings=189 commands=121 env=8 autostart=4
+      float_rules=40 monitors=1 skipped=139
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

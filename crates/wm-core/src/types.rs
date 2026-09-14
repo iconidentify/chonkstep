@@ -465,6 +465,17 @@ pub struct DecorationRules {
     /// many words keeps what it declared, and a list entry naming the
     /// application outranks this in either direction.
     pub frame_client_drawn: bool,
+    /// Draw every window opaque whatever its `opacity` rule says: the
+    /// native kill switch (`window_opacity = false`) for a desk that
+    /// would rather keep the occlusion a translucent window gives up.
+    /// The session toggle and `dim_inactive` are unaffected.
+    pub opacity_rules_disabled: bool,
+    /// Darken every unfocused window by this much (`0.0..=1.0`), the
+    /// way Hyprland's `decoration:dim_inactive` does at
+    /// `dim_strength`, or `None` to leave them alone. The window
+    /// stays opaque underneath: one black quad in front of it is far
+    /// cheaper than compositing everything beneath it.
+    pub dim_inactive: Option<f32>,
 }
 
 /// The keyboard half of the config's `input` block, as the shell reads

@@ -474,6 +474,29 @@ impl DrmSurface {
         }
     }
 
+    /// Requests that the next [`commit`](DrmSurface::commit) or
+    /// [`page_flip`](DrmSurface::page_flip) decision takes the commit
+    /// path with `ALLOW_MODESET` and writes `link-status = GOOD` on
+    /// this surface's connectors, even when no state change is pending.
+    ///
+    /// This is the userspace half of the kernel's `link-status`
+    /// contract for atomic clients: a link the driver marked `BAD`
+    /// shows nothing until a modeset sets the property back to `GOOD`.
+    /// [`commit_pending`](DrmSurface::commit_pending) reports `true`
+    /// until the device accepts that commit.
+    ///
+    /// Returns `false` on a legacy surface, which has no property
+    /// commits and therefore no way to honour the request.
+    pub fn request_link_retrain(&self) -> bool {
+        match &*self.internal {
+            DrmSurfaceInternal::Atomic(surf) => {
+                surf.request_link_retrain();
+                true
+            }
+            DrmSurfaceInternal::Legacy(_) => false,
+        }
+    }
+
     /// Returns if the underlying device is currently paused or not.
     pub fn is_active(&self) -> bool {
         match &*self.internal {

@@ -78,6 +78,15 @@ fn exec_verb(command: &str) -> Verb {
     {
         return Verb::Action(Action::ToggleLayout);
     }
+    // Omarchy's `SUPER + BACKSPACE`. The script asks Hyprland for the
+    // active window and sets its `opaque` property, both of which the
+    // IPC now serves; the native verb is the same toggle without the
+    // round trip through `hyprctl` and `jq`.
+    if argv.len() == 1
+        && program.rsplit('/').next() == Some("omarchy-hyprland-window-transparency-toggle")
+    {
+        return Verb::Action(Action::ToggleOpaque);
+    }
     if let Some(reason) = hyprland_refusal(program) {
         return Verb::Unbound(reason);
     }
@@ -128,9 +137,10 @@ fn exec_verb(command: &str) -> Verb {
 /// silently does nothing; and a name test that ignores what the IPC
 /// serves leaves working chords dead as coverage grows.
 ///
-/// The layout toggle is here because Omarchy's menu runs it as a
-/// script. A binding of the bare command still becomes the native
-/// `toggle-layout` in [`exec_verb`].
+/// The layout and transparency toggles are here because Omarchy's
+/// menu runs them as scripts. A binding of either bare command still
+/// becomes the native `toggle-layout` or `toggle-opaque` in
+/// [`exec_verb`].
 pub const SERVED_OMARCHY_SCRIPTS: &[&str] = &[
     "omarchy-hyprland-window-pop",
     "omarchy-hyprland-window-width",
@@ -140,6 +150,7 @@ pub const SERVED_OMARCHY_SCRIPTS: &[&str] = &[
     // Reads `.fullscreenClient` and sends `fullscreen_state`, both
     // axes of which the IPC now serves.
     "omarchy-hyprland-window-tiled-fullscreen-toggle",
+    "omarchy-hyprland-window-transparency-toggle",
 ];
 
 /// The `omarchy-hyprland-*` scripts Omarchy binds or starts whose
@@ -149,7 +160,6 @@ pub const SERVED_OMARCHY_SCRIPTS: &[&str] = &[
 /// [`SERVED_OMARCHY_SCRIPTS`] in the change that makes its requests
 /// served.
 pub const UNSERVED_OMARCHY_SCRIPTS: &[(&str, Unbound)] = &[
-    ("omarchy-hyprland-window-transparency-toggle", Unbound::OPACITY),
     // Both rewrite a Hyprland config flag and run `hyprctl reload`.
     ("omarchy-hyprland-window-gaps-toggle", Unbound::GAPS),
     ("omarchy-hyprland-window-single-square-aspect-toggle", Unbound::LAYOUT_OPTION),

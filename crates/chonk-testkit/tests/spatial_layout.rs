@@ -309,6 +309,60 @@ fn reflow_stages_final_configures_once_and_has_no_animation_deadline_after_settl
     assert_eq!(session.world().unwrap().spatial.calculations, calculations);
 }
 
+/// `[motion] enabled = false`: the reflow that a live transition would
+/// carry over a few hundred milliseconds is presented whole on the
+/// first rendered frame, and the end state is exactly the animated
+/// path's — same geometry, same focus, and no frame scheduled after it.
+#[test]
+#[ignore = "requires native nested Wayland"]
+fn with_motion_off_a_reflow_presents_its_final_geometry_on_the_first_rendered_frame() {
+    let mut outcomes = Vec::new();
+    for enabled in [true, false] {
+        let mut session = Session::boot(
+            &format!("spatial-motion-{enabled}"),
+            SessionOptions {
+                config_extra: format!(
+                    "show_dock = false\nhyprland_config = false\n[motion]\nenabled = {enabled}\n"
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let binary = profile_binary("chonk-input-probe").unwrap();
+        session
+            .launch(binary.to_str().unwrap(), &["1", "--interactive=resize"])
+            .unwrap();
+        session.wait_for_window("input-probe").unwrap();
+        session.door().barrier().unwrap();
+        let initial = session.world().unwrap();
+        let before = geometry(&initial, "input-probe");
+        // `dispatch` ends on the door's barrier: one rendered frame.
+        dispatch(&mut session, "layout mosaic");
+        let first = session.world().unwrap();
+        assert_eq!(first.spatial.mode, "Mosaic");
+        assert_eq!(
+            first.spatial.moving,
+            enabled,
+            "motion {enabled}: a window transitioning after the first rendered frame"
+        );
+        let final_state = settled(&mut session);
+        let after = geometry(&final_state, "input-probe");
+        assert_ne!(after, before, "the reflow moved the window");
+        if !enabled {
+            assert_eq!(geometry(&first, "input-probe"), after);
+            session.door().frame_stats().unwrap();
+            std::thread::sleep(Duration::from_millis(120));
+            assert_eq!(
+                session.door().frame_stats().unwrap().render_calls,
+                0,
+                "a policy that animates nothing schedules no frames"
+            );
+        }
+        outcomes.push((after, final_state.logical_focus == initial.logical_focus));
+    }
+    assert_eq!(outcomes[0], outcomes[1], "snapped and animated reflows end in the same state");
+}
+
 #[test]
 #[ignore = "requires native nested Wayland"]
 fn native_pointer_reorder_resize_cancel_and_modal_takeover_leave_no_transforms() {

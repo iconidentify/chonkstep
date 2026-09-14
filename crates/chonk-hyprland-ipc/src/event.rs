@@ -138,8 +138,12 @@ impl Differ {
         let mut events = Vec::new();
 
         // --- 1. additions others will refer to -------------------------
+        // By name, not id: ids are layout positions, so when the first
+        // output leaves — a docked laptop's panel disabled — the second
+        // inherits id 0 and an id diff would announce the wrong monitor
+        // as removed and the survivor as unchanged.
         for monitor in &now.monitors {
-            if !previous.monitors.iter().any(|old| old.id == monitor.id) {
+            if !previous.monitors.iter().any(|old| old.name == monitor.name) {
                 // Legacy consumers subscribe to `monitoradded`; newer
                 // Hyprland clients prefer the richer v2 payload. Send
                 // both, legacy first, as Hyprland does.
@@ -319,7 +323,7 @@ impl Differ {
             }
         }
         for monitor in &previous.monitors {
-            if !now.monitors.iter().any(|new| new.id == monitor.id) {
+            if !now.monitors.iter().any(|new| new.name == monitor.name) {
                 events.push(Event::new("monitorremoved", monitor.name.clone()));
             }
         }

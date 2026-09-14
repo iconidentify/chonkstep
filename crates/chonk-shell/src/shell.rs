@@ -1050,6 +1050,14 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// iteration, so the dismissal is never a frame behind.
     transient_escape: bool,
     config_reloaded: bool,
+    /// Set by an explicit reload alone — `hyprctl reload`, the reload
+    /// marker, a bound `reload` key — and drained by the compositor,
+    /// which then reconciles the session's monitor rules against the
+    /// outputs it drives. The one-second file watch and Omarchy theme
+    /// following re-resolve through [`Shell::reresolve`] without setting
+    /// it: re-applying a monitor rule can be a modeset, and a save of an
+    /// unrelated key must never move an output.
+    monitor_rules_pending: bool,
     /// Notices Omarchy switching its theme underneath a session that
     /// follows it (`SessionState::following`); asked once a second from
     /// [`Shell::tick`] while following — and while an adoption is
@@ -1307,6 +1315,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             appearance_requests: crate::appearance::RequestPoller::new(now),
             transient_escape: false,
             config_reloaded: false,
+            monitor_rules_pending: false,
             omarchy: crate::omarchy_follow::Watch::new(),
             omarchy_adoption_armed: None,
             // Armed only for a session that actually reads somebody
@@ -1348,6 +1357,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         wm.set_snap_threshold(next.edge_resistance);
         wm.set_drag_modifier(next.drag_modifier);
         wm.set_interaction_config(next.interaction.clone());
+        // Read by every transition on its next frame, so a reload that
+        // turns motion off lands the scenes in flight on their targets.
+        wm.set_motion_policy(next.motion);
         // The scale belongs in this list rather than in the metrics
         // step below: `wm-core` re-lays-out nothing on it — every pixel
         // it draws comes pre-scaled from the theme engine step 3 swaps
@@ -1542,10 +1554,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn reload_config(&mut self, wm: &mut WindowManager<B>) {
         self.reresolve(wm);
         self.config_reloaded = true;
+        self.monitor_rules_pending = true;
     }
 
     pub fn take_config_reloaded(&mut self) -> bool {
         std::mem::take(&mut self.config_reloaded)
+    }
+
+    /// Whether an explicit reload has happened since the compositor last
+    /// reconciled its outputs against the session's monitor rules. Drained
+    /// once; see [`Shell::monitor_rules_pending`].
+    pub fn take_monitor_rules_pending(&mut self) -> bool {
+        std::mem::take(&mut self.monitor_rules_pending)
     }
 
     /// Moves the session to the other side of the light/dark axis (or
@@ -1890,6 +1910,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // dispatch are shared verbatim.
             Action::Layout(mode) => wm.set_workspace_layout(wm.current_workspace(), *mode),
             Action::ToggleLayout => wm.toggle_workspace_layout(),
+            Action::ToggleOpaque => {
+                if let Some(id) = wm.focused_client() {
+                    wm.set_client_opaque(id, None);
+                }
+            }
             Action::Floating(value) => {
                 if let Some(id) = wm.focused_client() {
                     if let Some(value) = value {

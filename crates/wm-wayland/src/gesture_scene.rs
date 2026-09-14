@@ -37,6 +37,10 @@ pub(crate) struct Transition {
     next_frame: Instant,
     frame_interval: Duration,
     overview_token: Option<Id>,
+    /// Whether the armed spring came from a keyboard or pointer Overview
+    /// command rather than a released swipe: they answer to different
+    /// switches of the motion policy.
+    keyboard_target: bool,
 }
 impl Transition {
     pub fn horizontal(&self) -> bool {
@@ -207,6 +211,7 @@ fn begin(comp: &mut Compositor, motion: SwipeMotion, opened: bool) {
         next_frame: now,
         frame_interval,
         overview_token,
+        keyboard_target: false,
     });
     crate::input::sync_pointer_focus(comp);
 }
@@ -258,10 +263,47 @@ pub(crate) fn apply_overview_target(comp: &mut Compositor) {
         scene.position = position;
         let target = if opened { 1.0 } else { 0.0 };
         scene.spring = Some(physics::Spring::new(position, scene.velocity, target));
+        scene.keyboard_target = true;
         scene.last_frame = Instant::now();
         scene.next_frame = scene.last_frame;
     }
-    sync_progress(comp);
+    settle_or_sync(comp);
+}
+
+/// The policy an armed spring answers to. Recomputed per frame rather
+/// than stored, so a reload that turns motion off mid-flight lands the
+/// scene on its current target.
+fn spring_policy(comp: &Compositor, scene: &Transition) -> physics::MotionPolicy {
+    let policy = comp.wm.motion_policy();
+    policy.gate(if scene.keyboard_target {
+        policy.overview
+    } else {
+        policy.gesture_settle
+    })
+}
+
+/// After arming a spring: with motion off, jump to its target and run
+/// the same completion an animated frame would, in this pass, so a
+/// snapped transition has exactly the end state an animated one has.
+fn settle_or_sync(comp: &mut Compositor) {
+    let policy = comp
+        .wm
+        .backend()
+        .gesture_scene
+        .as_ref()
+        .filter(|scene| scene.spring.is_some())
+        .map(|scene| spring_policy(comp, scene));
+    match policy {
+        Some(policy) if !policy.enabled => {
+            let scene = comp.wm.backend_mut().gesture_scene.as_mut().unwrap();
+            let spring = scene.spring.as_mut().unwrap();
+            spring.advance_with(0.0, &policy);
+            scene.position = spring.position;
+            scene.velocity = spring.velocity;
+            complete(comp);
+        }
+        _ => sync_progress(comp),
+    }
 }
 
 fn sync_progress(comp: &mut Compositor) {
@@ -292,10 +334,11 @@ pub(crate) fn release(comp: &mut Compositor, cancelled: bool, motion: Option<Swi
             physics::settle_target(scene.position, scene.velocity, min, max)
         };
         scene.spring = Some(physics::Spring::new(scene.position, scene.velocity, target));
+        scene.keyboard_target = false;
         scene.last_frame = Instant::now();
         scene.next_frame = scene.last_frame;
     }
-    sync_progress(comp);
+    settle_or_sync(comp);
 }
 
 /// Ownership loss is immediate, unlike a libinput cancellation which settles.
@@ -368,39 +411,50 @@ pub(crate) fn tick(comp: &mut Compositor) {
         return;
     }
     let now = Instant::now();
+    let policy = spring_policy(comp, scene);
     let scene = comp.wm.backend_mut().gesture_scene.as_mut().unwrap();
     let spring = scene.spring.as_mut().unwrap();
-    let finished = spring.advance(
+    let finished = spring.advance_with(
         now.saturating_duration_since(scene.last_frame)
             .as_secs_f64(),
+        &policy,
     );
     scene.last_frame = now;
     scene.next_frame = now + scene.frame_interval;
     scene.position = spring.position;
     scene.velocity = spring.velocity;
     if finished {
-        let scene = comp.wm.backend_mut().gesture_scene.take().unwrap();
-        let target = scene.spring.unwrap().target;
-        if scene.horizontal() {
-            if target > 0.0 {
-                comp.shell
-                    .on_desktop_gesture(&mut comp.wm, DesktopGesture::WorkspaceNext);
-            } else if target < 0.0 {
-                comp.shell
-                    .on_desktop_gesture(&mut comp.wm, DesktopGesture::WorkspacePrevious);
-            }
-        } else {
-            if let Some(overview) = comp.wm.backend_mut().overview.as_mut() {
-                overview.progress = target;
-            }
-            comp.shell
-                .finish_desktop_gesture_overview(&mut comp.wm, target > 0.5);
-        }
-        comp.wm.backend_mut().mark_damaged();
-        crate::input::sync_pointer_focus(comp);
+        complete(comp);
     } else {
         sync_progress(comp);
     }
+}
+
+/// The one completion for a settled spring, animated or snapped: the
+/// workspace change still goes through the shell, Overview still
+/// releases its input ownership, and pointer focus is re-derived.
+fn complete(comp: &mut Compositor) {
+    let Some(scene) = comp.wm.backend_mut().gesture_scene.take() else {
+        return;
+    };
+    let target = scene.spring.map_or(scene.position, |spring| spring.target);
+    if scene.horizontal() {
+        if target > 0.0 {
+            comp.shell
+                .on_desktop_gesture(&mut comp.wm, DesktopGesture::WorkspaceNext);
+        } else if target < 0.0 {
+            comp.shell
+                .on_desktop_gesture(&mut comp.wm, DesktopGesture::WorkspacePrevious);
+        }
+    } else {
+        if let Some(overview) = comp.wm.backend_mut().overview.as_mut() {
+            overview.progress = target;
+        }
+        comp.shell
+            .finish_desktop_gesture_overview(&mut comp.wm, target > 0.5);
+    }
+    comp.wm.backend_mut().mark_damaged();
+    crate::input::sync_pointer_focus(comp);
 }
 
 pub(crate) fn render(

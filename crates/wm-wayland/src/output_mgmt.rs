@@ -32,12 +32,14 @@
 //! - **Transform** applies on the DRM session backend for the four
 //!   non-flipped rotations; the nested backend truthfully refuses it
 //!   because its one output is the host window.
-//! - **Disable** is refused with `failed()` and a log line naming the
-//!   gap. Disabling means tearing an output
-//!   out of three index-aligned lists (`Compositor::outputs`, the
-//!   ledger's monitors, the session's crtcs) that the lock module and
-//!   the shell hold indices into. A truthful `failed` beats a lying
-//!   `succeeded`.
+//! - **Disable** parks the output (`state::park_output`): the session
+//!   keeps the connector and clears its crtc, and the compositor runs
+//!   the unplug half of the hotplug path, so every index-bearing ledger
+//!   moves through the one reindexing it already has. A parked output is
+//!   announced as a disabled head — after the enabled ones, so `kanshi`
+//!   and `wlr-randr --on` can put it back. Disabling the last output in
+//!   the layout is refused with `failed()` and a log line: the desktop
+//!   is never without an output.
 //! - **Adaptive sync** is capability-checked and controls permission for
 //!   the renderer's conservative direct-scanout-only runtime gate.
 //!
@@ -135,6 +137,7 @@ struct HeadInstance {
 #[derive(Clone, PartialEq)]
 struct HeadSnapshot {
     name: String,
+    enabled: bool,
     position: Point,
     scale: f64,
     current_mode: usize,
@@ -176,10 +179,73 @@ struct ConfigHeadData {
     index: usize,
 }
 
-/// A validated apply, waiting to be performed.
+/// A validated apply, waiting to be performed. Heads are held by name:
+/// enabling or disabling one moves it between the layout and the parked
+/// list, and every index after it with it.
 struct PendingApply {
     resource: ZwlrOutputConfigurationV1,
-    heads: Vec<(usize, HeadConfig)>,
+    heads: Vec<(String, HeadConfig)>,
+}
+
+/// One head as this module publishes it: an output in the layout, or a
+/// parked one. Heads are indexed over the layout first and the parked
+/// outputs after it, which is the order they are announced in.
+enum HeadSource<'a> {
+    Live(&'a crate::state::OutputEntry),
+    Parked(&'a crate::state::OutputSetup),
+}
+
+impl HeadSource<'_> {
+    fn output(&self) -> &smithay::output::Output {
+        match self {
+            HeadSource::Live(entry) => &entry.output,
+            HeadSource::Parked(setup) => &setup.output,
+        }
+    }
+
+    fn name(&self) -> String {
+        self.output().name()
+    }
+
+    fn identity(&self) -> Option<&str> {
+        match self {
+            HeadSource::Live(entry) => entry.identity.as_deref(),
+            HeadSource::Parked(setup) => setup.identity.as_deref(),
+        }
+    }
+
+    fn modes(&self) -> &[smithay::output::Mode] {
+        match self {
+            HeadSource::Live(entry) => &entry.modes,
+            HeadSource::Parked(setup) => &setup.modes,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        matches!(self, HeadSource::Live(_))
+    }
+
+    fn vrr_supported(&self) -> bool {
+        match self {
+            HeadSource::Live(entry) => entry.vrr_supported,
+            HeadSource::Parked(setup) => setup.vrr_supported,
+        }
+    }
+}
+
+/// Every head, layout first, then parked.
+fn heads(comp: &Compositor) -> impl Iterator<Item = HeadSource<'_>> {
+    comp.outputs
+        .iter()
+        .map(HeadSource::Live)
+        .chain(comp.parked_outputs.iter().map(|parked| HeadSource::Parked(&parked.setup)))
+}
+
+/// Whether a configuration would leave the layout with no output: the
+/// enabled heads it disables, less the parked heads it enables. Pure,
+/// because this is the one refusal every disable route shares.
+fn layout_would_empty(enabled: usize, disabling: usize, enabling: usize) -> bool {
+    enabled.saturating_sub(disabling) + enabling == 0
 }
 
 /// Registers the global. Called once from `run`, before the listening
@@ -241,20 +307,17 @@ fn publish(comp: &mut Compositor) {
     // Vec here made a persistent `kanshi`/`wlr-randr` connection pay
     // one allocation and free for every unrelated client commit. The
     // baseline is rewritten in place only on the rare changed path.
+    let head_count = comp.outputs.len() + comp.parked_outputs.len();
     let structural = comp.output_mgmt.dirty
-        && (comp.outputs.len() != comp.output_mgmt.published.len()
-            || comp
-                .outputs
-                .iter()
+        && (head_count != comp.output_mgmt.published.len()
+            || heads(comp)
                 .zip(&comp.output_mgmt.published)
-                .any(|(entry, previous)| entry.output.name() != previous.name));
+                .any(|(head, previous)| head.name() != previous.name || head.enabled() != previous.enabled));
     let changed = comp.output_mgmt.dirty
         && (structural
-            || comp
-                .outputs
-                .iter()
+            || heads(comp)
                 .zip(&comp.output_mgmt.published)
-                .any(|(entry, previous)| head_snapshot(entry) != *previous));
+                .any(|(head, previous)| head_snapshot(&head) != *previous));
     // The potentially-different state has now been compared, even if
     // the mutation proved idempotent and there is no batch to send.
     comp.output_mgmt.dirty = false;
@@ -266,11 +329,16 @@ fn publish(comp: &mut Compositor) {
     }
     let serial = comp.output_mgmt.serial;
     let display_handle = comp.display_handle.clone();
-    let Compositor { outputs, output_mgmt, .. } = comp;
+    let Compositor { outputs, parked_outputs, output_mgmt, .. } = comp;
+    let sources: Vec<HeadSource> = outputs
+        .iter()
+        .map(HeadSource::Live)
+        .chain(parked_outputs.iter().map(|parked| HeadSource::Parked(&parked.setup)))
+        .collect();
     for manager in output_mgmt.managers.iter_mut() {
         if !manager.announced {
-            for (index, entry) in outputs.iter().enumerate() {
-                announce_head(&display_handle, manager, index, entry);
+            for (index, head) in sources.iter().enumerate() {
+                announce_head(&display_handle, manager, index, head);
             }
             manager.announced = true;
             manager.resource.done(serial);
@@ -288,33 +356,45 @@ fn publish(comp: &mut Compositor) {
                 }
                 head.resource.finished();
             }
-            for (index, entry) in outputs.iter().enumerate() {
-                announce_head(&display_handle, manager, index, entry);
+            for (index, head) in sources.iter().enumerate() {
+                announce_head(&display_handle, manager, index, head);
             }
             manager.resource.done(serial);
         } else if changed {
             for head in &manager.heads {
-                let Some(entry) = outputs.get(head.index) else { continue };
+                let Some(source) = sources.get(head.index) else { continue };
                 let Some(previous) = output_mgmt.published.get(head.index) else { continue };
-                update_head(head, entry, previous);
+                update_head(head, source, previous);
             }
             manager.resource.done(serial);
         }
     }
     if changed {
         output_mgmt.published.clear();
-        output_mgmt.published.extend(outputs.iter().map(head_snapshot));
+        output_mgmt.published.extend(sources.iter().map(head_snapshot));
     }
 }
 
-fn head_snapshot(entry: &crate::state::OutputEntry) -> HeadSnapshot {
-    HeadSnapshot {
-        name: entry.output.name(),
-        position: entry.position,
-        scale: entry.scale,
-        current_mode: current_mode_index(entry),
-        transform: entry.transform,
-        adaptive_sync: entry.vrr_requested,
+fn head_snapshot(head: &HeadSource<'_>) -> HeadSnapshot {
+    match head {
+        HeadSource::Live(entry) => HeadSnapshot {
+            name: entry.output.name(),
+            enabled: true,
+            position: entry.position,
+            scale: entry.scale,
+            current_mode: current_mode_index(entry),
+            transform: entry.transform,
+            adaptive_sync: entry.vrr_requested,
+        },
+        HeadSource::Parked(setup) => HeadSnapshot {
+            name: setup.output.name(),
+            enabled: false,
+            position: Point::new(0, 0),
+            scale: 1.0,
+            current_mode: 0,
+            transform: Transform::Normal,
+            adaptive_sync: false,
+        },
     }
 }
 
@@ -356,9 +436,8 @@ fn requested_transform(value: i32) -> Option<Transform> {
     }
 }
 
-fn matching_mode_index(entry: &crate::state::OutputEntry, width: i32, height: i32, refresh: i32) -> Option<usize> {
-    entry
-        .modes
+fn matching_mode_index(modes: &[smithay::output::Mode], width: i32, height: i32, refresh: i32) -> Option<usize> {
+    modes
         .iter()
         .enumerate()
         .filter(|(_, mode)| {
@@ -376,13 +455,13 @@ fn announce_head(
     display_handle: &DisplayHandle,
     manager: &mut Manager,
     index: usize,
-    entry: &crate::state::OutputEntry,
+    head: &HeadSource<'_>,
 ) {
     let Some(client) = manager.resource.client() else {
         return;
     };
     let version = manager.resource.version();
-    let head = match client.create_resource::<ZwlrOutputHeadV1, usize, Compositor>(
+    let resource = match client.create_resource::<ZwlrOutputHeadV1, usize, Compositor>(
         display_handle,
         version,
         index,
@@ -393,23 +472,26 @@ fn announce_head(
             return;
         }
     };
+    let source = head;
+    let head = resource;
+    let output = source.output();
     manager.resource.head(&head);
-    head.name(entry.output.name());
-    head.description(entry.identity.clone().unwrap_or_else(|| {
-        format!("{} ({})", entry.output.name(), entry.output.physical_properties().model)
+    head.name(output.name());
+    head.description(source.identity().map(str::to_string).unwrap_or_else(|| {
+        format!("{} ({})", output.name(), output.physical_properties().model)
     }));
-    let physical = entry.output.physical_properties().size;
+    let physical = output.physical_properties().size;
     if physical.w > 0 && physical.h > 0 {
         head.physical_size(physical.w, physical.h);
     }
     if version >= 2 {
-        head.make(entry.output.physical_properties().make);
-        head.model(entry.output.physical_properties().model);
+        head.make(output.physical_properties().make);
+        head.model(output.physical_properties().model);
     }
 
-    let mut modes = Vec::with_capacity(entry.modes.len());
-    let preferred = entry.output.preferred_mode();
-    for (mode_index, mode) in entry.modes.iter().enumerate() {
+    let mut modes = Vec::with_capacity(source.modes().len());
+    let preferred = output.preferred_mode();
+    for (mode_index, mode) in source.modes().iter().enumerate() {
         let resource = match client.create_resource::<ZwlrOutputModeV1, (usize, usize), Compositor>(
             display_handle,
             version,
@@ -430,9 +512,14 @@ fn announce_head(
         modes.push(resource);
     }
 
-    // Every output this compositor drives is enabled — a disabled head
-    // would be one this session cannot yet produce (see the module
-    // docs on disable).
+    // A parked output is a disabled head: the protocol says a disabled
+    // head carries no mode, position, transform or scale, and that is
+    // exactly the state it is in.
+    let HeadSource::Live(entry) = source else {
+        head.enabled(0);
+        manager.heads.push(HeadInstance { index, resource: head, modes });
+        return;
+    };
     head.enabled(1);
     let current = current_mode_index(entry);
     if let Some(mode) = modes.get(current) {
@@ -451,8 +538,14 @@ fn announce_head(
     manager.heads.push(HeadInstance { index, resource: head, modes });
 }
 
-/// Sends only what changed about an already-announced head.
-fn update_head(head: &HeadInstance, entry: &crate::state::OutputEntry, previous: &HeadSnapshot) {
+/// Sends only what changed about an already-announced head. A change of
+/// enabled state is structural (the head moves between the layout and
+/// the parked list) and re-announces everything, so only a live head
+/// reaches here with anything to say.
+fn update_head(head: &HeadInstance, source: &HeadSource<'_>, previous: &HeadSnapshot) {
+    let HeadSource::Live(entry) = source else {
+        return;
+    };
     if entry.position != previous.position {
         head.resource.position(entry.position.x, entry.position.y);
     }
@@ -487,17 +580,23 @@ fn update_head(head: &HeadInstance, entry: &crate::state::OutputEntry, previous:
 /// their current state (the protocol prefers every head configured;
 /// treating silence as "unchanged" refuses nobody and surprises
 /// nobody).
-fn validate(comp: &Compositor, config: &ConfigState) -> Result<Vec<(usize, HeadConfig)>, String> {
-    let mut heads = Vec::with_capacity(config.heads.len());
+fn validate(comp: &Compositor, config: &ConfigState) -> Result<Vec<(String, HeadConfig)>, String> {
+    let sources: Vec<HeadSource> = heads(comp).collect();
+    let mut result = Vec::with_capacity(config.heads.len());
+    let (mut disabling, mut enabling) = (0, 0);
     for (&index, head) in &config.heads {
-        let Some(entry) = comp.outputs.get(index) else {
+        let Some(source) = sources.get(index) else {
             return Err(format!("head {index} does not exist"));
         };
-        let name = entry.output.name();
+        let name = source.name();
+        match (source.enabled(), head.enabled) {
+            (true, false) => disabling += 1,
+            (false, true) => enabling += 1,
+            _ => {}
+        }
         if !head.enabled {
-            return Err(format!(
-                "disabling {name}: not supported yet (this compositor cannot yet remove an output from the session's layout)"
-            ));
+            result.push((name, head.clone()));
+            continue;
         }
         if let Some(transform) = head.transform {
             let Some(transform) = requested_transform(transform) else {
@@ -507,7 +606,7 @@ fn validate(comp: &Compositor, config: &ConfigState) -> Result<Vec<(usize, HeadC
                 return Err(format!("rotating {name}: the nested backend reserves its transform for the host surface"));
             }
         }
-        if head.adaptive_sync == Some(true) && !entry.vrr_supported {
+        if head.adaptive_sync == Some(true) && !source.vrr_supported() {
             return Err(format!(
                 "adaptive sync on {name}: the connector does not advertise VRR capability"
             ));
@@ -520,11 +619,17 @@ fn validate(comp: &Compositor, config: &ConfigState) -> Result<Vec<(usize, HeadC
                 return Err(format!("scale {scale} on {name} is outside the sane range"));
             }
         }
+        // A parked head's modes are checked against its list alone; the
+        // crtc it will come back on is decided when it is enabled, and
+        // `apply_mode` answers for it then.
+        let applicable = |mode: usize| {
+            !source.enabled() || crate::session::mode_is_applicable(&comp.graphics, index, mode)
+        };
         if let Some(mode) = head.mode {
-            if mode >= entry.modes.len() {
+            if mode >= source.modes().len() {
                 return Err(format!("mode {mode} does not belong to {name}"));
             }
-            if !crate::session::mode_is_applicable(&comp.graphics, index, mode) {
+            if !applicable(mode) {
                 return Err(format!(
                     "mode change on {name}: the nested backend's output is the host window and keeps its size"
                 ));
@@ -535,9 +640,9 @@ fn validate(comp: &Compositor, config: &ConfigState) -> Result<Vec<(usize, HeadC
             // hardware actually advertises — a mode the display never
             // offered is a mode it will refuse, and the nested output
             // has no modes to set at all.
-            let matched = matching_mode_index(entry, w, h, refresh);
+            let matched = matching_mode_index(source.modes(), w, h, refresh);
             match matched {
-                Some(mode) if crate::session::mode_is_applicable(&comp.graphics, index, mode) => {}
+                Some(mode) if applicable(mode) => {}
                 _ => {
                     return Err(format!(
                         "custom mode {w}x{h}@{refresh} on {name} matches no mode the display advertises"
@@ -545,9 +650,14 @@ fn validate(comp: &Compositor, config: &ConfigState) -> Result<Vec<(usize, HeadC
                 }
             }
         }
-        heads.push((index, head.clone()));
+        result.push((name, head.clone()));
     }
-    Ok(heads)
+    if layout_would_empty(comp.outputs.len(), disabling, enabling) {
+        let names: Vec<String> = result.iter().filter(|(_, head)| !head.enabled).map(|(name, _)| name.clone()).collect();
+        tracing::warn!(outputs = %names.join(", "), "refusing to disable the last output in the layout");
+        return Err(format!("disabling {}: refusing to leave the layout without an output", names.join(", ")));
+    }
+    Ok(result)
 }
 
 /// Performs a parked, already-validated apply: scale, mode, position,
@@ -563,7 +673,32 @@ fn perform_pending_apply(comp: &mut Compositor) {
     let mut moved_any = false;
     let mut adaptive_any = false;
     let mut first_error: Option<String> = None;
-    for (index, head) in &pending.heads {
+    // Structure first: a head leaving or joining the layout moves every
+    // index after it, so the properties below resolve their output by
+    // name once the layout is settled. Enables before disables, so a
+    // configuration that swaps which output is on never meets the
+    // last-output refusal on the way.
+    for (name, _) in pending.heads.iter().filter(|(_, head)| head.enabled) {
+        if comp.parked_outputs.iter().any(|parked| parked.setup.output.name() == *name) {
+            if let Err(error) = crate::state::unpark_output(comp, name) {
+                tracing::warn!(%error, output = %name, "could not enable the output");
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    for (name, _) in pending.heads.iter().filter(|(_, head)| !head.enabled) {
+        if let Some(index) = comp.outputs.iter().position(|entry| entry.output.name() == *name) {
+            if let Err(error) = crate::state::park_output(comp, index) {
+                tracing::warn!(%error, output = %name, "could not disable the output");
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    for (name, head) in pending.heads.iter().filter(|(_, head)| head.enabled) {
+        let Some(index) = comp.outputs.iter().position(|entry| entry.output.name() == *name) else {
+            continue;
+        };
+        let index = &index;
         if let Some(enabled) = head.adaptive_sync {
             if comp.outputs[*index].vrr_requested != enabled {
                 match crate::session::set_adaptive_sync(&mut comp.graphics, *index, enabled) {
@@ -604,7 +739,7 @@ fn perform_pending_apply(comp: &mut Compositor) {
         }
         let mode = head.mode.or_else(|| {
             head.custom_mode.and_then(|(w, h, refresh)| {
-                matching_mode_index(&comp.outputs[*index], w, h, refresh)
+                matching_mode_index(&comp.outputs[*index].modes, w, h, refresh)
             })
         });
         if let Some(mode_index) = mode {
@@ -1125,6 +1260,19 @@ mod tests {
 
     // The protocol halves need a display and a client; what a unit test
     // can reach is the layout arithmetic an `apply` runs on.
+
+    /// wlr-output-management may disable any head but the last one in
+    /// the layout, counting the heads the same configuration enables:
+    /// `kanshi` swapping the laptop panel for the dock is one apply.
+    #[test]
+    fn a_configuration_may_not_leave_the_layout_without_an_output() {
+        assert!(layout_would_empty(1, 1, 0), "the only output");
+        assert!(layout_would_empty(2, 2, 0), "both outputs at once");
+        assert!(!layout_would_empty(2, 1, 0), "one of two");
+        assert!(!layout_would_empty(1, 1, 1), "swapped for a parked one");
+        assert!(!layout_would_empty(1, 0, 0), "nothing disabled");
+        assert!(layout_would_empty(0, 0, 0));
+    }
 
     #[test]
     fn a_layout_placed_anywhere_is_translated_back_to_the_origin() {

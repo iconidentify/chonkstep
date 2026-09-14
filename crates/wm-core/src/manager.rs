@@ -367,6 +367,10 @@ pub struct WindowManager<B: Backend> {
     /// Chrome invalidated by an interactive drag. Drains once at the render
     /// boundary, not once per input event.
     pending_decorations: HashSet<ClientId>,
+    /// Whether and how fast the transitions this manager starts move
+    /// (`set_motion_policy`). Layout reflows consult it here; the
+    /// backend's own scenes read it back through `motion_policy`.
+    motion: crate::MotionPolicy,
 }
 
 struct CycleSession {
@@ -456,7 +460,20 @@ impl<B: Backend> WindowManager<B> {
             fullscreen_restore: HashMap::new(),
             restore_title_metrics: HashMap::new(),
             pending_decorations: HashSet::new(),
+            motion: crate::MotionPolicy::default(),
         }
+    }
+
+    /// Installs the motion policy a config load or reload resolved,
+    /// sanitized here so an out-of-range speed from a file never reaches
+    /// a spring. Takes effect on the next transition and, through
+    /// [`Self::motion_policy`], on any transition already in flight.
+    pub fn set_motion_policy(&mut self, policy: crate::MotionPolicy) {
+        self.motion = policy.sanitized();
+    }
+
+    pub fn motion_policy(&self) -> crate::MotionPolicy {
+        self.motion
     }
 
     /// Switches between click-to-focus (the default) and focus-follows-
@@ -1063,6 +1080,16 @@ impl<B: Backend> WindowManager<B> {
             self.raise_client(id);
         }
         true
+    }
+
+    /// Forces a client opaque for the session (`Some(true)`), lets its
+    /// opacity rule apply again (`Some(false)`), or toggles between the
+    /// two (`None`): Omarchy's `SUPER + BACKSPACE`. The state lives on
+    /// the backend with the rule it overrides; `false` when the client
+    /// is unknown or the backend draws every window opaque anyway.
+    pub fn set_client_opaque(&mut self, id: ClientId, opaque: Option<bool>) -> bool {
+        let Some(client) = self.clients.get(id) else { return false };
+        self.backend.set_window_opaque(client.window, opaque)
     }
 
     /// Add or remove a stable IPC tag from a managed client.
@@ -2227,6 +2254,7 @@ impl<B: Backend> WindowManager<B> {
         if let Some(factor) = window_rule.touchpad_scroll_factor {
             self.touchpad_scroll_rules.insert(id, factor);
         }
+        self.backend.set_window_opacity(window, window_rule.opacity, window_rule.no_dim);
         self.window_index.insert(window, id);
         if self.spaces_mode() && self.mac_hidden.iter().any(|other| self.same_application(*other, id)) {
             self.mac_hidden.insert(id);

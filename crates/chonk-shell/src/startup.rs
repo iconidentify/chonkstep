@@ -225,6 +225,10 @@ pub struct SessionState {
     /// Retained configuration refusals for the Hyprland-compatible
     /// `configerrors` query.
     pub config_diagnostics: Vec<String>,
+    /// Whether, and how fast, the compositor's own transitions move.
+    /// Carried here so a reload that turns motion off reaches the
+    /// window manager and every scene in flight without a restart.
+    pub motion: wm_core::MotionPolicy,
 }
 
 impl SessionState {
@@ -309,6 +313,7 @@ impl SessionState {
             workspace_layouts: config.workspace_layouts.clone(),
             keybindings: config.keybindings.clone(),
             config_diagnostics: config.diagnostics.clone(),
+            motion: config.motion,
         }
     }
 
@@ -968,6 +973,16 @@ mod tests {
     }
 
     #[test]
+    fn motion_policy_resolves_from_config_on_every_reload() {
+        let config = wm_config::parse("[motion]\nenabled = false\nspeed = 0.5\n").unwrap();
+        assert_eq!(
+            SessionState::resolve(&config).motion,
+            wm_core::MotionPolicy { enabled: false, speed: 0.5, ..Default::default() }
+        );
+        assert_eq!(SessionState::resolve(&wm_config::parse("").unwrap()).motion, wm_core::MotionPolicy::default());
+    }
+
+    #[test]
     fn decoration_style_resolves_from_config_on_every_reload() {
         for name in ["system7", "windowmaker", "modern", "system7"] {
             let config = wm_config::parse(&format!("decoration_style = {name:?}")).unwrap();
@@ -1037,6 +1052,7 @@ mod tests {
             workspace_layouts: BTreeMap::new(),
             keybindings: Vec::new(),
             config_diagnostics: Vec::new(),
+            motion: wm_core::MotionPolicy::default(),
         };
         assert_eq!(state.theme(), base.scaled(2.0));
         // The load-bearing half: the state still holds the *unscaled*

@@ -36,7 +36,7 @@ pub use client::{
     Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo,
 };
 pub use focus::{FocusDirection, FocusPolicy, OutputTarget};
-pub use gestures::{physics as gesture_physics, DesktopGesture, GestureConfig, SwipeAxis, SwipeMotion, SwipeTracker};
+pub use gestures::{physics as gesture_physics, physics::MotionPolicy, DesktopGesture, GestureConfig, SwipeAxis, SwipeMotion, SwipeTracker};
 pub use hittest::{hit_test, HitTarget};
 pub use interaction::{AppProfile, InteractionConfig, InteractionMode, KeyboardMode};
 pub use manager::{
@@ -46,8 +46,8 @@ pub use manager::{
 };
 pub use motif::{hints_say_client_decorates, MIN_HINT_WORDS};
 pub use placement::{
-    place_frame, FloatDecision, FloatPolicy, IdleInhibitRule, PlacementPolicy, RuleMetrics, RulePlacement, RuleWorkspace,
-    RuleWorkspaceTarget, WindowRuleDecision,
+    place_frame, FloatDecision, FloatPolicy, IdleInhibitRule, OpacityRule, PlacementPolicy, RuleMetrics, RulePlacement,
+    RuleWorkspace, RuleWorkspaceTarget, WindowRuleDecision,
 };
 // `FloatDecision` carries a `Size`, so a crate that implements
 // `FloatPolicy` needs the type to name it. Re-exported here rather

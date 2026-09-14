@@ -110,7 +110,7 @@ example:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-162 bindings, including four native capture shortcuts, derived from Omarchy's
+163 bindings, including four native capture shortcuts, derived from Omarchy's
 own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
@@ -229,6 +229,7 @@ helpers are supported directly.
 | `super+ctrl+s`           | `run omarchy-menu-share`               | `omarchy-menu toggle share`                                                                                         |
 | `super+ctrl+space`       | `run omarchy-menu-background`          | `omarchy-menu toggle background`                                                                                    |
 | `super+shift+ctrl+space` | `run omarchy-menu-theme`               | `omarchy-menu toggle theme`                                                                                         |
+| `super+backspace` | `toggle-opaque` | -- |
 | `super+ctrl+e`           | `run omarchy-emojis`                   | `omarchy-shell shell toggle omarchy.emojis`                                                                         |
 | `super+alt+k`            | `run omarchy-keybindings-tmux`         | `omarchy-menu-tmux-keybindings`                                                                                     |
 | `super+ctrl+k`           | `run omarchy-keybindings-herdr`        | `omarchy-menu-herdr-keybindings`                                                                                    |
@@ -303,7 +304,7 @@ helpers are supported directly.
 
 ### Deliberately unbound
 
-20 groups of Omarchy chords remain unbound in the static preset. The table
+19 groups of Omarchy chords remain unbound in the static preset. The table
 explains each limit; the live configuration reader supports additional chords.
 
 | Omarchy chord                                                                                      | What Omarchy does with it                                            | Why not here                                                |
@@ -320,7 +321,6 @@ explains each limit; the live configuration reader supports additional chords.
 | `super+k`                                                                                          | Omarchy's keybinding cheatsheet                                      | declined on purpose — see the note under the table          |
 | `super+shift+space`                                                                                | toggle Omarchy's top bar                                             | chonkstep has no verb for it, and no command can stand in   |
 | `super+ctrl+d`                                                                                     | Omarchy's display panel                                              | commands Hyprland beyond the requests ChonkStep serves      |
-| `super+backspace` | window transparency | needs per-window opacity, which ChonkStep does not model |
 | `super+shift+backspace` | window gaps | toggles Hyprland's gaps, which ChonkStep does not read |
 | `super+ctrl+backspace` | single-window square aspect | toggles a Hyprland layout option, which ChonkStep does not read |
 | `super+ctrl+delete` | toggle the laptop display | disables an output, which ChonkStep does not do |

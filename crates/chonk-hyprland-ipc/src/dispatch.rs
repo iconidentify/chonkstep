@@ -82,6 +82,12 @@ pub enum Action {
     RaiseWindow(u64),
     SetPinned { window: u64, pinned: Option<bool> },
     SetTag { window: u64, tag: String, present: bool },
+    /// `setprop <window> opaque <value>` and its Lua form: force the
+    /// window opaque for the session (`Some(true)`), let its opacity
+    /// rule apply again (`Some(false)`), or toggle (`None`). The one
+    /// window property that is modeled; every other `set_prop` is
+    /// refused by name.
+    SetOpaque { window: u64, opaque: Option<bool> },
     /// Scale in protocol units (120 == 1.0), avoiding floating-point
     /// equality in an action that is compared in conformance tests.
     SetMonitorScale { output: String, scale_120: u32 },
@@ -91,6 +97,11 @@ pub enum Action {
     /// and the compositor resolves them exactly as a reload of the same
     /// line would.
     ConfigureMonitor { output: String, scale_120: Option<u32>, mode: Option<String>, position: Option<String> },
+    /// Take one named output out of the desktop layout, or put it back:
+    /// `keyword monitor NAME,disable`, its `NAME,preferred,auto,auto`
+    /// re-enable, and `hl.monitor({ output = NAME, disabled = BOOL })`.
+    /// The host refuses to disable the last output in the layout.
+    SetMonitorEnabled { output: String, enabled: bool },
     /// Power one named output, or every output when `output` is `None`.
     SetDpms { output: Option<String>, powered: bool },
     /// Select a group from the seat keymap. Hyprland accepts next,
@@ -260,6 +271,16 @@ fn split_verb(args: &str) -> (String, &str) {
     }
 }
 
+/// The value of an `opaque` property request: `None` toggles.
+fn opaque_value(value: &str) -> Option<Option<bool>> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "toggle" => Some(None),
+        "1" | "true" | "on" => Some(Some(true)),
+        "0" | "false" | "off" => Some(Some(false)),
+        _ => None,
+    }
+}
+
 fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
     if let Some((_, why)) = UNSUPPORTED.iter().find(|(name, _)| *name == verb) {
         return Outcome::Unsupported((*why).to_string());
@@ -368,6 +389,28 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                 selected_window(&selector, snapshot)
                     .map(|window| Outcome::Run(Action::RaiseWindow(window.id)))
                     .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {selector:?}")))
+            }
+        }
+        // `setprop <window> opaque toggle|1|0`, the classic spelling
+        // Omarchy's transparency toggle falls back to. Any other
+        // property is refused by name, exactly as the Lua form is.
+        "setprop" => {
+            let mut words = rest.split_whitespace();
+            let (Some(window), Some(prop)) = (words.next(), words.next()) else {
+                return Outcome::Unsupported("setprop takes a window, a property and a value".to_string());
+            };
+            if prop != "opaque" {
+                return Outcome::Unsupported(format!(
+                    "window property {prop:?} is not modeled; opaque is the one setprop property ChonkStep serves"
+                ));
+            }
+            let value = words.next().unwrap_or("toggle");
+            let Some(opaque) = opaque_value(value) else {
+                return Outcome::Unsupported(format!("setprop opaque takes toggle, 1 or 0, not {value:?}"));
+            };
+            match resolve_window(window, snapshot) {
+                Some(window) => Outcome::Run(Action::SetOpaque { window: window.id, opaque }),
+                None => Outcome::Unsupported(format!("no window matches {window:?}")),
             }
         }
         "pin" => selected_window(rest, snapshot)
@@ -559,7 +602,21 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
                 (Err(why), _) | (_, Err(why)) => Outcome::Unsupported(why),
             }
         }
-        "window.set_prop" => Outcome::Unsupported("window opacity and other dynamic properties are not modeled".to_string()),
+        "window.set_prop" => {
+            let Some(prop) = lua_field(&args, "prop") else {
+                return Outcome::Unknown("hl.dsp.window.set_prop with no prop".to_string());
+            };
+            if prop != "opaque" {
+                return Outcome::Unsupported(format!(
+                    "window property {prop:?} is not modeled; opaque is the one set_prop property ChonkStep serves"
+                ));
+            }
+            let value = lua_field(&args, "value").unwrap_or_else(|| "toggle".to_string());
+            match opaque_value(&value) {
+                Some(opaque) => lua_window(&args, snapshot, |window| Action::SetOpaque { window: window.id, opaque }),
+                None => Outcome::Unsupported(format!("set_prop opaque takes toggle, 1 or 0, not {value:?}")),
+            }
+        }
         "cursor.move" => {
             let coordinate = |key: &str| lua_field(&args, key).and_then(|value| value.trim().parse::<i32>().ok());
             match (coordinate("x"), coordinate("y")) {
@@ -587,18 +644,18 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
             Err(error) => return Outcome::Unsupported(format!("hl.monitor: invalid Lua arguments: {error}")),
         };
         // Every key is accounted for before anything changes. A request that
-        // also asked to disable or mirror the output must not come back `ok`
-        // having applied only its scale.
+        // also asked to mirror the output must not come back `ok` having
+        // applied only its scale.
         for arg in &args {
             let Literal::Table(fields) = arg else {
                 return Outcome::Unsupported("hl.monitor takes one table of named keys".to_string());
             };
             for (key, _) in fields {
                 match key.as_deref() {
-                    Some("output" | "mode" | "position" | "scale") => {}
+                    Some("output" | "mode" | "position" | "scale" | "disabled") => {}
                     Some(other) => {
                         return Outcome::Unsupported(format!(
-                            "hl.monitor key {other:?} is not supported; output, mode, position and scale are"
+                            "hl.monitor key {other:?} is not supported; output, mode, position, scale and disabled are"
                         ))
                     }
                     None => return Outcome::Unsupported("hl.monitor takes named keys only".to_string()),
@@ -608,8 +665,32 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         let Some(output) = lua_field(&args, "output") else {
             return Outcome::Unsupported("hl.monitor requires a named output".to_string());
         };
+        // `disabled` is the whole request: Omarchy's clamshell and
+        // laptop-display toggles write exactly `{ output, disabled = true }`,
+        // and a geometry given beside it would describe an output that is
+        // about to leave the layout. The name may be a disabled output's,
+        // which plain `monitors` omits.
+        if let Some(value) = lua_field(&args, "disabled") {
+            let Some(disabled) = parse_bool(&value) else {
+                return Outcome::Unsupported("hl.monitor disabled must be true or false".to_string());
+            };
+            if ["mode", "position", "scale"].iter().any(|key| lua_field(&args, key).is_some()) {
+                return Outcome::Unsupported(
+                    "hl.monitor disabled combines with output only; enable the output first, then configure it"
+                        .to_string(),
+                );
+            }
+            if !monitor_known(snapshot, &output) {
+                return Outcome::Unsupported(format!("hl.monitor names unknown output {output:?}"));
+            }
+            return Outcome::Run(Action::SetMonitorEnabled { output, enabled: !disabled });
+        }
         let Some(monitor) = snapshot.monitors.iter().find(|monitor| monitor.name == output) else {
-            return Outcome::Unsupported(format!("hl.monitor names unknown output {output:?}"));
+            return Outcome::Unsupported(if snapshot.disabled_monitors.iter().any(|monitor| monitor.name == output) {
+                format!("hl.monitor: output {output:?} is disabled; enable it with disabled = false first")
+            } else {
+                format!("hl.monitor names unknown output {output:?}")
+            });
         };
         let scale_120 = match lua_field(&args, "scale") {
             None => None,
@@ -745,8 +826,72 @@ fn layout_action(workspace: usize, mode: &str) -> Outcome {
     }
 }
 
+/// Whether `name` is an output in the layout or a disabled one.
+fn monitor_known(snapshot: &Snapshot, name: &str) -> bool {
+    snapshot.monitors.iter().chain(&snapshot.disabled_monitors).any(|monitor| monitor.name == name)
+}
+
+/// `keyword monitor NAME,…`: Omarchy's Display panel toggles a row off with
+/// `NAME,disable` and back on with `NAME,preferred,auto,auto`. The first
+/// takes the output out of the layout; the second puts a disabled output
+/// back, and on an output already in the layout means what the same
+/// monitor line means in the configuration. Anything past the scale —
+/// a transform, a colour depth — belongs in the configuration.
+fn parse_keyword_monitor(spec: &str, snapshot: &Snapshot) -> Outcome {
+    let fields: Vec<&str> = spec.split(',').map(str::trim).collect();
+    let (Some(&name), Some(&mode)) = (fields.first(), fields.get(1)) else {
+        return Outcome::Unsupported("keyword monitor requires NAME,disable or NAME,MODE,POSITION,SCALE".to_string());
+    };
+    if name.is_empty() {
+        return Outcome::Unsupported("keyword monitor requires an output name".to_string());
+    }
+    if mode.eq_ignore_ascii_case("disable") {
+        if fields.len() > 2 {
+            return Outcome::Unsupported("keyword monitor NAME,disable takes nothing after disable".to_string());
+        }
+        if !monitor_known(snapshot, name) {
+            return Outcome::Unsupported(format!("keyword monitor names unknown output {name:?}"));
+        }
+        return Outcome::Run(Action::SetMonitorEnabled { output: name.to_string(), enabled: false });
+    }
+    if fields.len() > 4 {
+        return Outcome::Unsupported(format!(
+            "keyword monitor {name}: {:?} belongs in the configuration; mode, position and scale apply live",
+            fields[4]
+        ));
+    }
+    if snapshot.disabled_monitors.iter().any(|monitor| monitor.name == name) {
+        // Back into the layout, where the configuration's own rule for it
+        // and the automatic placement apply, which is what
+        // `preferred,auto,auto` asks for.
+        return Outcome::Run(Action::SetMonitorEnabled { output: name.to_string(), enabled: true });
+    }
+    let Some(monitor) = snapshot.monitors.iter().find(|monitor| monitor.name == name) else {
+        return Outcome::Unsupported(format!("keyword monitor names unknown output {name:?}"));
+    };
+    let mode = mode.to_string();
+    if !monitor_advertises(monitor, &mode) {
+        return Outcome::Unsupported(format!("keyword monitor mode {mode:?} is not one {name} advertises"));
+    }
+    let position = fields.get(2).map(|value| value.to_string()).filter(|value| !value.is_empty());
+    if let Some(position) = &position {
+        if !position.eq_ignore_ascii_case("auto") && monitor_position(position).is_none() {
+            return Outcome::Unsupported(format!("keyword monitor position {position:?} must be auto or XxY"));
+        }
+    }
+    let scale_120 = match fields.get(3).map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        None => None,
+        Some(value) if value.eq_ignore_ascii_case("auto") => None,
+        Some(value) => match value.parse::<f64>() {
+            Ok(scale) if scale.is_finite() && (0.5..=4.0).contains(&scale) => Some((scale * 120.0).round() as u32),
+            _ => return Outcome::Unsupported("keyword monitor scale must be auto or a number between 0.5 and 4".to_string()),
+        },
+    };
+    Outcome::Run(Action::ConfigureMonitor { output: name.to_string(), scale_120, mode: Some(mode), position })
+}
+
 /// Parse the supported workspace, monitor and diagnostic keyword mutations.
-pub fn parse_keyword(source: &str) -> Outcome {
+pub fn parse_keyword(source: &str, snapshot: &Snapshot) -> Outcome {
     if let Some(spec) = source.trim().strip_prefix("workspace ") {
         if let Some((workspace, mode)) = spec.split_once(',') {
             if let Some(index) = workspace
@@ -765,14 +910,7 @@ pub fn parse_keyword(source: &str) -> Outcome {
     }
     let source = source.trim();
     if let Some(spec) = source.strip_prefix("monitor ") {
-        if let Some((name, operation)) = spec.split_once(',') {
-            if operation.trim().eq_ignore_ascii_case("disable") {
-                return Outcome::Unsupported(format!(
-                    "output {:?} cannot be disabled: chonkstep keeps every connected output in the desktop layout; configure persistent layout in ~/.config/hypr with hl.monitor, or use `hyprctl dispatch dpms off {}` for temporary power-off",
-                    name.trim(), name.trim()
-                ));
-            }
-        }
+        return parse_keyword_monitor(spec, snapshot);
     }
     let mut fields = source.split_whitespace();
     match (fields.next(), fields.next(), fields.next()) {
@@ -786,8 +924,8 @@ pub fn parse_keyword(source: &str) -> Outcome {
             "keyword does not mutate chonkstep's configuration. \
              chonkstep reads ~/.config/hypr and re-reads it within a second of an edit, \
              so edit the file instead, or use `hyprctl eval hl.monitor({...})` for a live \
-             scale change. `keyword monitor NAME,disable` cannot work at all: chonkstep \
-             drives every connected output and has no disable path."
+             mode, position, scale or disable change. `keyword monitor NAME,disable` and \
+             `keyword monitor NAME,MODE,POSITION,SCALE` are the two keyword forms served."
                 .to_string(),
         ),
     }
@@ -1762,6 +1900,89 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn one_window() -> Snapshot {
+        let window = Window {
+            floating: false,
+            id: 7,
+            title: "~".into(),
+            class: "foot".into(),
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+            workspace: 0,
+            special: None,
+            monitor: 0,
+            pid: 0,
+            xwayland: false,
+            fullscreen: false,
+            maximized: false,
+            client_fullscreen: false,
+            hidden: false,
+            urgent: false,
+            pinned: false,
+            inhibiting_idle: false,
+            tags: Vec::new(),
+            xdg_tag: String::new(),
+            xdg_description: String::new(),
+            focus_history_id: 0,
+        };
+        Snapshot { windows: vec![window], focused: Some(7), ..Default::default() }
+    }
+
+    /// `set_prop`, in Omarchy's Lua form and the classic spelling its
+    /// transparency toggle falls back to: `opaque` is served in its
+    /// three values, and every other property is refused by name
+    /// rather than answered `ok` for nothing.
+    #[test]
+    fn set_prop_serves_opaque_and_refuses_every_other_property() {
+        let snapshot = one_window();
+        let toggle = Outcome::Run(Action::SetOpaque { window: 7, opaque: None });
+        assert_eq!(
+            parse(r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "opaque", value = "toggle" })"#, &snapshot),
+            toggle
+        );
+        assert_eq!(
+            parse(r#"hl.dsp.window.set_prop({ prop = "opaque", value = "1" })"#, &snapshot),
+            Outcome::Run(Action::SetOpaque { window: 7, opaque: Some(true) }),
+            "the focused window when none is named"
+        );
+        assert_eq!(
+            parse(r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "opaque", value = "0" })"#, &snapshot),
+            Outcome::Run(Action::SetOpaque { window: 7, opaque: Some(false) })
+        );
+        assert_eq!(parse("setprop address:0x7 opaque toggle", &snapshot), toggle);
+        assert_eq!(
+            parse("setprop address:0x7 opaque 1", &snapshot),
+            Outcome::Run(Action::SetOpaque { window: 7, opaque: Some(true) })
+        );
+        for wire in [
+            r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "rounding", value = "8" })"#,
+            r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "alpha", value = "0.5" })"#,
+            "setprop address:0x7 rounding 8",
+            "setprop address:0x7 alpha 0.5",
+        ] {
+            match parse(wire, &snapshot) {
+                Outcome::Unsupported(why) => assert!(why.contains("not modeled"), "{wire}: {why}"),
+                other => panic!("{wire} must be refused, not {other:?}"),
+            }
+        }
+        for wire in [
+            r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "opaque", value = "maybe" })"#,
+            "setprop address:0x7 opaque half",
+        ] {
+            assert!(matches!(parse(wire, &snapshot), Outcome::Unsupported(_)), "{wire}");
+        }
+        assert!(
+            matches!(parse("setprop address:0x9 opaque toggle", &snapshot), Outcome::Unsupported(_)),
+            "an unknown window is refused"
+        );
+        // A value a client could not have chosen: the property never
+        // reads anything but the words above, so no number reaches
+        // the compositor from here.
+        assert!(matches!(parse("setprop address:0x7 opaque 0.5", &snapshot), Outcome::Unsupported(_)));
+    }
 
     /// The verb split has the same shape as the request split, so it
     /// had the same panic: a multibyte space after the verb put the

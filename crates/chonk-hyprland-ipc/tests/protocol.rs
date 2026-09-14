@@ -93,6 +93,7 @@ fn window(id: u64, title: &str, class: &str, workspace: usize) -> Window {
 fn desktop() -> Snapshot {
     Snapshot {
         monitors: vec![monitor(0, "eDP-1", true, 0)],
+        disabled_monitors: Vec::new(),
         workspaces: vec![workspace(0, 1), workspace(1, 0), workspace(2, 0)],
         specials: Vec::new(),
         windows: vec![window(4_294_967_297, "~ — foot", "foot", 0)],
@@ -1104,6 +1105,17 @@ fn served_script_requests(snapshot: &Snapshot) -> Vec<(&'static str, Vec<ScriptR
                 dispatch("fullscreenstate 0 2"),
             ],
         ),
+        (
+            "omarchy-hyprland-window-transparency-toggle",
+            vec![
+                Query("j/activewindow", &["address"]),
+                dispatch(&format!(
+                    r#"hl.dsp.window.set_prop({{ window = "{window}", prop = "opaque", value = "toggle" }})"#
+                )),
+                // The script's fallback when the Lua form is refused.
+                Mutation(format!("/dispatch setprop {window} opaque toggle")),
+            ],
+        ),
     ]
 }
 
@@ -1823,20 +1835,146 @@ fn a_monitors_mode_list_is_the_connectors_modes_in_hyprlands_spelling() {
 /// zero for it — so it must not be false. It used to claim chonkstep
 /// does not read a Hyprland config, which is this compositor's headline
 /// feature.
+/// The Display panel's row toggle, both directions: `NAME,disable` takes
+/// an output out of the layout and `NAME,preferred,auto,auto` puts a
+/// disabled one back. On an output already in the layout the second form
+/// means what the same monitor line means in the configuration.
 #[test]
-fn the_keyword_refusal_is_true_and_names_the_routes_that_work() {
-    let answer = ask("keyword monitor eDP-1,disable", &desktop());
-    assert!(answer.starts_with("Invalid dispatcher:"), "keyword stays a refusal: {answer}");
-    assert!(
-        !answer.contains("does not read a Hyprland config"),
-        "the compositor does read one; saying otherwise sends a reader the wrong way: {answer}"
+fn the_keyword_monitor_forms_the_display_panel_sends_are_served() {
+    let mut desk = desktop();
+    desk.monitors.push(monitor(1, "HDMI-A-1", false, 1));
+    let (response, actions) = answer_payload(b"keyword monitor HDMI-A-1,disable", &desk);
+    assert_eq!(response.trim(), "ok");
+    assert_eq!(actions, vec![Action::SetMonitorEnabled { output: "HDMI-A-1".into(), enabled: false }]);
+
+    let mut parked = desktop();
+    parked.disabled_monitors.push(monitor(-1, "HDMI-A-1", false, 0));
+    let (response, actions) = answer_payload(b"keyword monitor HDMI-A-1,preferred,auto,auto", &parked);
+    assert_eq!(response.trim(), "ok");
+    assert_eq!(actions, vec![Action::SetMonitorEnabled { output: "HDMI-A-1".into(), enabled: true }]);
+    // Disabling an output that is already disabled is the same request
+    // again, not an unknown output.
+    let (response, actions) = answer_payload(b"keyword monitor HDMI-A-1,disable", &parked);
+    assert_eq!(response.trim(), "ok");
+    assert_eq!(actions, vec![Action::SetMonitorEnabled { output: "HDMI-A-1".into(), enabled: false }]);
+
+    let (response, actions) = answer_payload(b"keyword monitor eDP-1,preferred,auto,2", &desk);
+    assert_eq!(response.trim(), "ok");
+    assert_eq!(
+        actions,
+        vec![Action::ConfigureMonitor {
+            output: "eDP-1".into(),
+            scale_120: Some(240),
+            mode: Some("preferred".into()),
+            position: Some("auto".into()),
+        }]
     );
+
+    for (request, why) in [
+        ("keyword monitor DP-9,disable", "unknown output"),
+        ("keyword monitor eDP-1,preferred,auto,1,transform,1", "belongs in the configuration"),
+        ("keyword monitor eDP-1,1x1@1,auto,1", "not one eDP-1 advertises"),
+        ("keyword monitor eDP-1,preferred,somewhere,1", "auto or XxY"),
+        ("keyword monitor eDP-1,preferred,auto,9", "between 0.5 and 4"),
+    ] {
+        let (response, actions) = answer_payload(request.as_bytes(), &desk);
+        assert!(response.starts_with("Invalid dispatcher:"), "{request}: {response}");
+        assert!(response.contains(why), "{request}: {response}");
+        assert!(actions.is_empty(), "{request}");
+    }
+    let answer = ask("keyword general:gaps_in 5", &desk);
+    assert!(answer.starts_with("Invalid dispatcher:"), "the broad namespace stays refused: {answer}");
     assert!(answer.contains("~/.config/hypr"), "name the file that does work: {answer}");
     assert!(answer.contains("hl.monitor"), "name the live route that does work: {answer}");
-    assert!(
-        answer.contains("disable"),
-        "the one shipped caller toggles a monitor off; say why that cannot work: {answer}"
-    );
+    assert!(!answer.contains("cannot work at all"), "disable is served now: {answer}");
+}
+
+/// Omarchy's clamshell and laptop-display toggles write
+/// `hl.monitor({ output = NAME, disabled = true })`; the same request
+/// over `eval` is the live form. It is the whole request: a geometry
+/// given beside it is refused rather than half applied.
+#[test]
+fn hl_monitor_disabled_is_the_whole_request() {
+    let mut desk = desktop();
+    desk.monitors.push(monitor(1, "HDMI-A-1", false, 1));
+    let (response, actions) = answer_payload(br#"eval hl.monitor({ output = "HDMI-A-1", disabled = true })"#, &desk);
+    assert_eq!(response.trim(), "ok");
+    assert_eq!(actions, vec![Action::SetMonitorEnabled { output: "HDMI-A-1".into(), enabled: false }]);
+
+    let mut parked = desktop();
+    parked.disabled_monitors.push(monitor(-1, "HDMI-A-1", false, 0));
+    let (response, actions) = answer_payload(br#"eval hl.monitor({ output = "HDMI-A-1", disabled = false })"#, &parked);
+    assert_eq!(response.trim(), "ok");
+    assert_eq!(actions, vec![Action::SetMonitorEnabled { output: "HDMI-A-1".into(), enabled: true }]);
+
+    for (request, why) in [
+        (r#"eval hl.monitor({ output = "HDMI-A-1", disabled = true, scale = 2 })"#, "combines with output only"),
+        (r#"eval hl.monitor({ output = "HDMI-A-1", disabled = "maybe" })"#, "true or false"),
+        (r#"eval hl.monitor({ output = "DP-9", disabled = true })"#, "unknown output"),
+        (r#"eval hl.monitor({ output = "HDMI-A-1", mirror = "eDP-1" })"#, "not supported"),
+    ] {
+        let (response, actions) = answer_payload(request.as_bytes(), &desk);
+        assert!(response.starts_with("Invalid dispatcher:"), "{request}: {response}");
+        assert!(response.contains(why), "{request}: {response}");
+        assert!(actions.is_empty(), "{request}");
+    }
+    // A disabled output's scale cannot be set until it is back.
+    let (response, actions) = answer_payload(br#"eval hl.monitor({ output = "HDMI-A-1", scale = 2 })"#, &parked);
+    assert!(response.contains("is disabled"), "{response}");
+    assert!(actions.is_empty());
+}
+
+/// `monitors all` lists a disabled output with `disabled: true`; plain
+/// `monitors` is the layout and omits it, so a bar never draws a
+/// workspace row for a panel inside a closed lid.
+#[test]
+fn monitors_all_lists_disabled_outputs_and_monitors_omits_them() {
+    let mut desk = desktop();
+    desk.disabled_monitors.push(monitor(-1, "HDMI-A-1", false, 0));
+
+    let layout = ask_json("j/monitors", &desk);
+    let names: Vec<&str> = layout.as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["eDP-1"]);
+    assert_eq!(layout[0]["disabled"], serde_json::json!(false));
+
+    let all = ask_json("j/monitors all", &desk);
+    let names: Vec<&str> = all.as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["eDP-1", "HDMI-A-1"]);
+    assert_eq!(all[0]["disabled"], serde_json::json!(false));
+    assert_eq!(all[1]["disabled"], serde_json::json!(true));
+    assert_eq!(all[1]["id"], serde_json::json!(-1));
+
+    let plain = ask("monitors all", &desk);
+    assert!(plain.contains("Monitor HDMI-A-1 (ID -1):") && plain.contains("\tdisabled: true"), "{plain}");
+    let plain = ask("monitors", &desk);
+    assert!(!plain.contains("HDMI-A-1"), "{plain}");
+}
+
+/// Monitor ids are layout positions. When the first output leaves, the
+/// second inherits id 0, so the diff has to go by name or it announces
+/// the survivor as removed and never names the one that left.
+#[test]
+fn disabling_the_first_monitor_names_it_in_monitorremoved() {
+    let mut differ = Differ::new();
+    let mut before = desktop();
+    before.monitors.push(monitor(1, "HDMI-A-1", false, 1));
+    differ.diff(&before);
+
+    let mut after = before.clone();
+    after.monitors.remove(0);
+    after.monitors[0].id = 0;
+    after.disabled_monitors.push(monitor(-1, "eDP-1", false, 0));
+    let events = differ.diff(&after);
+    let removed: Vec<&str> = events.iter().filter(|e| e.name() == "monitorremoved").map(|e| e.data()).collect();
+    assert_eq!(removed, ["eDP-1"]);
+    assert!(!events.iter().any(|e| e.name() == "monitoradded"), "the survivor was never added: {events:?}");
+
+    let mut back = after.clone();
+    back.monitors.push(monitor(1, "eDP-1", false, 0));
+    back.disabled_monitors.clear();
+    let events = differ.diff(&back);
+    let added: Vec<&str> = events.iter().filter(|e| e.name() == "monitoradded").map(|e| e.data()).collect();
+    assert_eq!(added, ["eDP-1"]);
 }
 
 #[test]

@@ -160,6 +160,15 @@
 # false for sloppy focus that leaves the stack alone.
 #autoraise = true
 
+# Whether `opacity` window rules read from a Hyprland configuration
+# (Omarchy's 0.985 focused / 0.96 unfocused default, its opaque
+# browsers and video players) are drawn. A translucent window costs
+# something: everything beneath it is composited too, where an opaque
+# window hides it. Set this to false to draw every window opaque and
+# keep that occlusion; the rules are still read, `SUPER + BACKSPACE`'s
+# session toggle still answers, and `dim_inactive` still dims.
+#window_opacity = true
+
 # Pointer and touchpad hardware configuration. These values are applied to
 # each real libinput device when it appears and re-applied after a live config
 # reload. Unsupported settings are skipped per device instead of preventing
@@ -685,3 +694,16 @@
 #enabled = true
 #fingers = 0       # both three and four fingers; or choose 3 or 4
 #distance = 80     # logical touchpad travel, accepted range 24..1000
+
+# Whether, and how fast, the transitions the compositor starts on its own
+# move: spatial-layout reflows, keyboard Overview open/close, and the
+# settle after a released swipe. Fingers on a touchpad move the desktop
+# 1:1 regardless. Wins over Omarchy's `animations.enabled` and
+# `hl.animation` switches (see hyprland-config.md); a reload applies it
+# to transitions already in flight.
+#[motion]
+#enabled = true          # false: every such transition completes in one frame
+#layout = true           # spatial-layout reflow motion
+#overview = true         # keyboard and pointer Overview open/close
+#gesture_settle = true   # the spring after a released swipe
+#speed = 1.0             # multiplies the spring's stiffness; 0.25..=4

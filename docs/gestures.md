@@ -97,9 +97,17 @@ Settings are latched at the beginning of each stroke. Hyprland's arbitrary
 native desktop gestures. The X11 session does not receive this libinput gesture
 stream. A nested compositor depends on its host forwarding gestures; use the
 native login session for physical touchpad gestures.
-The accepted distance range remains 24..1000. There are no new configuration
-keys. Sensitivity is independent of output width, resolution, and scale; each
-output converts the same normalized progress into its own physical translation.
+The accepted distance range remains 24..1000. Sensitivity is independent of
+output width, resolution, and scale; each output converts the same normalized
+progress into its own physical translation.
+
+The spring after a release is motion, not input, so the `[motion]` table
+governs it: `gesture_settle = false` (or `enabled = false`) makes a released
+swipe jump to its settle target and commit in the same pass, through the same
+workspace or Overview completion the spring would have reached. Finger tracking
+while the swipe is held is unaffected. See `config.example.toml` and
+[hyprland-config.md](hyprland-config.md#animations--motion) for the Omarchy
+switches that feed the same policy.
 
 ## Bar boundary
 

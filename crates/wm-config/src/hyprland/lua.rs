@@ -285,12 +285,18 @@ impl Facts {
         }
     }
 
+    /// `$XDG_STATE_HOME`, or `~/.local/state` — what Omarchy's
+    /// `paths.state_home` resolves to.
+    pub(crate) fn state_root(&self) -> Option<std::path::PathBuf> {
+        if let Some(state) = &self.state_home {
+            return Some(state.clone());
+        }
+        Some(self.home.as_ref()?.join(".local/state"))
+    }
+
     /// `~/.local/state/omarchy` — where the preinstalls marker lives.
     fn omarchy_state(&self) -> Option<std::path::PathBuf> {
-        if let Some(state) = &self.state_home {
-            return Some(state.join("omarchy"));
-        }
-        Some(self.home.as_ref()?.join(".local/state/omarchy"))
+        Some(self.state_root()?.join("omarchy"))
     }
 
     fn cmd_present(&self, command: &str) -> bool {
@@ -1146,12 +1152,17 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
             }),
         },
         "hl.on" => out.push(Directive::Ignored { kind: "event", detail: "hl.on event handlers other than the start handler's body".into() }),
-        // Hyprland's animation machinery, the Lua spelling of the
-        // `bezier` and `animation` lines the conf reader names.
-        "hl.curve" | "hl.animation" => out.push(Directive::Ignored {
+        // Hyprland's animation curves, the Lua spelling of `bezier`.
+        // This desktop's motion is one spring; the switch on each
+        // `hl.animation` leaf is read, the curve never is.
+        "hl.curve" => out.push(Directive::Ignored {
             kind: "animation",
-            detail: format!("{path}(…): Hyprland's animations; this desktop draws its own"),
+            detail: format!(
+                "hl.curve({}): Hyprland's animation curves; this desktop's motion is one spring",
+                describe(&arg(0))
+            ),
         }),
+        "hl.animation" => emit_animation(&arg(0), out),
         // Calls that act while Hyprland runs rather than configure it.
         runtime if runtime == "hl.timer" || runtime == "hl.dispatch" || runtime.starts_with("hl.get_") => {
             out.push(Directive::Ignored {
@@ -1179,10 +1190,19 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
         // evaluate `require` for a value.
         "require_all.files" => match as_string(&arg(1)) {
             Some(prefix) => out.push(Directive::Include(Include::ModuleDirectory { prefix })),
-            None => out.push(Directive::Ignored {
-                kind: "include",
-                detail: "require_all.files with no module prefix: the directory is built from a value this reader cannot evaluate".into(),
-            }),
+            // No prefix: Omarchy's `toggles.lua` puts the directory
+            // itself on `package.path`. Its directory is
+            // `paths.state_home .. "/omarchy/toggles/hypr"`, and that
+            // one shape — the state home from `default.hypr.paths` plus
+            // a literal — resolves without evaluating `require` for a
+            // value. Any other nil-prefix fan-out stays ignored.
+            None => match state_directory(&arg(0), &arg(2), env) {
+                Some(include) => out.push(Directive::Include(include)),
+                None => out.push(Directive::Ignored {
+                    kind: "include",
+                    detail: "require_all.files with no module prefix: the directory is built from a value this reader cannot evaluate".into(),
+                }),
+            },
         },
         // `dofile` is Omarchy's bootstrap, whose whole job is to set
         // `package.path` — which `super::Roots` already models, so
@@ -1204,6 +1224,68 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
 
 /// Omarchy's module whose function re-applies a persisted device disable.
 const DISABLED_INPUT_DEVICE: &str = "default.hypr.disabled-input-device";
+
+/// Omarchy's module of path constants, whose `state_home` field is
+/// `$XDG_STATE_HOME` or `~/.local/state`.
+const PATHS_MODULE: &str = "default.hypr.paths";
+
+/// The most exclusions a toggle fan-out may name. Omarchy names two.
+const MAX_EXCLUDES: usize = 64;
+
+/// Whether `name` is bound by `require` to `module`, the way
+/// `local paths = require("default.hypr.paths")` binds `paths`.
+fn is_required_module(name: &str, module: &str, env: &Env) -> bool {
+    matches!(
+        env.get(name),
+        Some(Value::Call { path: callee, args })
+            if callee == "require" && matches!(args.first(), Some(Value::Str(required)) if required == module)
+    )
+}
+
+/// The toggle-directory fan-out of Omarchy's `toggles.lua`, or `None`
+/// for any other nil-prefix `require_all.files`. `dir` has to be
+/// `<paths>.state_home .. "<literal>"` with `<paths>` bound to
+/// `default.hypr.paths`, and the literal a plain relative path — a
+/// value this reader can place under `$XDG_STATE_HOME` without
+/// evaluating anything, and one that cannot climb out of it. The
+/// `exclude` table is honoured so a base name Omarchy refuses to load
+/// as code is never read here either.
+fn state_directory(dir: &Value, options: &Value, env: &Env) -> Option<Include> {
+    let Value::Binary { op: "..", left, right } = dir else {
+        return None;
+    };
+    let (Value::Name(field), Value::Str(suffix)) = (&**left, &**right) else {
+        return None;
+    };
+    let receiver = field.strip_suffix(".state_home")?;
+    if !is_required_module(receiver, PATHS_MODULE, env) {
+        return None;
+    }
+    if suffix.len() > 200 || !suffix.starts_with('/') {
+        return None;
+    }
+    let relative = suffix.trim_matches('/');
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if relative.is_empty() || !relative.split('/').all(plain) {
+        return None;
+    }
+    let mut exclude = Vec::new();
+    if let Value::Table(fields) = options {
+        if let Some((_, Value::Table(names))) = fields.iter().find(|(key, _)| key.as_deref() == Some("exclude")) {
+            for (name, value) in names.iter().take(MAX_EXCLUDES) {
+                if let (Some(name), Value::Bool(true)) = (name, value) {
+                    exclude.push(name.clone());
+                }
+            }
+        }
+    }
+    Some(Include::StateDirectory { relative: relative.to_string(), exclude })
+}
 
 /// Whether `path` is a name bound by `require` to Omarchy's
 /// `disabled-input-device` module, which returns the one function it holds.
@@ -1369,10 +1451,97 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
         }),
         None => {}
     }
-    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor" | "binds"))) {
+    match root.iter().find(|(key, _)| key.as_deref() == Some("animations")).map(|(_, value)| value) {
+        Some(Value::Table(fields)) => {
+            for (key, value) in fields {
+                let Some(key) = key else { continue };
+                out.push(match (key.as_str(), value) {
+                    ("enabled", Value::Bool(enabled)) => Directive::Animation { leaf: "global".into(), enabled: *enabled },
+                    ("enabled", other) => Directive::Ignored {
+                        kind: "animation",
+                        detail: format!("animations.enabled = {}: computed at runtime, not carried over", describe(other)),
+                    },
+                    _ => Directive::Ignored {
+                        kind: "animation",
+                        detail: format!("animations.{key}: Hyprland's; only animations.enabled is read"),
+                    },
+                });
+            }
+        }
+        Some(_) => out.push(Directive::Ignored {
+            kind: "animation",
+            detail: "hl.config animations table is unreadable".into(),
+        }),
+        None => {}
+    }
+    match root.iter().find(|(key, _)| key.as_deref() == Some("decoration")).map(|(_, value)| value) {
+        Some(Value::Table(fields)) => {
+            for (key, value) in fields {
+                let Some(key) = key else { continue };
+                out.push(decoration_setting(key, value));
+            }
+        }
+        Some(_) => out.push(Directive::Ignored {
+            kind: "decoration",
+            detail: "hl.config decoration table is unreadable".into(),
+        }),
+        None => {}
+    }
+    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor" | "binds" | "animations" | "decoration"))) {
         out.push(Directive::Ignored {
             kind: "config",
-            detail: "hl.config settings outside input, cursor, binds and general.layout are not carried over".into(),
+            detail: "hl.config settings outside input, cursor, binds, animations, decoration and general.layout are not carried over".into(),
+        });
+    }
+}
+
+/// `hl.animation({ leaf = NAME, enabled = BOOL, speed = …, bezier = …,
+/// style = … })`: the switch is carried under its leaf name, and the
+/// speed, curve and style are declined by that same name. A leaf or
+/// switch only running code could give is refused rather than guessed.
+fn emit_animation(value: &Value, out: &mut Vec<Directive>) {
+    let Value::Table(fields) = value else {
+        out.push(Directive::Ignored {
+            kind: "animation",
+            detail: format!("hl.animation({}): not a table", describe(value)),
+        });
+        return;
+    };
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(k, _)| k.as_deref() == Some(name))
+            .map(|(_, v)| v)
+    };
+    let Some(leaf) = field("leaf").and_then(as_string).filter(|leaf| !leaf.is_empty()) else {
+        out.push(Directive::Ignored {
+            kind: "animation",
+            detail: format!("hl.animation(…) with an unreadable leaf: {}", describe(field("leaf").unwrap_or(&Value::Nil))),
+        });
+        return;
+    };
+    out.push(match field("enabled") {
+        Some(Value::Bool(enabled)) => Directive::Animation { leaf: leaf.clone(), enabled: *enabled },
+        Some(other) => Directive::Ignored {
+            kind: "animation",
+            detail: format!("hl.animation leaf {leaf:?}: enabled = {}: computed at runtime, not carried over", describe(other)),
+        },
+        None => Directive::Ignored {
+            kind: "animation",
+            detail: format!("hl.animation leaf {leaf:?}: no enabled switch to read"),
+        },
+    });
+    let styled: Vec<&str> = ["speed", "bezier", "style"]
+        .into_iter()
+        .filter(|name| field(name).is_some())
+        .collect();
+    if !styled.is_empty() {
+        out.push(Directive::Ignored {
+            kind: "animation",
+            detail: format!(
+                "hl.animation leaf {leaf:?}: {} not applied; this desktop's motion is one spring whose speed is [motion] speed",
+                styled.join(", ")
+            ),
         });
     }
 }
@@ -1441,6 +1610,26 @@ fn workspace_rule(value: &Value, out: &mut Vec<Directive>) {
             kind: "workspace-rule",
             detail: format!("hl.workspace_rule(workspace = {shown}): {why}"),
         }),
+    }
+}
+
+/// One `decoration` key: the two that dim unfocused windows are read,
+/// everything else in the table is Hyprland's look and is named as
+/// declined, exactly as the conf reader names a `decoration { … }`
+/// block.
+fn decoration_setting(key: &str, value: &Value) -> Directive {
+    if !matches!(key, "dim_inactive" | "dim_strength") {
+        return Directive::Ignored {
+            kind: "decoration",
+            detail: format!("decoration.{key}: a Hyprland subsystem this desktop has its own answer for"),
+        };
+    }
+    match property_text(value) {
+        Some(value) => Directive::Decoration { name: key.to_string(), value },
+        None => Directive::Ignored {
+            kind: "decoration",
+            detail: format!("{key} = {}: computed at runtime, not carried over", describe(value)),
+        },
     }
 }
 

@@ -411,8 +411,40 @@ fn build_snapshot(
     if devices.mice.is_empty() {
         devices.mice.push(PointerDevice { name: chonk_hyprland_ipc::state::NESTED_POINTER.into() });
     }
+    // Parked outputs: listed by `monitors all` alone, with `disabled:
+    // true`, at no layout position and outside the id space the layout
+    // monitors occupy.
+    let disabled_monitors: Vec<Monitor> = wm
+        .backend()
+        .parked_monitors
+        .iter()
+        .map(|parked| Monitor {
+            id: -1,
+            name: parked.name.clone(),
+            description: parked.identity.clone().unwrap_or_else(|| parked.name.clone()),
+            x: 0,
+            y: 0,
+            width: parked.hardware.modes.first().map_or(0, |mode| mode.width),
+            height: parked.hardware.modes.first().map_or(0, |mode| mode.height),
+            scale: 1.0,
+            powered: false,
+            vrr_supported: parked.hardware.vrr_supported,
+            vrr_enabled: false,
+            focused: false,
+            active_workspace: 0,
+            // A parked output shows nothing, a special included.
+            special_workspace: None,
+            make: parked.hardware.make.clone(),
+            model: parked.hardware.model.clone(),
+            serial: parked.hardware.serial.clone(),
+            refresh_millihertz: parked.hardware.refresh_millihertz,
+            transform: parked.hardware.transform,
+            modes: parked.hardware.modes.clone(),
+        })
+        .collect();
     Snapshot {
         monitors,
+        disabled_monitors,
         workspaces,
         specials,
         windows,
@@ -827,6 +859,7 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             None => false,
         },
         Action::SetTag { window, tag, present } => client_of(wm, window).is_some_and(|id| wm.set_client_tag(id, &tag, present)),
+        Action::SetOpaque { window, opaque } => client_of(wm, window).is_some_and(|id| wm.set_client_opaque(id, opaque)),
         Action::SetFloating { window, floating } => {
             if let Some(id) = client_of(wm, window) {
                 if let Some(value) = floating {
@@ -909,6 +942,27 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
         }
         Action::SetDpms { output, powered } => {
             crate::output_power::set_from_ipc(comp, output.as_deref(), powered)
+        }
+        // The Display panel's row toggle and Omarchy's clamshell and
+        // laptop-display toggles. Disabling the last output in the
+        // layout is refused by `park_output`, with a log line; an output
+        // already in the asked-for state is `ok`, as it is under Hyprland.
+        Action::SetMonitorEnabled { output, enabled } => {
+            let index = comp.outputs.iter().position(|entry| entry.output.name() == output);
+            let parked = comp.parked_outputs.iter().any(|parked| parked.setup.output.name() == output);
+            let result = match (enabled, index, parked) {
+                (false, Some(index), _) => crate::state::park_output(comp, index),
+                (false, None, true) | (true, Some(_), _) => Ok(()),
+                (true, None, true) => crate::state::unpark_output(comp, &output),
+                (_, None, false) => Err(format!("no output named {output}")),
+            };
+            match result {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%output, enabled, %error, "monitor enable request refused");
+                    false
+                }
+            }
         }
         Action::SwitchKeyboardLayout { device, target } => {
             switch_keyboard_layout(comp, &device, target)

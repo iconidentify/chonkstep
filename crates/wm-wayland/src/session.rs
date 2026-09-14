@@ -68,7 +68,7 @@ use smithay::backend::allocator::{Format, Fourcc, Modifier};
 use smithay::backend::drm::compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{
-    DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmEventTime, DrmNode, NodeType,
+    DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmError, DrmEvent, DrmEventTime, DrmNode, NodeType,
     PlaneInfo, VrrSupport,
 };
 use smithay::backend::egl::{EGLContext, EGLDisplay};
@@ -213,6 +213,138 @@ fn connector_is_non_desktop(drm: &DrmDeviceFd, connector: connector::Handle) -> 
                 .as_deref()
                 == Some("non-desktop")
     })
+}
+
+/// What this session does with one connector, decided the same way at
+/// startup ([`pick_outputs`]) and on every later rescan
+/// ([`rescan_session_outputs`]). Those two are the only places that
+/// decide whether a connector is driven; a connector skipped at login
+/// stays skipped through every hotplug, and one adopted stays adopted
+/// while its classification holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectorUse {
+    /// Connected, desktop, with modes: gets a crtc and a `wl_output`.
+    Drive,
+    Disconnected,
+    /// The kernel marks it `non-desktop` (an HMD): reserved for a
+    /// lease/VR runtime, never driven, even if it has modes.
+    NonDesktop,
+    /// Connected but nothing to scan out at.
+    NoModes,
+}
+
+/// The classification behind [`ConnectorUse`]. `non_desktop` must come
+/// from a property read *after* the forced probe that produced `state`:
+/// userspace cannot set the property, but the kernel rewrites it from
+/// each new sink's EDID, so a headset plugged into the port a monitor
+/// just left changes the answer within one debounce window.
+fn connector_use(state: connector::State, non_desktop: bool, has_modes: bool) -> ConnectorUse {
+    if state != connector::State::Connected {
+        ConnectorUse::Disconnected
+    } else if non_desktop {
+        ConnectorUse::NonDesktop
+    } else if !has_modes {
+        ConnectorUse::NoModes
+    } else {
+        ConnectorUse::Drive
+    }
+}
+
+/// The structural delta one connector rescan applies, computed by
+/// [`rescan_plan`] from the probe results alone so the set arithmetic
+/// is testable without a DRM device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RescanPlan {
+    /// Indices into the driven list whose connector is no longer
+    /// [`ConnectorUse::Drive`] — unplugged, gone from the resource
+    /// list, or turned non-desktop. Descending, so removing by index
+    /// from the same list is safe.
+    remove: Vec<usize>,
+    /// Connectors to adopt, in probe order: [`ConnectorUse::Drive`]
+    /// and not yet driven.
+    adopt: Vec<connector::Handle>,
+    /// Every connector the probe classified [`ConnectorUse::NonDesktop`],
+    /// driven or not — the reserved set this rescan leaves alone.
+    reserved: Vec<connector::Handle>,
+}
+
+/// Decides what a rescan removes and adopts. `driven` is the connector
+/// of each current output, in output order; `probed` is every
+/// connector the forced probe could read, with its classification.
+///
+/// `keep` lists connectors the plan must leave exactly as they are —
+/// neither adopted nor removed, whatever the probe says. Nothing passes
+/// one today; it is the hook for a connector that is present but
+/// deliberately not driven (a parked or disabled output), which must
+/// survive a rescan without being mistaken for an unplug.
+fn rescan_plan(
+    driven: &[connector::Handle],
+    probed: &[(connector::Handle, ConnectorUse)],
+    keep: &[connector::Handle],
+) -> RescanPlan {
+    let use_of = |handle: connector::Handle| {
+        probed.iter().find(|(probed, _)| *probed == handle).map(|(_, use_)| *use_)
+    };
+    let mut remove: Vec<usize> = driven
+        .iter()
+        .enumerate()
+        .filter(|(_, handle)| !keep.contains(handle) && use_of(**handle) != Some(ConnectorUse::Drive))
+        .map(|(index, _)| index)
+        .collect();
+    remove.sort_unstable_by(|a, b| b.cmp(a));
+    let adopt = probed
+        .iter()
+        .filter(|(handle, use_)| {
+            *use_ == ConnectorUse::Drive && !driven.contains(handle) && !keep.contains(handle)
+        })
+        .map(|(handle, _)| *handle)
+        .collect();
+    let reserved = probed
+        .iter()
+        .filter(|(_, use_)| *use_ == ConnectorUse::NonDesktop)
+        .map(|(handle, _)| *handle)
+        .collect();
+    RescanPlan { remove, adopt, reserved }
+}
+
+/// `DRM_MODE_LINK_STATUS_BAD`: enum value 1 of the `link-status`
+/// connector property. The kernel sets it when a DisplayPort (or
+/// USB-C/Thunderbolt) link fails to train and sends a hotplug uevent;
+/// the sink shows nothing until userspace performs a modeset that
+/// writes the property back to `GOOD` (0). The kernel does that on
+/// its own only for legacy `SETCRTC` callers, never for an atomic one.
+const DRM_MODE_LINK_STATUS_BAD: u64 = 1;
+
+/// The pure half of [`connector_link_bad`]: whether a connector's
+/// property table, given as `(name, raw value)` pairs, says the link
+/// is `BAD`. A driver that exposes no `link-status` property reads as
+/// healthy, and so does any value other than `BAD`.
+fn link_status_is_bad<'a>(properties: impl IntoIterator<Item = (&'a str, u64)>) -> bool {
+    properties
+        .into_iter()
+        .any(|(name, value)| name == "link-status" && value == DRM_MODE_LINK_STATUS_BAD)
+}
+
+/// Whether the kernel has marked this connector's link `BAD`. Mirrors
+/// [`connector_is_non_desktop`]: one property-set read plus one name
+/// lookup per property, which is why it belongs in the debounced
+/// connector rescan and never in the udev callback itself. Unreadable
+/// properties read as healthy, the same as a driver without the
+/// property.
+fn connector_link_bad(drm: &DrmDeviceFd, connector: connector::Handle) -> bool {
+    let Ok(props) = drm.get_properties(connector) else {
+        return false;
+    };
+    let (ids, values) = props.as_props_and_values();
+    let named: Vec<(String, u64)> = ids
+        .iter()
+        .zip(values.iter())
+        .filter_map(|(&id, &value)| {
+            let name = drm.get_property(id).ok()?.name().to_str().ok()?.to_owned();
+            Some((name, value))
+        })
+        .collect();
+    link_status_is_bad(named.iter().map(|(name, value)| (name.as_str(), *value)))
 }
 
 /// The stable, user-facing portion of a connector's EDID. This is the
@@ -556,6 +688,147 @@ const FLIP_STALL_RECOVERY: Duration = Duration::from_secs(5);
 /// a modeset.
 const LOOP_BLOCK_GRACE: Duration = Duration::from_millis(250);
 
+/// How many consecutive commit failures an output accumulates before
+/// the session stops retrying the identical crtc state and recovers
+/// the output instead.
+///
+/// Three rather than one because a single rejected commit is ordinary
+/// on some drivers (a transient `EBUSY` while a previous flip drains,
+/// an atomic test that fails once after a VT switch) and the recovery
+/// costs a modeset's worth of flicker. On Apple's DCP that modeset can
+/// block the caller for seconds (see [`LOOP_BLOCK_GRACE`]), which is
+/// why a reset per failed frame was never an option.
+const COMMIT_FAILURE_THRESHOLD: u32 = 3;
+
+/// The first wait between two recoveries of the same output. Doubles
+/// on every recovery up to [`COMMIT_RESET_BACKOFF_MAX`], so an output
+/// whose commits keep failing is retried at 1 s, 2 s, 4 s, … rather
+/// than modeset at the render cadence.
+const COMMIT_RESET_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+const COMMIT_RESET_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Which recovery an output whose commits keep failing gets next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryRung {
+    /// Re-read the crtc's state from the kernel and drop the swapchain,
+    /// so the next frame is a full one. This is a modeset only if the
+    /// kernel's view of the crtc has diverged from ours.
+    Reset,
+    /// The reset did not take: force a real `ALLOW_MODESET` commit that
+    /// also writes `link-status = GOOD` on the crtc's connectors — the
+    /// one thing a rejected commit or a bad link is guaranteed to need
+    /// and a plain retry can never produce.
+    Modeset,
+}
+
+/// Per-output commit-failure accounting. Separate from the flip-stall
+/// timing in [`service_pending_flips`], which watches flips the kernel
+/// *accepted*; this counts the ones it refused.
+#[derive(Clone, Copy, Debug)]
+struct CommitHealth {
+    /// Failed `render_frame`/`queue_frame` calls since the last frame
+    /// the device accepted. `DeviceInactive` is never counted: a VT
+    /// that belongs to someone else is not a broken output.
+    consecutive_failures: u32,
+    /// Before this instant no further recovery runs, however many more
+    /// failures arrive. `None` until the first recovery.
+    next_reset_allowed: Option<Instant>,
+    /// The wait the *next* recovery will arm.
+    backoff: Duration,
+    /// Recoveries since the last accepted frame; selects the rung.
+    resets: u32,
+}
+
+impl Default for CommitHealth {
+    fn default() -> Self {
+        Self {
+            consecutive_failures: 0,
+            next_reset_allowed: None,
+            backoff: COMMIT_RESET_BACKOFF_INITIAL,
+            resets: 0,
+        }
+    }
+}
+
+impl CommitHealth {
+    /// Whether the failures have reached the threshold and the backoff
+    /// from the previous recovery, if any, has elapsed.
+    fn should_reset(&self, now: Instant) -> bool {
+        self.consecutive_failures >= COMMIT_FAILURE_THRESHOLD
+            && self.next_reset_allowed.is_none_or(|at| now >= at)
+    }
+
+    /// Starts the wait before the next recovery and doubles the one
+    /// after it, capped at [`COMMIT_RESET_BACKOFF_MAX`].
+    fn arm_backoff(&mut self, now: Instant) {
+        self.next_reset_allowed = Some(now + self.backoff);
+        self.backoff = self.backoff.saturating_mul(2).min(COMMIT_RESET_BACKOFF_MAX);
+        self.resets = self.resets.saturating_add(1);
+    }
+
+    /// The rung the next recovery takes: a reset first, and a forced
+    /// modeset for every recovery after a reset that did not take.
+    fn next_rung(&self) -> RecoveryRung {
+        if self.resets == 0 {
+            RecoveryRung::Reset
+        } else {
+            RecoveryRung::Modeset
+        }
+    }
+
+    /// Records one refused commit. Returns the recovery to perform now,
+    /// or `None` while the threshold is unmet or a backoff is running.
+    /// A returned rung has already armed its backoff.
+    fn note_failure(&mut self, now: Instant) -> Option<RecoveryRung> {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if !self.should_reset(now) {
+            return None;
+        }
+        let rung = self.next_rung();
+        self.arm_backoff(now);
+        Some(rung)
+    }
+}
+
+/// Test-only fault injection: how many of the next `queue_frame`
+/// submissions fail before reaching the driver. Read once from
+/// `CHONKSTEP_TEST_QUEUE_FRAME_FAILURES`, and only when
+/// `CHONKSTEP_TEST_SOCKET` opens the private test door — a user session
+/// pays one atomic load per queued frame and nothing else. The same
+/// shape as `CHONKSTEP_TEST_READBACK_DELAY_MS` in `readback.rs`.
+static INJECTED_QUEUE_FAILURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static INJECTED_QUEUE_FAILURES_ARMED: OnceLock<()> = OnceLock::new();
+
+/// Consumes one injected failure, if any remain. The injected error is
+/// a rejected atomic test on this crtc — the shape a driver produces
+/// when it refuses a commit — and it counts toward [`CommitHealth`]
+/// exactly like a real one.
+fn take_injected_queue_failure() -> bool {
+    INJECTED_QUEUE_FAILURES_ARMED.get_or_init(|| {
+        if std::env::var_os("CHONKSTEP_TEST_SOCKET").is_none() {
+            return;
+        }
+        let count = std::env::var("CHONKSTEP_TEST_QUEUE_FRAME_FAILURES")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0);
+        INJECTED_QUEUE_FAILURES.store(count, std::sync::atomic::Ordering::Relaxed);
+    });
+    INJECTED_QUEUE_FAILURES
+        .fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |remaining| remaining.checked_sub(1),
+        )
+        .is_ok()
+}
+
+#[cfg(test)]
+fn inject_queue_failures(count: u32) {
+    INJECTED_QUEUE_FAILURES_ARMED.get_or_init(|| ());
+    INJECTED_QUEUE_FAILURES.store(count, std::sync::atomic::Ordering::Release);
+}
+
 /// Whether to force full-output damage on every frame instead of
 /// trusting the damage tracker's per-element result.
 ///
@@ -648,6 +921,32 @@ pub(crate) struct SessionGraphics {
     /// burst of udev changes and every forced connector probe may block;
     /// one absolute deadline coalesces that burst into one walk.
     hotplug_due: Option<Instant>,
+    /// Connectors the kernel marks `non-desktop`, as of the last
+    /// enumeration. Never driven; kept so a burst of hotplug events
+    /// logs each newly reserved headset once rather than per rescan,
+    /// and so a lease path can advertise the same set startup skipped.
+    non_desktop: Vec<connector::Handle>,
+    /// Connected connectors kept out of the layout — a laptop panel
+    /// behind a closed lid. Not in `outputs`, so nothing positional
+    /// reaches them; a rescan treats them as present, and an unplug
+    /// drops them without any layout work. See [`park_output`].
+    parked: Vec<ParkedConnector>,
+}
+
+/// A connected connector this session keeps but does not drive: the
+/// output was taken out of the layout by a monitor rule, `keyword
+/// monitor NAME,disable`, `hl.monitor({ disabled = true })` or
+/// wlr-output-management. Its crtc is cleared the way DPMS-off clears
+/// one, and kept, so putting the output back is the DPMS-on path rather
+/// than a fresh surface — until a newer connector finds no free crtc,
+/// when [`release_parked_crtc`] gives this one up and the return goes
+/// through [`attach_output`] instead.
+struct ParkedConnector {
+    /// Connector name, which is what every route names the output by.
+    name: String,
+    connector: connector::Handle,
+    /// `Some` while the crtc is kept.
+    output: Option<SessionOutput>,
 }
 
 /// One output being scanned out: its crtc, its place in the global
@@ -764,6 +1063,9 @@ struct SessionOutput {
     /// composition actually consumes. Rendering is armed late enough
     /// to sample fresh input while retaining a measured safety budget.
     frame_clock: FrameClock,
+    /// Refused commits since the last accepted frame, and when this
+    /// output may next be recovered — see [`escalate_commit_failure`].
+    commit_health: CommitHealth,
 }
 
 const INITIAL_RENDER_MEAN: Duration = Duration::from_millis(2);
@@ -1086,12 +1388,13 @@ pub(crate) fn graphics_diagnostics(graphics: &Graphics) -> String {
     match graphics {
         Graphics::Winit(_) => "backend=nested-winit renderer=GLES host_output=true".to_string(),
         Graphics::Session(session) => format!(
-            "backend=drm-session kms_device={} drm_driver={} render_node={} {}",
+            "backend=drm-session kms_device={} drm_driver={} render_node={} parked_outputs={} {}",
             session.device_path.display(),
             session.driver_name,
             session
                 .render_node
                 .map_or_else(|| "unknown".to_string(), |node| node.to_string()),
+            session.parked.len(),
             session.render_stack.diagnostics(),
         ),
     }
@@ -1155,7 +1458,7 @@ pub(crate) fn init(
     //    opening `/dev/dri/cardN` directly would work as root and then
     //    strand the device on the first VT switch.
     let (device_path, device) = open_first_usable_device(&mut seat_session, &seat_name)?;
-    let Device { mut drm, notifier: drm_notifier, gbm, connectors } = device;
+    let Device { mut drm, notifier: drm_notifier, gbm, connectors, non_desktop } = device;
     tracing::info!(
         device = %device_path.display(),
         outputs = connectors.len(),
@@ -1400,6 +1703,12 @@ pub(crate) fn init(
             UdevEvent::Changed { device_id } => {
                 let Graphics::Session(session) = &mut comp.graphics else { return };
                 if session.drm.device_id() == device_id {
+                    // The rescan also reads `link-status` on every
+                    // driven connector: a link that failed to train
+                    // arrives as exactly this event, with the connector
+                    // set unchanged. Reading it here would put one
+                    // property walk per connector on a callback that
+                    // fires in bursts.
                     session.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
                     tracing::debug!(?device_id, "connector change noticed; debounced rescan armed");
                 }
@@ -1529,6 +1838,31 @@ pub(crate) fn init(
                             &mut output.scanout_scene,
                             &mut output.client_scanout_active,
                         );
+                        // The crtc was rebuilt from scratch; whatever
+                        // was failing before the switch is history.
+                        output.commit_health = CommitHealth::default();
+                    }
+                    // `activate(true)` reset the parked crtcs too; left
+                    // alone, a panel behind a closed lid would come back
+                    // from a VT switch in whatever state the reset left
+                    // it. Re-clear each one the way a powered-off
+                    // output is re-cleared above.
+                    for parked in session.parked.iter_mut() {
+                        let Some(output) = parked.output.as_mut() else { continue };
+                        if let Err(error) = output.drm_compositor.reset_state() {
+                            tracing::error!(?error, output = %parked.name, "could not reset a parked crtc after resuming");
+                        }
+                        output.drm_compositor.reset_buffers();
+                        if let Err(error) = output.drm_compositor.clear() {
+                            tracing::warn!(?error, output = %parked.name, "could not re-clear a parked output after VT resume");
+                        }
+                        output.frame_pending = None;
+                        output.last_vblank = None;
+                        clear_scene_holds(
+                            &mut output.pending_scene,
+                            &mut output.scanout_scene,
+                            &mut output.client_scanout_active,
+                        );
                     }
                     // Marks every output dirty on the next render pass
                     // (see `render_frame_session`), which is what
@@ -1549,6 +1883,12 @@ pub(crate) fn init(
             }
         })
         .map_err(|error| format!("failed to register the seat session source: {error}"))?;
+
+    // System sleep. A suspend does not pause the seat, so nothing above
+    // runs on the way back; logind's `PrepareForSleep(false)` is the
+    // signal, and `sleep_bus` delivers it as an edge into
+    // [`note_system_resumed`].
+    crate::sleep_bus::init(loop_handle);
 
     // 6. Hand the assembled stack back to `run`, which registers an
     //    output global per output and builds the damage trackers from
@@ -1585,6 +1925,8 @@ pub(crate) fn init(
             last_service: Instant::now(),
             strict_release,
             hotplug_due: None,
+            non_desktop,
+            parked: Vec::new(),
         })),
         outputs: setups,
     })
@@ -1815,6 +2157,7 @@ fn attach_output(
                 Refresh::Unknown
             },
             frame_clock: FrameClock::new(*mode),
+            commit_health: CommitHealth::default(),
         },
         OutputSetup {
             output,
@@ -1919,39 +2262,145 @@ pub(crate) fn service_connector_hotplug(comp: &mut Compositor) {
         return;
     }
 
+    // Before the presence diff: a connector whose link failed to train
+    // is still present, still driven, and skipped by the diff below.
+    retrain_bad_links(session);
     match rescan_session_outputs(session) {
-        Ok((removed, added)) if removed.is_empty() && added.is_empty() => {
-            tracing::debug!("connector rescan found no output changes");
+        Ok(RescanDelta { removed, added, unplugged }) => {
+            // A parked connector that left needs no layout work, only
+            // its record dropped, so its disabled head and `monitors
+            // all` entry go with it.
+            if !unplugged.is_empty() {
+                crate::state::drop_parked_outputs(comp, &unplugged);
+            }
+            if removed.is_empty() && added.is_empty() {
+                tracing::debug!("connector rescan found no output changes");
+            } else {
+                crate::state::apply_connector_hotplug(comp, &removed, added);
+            }
         }
-        Ok((removed, added)) => crate::state::apply_connector_hotplug(comp, &removed, added),
         Err(error) => tracing::warn!(%error, "connector rescan failed; keeping the current output set"),
     }
 }
 
-fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, Vec<OutputSetup>), String> {
+/// Reads `link-status` on every driven connector and schedules the
+/// retraining modeset for each one the kernel marked `BAD`.
+///
+/// Powered-off outputs are skipped: their link is down by design and a
+/// modeset would switch them back on. Nothing here touches the crtc
+/// directly — the retrain rides the next frame, which is built from
+/// the ledger like any other, so a locked session repaints locked.
+fn retrain_bad_links(session: &mut SessionGraphics) {
+    for output in session.outputs.iter_mut() {
+        if !output.powered || !connector_link_bad(session.drm.device_fd(), output.connector) {
+            continue;
+        }
+        if !output.drm_compositor.request_link_retrain() {
+            tracing::warn!(output = %output.name, "link-status is BAD but this surface cannot retrain it");
+            continue;
+        }
+        tracing::warn!(output = %output.name, "link-status is BAD; the next frame is a modeset that retrains the link");
+        output.dirty = true;
+    }
+}
+
+/// The system is back from suspend, per logind. Called from the
+/// `sleep_bus` channel callback on the compositor thread.
+///
+/// Deliberately not a crtc reset: [`escalate_commit_failure`] and
+/// [`retrain_bad_links`] handle the outputs that actually fail, and a
+/// blanket modeset costs a visible flicker on every wake. What resume
+/// owes is a look — the connector set may have changed, a docked
+/// monitor's link may not have retrained, the LUTs may be linear — and
+/// a full repaint, because firmware may have painted over the screens.
+/// Display state only: the lock-before-suspend flow is untouched, and
+/// the repaint is built from the ledger like every other frame.
+pub(crate) fn note_system_resumed(comp: &mut Compositor) {
+    let Compositor { graphics, wm, gamma, .. } = comp;
+    let Graphics::Session(session) = graphics else {
+        return;
+    };
+    tracing::info!("system resumed from sleep: rescanning connectors and checking every link");
+    // The rescan reads `link-status` on every output before the
+    // presence diff, so one armed scan covers both.
+    session.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
+    let backend = wm.backend_mut();
+    backend.mark_damaged();
+    backend.full_damage_required = true;
+    crate::gamma::note_session_resumed(gamma);
+}
+
+/// What one connector rescan changed.
+struct RescanDelta {
+    /// Outputs removed from the layout, by index, descending.
+    removed: Vec<usize>,
+    /// Connectors newly adopted into the layout.
+    added: Vec<OutputSetup>,
+    /// Parked connectors that were unplugged and are no longer kept.
+    unplugged: Vec<String>,
+}
+
+/// What a connector rescan does about the parked connectors: which are
+/// still plugged in (and so must not be re-adopted), and which have gone.
+/// Pure, so the diff a docked laptop performs on every lid event is
+/// testable without a DRM device. `parked` and `connected` are anything
+/// comparable — connector handles in production.
+fn plan_parked<H: PartialEq + Copy>(parked: &[H], connected: &[H]) -> (Vec<H>, Vec<H>) {
+    parked.iter().copied().partition(|handle| connected.contains(handle))
+}
+
+/// Walks every connector after a hotplug or VT resume and applies the
+/// [`rescan_plan`]: outputs whose connector stopped being
+/// [`ConnectorUse::Drive`] leave through the same removal the unplug
+/// case always took (so a monitor swapped for a headset on one port
+/// within a debounce window is removed, not kept on the headset), and
+/// newly drivable connectors are adopted. The non-desktop property is
+/// read fresh after every forced probe — never cached — because the
+/// kernel rewrites it from each new sink's EDID.
+fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<RescanDelta, String> {
     let resources = session
         .drm
         .resource_handles()
         .map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
-    let mut connected = Vec::new();
+    let mut probed: Vec<(connector::Handle, ConnectorUse)> = Vec::new();
+    let mut drivable: Vec<connector::Info> = Vec::new();
     for handle in resources.connectors() {
         match session.drm.get_connector(*handle, true) {
-            Ok(info) if info.state() == connector::State::Connected && !info.modes().is_empty() => {
-                connected.push(info);
+            Ok(info) => {
+                let use_ = connector_use(
+                    info.state(),
+                    connector_is_non_desktop(session.drm.device_fd(), *handle),
+                    !info.modes().is_empty(),
+                );
+                probed.push((*handle, use_));
+                match use_ {
+                    ConnectorUse::Drive => drivable.push(info),
+                    ConnectorUse::NonDesktop if !session.non_desktop.contains(handle) => tracing::info!(
+                        connector = %connector_name(&info),
+                        "connector is marked non-desktop; reserved for a lease/VR runtime, not driven"
+                    ),
+                    ConnectorUse::NonDesktop | ConnectorUse::Disconnected | ConnectorUse::NoModes => {}
+                }
             }
-            Ok(_) => {}
             Err(error) => tracing::debug!(?handle, ?error, "connector probe failed during hotplug rescan"),
         }
     }
 
-    let connected_handles: Vec<connector::Handle> = connected.iter().map(connector::Info::handle).collect();
-    let mut removed: Vec<usize> = session
-        .outputs
+    // Parked connectors: still plugged in means still parked, kept out
+    // of the plan so it neither adopts nor removes them; unplugged
+    // means dropped below, with no layout work because a parked output
+    // was never in the layout.
+    let connected_handles: Vec<connector::Handle> = probed
         .iter()
-        .enumerate()
-        .filter_map(|(index, output)| (!connected_handles.contains(&output.connector)).then_some(index))
+        .filter(|(_, use_)| *use_ == ConnectorUse::Drive)
+        .map(|(handle, _)| *handle)
         .collect();
-    removed.sort_unstable_by(|a, b| b.cmp(a));
+    let parked_handles: Vec<connector::Handle> = session.parked.iter().map(|parked| parked.connector).collect();
+    let (parked_present, parked_gone) = plan_parked(&parked_handles, &connected_handles);
+    let driven: Vec<connector::Handle> = session.outputs.iter().map(|output| output.connector).collect();
+    let plan = rescan_plan(&driven, &probed, &parked_present);
+    session.non_desktop = plan.reserved;
+    let removed = plan.remove;
     for index in &removed {
         let mut output = session.outputs.remove(*index);
         if let Some(mut feedback) = output.presentation.take() {
@@ -1959,6 +2408,21 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, 
         }
         tracing::info!(output = %output.name, "connector unplugged; output removed from scanout");
     }
+    let mut unplugged = Vec::new();
+    session.parked.retain_mut(|parked| {
+        if parked_gone.contains(&parked.connector) {
+            if let Some(mut output) = parked.output.take() {
+                if let Some(mut feedback) = output.presentation.take() {
+                    feedback.discarded();
+                }
+            }
+            tracing::info!(output = %parked.name, "parked connector unplugged; dropped");
+            unplugged.push(parked.name.clone());
+            false
+        } else {
+            true
+        }
+    });
 
     let mut next_x = session
         .outputs
@@ -1970,13 +2434,23 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, 
         .max()
         .unwrap_or(0);
     let mut added = Vec::new();
-    for info in connected {
-        if session.outputs.iter().any(|output| output.connector == info.handle()) {
+    for info in drivable {
+        if !plan.adopt.contains(&info.handle()) {
             continue;
         }
         let Some(mode) = preferred_mode(&info) else { continue };
-        let taken: Vec<crtc::Handle> = session.outputs.iter().map(|output| output.crtc).collect();
-        let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken) else {
+        // A parked output keeps its crtc, so it is spoken for here —
+        // unless nothing else can drive the new connector, when the
+        // parked one gives its crtc up (see `release_parked_crtc`).
+        let taken: Vec<crtc::Handle> = session
+            .outputs
+            .iter()
+            .map(|output| output.crtc)
+            .chain(session.parked.iter().filter_map(|parked| parked.output.as_ref().map(|output| output.crtc)))
+            .collect();
+        let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken)
+            .or_else(|| release_parked_crtc(session, &resources, &info))
+        else {
             tracing::warn!(output = %connector_name(&info), "hot-plugged connector has no free crtc");
             continue;
         };
@@ -1999,7 +2473,152 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, 
             Err(error) => tracing::warn!(output = %connector_name(&target.info), %error, "could not adopt hot-plugged connector"),
         }
     }
-    Ok((removed, added))
+    Ok(RescanDelta { removed, added, unplugged })
+}
+
+/// The crtcs `connector` could be driven from, in the kernel's order.
+fn candidate_crtcs(drm: &DrmDevice, resources: &ResourceHandles, connector: &connector::Info) -> Vec<crtc::Handle> {
+    connector
+        .encoders()
+        .iter()
+        .filter_map(|handle| drm.get_encoder(*handle).ok())
+        .flat_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()))
+        .collect()
+}
+
+/// Gives up a parked output's crtc for a connector that found no free
+/// one: hardware with few crtcs needs the closed lid's crtc when a dock
+/// adds monitors. The parked output's `DrmCompositor` is dropped with
+/// it; if the output is put back later, [`unpark_output`] re-adopts it
+/// through [`attach_output`] with whatever crtc is free then.
+fn release_parked_crtc(
+    session: &mut SessionGraphics,
+    resources: &ResourceHandles,
+    connector: &connector::Info,
+) -> Option<crtc::Handle> {
+    let candidates = candidate_crtcs(&session.drm, resources, connector);
+    let parked = session
+        .parked
+        .iter_mut()
+        .find(|parked| parked.output.as_ref().is_some_and(|output| candidates.contains(&output.crtc)))?;
+    let mut output = parked.output.take()?;
+    if let Some(mut feedback) = output.presentation.take() {
+        feedback.discarded();
+    }
+    let crtc = output.crtc;
+    drop(output);
+    tracing::info!(
+        parked = %parked.name,
+        new = %connector_name(connector),
+        ?crtc,
+        "a parked output released its crtc to a newly plugged connector"
+    );
+    Some(crtc)
+}
+
+/// Takes the output at `index` out of scanout without forgetting the
+/// connector: the crtc is cleared exactly as DPMS-off clears it, the
+/// `SessionOutput` moves to the parked list, and the caller removes the
+/// matching entry from `Compositor::outputs` through the connector
+/// hotplug tail, keeping the two lists index-aligned. On the nested
+/// backend a virtual output has nothing to clear; parking it is the
+/// layout half alone, which the caller performs.
+pub(crate) fn park_output(graphics: &mut Graphics, index: usize) -> Result<(), String> {
+    let Graphics::Session(session) = graphics else {
+        return Ok(());
+    };
+    let output = session.outputs.get_mut(index).ok_or_else(|| format!("output index {index} does not exist"))?;
+    if output.drm_compositor.vrr_enabled() {
+        if let Err(error) = output.drm_compositor.use_vrr(false) {
+            tracing::warn!(?error, output = %output.name, "could not disable adaptive sync before parking");
+        }
+    }
+    output.drm_compositor.clear().map_err(|error| format!("disable failed: {error}"))?;
+    let mut output = session.outputs.remove(index);
+    output.powered = false;
+    output.dirty = false;
+    output.frame_pending = None;
+    output.last_vblank = None;
+    output.frame_clock.disarm();
+    clear_scene_holds(&mut output.pending_scene, &mut output.scanout_scene, &mut output.client_scanout_active);
+    if let Some(mut feedback) = output.presentation.take() {
+        feedback.discarded();
+    }
+    tracing::info!(output = %output.name, "output parked: connector kept, crtc cleared, out of the layout");
+    session.parked.push(ParkedConnector { name: output.name.clone(), connector: output.connector, output: Some(output) });
+    Ok(())
+}
+
+/// Puts a parked output back at the end of the scanout list — the
+/// caller appends the matching entry to `Compositor::outputs`, so the
+/// two lists stay aligned. `Ok(None)` when the retained `SessionOutput`
+/// came back as DPMS-on would bring it; `Ok(Some(setup))` when its crtc
+/// had been released and the connector was adopted afresh through
+/// [`attach_output`], whose new `Output` replaces the caller's.
+pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Option<OutputSetup>, String> {
+    let Graphics::Session(session) = graphics else {
+        return Ok(None);
+    };
+    let at = session
+        .parked
+        .iter()
+        .position(|parked| parked.name == name)
+        .ok_or_else(|| format!("{name} is not a parked output"))?;
+    if let Some(mut output) = session.parked[at].output.take() {
+        session.parked.remove(at);
+        output.powered = true;
+        output.dirty = true;
+        output.full_damage_required = true;
+        output.drm_compositor.reset_buffer_ages();
+        output.frame_clock.disarm();
+        tracing::info!(output = %name, "output unparked: back in the layout on its kept crtc");
+        session.outputs.push(output);
+        return Ok(None);
+    }
+    // The crtc went to a newer connector; find another and start over.
+    // Keep the parked record until adoption succeeds. Any probe or
+    // allocation can fail (including across a VT switch); the next
+    // enable must still find the connector and be able to retry.
+    let connector = session.parked[at].connector;
+    let resources = session
+        .drm
+        .resource_handles()
+        .map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
+    let info = session
+        .drm
+        .get_connector(connector, false)
+        .map_err(|error| format!("could not read connector {name}: {error}"))?;
+    let Some(mode) = preferred_mode(&info) else {
+        return Err(format!("{name} reports no modes"));
+    };
+    let taken: Vec<crtc::Handle> = session
+        .outputs
+        .iter()
+        .map(|output| output.crtc)
+        .chain(session.parked.iter().filter_map(|parked| parked.output.as_ref().map(|output| output.crtc)))
+        .collect();
+    let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken) else {
+        return Err(format!("{name} has no free crtc to come back on"));
+    };
+    let target = ConnectorTarget { info, crtc, mode };
+    let next_x = session
+        .outputs
+        .iter()
+        .map(|output| {
+            let width = output.drm_modes.first().map(|mode| mode.size().0 as i32).unwrap_or(0);
+            output.position.x.saturating_add(width)
+        })
+        .max()
+        .unwrap_or(0);
+    match attach_output(&mut session.drm, &session.gbm, session.render_node, &session.render_formats, &target, Point::new(next_x, 0)) {
+        Ok((output, setup)) => {
+            session.parked.remove(at);
+            tracing::info!(output = %name, ?crtc, "output unparked: re-adopted on a fresh crtc");
+            session.outputs.push(output);
+            Ok(Some(setup))
+        }
+        Err(error) => Err(format!("could not re-adopt {name}: {error}")),
+    }
 }
 
 /// Services every page flip in flight: names the ones that have overrun
@@ -2090,45 +2709,78 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
     }
 
     for output in session.outputs.iter_mut() {
-        // Forces the next `render_frame` to report a non-empty result
-        // and the next `queue_frame` to go out as a full modeset commit
-        // rather than a page flip. That is the part that actually
-        // unwedges a crtc the kernel still believes has a flip
-        // outstanding, and the reason a plain retry would not: further
-        // page flips against a pending one come back `EBUSY`.
-        if let Err(error) = output.drm_compositor.reset_state() {
-            tracing::error!(
-                ?error,
-                output = %output.name,
-                "could not reset the crtc state after a stalled page flip"
-            );
-        }
-        // The swapchain slot the lost flip is holding will never come
-        // back through `frame_submitted`. Dropping every buffer is what
-        // keeps the frames after the reset from failing with
-        // `NoFreeSlotsError`.
-        output.drm_compositor.reset_buffers();
-        // A late completion for the flip just abandoned finds this
-        // `None` (or, if the reset's own frame is already out, a newer
-        // flip's `Some`) and calls `frame_submitted` with nothing
-        // pending, which smithay answers `Ok(None)`. Harmless, and the
-        // same shape the pause/resume path has always had.
-        output.frame_pending = None;
-        output.last_vblank = None;
-        // The abandoned pending scene and the buffer that was current
-        // before the reset both go: reset_state disabled the planes,
-        // so the display engine can no longer read either.
-        clear_scene_holds(
-            &mut output.pending_scene,
-            &mut output.scanout_scene,
-            &mut output.client_scanout_active,
-        );
-        if let Some(mut feedback) = output.presentation.take() {
-            feedback.discarded();
-        }
-        output.dirty = true;
+        recover_output(output, RecoveryRung::Reset);
     }
     true
+}
+
+/// Tears down one output's crtc bookkeeping so its next frame goes out
+/// as a full commit rather than a page flip. Shared by the stall
+/// watchdog above, which runs it for every output after a device-wide
+/// reset, and by [`escalate_commit_failure`], which runs it for the one
+/// output whose commits the kernel keeps refusing while its neighbours
+/// keep flipping.
+fn recover_output(output: &mut SessionOutput, rung: RecoveryRung) {
+    // Forces the next `render_frame` to report a non-empty result
+    // and the next `queue_frame` to go out as a full modeset commit
+    // rather than a page flip. That is the part that actually
+    // unwedges a crtc the kernel still believes has a flip
+    // outstanding, and the reason a plain retry would not: further
+    // page flips against a pending one come back `EBUSY`.
+    if let Err(error) = output.drm_compositor.reset_state() {
+        tracing::error!(?error, output = %output.name, "could not reset the crtc state");
+    }
+    // `reset_state` re-reads the kernel's view of the crtc, and the
+    // commit it provokes is a modeset only where that view differs
+    // from ours. A commit the kernel refuses with the state it already
+    // holds needs a forced `ALLOW_MODESET` commit — and, for a link
+    // that failed to train, `link-status = GOOD` in the same request.
+    if rung == RecoveryRung::Modeset && !output.drm_compositor.request_link_retrain() {
+        tracing::warn!(output = %output.name, "this surface cannot force a modeset; repeating the reset");
+    }
+    // The swapchain slot the lost flip is holding will never come
+    // back through `frame_submitted`. Dropping every buffer is what
+    // keeps the frames after the reset from failing with
+    // `NoFreeSlotsError`.
+    output.drm_compositor.reset_buffers();
+    // A late completion for the flip just abandoned finds this
+    // `None` (or, if the reset's own frame is already out, a newer
+    // flip's `Some`) and calls `frame_submitted` with nothing
+    // pending, which smithay answers `Ok(None)`. Harmless, and the
+    // same shape the pause/resume path has always had.
+    output.frame_pending = None;
+    output.last_vblank = None;
+    // The abandoned pending scene and the buffer that was current
+    // before the reset both go: reset_state disabled the planes,
+    // so the display engine can no longer read either.
+    clear_scene_holds(
+        &mut output.pending_scene,
+        &mut output.scanout_scene,
+        &mut output.client_scanout_active,
+    );
+    if let Some(mut feedback) = output.presentation.take() {
+        feedback.discarded();
+    }
+    output.dirty = true;
+}
+
+/// Counts one refused commit against an output and recovers it once
+/// [`CommitHealth`] says so: at [`COMMIT_FAILURE_THRESHOLD`] failures,
+/// then no sooner than the doubling backoff allows. Per output, so a
+/// healthy neighbour keeps flipping; the device-wide reset stays with
+/// the stall watchdog.
+fn escalate_commit_failure(output: &mut SessionOutput, now: Instant) {
+    let Some(rung) = output.commit_health.note_failure(now) else {
+        return;
+    };
+    tracing::warn!(
+        output = %output.name,
+        failures = output.commit_health.consecutive_failures,
+        ?rung,
+        next_attempt_no_sooner_than = ?output.commit_health.next_reset_allowed.map(|at| at.saturating_duration_since(now)),
+        "commits keep failing; recovering this output's crtc state"
+    );
+    recover_output(output, rung);
 }
 
 /// Whether a mode change to `mode_index` on output `index` could be
@@ -2220,10 +2872,24 @@ pub(crate) fn apply_transform(graphics: &mut Graphics, index: usize, transform: 
 pub(crate) fn apply_output_setups(graphics: &mut Graphics, setups: &mut [OutputSetup]) {
     for (index, setup) in setups.iter_mut().enumerate() {
         let requested_transform = setup.transform;
+        // A mode or orientation the crtc already drives is left alone:
+        // `apply_mode` is a modeset whatever the mode, and this runs on
+        // every hotplug and every monitor-rule reconcile, where the
+        // outputs whose rule did not change must not flicker.
+        let (mode_current, transform_current) = match graphics {
+            Graphics::Winit(_) => (false, false),
+            Graphics::Session(session) => session.outputs.get(index).map_or((false, false), |output| {
+                (
+                    setup.requested_mode.is_some_and(|mode_index| mode_index == output.mode_index),
+                    requested_transform == output.transform,
+                )
+            }),
+        };
         let result = setup
             .requested_mode
+            .filter(|_| !mode_current)
             .map_or(Ok(()), |mode_index| apply_mode(graphics, index, mode_index))
-            .and_then(|()| apply_transform(graphics, index, requested_transform));
+            .and_then(|()| if transform_current { Ok(()) } else { apply_transform(graphics, index, requested_transform) });
         if let Err(error) = result {
             tracing::warn!(
                 %error,
@@ -2786,14 +3452,20 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             Err(error) => {
                 // Includes the atomic test failures a returning VT
                 // switch can produce; the seat-activation handler above
-                // resets the device and marks damage, so the recovery
-                // path is there rather than duplicated here.
+                // resets the device and marks damage for that case.
+                // Failures that outlive it are counted here and
+                // escalate per output once they persist. This cannot
+                // be `DeviceInactive`: the pass checked `is_active`
+                // above, and only the pause handler on this thread
+                // clears it.
                 if crate::renderer::note_frame_failure() {
                     tracing::warn!(?error, output = %output.name, "DRM render failed; keeping this output dirty for a retry");
                 }
                 output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
                 stats.finish("render_failed", render_started.elapsed());
                 output.scene_scratch.clear();
+                drop(stats);
+                escalate_commit_failure(output, Instant::now());
                 continue;
             }
         };
@@ -2842,7 +3514,11 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         let client_scanout = direct_scanout || stats.current.overlays > 0 || stats.current.cursor;
         if rendered {
             let queue_started = Instant::now();
-            let queue = output.drm_compositor.queue_frame(());
+            let queue = if take_injected_queue_failure() {
+                Err(FrameError::DrmError(DrmError::TestFailed(output.crtc)))
+            } else {
+                output.drm_compositor.queue_frame(())
+            };
             stats.stage(6, queue_started.elapsed());
             let feedback_started = Instant::now();
             match queue {
@@ -2853,6 +3529,10 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                         client_scanout,
                         stall_reported: false,
                     });
+                    // The device accepted a frame: whatever was
+                    // failing is over, and the backoff starts from
+                    // scratch next time.
+                    output.commit_health = CommitHealth::default();
                     frame_queued = true;
                     if let (Some(entry), Some(monitor)) =
                         (output_entries.get(output_index), wm.backend().monitors.get(output_index))
@@ -2917,6 +3597,13 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                     output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
                     stats.finish("queue_failed", render_started.elapsed());
                     output.scene_scratch.clear();
+                    // A VT that belongs to someone else is not a
+                    // broken output; every other refusal counts.
+                    let device_inactive = matches!(error, FrameError::DrmError(DrmError::DeviceInactive));
+                    drop(stats);
+                    if !device_inactive {
+                        escalate_commit_failure(output, Instant::now());
+                    }
                     continue;
                 }
             }
@@ -2978,6 +3665,8 @@ struct Device {
     /// Never empty — a device with nothing plugged in is not a device
     /// this session can run on (see [`probe_device`]).
     connectors: Vec<ConnectorTarget>,
+    /// Connected connectors [`pick_outputs`] reserved as non-desktop.
+    non_desktop: Vec<connector::Handle>,
 }
 
 /// A connector this session will drive, with the crtc and mode chosen
@@ -3171,14 +3860,16 @@ fn probe_device(seat_session: &mut LibSeatSession, path: &Path) -> Result<Device
 
     let (drm, notifier) =
         DrmDevice::new(fd.clone(), true).map_err(|error| format!("not a usable DRM device: {error}"))?;
-    let connectors = pick_outputs(&drm)?;
+    let (connectors, non_desktop) = pick_outputs(&drm)?;
     let gbm = GbmDevice::new(fd).map_err(|error| format!("GBM init failed: {error}"))?;
 
-    Ok(Device { drm, notifier, gbm, connectors })
+    Ok(Device { drm, notifier, gbm, connectors, non_desktop })
 }
 
 /// Picks the connectors this session paints on: every connected one
 /// that has both a mode and a free crtc, in the kernel's enumeration
+/// order, plus the connectors it reserved as non-desktop — the same
+/// classification ([`connector_use`]) every later rescan applies. Kernel
 /// order — which is stable across boots on a given machine, and is
 /// therefore what decides which monitor is primary and how the outputs
 /// are laid out left to right (see the module docs: there is no
@@ -3189,7 +3880,7 @@ fn probe_device(seat_session: &mut LibSeatSession, path: &Path) -> Result<Device
 /// render-only node or the wrong GPU announces itself, and [`init`]'s
 /// candidate walk should move on to the next one rather than come up
 /// with a session nobody can see.
-fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
+fn pick_outputs(drm: &DrmDevice) -> Result<(Vec<ConnectorTarget>, Vec<connector::Handle>), String> {
     let resources =
         drm.resource_handles().map_err(|error| format!("no KMS resources (a render-only node?): {error}"))?;
 
@@ -3197,6 +3888,7 @@ fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
     // diagnosable from one log line instead of a bisect.
     let mut skipped: Vec<String> = Vec::new();
     let mut targets: Vec<ConnectorTarget> = Vec::new();
+    let mut non_desktop: Vec<connector::Handle> = Vec::new();
     for handle in resources.connectors() {
         let info = match drm.get_connector(*handle, true) {
             Ok(info) => info,
@@ -3206,18 +3898,26 @@ fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
             }
         };
         let name = connector_name(&info);
-        if info.state() != connector::State::Connected {
-            skipped.push(format!("{name} is {:?}", info.state()));
-            continue;
-        }
-        if connector_is_non_desktop(drm.device_fd(), *handle) {
-            skipped.push(format!("{name} is marked non-desktop (reserved for a lease/VR runtime)"));
-            continue;
-        }
-        let Some(mode) = preferred_mode(&info) else {
-            skipped.push(format!("{name} is connected but reports no modes"));
-            continue;
+        let mode = preferred_mode(&info);
+        let reason = match connector_use(
+            info.state(),
+            connector_is_non_desktop(drm.device_fd(), *handle),
+            mode.is_some(),
+        ) {
+            ConnectorUse::Drive => None,
+            ConnectorUse::Disconnected => Some(format!("{name} is {:?}", info.state())),
+            ConnectorUse::NonDesktop => {
+                non_desktop.push(*handle);
+                Some(format!("{name} is marked non-desktop (reserved for a lease/VR runtime)"))
+            }
+            ConnectorUse::NoModes => Some(format!("{name} is connected but reports no modes")),
         };
+        if let Some(reason) = reason {
+            skipped.push(reason);
+            continue;
+        }
+        // `Drive` implies a mode; the `else` only satisfies the type.
+        let Some(mode) = mode else { continue };
         // A crtc drives exactly one output, so one already spoken for by
         // an earlier connector is not a candidate for this one — which
         // is also the ceiling on how many monitors this session lights
@@ -3235,7 +3935,7 @@ fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
         if !skipped.is_empty() {
             tracing::debug!(skipped = %skipped.join(", "), "connectors this session will not drive");
         }
-        return Ok(targets);
+        return Ok((targets, non_desktop));
     }
     Err(if skipped.is_empty() {
         "the device exposes no connectors at all".to_string()
@@ -3314,6 +4014,93 @@ mod tests {
         edid[72..77].copy_from_slice(&[0, 0, 0, 0xff, 0]);
         edid[77..90].copy_from_slice(b"ABC123\n      ");
         edid
+    }
+
+    fn handle(id: u32) -> connector::Handle {
+        connector::Handle::from(std::num::NonZeroU32::new(id).unwrap())
+    }
+
+    #[test]
+    fn connector_use_classifies_every_connector_state() {
+        assert_eq!(connector_use(connector::State::Disconnected, false, true), ConnectorUse::Disconnected);
+        assert_eq!(connector_use(connector::State::Unknown, false, true), ConnectorUse::Disconnected);
+        // Non-desktop wins over having modes: a headset advertises
+        // modes like any panel and must still not be driven.
+        assert_eq!(connector_use(connector::State::Connected, true, true), ConnectorUse::NonDesktop);
+        assert_eq!(connector_use(connector::State::Connected, true, false), ConnectorUse::NonDesktop);
+        assert_eq!(connector_use(connector::State::Connected, false, false), ConnectorUse::NoModes);
+        assert_eq!(connector_use(connector::State::Connected, false, true), ConnectorUse::Drive);
+    }
+
+    /// The bug: a headset appearing after startup was collected like a
+    /// monitor and adopted. The plan must reserve it instead.
+    #[test]
+    fn rescan_plan_does_not_adopt_an_undriven_non_desktop_connector() {
+        let (monitor, headset) = (handle(1), handle(2));
+        let plan = rescan_plan(
+            &[monitor],
+            &[(monitor, ConnectorUse::Drive), (headset, ConnectorUse::NonDesktop)],
+            &[],
+        );
+        assert!(plan.remove.is_empty());
+        assert!(plan.adopt.is_empty());
+        assert_eq!(plan.reserved, vec![headset]);
+    }
+
+    /// A monitor unplugged and a headset plugged into the same port
+    /// within one debounce window: the connector is still connected
+    /// with modes, but its classification changed, so its output goes
+    /// out through the unplug path rather than staying on the headset.
+    #[test]
+    fn rescan_plan_removes_a_driven_connector_that_turned_non_desktop() {
+        let (left, right) = (handle(1), handle(2));
+        let plan =
+            rescan_plan(&[left, right], &[(left, ConnectorUse::Drive), (right, ConnectorUse::NonDesktop)], &[]);
+        assert_eq!(plan.remove, vec![1]);
+        assert!(plan.adopt.is_empty());
+        assert_eq!(plan.reserved, vec![right]);
+    }
+
+    #[test]
+    fn rescan_plan_adopts_and_removes_desktop_connectors_as_before() {
+        let (a, b, c, d) = (handle(1), handle(2), handle(3), handle(4));
+        // `a` unplugged, `b` vanished from the resource list entirely,
+        // `c` still driven, `d` newly plugged in with modes.
+        let plan = rescan_plan(
+            &[a, b, c],
+            &[(a, ConnectorUse::Disconnected), (c, ConnectorUse::Drive), (d, ConnectorUse::Drive)],
+            &[],
+        );
+        // Descending so removal by index from the same list is safe.
+        assert_eq!(plan.remove, vec![1, 0]);
+        assert_eq!(plan.adopt, vec![d]);
+        assert!(plan.reserved.is_empty());
+
+        // A connected connector without modes is neither adopted nor,
+        // if it was driven, kept.
+        let plan = rescan_plan(&[a], &[(a, ConnectorUse::NoModes), (d, ConnectorUse::NoModes)], &[]);
+        assert_eq!(plan.remove, vec![0]);
+        assert!(plan.adopt.is_empty());
+
+        // Nothing changed: an empty plan.
+        assert_eq!(rescan_plan(&[a], &[(a, ConnectorUse::Drive)], &[]), RescanPlan::default());
+    }
+
+    /// The `keep` hook: a connector listed there is left exactly as it
+    /// is, whether the probe says it is drivable or gone.
+    #[test]
+    fn rescan_plan_leaves_kept_connectors_alone() {
+        let (driven, parked) = (handle(1), handle(2));
+        let plan = rescan_plan(
+            &[driven, parked],
+            &[(driven, ConnectorUse::Drive), (parked, ConnectorUse::Drive)],
+            &[parked],
+        );
+        assert_eq!(plan, RescanPlan::default());
+        let plan = rescan_plan(&[driven], &[(driven, ConnectorUse::Drive), (parked, ConnectorUse::Drive)], &[parked]);
+        assert_eq!(plan, RescanPlan::default());
+        let plan = rescan_plan(&[driven, parked], &[(driven, ConnectorUse::Drive)], &[parked]);
+        assert_eq!(plan, RescanPlan::default());
     }
 
     #[test]
@@ -3428,6 +4215,31 @@ mod tests {
         assert!(!active);
     }
 
+    /// A docked laptop's closed panel is parked, not gone: a rescan
+    /// must keep treating its connector as present (never re-adopting
+    /// it into the layout) until the connector actually leaves, and
+    /// then drop it with no layout work.
+    #[test]
+    fn a_rescan_keeps_a_parked_connector_present_and_drops_an_unplugged_one() {
+        let (present, gone) = plan_parked(&[handle(7), handle(9)], &[handle(7), handle(3)]);
+        assert_eq!(present, vec![handle(7)]);
+        assert_eq!(gone, vec![handle(9)]);
+        // The present parked connector is the plan's kept list: neither
+        // re-adopted nor removed. The driven one stays, a new one is
+        // adopted, and the unplugged parked one is free to come back new.
+        let probed = [
+            (handle(7), ConnectorUse::Drive),
+            (handle(3), ConnectorUse::Drive),
+            (handle(9), ConnectorUse::Drive),
+            (handle(11), ConnectorUse::Drive),
+        ];
+        let plan = rescan_plan(&[handle(3)], &probed, &present);
+        assert!(plan.remove.is_empty(), "the driven connector stays");
+        assert_eq!(plan.adopt, vec![handle(9), handle(11)], "parked-present is skipped; new and returning are adopted");
+        let (present, gone) = plan_parked::<u32>(&[], &[1, 2]);
+        assert!(present.is_empty() && gone.is_empty());
+    }
+
     #[test]
     fn disabling_the_crtc_releases_all_scene_holds() {
         let mut pending = vec![1];
@@ -3525,5 +4337,86 @@ mod tests {
         assert_eq!(clock.margin, period / 2, "GPU correction cannot consume a whole refresh");
         clock.disarm();
         assert!(clock.last_late_presentation.is_none());
+    }
+
+    /// Two refusals are a transient; the third is a pattern. Once a
+    /// recovery has run, more failures inside its backoff must not
+    /// run another, however many arrive.
+    #[test]
+    fn should_reset_needs_the_threshold_and_an_elapsed_backoff() {
+        let now = Instant::now();
+        let mut health = CommitHealth::default();
+        assert!(!health.should_reset(now));
+        health.consecutive_failures = COMMIT_FAILURE_THRESHOLD - 1;
+        assert!(!health.should_reset(now));
+        health.consecutive_failures = COMMIT_FAILURE_THRESHOLD;
+        assert!(health.should_reset(now));
+
+        health.arm_backoff(now);
+        assert!(!health.should_reset(now));
+        assert!(!health.should_reset(now + COMMIT_RESET_BACKOFF_INITIAL - Duration::from_millis(1)));
+        assert!(health.should_reset(now + COMMIT_RESET_BACKOFF_INITIAL));
+    }
+
+    /// 1 s, 2 s, 4 s, … capped at 30 s, and the rung steps up after the
+    /// first reset so a failure that survives it gets a real modeset.
+    #[test]
+    fn backoff_doubles_to_thirty_seconds_and_escalates_the_rung() {
+        let start = Instant::now();
+        let mut health = CommitHealth::default();
+        assert_eq!(health.next_rung(), RecoveryRung::Reset);
+        let mut now = start;
+        let mut waits = Vec::new();
+        for _ in 0..7 {
+            health.arm_backoff(now);
+            let allowed = health.next_reset_allowed.unwrap();
+            waits.push(allowed.duration_since(now).as_secs());
+            now = allowed;
+            assert_eq!(health.next_rung(), RecoveryRung::Modeset);
+        }
+        assert_eq!(waits, vec![1, 2, 4, 8, 16, 30, 30]);
+        assert_eq!(health.backoff, COMMIT_RESET_BACKOFF_MAX);
+    }
+
+    /// Only the enum value the kernel defines as BAD counts, only under
+    /// the kernel's property name, and a driver without the property
+    /// reads as healthy.
+    #[test]
+    fn link_status_match_flags_only_the_bad_value_under_the_right_name() {
+        assert!(link_status_is_bad([("DPMS", 0), ("link-status", 1)]));
+        assert!(!link_status_is_bad([("DPMS", 0), ("link-status", 0)]));
+        assert!(!link_status_is_bad([("non-desktop", 1), ("CRTC_ID", 1)]));
+        assert!(!link_status_is_bad(std::iter::empty()));
+        assert!(!link_status_is_bad([("link-status", 2)]));
+    }
+
+    /// The fault-injection switch feeds the same accounting a driver's
+    /// refusals do: five injected failures produce exactly one recovery,
+    /// at the third, and none inside the backoff it arms. Once the
+    /// budget is spent the switch is inert.
+    #[test]
+    fn injected_queue_failures_escalate_once_after_the_threshold_and_not_inside_the_backoff() {
+        let start = Instant::now();
+        let mut health = CommitHealth::default();
+        inject_queue_failures(5);
+        let mut outcomes = Vec::new();
+        let mut now = start;
+        while take_injected_queue_failure() {
+            outcomes.push(health.note_failure(now));
+            now += Duration::from_millis(100);
+        }
+        assert_eq!(outcomes, vec![None, None, Some(RecoveryRung::Reset), None, None]);
+        assert!(!take_injected_queue_failure(), "a spent budget injects nothing");
+        assert_eq!(health.consecutive_failures, 5);
+
+        // Past the backoff the next refusal escalates, to the modeset rung.
+        let later = start + COMMIT_RESET_BACKOFF_INITIAL + Duration::from_millis(500);
+        assert_eq!(health.note_failure(later), Some(RecoveryRung::Modeset));
+        assert_eq!(health.note_failure(later + Duration::from_millis(100)), None);
+
+        // An accepted frame forgets everything, backoff included.
+        health = CommitHealth::default();
+        assert_eq!(health.note_failure(later), None);
+        assert_eq!(health.backoff, COMMIT_RESET_BACKOFF_INITIAL);
     }
 }

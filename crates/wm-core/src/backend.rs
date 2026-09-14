@@ -681,6 +681,26 @@ pub trait Backend {
     /// pixels that would lie over this desktop's borders, around handles
     /// nobody could reach. Defaulted to a no-op.
     fn set_window_chrome(&mut self, _window: Self::WindowId, _chrome: crate::ClientChrome) {}
+    /// Tells the backend the opacity rule a managed window mapped
+    /// under, and whether `dim_inactive` must leave it alone. Both
+    /// come from configuration only: no client request reaches this.
+    /// Defaulted to a no-op for a backend that draws every window
+    /// opaque.
+    fn set_window_opacity(
+        &mut self,
+        _window: Self::WindowId,
+        _opacity: Option<crate::OpacityRule>,
+        _no_dim: bool,
+    ) {
+    }
+    /// Forces a window opaque for the rest of the session, or lets its
+    /// rule apply again: `Some(true)`, `Some(false)`, or `None` to
+    /// toggle. Answers whether the backend models the state at all,
+    /// so a request can be refused rather than answered `ok` for
+    /// nothing.
+    fn set_window_opaque(&mut self, _window: Self::WindowId, _opaque: Option<bool>) -> bool {
+        false
+    }
     /// Moves the client window within its frame. Reparenting fixes the
     /// client at the theme's chrome offset and normal reflows never
     /// change it, so this only matters when the offset itself changes:
