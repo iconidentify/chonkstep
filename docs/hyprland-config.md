@@ -512,6 +512,14 @@ never a refusal to start.**
   graph is cycle-checked (through symlinks too) and budget-limited to
   256 files and 8 MiB, and regex patterns are compiled with a size cap
   by an engine that cannot backtrack.
+- Work is bounded per file, not only per construct, because nested
+  loops multiply. One Lua file walks at most 65,536 statements (every
+  pass of a loop counts) and contributes at most 8,192 directives. One
+  statement chains at most 256 operators, a value bound to a name is
+  capped in size, and following a name bound to a name is metered, so
+  `o = o or {}` followed by `if o then` is a condition that cannot be
+  answered rather than a hang. Past any bound, what is left is skipped
+  with a line naming the bound.
 - A file that is not valid UTF-8 is read lossily rather than dropped.
 - A binding that will not parse costs you that binding. A rule that
   will not compile costs you that rule. A file that will not open costs
@@ -522,7 +530,10 @@ never a refusal to start.**
   path into the window manager.
 
 The tests for this feed the parser unterminated strings, five thousand
-nested braces, loops asking for a hundred million iterations, patterns
+nested braces, loops asking for a hundred million iterations, five
+nested loops asking for a billion, names bound to themselves, two
+hundred thousand chained `not`s, values that double each time they are
+rebound, patterns
 that would hang a backtracking engine, four hundred random byte
 strings, and every truncation of the real files — and, end to end, boot
 a whole session against a configuration tree made of garbage and check

@@ -71,6 +71,36 @@ const MAX_DEPTH: u32 = 24;
 /// amount of parsing whatever shape it takes.
 const MAX_STATEMENTS: usize = 20_000;
 
+/// The most directives one `read` may contribute. Loops multiply, so a
+/// per-loop bound alone bounds neither output nor work: five nested
+/// loops of 64 ask for a billion passes, each within its own bound.
+/// The captured Omarchy machine's whole tree produces a few hundred.
+pub(super) const MAX_DIRECTIVES: usize = 8_192;
+
+/// The most statements one `read` may walk, counting every pass of a
+/// loop body. The directive bound's twin: a loop whose body produces
+/// nothing still costs its passes.
+const MAX_STEPS: usize = 65_536;
+
+/// The most operators one statement's expressions may build. An
+/// operator chain is a tree, and `eval`, `render` and `Drop` all
+/// recurse over it, so a chain longer than a stack is a stack
+/// overflow three different ways. Counted per statement rather than
+/// per chain, because parentheses stack chains end to end. Omarchy's
+/// longest is four.
+const MAX_OPERATORS: usize = 256;
+
+/// The heaviest a value bound to a name may be, in nodes plus one per
+/// 64 bytes of text, and the deepest it may nest. A value only grows by
+/// being bound and read back — `t = { t, t }` doubles on every pass and
+/// `t = { t }` deepens — so binding is where its size is checked.
+const MAX_VALUE_WEIGHT: usize = 4_096;
+const MAX_VALUE_DEPTH: u32 = 256;
+
+/// How many steps answering one condition may take. A name bound to a
+/// name is followed, and `o = o or {}` binds one to itself.
+const MAX_TRUTH_STEPS: u32 = 256;
+
 /// A Lua value, to the extent this reader needs one.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -101,7 +131,10 @@ pub enum Value {
     /// is a *definition* (`helpers.lua` defines `o.bind` in terms of
     /// `hl.bind`), and walking a definition would emit the bindings its
     /// own body describes rather than the ones its callers ask for.
-    Function(Vec<Stmt>),
+    ///
+    /// Shared rather than owned, so binding a function to a name, or
+    /// putting it in a table that is bound again, copies nothing.
+    Function(std::sync::Arc<Vec<Stmt>>),
     /// `a .. b`, `a + b`, `a - b`, kept unevaluated.
     ///
     /// Unevaluated on purpose, and this is the single most important
@@ -218,7 +251,12 @@ pub fn read(source: &str, facts: &Facts, globals: &mut Globals, out: &mut Vec<Di
     let mut parser = Parser::new(source);
     let body = parser.block(0);
     let mut env = Env::default();
-    walk(&body, facts, globals, &mut env, out, 0);
+    // This read's own vector, so the directive budget counts this
+    // file's output and not the files read before it.
+    let mut read = Vec::new();
+    let mut steps = 0;
+    walk(&body, facts, globals, &mut env, &mut read, &mut steps, 0);
+    out.append(&mut read);
 }
 
 /// Globals a file may set that a later file reads. Only the two
@@ -250,6 +288,7 @@ fn walk(
     globals: &mut Globals,
     env: &mut Env,
     out: &mut Vec<Directive>,
+    steps: &mut usize,
     depth: u32,
 ) {
     if depth > MAX_DEPTH {
@@ -260,6 +299,9 @@ fn walk(
         return;
     }
     for stmt in body {
+        if spent(steps, out) {
+            return;
+        }
         match stmt {
             Stmt::Call { path, args } => {
                 // `hl.on("hyprland.start", function() … end)`: the one
@@ -270,10 +312,10 @@ fn walk(
                     let body = args.get(1).map(|v| eval(v, env));
                     match (event, body) {
                         (Some(Value::Str(name)), Some(Value::Function(body))) if name == START_EVENT => {
-                            walk(&body, facts, globals, env, out, depth + 1);
+                            walk(&body, facts, globals, env, out, steps, depth + 1);
                         }
                         (Some(Value::Str(name)), Some(Value::Function(body))) if name == "layer.opened" => {
-                            match layer_bindings(&body, env) {
+                            match layer_bindings(&body, env, steps) {
                                 Ok(bindings) if !bindings.is_empty() => out.extend(bindings),
                                 Ok(_) => out.push(Directive::Ignored {
                                     kind: "event",
@@ -303,7 +345,7 @@ fn walk(
                     let body = args.get(1).map(|value| eval(value, env));
                     match (name, body) {
                         (Some(Value::Str(name)), Some(Value::Function(body))) => {
-                            note_submap_bindings(&name, &body, env, out, depth + 1);
+                            note_submap_bindings(&name, &body, env, out, steps, depth + 1);
                         }
                         _ => out.push(Directive::Ignored {
                             kind: "submap",
@@ -315,7 +357,7 @@ fn walk(
                 emit_call(path, args, env, out);
             }
             Stmt::Assign { name, value } => {
-                let value = eval(value, env);
+                let value = bind(name, eval(value, env), out);
                 env.insert(name.clone(), value.clone());
                 globals.values.insert(name.clone(), value);
             }
@@ -359,8 +401,13 @@ fn walk(
                 }
                 let shadowed = env.get(var).cloned();
                 for i in from..=to {
+                    // Every pass counts, even one with nothing in it:
+                    // nested loops multiply, and their bounds do not.
+                    if spent(steps, out) {
+                        break;
+                    }
                     env.insert(var.clone(), Value::Num(i as f64));
-                    walk(body, facts, globals, env, out, depth + 1);
+                    walk(body, facts, globals, env, out, steps, depth + 1);
                 }
                 match shadowed {
                     Some(old) => env.insert(var.clone(), old),
@@ -378,8 +425,11 @@ fn walk(
                 };
                 let shadowed = env.get(var).cloned();
                 for value in values.into_iter().take(MAX_LOOP as usize) {
+                    if spent(steps, out) {
+                        break;
+                    }
                     env.insert(var.clone(), value);
-                    walk(body, facts, globals, env, out, depth + 1);
+                    walk(body, facts, globals, env, out, steps, depth + 1);
                 }
                 match shadowed {
                     Some(old) => {
@@ -394,21 +444,24 @@ fn walk(
                 cond,
                 then_body,
                 else_body,
-            } => match truth(cond, facts, globals, env) {
-                Some(true) => walk(then_body, facts, globals, env, out, depth + 1),
-                Some(false) => walk(else_body, facts, globals, env, out, depth + 1),
-                None => out.push(Directive::Ignored {
-                    kind: "lua",
-                    detail: format!(
-                        "if {} — a condition this reader cannot answer without running it",
-                        describe(cond)
-                    ),
-                }),
-            },
-            Stmt::Block(body) => walk(body, facts, globals, env, out, depth + 1),
+            } => {
+                let mut fuel = MAX_TRUTH_STEPS;
+                match truth(cond, facts, globals, env, &mut fuel) {
+                    Some(true) => walk(then_body, facts, globals, env, out, steps, depth + 1),
+                    Some(false) => walk(else_body, facts, globals, env, out, steps, depth + 1),
+                    None => out.push(Directive::Ignored {
+                        kind: "lua",
+                        detail: format!(
+                            "if {} — a condition this reader cannot answer without running it",
+                            describe(cond)
+                        ),
+                    }),
+                }
+            }
+            Stmt::Block(body) => walk(body, facts, globals, env, out, steps, depth + 1),
             Stmt::Skipped(what) => out.push(Directive::Ignored {
                 kind: "lua",
-                detail: format!("{what} block"),
+                detail: format!("{what}: not read"),
             }),
         }
     }
@@ -424,6 +477,7 @@ fn note_submap_bindings(
     body: &[Stmt],
     env: &Env,
     out: &mut Vec<Directive>,
+    steps: &mut usize,
     depth: u32,
 ) {
     if depth > MAX_DEPTH {
@@ -434,6 +488,9 @@ fn note_submap_bindings(
         return;
     }
     for stmt in body {
+        if spent(steps, out) {
+            return;
+        }
         match stmt {
             Stmt::Call { path, args }
                 if matches!(path.as_str(), "hl.bind" | "o.bind" | "o.bind_toggle") =>
@@ -450,7 +507,7 @@ fn note_submap_bindings(
                     ),
                 });
             }
-            Stmt::Block(nested) => note_submap_bindings(name, nested, env, out, depth + 1),
+            Stmt::Block(nested) => note_submap_bindings(name, nested, env, out, steps, depth + 1),
             Stmt::NumericFor { .. }
             | Stmt::GenericFor { .. }
             | Stmt::If { .. }
@@ -483,18 +540,26 @@ fn iterable(value: &Value) -> Option<Vec<Value>> {
 /// by Omarchy's selection overlay. The whole handler is validated
 /// before any directive is returned, so an unexpected side effect can
 /// never leave a partially interpreted modal keymap behind.
-fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
+fn layer_bindings(body: &[Stmt], env: &Env, steps: &mut usize) -> Result<Vec<Directive>, String> {
     fn walk_layer(
         body: &[Stmt],
         env: &mut Env,
         namespace: Option<&str>,
         out: &mut Vec<Directive>,
+        steps: &mut usize,
         depth: u32,
     ) -> Result<(), String> {
         if depth > MAX_DEPTH {
             return Err("handler nested too deeply".into());
         }
         for stmt in body {
+            // The read's own budget: loops nest here as they do there.
+            *steps = steps.saturating_add(1);
+            if *steps > MAX_STEPS || out.len() >= MAX_DIRECTIVES {
+                return Err(format!(
+                    "handler walks more than {MAX_STEPS} statements or binds more than {MAX_DIRECTIVES} keys"
+                ));
+            }
             match stmt {
                 Stmt::If {
                     cond,
@@ -503,7 +568,7 @@ fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
                 } => {
                     let discovered = namespace_from_condition(cond);
                     let namespace = discovered.as_deref().or(namespace);
-                    walk_layer(then_body, env, namespace, out, depth + 1)?;
+                    walk_layer(then_body, env, namespace, out, steps, depth + 1)?;
                     // An else branch may contain alternate bindings and
                     // is safe only when it has no executable content.
                     if !else_body.is_empty() {
@@ -519,7 +584,7 @@ fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
                     let shadowed = env.get(var).cloned();
                     for value in values {
                         env.insert(var.clone(), value);
-                        walk_layer(body, env, namespace, out, depth + 1)?;
+                        walk_layer(body, env, namespace, out, steps, depth + 1)?;
                     }
                     match shadowed {
                         Some(old) => {
@@ -543,7 +608,7 @@ fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
                 // bookkeeping. Calls other than table.insert would be
                 // arbitrary handler side effects and refuse the whole.
                 Stmt::Call { path, .. } => return Err(format!("unexpected call {path}")),
-                Stmt::Block(body) => walk_layer(body, env, namespace, out, depth + 1)?,
+                Stmt::Block(body) => walk_layer(body, env, namespace, out, steps, depth + 1)?,
                 Stmt::Skipped(kind) => return Err(format!("unsupported {kind} construct")),
             }
         }
@@ -552,7 +617,7 @@ fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
 
     let mut out = Vec::new();
     let mut env = env.clone();
-    walk_layer(body, &mut env, None, &mut out, 0)?;
+    walk_layer(body, &mut env, None, &mut out, steps, 0)?;
     Ok(out)
 }
 
@@ -630,7 +695,14 @@ fn collect_layer_value(
 /// the one that would need a shell, and it is refused by name so that
 /// the refusal is visible in the log rather than implied by falling
 /// through to the default.
-fn truth(cond: &Value, facts: &Facts, globals: &Globals, env: &Env) -> Option<bool> {
+///
+/// `fuel` meters the answer. A name bound to a name is followed, and
+/// must be — `local gate = omarchy_default_bindings` then `if gate` is
+/// a legitimate two-hop read — but `o = o or {}` binds a name to
+/// itself, and a cycle followed without a meter never returns. Out of
+/// fuel, a condition is simply unanswerable.
+fn truth(cond: &Value, facts: &Facts, globals: &Globals, env: &Env, fuel: &mut u32) -> Option<bool> {
+    *fuel = fuel.checked_sub(1)?;
     match cond {
         Value::Bool(b) => Some(*b),
         Value::Nil => Some(false),
@@ -639,7 +711,7 @@ fn truth(cond: &Value, facts: &Facts, globals: &Globals, env: &Env) -> Option<bo
             // Lua truthiness: anything but `nil` and `false` is true,
             // and an unset global is `nil`.
             let value = env.get(name).or_else(|| globals.get(name))?;
-            truth(value, facts, globals, env)
+            truth(value, facts, globals, env, fuel)
         }
         Value::Call { path, args } => match (path.as_str(), args.first()) {
             ("o.cmd_present", Some(Value::Str(cmd))) => Some(facts.cmd_present(cmd)),
@@ -1118,6 +1190,67 @@ fn monitor_from(fields: &[(Option<String>, Value)]) -> Monitor {
     }
 }
 
+// ---- budgets ----------------------------------------------------------
+
+/// Counts one step of a read's walk, and answers whether the read has
+/// spent its budget of steps or of directives — saying so once, the
+/// first time. `usize::MAX` marks a read already cut off, so every
+/// enclosing loop and block stops without another line.
+fn spent(steps: &mut usize, out: &mut Vec<Directive>) -> bool {
+    if *steps == usize::MAX {
+        return true;
+    }
+    *steps += 1;
+    let detail = if *steps > MAX_STEPS {
+        format!(
+            "more than {MAX_STEPS} statements walked in one file, counting every pass of a loop; the rest is not read"
+        )
+    } else if out.len() >= MAX_DIRECTIVES {
+        format!("more than {MAX_DIRECTIVES} directives from one file; the rest is not read")
+    } else {
+        return false;
+    };
+    *steps = usize::MAX;
+    out.push(Directive::Ignored { kind: "lua", detail });
+    true
+}
+
+/// A value about to be bound to `name`, or an opaque stand-in, said
+/// so, when it is too big to keep.
+fn bind(name: &str, value: Value, out: &mut Vec<Directive>) -> Value {
+    let mut weight = 0;
+    if fits(&value, 0, &mut weight) {
+        return value;
+    }
+    out.push(Directive::Ignored {
+        kind: "lua",
+        detail: format!("{name} = …: a value too large to follow"),
+    });
+    Value::Opaque("a value too large to follow".into())
+}
+
+/// Whether `value` is within [`MAX_VALUE_WEIGHT`] and
+/// [`MAX_VALUE_DEPTH`]. Stops at the first bound crossed, so checking a
+/// value costs no more than keeping one.
+fn fits(value: &Value, depth: u32, weight: &mut usize) -> bool {
+    *weight += match value {
+        Value::Str(text) | Value::Name(text) | Value::Opaque(text) => 1 + text.len() / 64,
+        _ => 1,
+    };
+    if *weight > MAX_VALUE_WEIGHT || depth > MAX_VALUE_DEPTH {
+        return false;
+    }
+    match value {
+        Value::Table(fields) => fields.iter().all(|(_, value)| fits(value, depth + 1, weight)),
+        Value::Call { args, .. } => args.iter().all(|value| fits(value, depth + 1, weight)),
+        Value::Binary { left, right, .. } => {
+            fits(left, depth + 1, weight) && fits(right, depth + 1, weight)
+        }
+        // A function's body is shared, not copied, by binding it.
+        _ => true,
+    }
+}
+
 // ---- evaluation -------------------------------------------------------
 
 /// Resolves names, concatenation and arithmetic against `env`. Pure,
@@ -1274,6 +1407,13 @@ struct Parser {
     chars: Vec<char>,
     at: usize,
     statements: usize,
+    /// Operators built by the statement being parsed. See
+    /// [`MAX_OPERATORS`].
+    operators: usize,
+    /// The bound, if any, one of the current statement's expressions
+    /// hit. Such a statement is refused whole: a condition, a chord or a
+    /// command with its tail cut off is not some other one.
+    trouble: Option<&'static str>,
 }
 
 impl Parser {
@@ -1282,7 +1422,28 @@ impl Parser {
             chars: source.chars().collect(),
             at: 0,
             statements: 0,
+            operators: 0,
+            trouble: None,
         }
+    }
+
+    /// The stand-in for an expression past [`MAX_DEPTH`]. Like
+    /// [`Parser::operator`], it keeps the first bound a statement hit:
+    /// what is left after one bound often trips the other.
+    fn too_deep(&mut self) -> Value {
+        self.trouble.get_or_insert("expression nested too deeply");
+        Value::Opaque("an expression nested too deeply".into())
+    }
+
+    /// One more operator for the current statement, built by `build`
+    /// unless the statement has already built its share.
+    fn operator(&mut self, build: impl FnOnce() -> Value) -> Value {
+        self.operators += 1;
+        if self.operators > MAX_OPERATORS {
+            self.trouble.get_or_insert("expression too long");
+            return Value::Opaque("an expression too long to read".into());
+        }
+        build()
     }
 
     fn peek(&self) -> Option<char> {
@@ -1384,15 +1545,19 @@ impl Parser {
     /// `until` or end of input. The terminator is left unconsumed for
     /// the caller.
     fn block(&mut self, depth: u32) -> Vec<Stmt> {
+        // Each statement gets its own operator budget and its own
+        // record of a bound hit. A function body sits inside an
+        // expression, so the enclosing statement's are put back after.
+        let enclosing = (self.operators, self.trouble.take());
         let mut body = Vec::new();
         loop {
             self.trivia();
             if self.eof() || self.statements >= MAX_STATEMENTS {
-                return body;
+                break;
             }
             let word = self.peek_word();
             match word.as_str() {
-                "end" | "else" | "elseif" | "until" => return body,
+                "end" | "else" | "elseif" | "until" => break,
                 "" => {
                     // Not a word: punctuation this parser has no
                     // statement for. Consume it so progress is
@@ -1403,10 +1568,16 @@ impl Parser {
                 _ => {}
             }
             self.statements += 1;
-            if let Some(stmt) = self.statement(&word, depth) {
+            self.operators = 0;
+            let stmt = self.statement(&word, depth);
+            if let Some(why) = self.trouble.take() {
+                body.push(Stmt::Skipped(why));
+            } else if let Some(stmt) = stmt {
                 body.push(stmt);
             }
         }
+        (self.operators, self.trouble) = enclosing;
+        body
     }
 
     fn statement(&mut self, word: &str, depth: u32) -> Option<Stmt> {
@@ -1593,11 +1764,12 @@ impl Parser {
         }
         if depth > MAX_DEPTH {
             self.skip_to_end();
-            return Value::Function(Vec::new());
+            self.too_deep();
+            return Value::Function(Default::default());
         }
         let body = self.block(depth + 1);
         self.take_word();
-        Value::Function(body)
+        Value::Function(body.into())
     }
 
     /// The tail of an `if`: `elseif …`, `else …`, or nothing — in every
@@ -1689,7 +1861,7 @@ impl Parser {
     /// writes, and left-associative like Lua's.
     fn expr(&mut self, depth: u32) -> Value {
         if depth > MAX_DEPTH {
-            return Value::Opaque("…".into());
+            return self.too_deep();
         }
         let mut left = self.primary(depth);
         loop {
@@ -1728,7 +1900,7 @@ impl Parser {
                 }
             };
             let right = self.primary(depth + 1);
-            left = fold(op, left, right);
+            left = self.operator(|| fold(op, left, right));
         }
     }
 
@@ -1748,8 +1920,14 @@ impl Parser {
                 }
                 inner
             }
+            // Unary operators recurse without passing through `expr`,
+            // so they check the depth themselves, after consuming the
+            // operator so that progress is still guaranteed.
             Some('-') => {
                 self.at += 1;
+                if depth > MAX_DEPTH {
+                    return self.too_deep();
+                }
                 match self.primary(depth + 1) {
                     Value::Num(n) => Value::Num(-n),
                     other => Value::Opaque(render(&other)),
@@ -1764,6 +1942,9 @@ impl Parser {
                     "nil" => return Value::Nil,
                     "function" => return self.function_body(depth),
                     "not" => {
+                        if depth > MAX_DEPTH {
+                            return self.too_deep();
+                        }
                         let _ = self.primary(depth + 1);
                         return Value::Opaque("not …".into());
                     }
@@ -1859,6 +2040,7 @@ impl Parser {
                     _ => {}
                 }
             }
+            self.too_deep();
             return Value::Table(fields);
         }
         loop {

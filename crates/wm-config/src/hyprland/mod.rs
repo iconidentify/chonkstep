@@ -74,7 +74,8 @@
 //! is a logged warning and a skipped line — never a panic, and never a
 //! refusal to start.** Everything here is total. There is no `unwrap`
 //! on parsed content, recursion is depth-bounded, loops are
-//! iteration-bounded, the file graph is cycle-checked and
+//! iteration-bounded, a Lua file's whole walk is step-bounded because
+//! loops multiply, the file graph is cycle-checked and
 //! budget-limited, and patterns are compiled with a size cap. The
 //! hostile-input tests exist to keep that true.
 //!

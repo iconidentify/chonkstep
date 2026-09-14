@@ -1914,6 +1914,108 @@ fn hostile_input_never_panics_and_always_yields_something() {
             }
         }
     }
+
+    // Shapes that recurse or multiply rather than nest: a name bound to
+    // itself, operator chains longer than a stack, values that grow each
+    // time they are rebound, and loops whose counts multiply. Each group
+    // of files is read in order through one `Globals`, the way
+    // `helpers.lua` and a user's file share them, and must end in a
+    // skip that names the bound it hit.
+    let facts = lua::Facts {
+        path: Vec::new(),
+        home: None,
+        state_home: None,
+    };
+    let nested_loops = |body: &str| {
+        format!(
+            "{}{body}{}",
+            "for i = 1, 64 do\n".repeat(5),
+            "end\n".repeat(5)
+        )
+    };
+    let bounded: Vec<(Vec<String>, &str)> = vec![
+        (
+            vec!["o = o or {}\n".into(), "if o then hl.env(\"A\", \"B\") end\n".into()],
+            "cannot answer",
+        ),
+        (vec!["a = b\nb = a\nif b then hl.env(\"A\", \"B\") end\n".into()], "cannot answer"),
+        (vec!["local x = x or false\nif x then hl.env(\"A\", \"B\") end\n".into()], "cannot answer"),
+        (
+            vec![format!("if {}true then hl.env(\"A\", \"B\") end", "not ".repeat(200_000))],
+            "nested too deeply",
+        ),
+        (
+            vec![format!("if {}1 then hl.env(\"A\", \"B\") end", "- ".repeat(200_000))],
+            "nested too deeply",
+        ),
+        (
+            vec![format!("local x = a{}\nif x then hl.env(\"A\", \"B\") end", " .. a".repeat(150_000))],
+            "too long",
+        ),
+        (
+            vec![format!(
+                "local x = {}a{}\nif x then hl.env(\"A\", \"B\") end",
+                "(".repeat(24),
+                format!("){}", " .. a".repeat(16)).repeat(24)
+            )],
+            "too long",
+        ),
+        (
+            vec![format!("local x = {{}}\n{}if x then hl.env(\"A\", \"B\") end", "x = { x }\n".repeat(19_000))],
+            "too large",
+        ),
+        (
+            vec![format!("local x = {{}}\n{}if x then hl.env(\"A\", \"B\") end", "x = { x, x }\n".repeat(64))],
+            "too large",
+        ),
+        (
+            vec![format!("local x = \"ab\"\n{}if x then hl.env(\"A\", \"B\") end", "x = x .. x\n".repeat(64))],
+            "too large",
+        ),
+        (vec![nested_loops("hl.env(\"A\", \"B\")\n")], "directives"),
+        (vec![nested_loops("")], "statements walked"),
+        (vec![nested_loops("local y = 1\n")], "statements walked"),
+    ];
+    for (sources, needle) in bounded {
+        let mut globals = lua::Globals::default();
+        let mut out = Vec::new();
+        for source in &sources {
+            out.clear();
+            lua::read(source, &facts, &mut globals, &mut out);
+        }
+        let shape = &sources.last().unwrap()[..sources.last().unwrap().len().min(60)];
+        assert!(
+            out.iter()
+                .any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains(needle))),
+            "{shape:?} must be skipped naming its bound ({needle:?}): {:?}",
+            &out[..out.len().min(4)]
+        );
+        assert!(
+            out.len() <= lua::MAX_DIRECTIVES + 1,
+            "{shape:?} produced {} directives",
+            out.len()
+        );
+        if needle == "cannot answer" {
+            assert!(
+                !out.iter().any(|d| matches!(d, Directive::Env { .. })),
+                "{shape:?} ran a block whose condition it could not answer"
+            );
+        }
+    }
+    // ...and every one of those bounds sits far above what a real
+    // Omarchy tree spends, so none of them costs a real binding.
+    let real = read(&machine());
+    assert!(
+        !real.skipped.iter().any(|skip| ["the rest is not read", "too large", "too long", "nested too deeply"]
+            .iter()
+            .any(|bound| skip.what.contains(bound))),
+        "the captured machine hit a reader bound: {:?}",
+        real.skipped
+    );
+    assert!(
+        real.bindings.len() + real.skipped.len() < lua::MAX_DIRECTIVES / 16,
+        "the directive bound is no longer far above a real tree's output"
+    );
 }
 
 /// The same, over bytes that are not text at all.
