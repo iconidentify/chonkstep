@@ -43,7 +43,9 @@
 //! `#[ignore]`d. `scripts/e2e.sh`, or
 //! `cargo test -p chonk-testkit --test hyprland_config -- --ignored`.
 
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -65,6 +67,9 @@ const KEY_R: u32 = 19;
 const KEY_LEFTMETA: u32 = 125;
 /// `KEY_LEFTSHIFT`.
 const KEY_LEFTSHIFT: u32 = 42;
+/// `KEY_L` — `super+l`, which Omarchy binds to its workspace-layout
+/// toggle and this desktop answers natively.
+const KEY_L: u32 = 38;
 /// `KEY_W` — the baked Omarchy keymap's close chord, `super+w`, which
 /// the broken-configuration test uses to show that a read yielding
 /// nothing leaves that keymap standing as the fallback.
@@ -112,6 +117,9 @@ require("hypr.input")
 require("hypr.bindings")
 require("hypr.looknfeel")
 require("hypr.autostart")
+
+-- Toggle config flags dynamically.
+require("default.hypr.toggles")
 
 -- Add any other personal Hyprland configuration below.
 o.bind("{close_chord}", "Close window", hl.dsp.window.close())
@@ -175,6 +183,32 @@ fn copy_tree(from: &Path, to: &Path) {
             std::fs::copy(entry.path(), &target).expect("copy fixture");
         }
     }
+}
+
+/// One request to the session's Hyprland IPC socket — `hyprctl`'s
+/// shape: connect, write, read to EOF.
+fn request(session: &Session, message: &str) -> String {
+    let path = PathBuf::from(std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"))
+        .join("hypr")
+        .join(session.hyprland_signature().expect("the session published its Hyprland signature"))
+        .join(".socket.sock");
+    let mut socket = UnixStream::connect(path).expect("hyprland ipc socket");
+    socket.set_read_timeout(Some(Duration::from_secs(5))).expect("read timeout");
+    socket.write_all(message.as_bytes()).expect("request");
+    let mut reply = String::new();
+    socket.read_to_string(&mut reply).expect("reply");
+    reply
+}
+
+/// Workspace `id`'s `tiledLayout`, as `hyprctl workspaces -j` reports
+/// it — the way Omarchy's bar asks which style a workspace is in.
+fn tiled_layout(session: &Session, id: i64) -> Option<String> {
+    let workspaces: Vec<serde_json::Value> = serde_json::from_str(&request(session, "j/workspaces")).ok()?;
+    workspaces
+        .iter()
+        .find(|workspace| workspace["id"].as_i64() == Some(id))?["tiledLayout"]
+        .as_str()
+        .map(String::from)
 }
 
 /// The path the session reads the user's `hyprland.lua` from — what an
@@ -292,6 +326,118 @@ fn the_desktops_own_hyprland_config_drives_the_session_and_follows_an_edit() {
     session
         .wait_for_window_gone(PROBE)
         .expect("super+shift+j, the chord the edit moved the close verb onto, should close the window");
+}
+
+/// The desktop this configuration describes is a tiled one. Omarchy's
+/// shipped `looknfeel.lua` sets `general.layout = "dwindle"`, and its
+/// own `SUPER+L` saves a per-workspace `hl.workspace_rule` under
+/// `~/.local/state/omarchy/workspace-layouts/` that `toggles.lua` reads
+/// back at login. A fresh session with `restore_session = false` — the
+/// default, and the session that used to come up with every window
+/// floating — must start in those styles, report them through
+/// Hyprland's IPC, tile a real pair of windows, and then keep a live
+/// `SUPER+L` through the re-read an unrelated edit causes while still
+/// following the toggle script when it saves a *changed* rule.
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn omarchys_default_and_saved_workspace_layouts_come_up_in_a_fresh_session() {
+    let (_omarchy_root, mut options) = scratch_machine("hyprland-workspace-layouts", FIRST_SIZE, "SUPER + SHIFT + K");
+    // The default, spelled out: nothing but the configuration is read.
+    options.config_extra.push_str("restore_session = false\n");
+    // The file `omarchy-hyprland-workspace-layout-toggle` writes, in
+    // the place it writes it.
+    let saved_layout = "omarchy/workspace-layouts/2.lua";
+    options.state_root_files.push((
+        saved_layout.into(),
+        b"hl.workspace_rule({ workspace = \"2\", layout = \"scrolling\" })\n".to_vec(),
+    ));
+    let mut session = Session::boot("hyprland-workspace-layouts", options).expect("session boots");
+
+    // ---- 1. The resolved styles, through Hyprland's own IPC ----------
+    assert_eq!(
+        tiled_layout(&session, 1).as_deref(),
+        Some("dwindle"),
+        "general.layout = \"dwindle\" is workspace 1's starting style"
+    );
+    assert_eq!(
+        tiled_layout(&session, 2).as_deref(),
+        Some("scrolling"),
+        "the saved workspace-layouts/2.lua is workspace 2's starting style"
+    );
+    assert_eq!(session.world().expect("world").spatial.mode, "Mosaic");
+
+    // ---- 2. Two real windows on workspace 1 tile side by side --------
+    //
+    // Under an app id the scratch configuration's own float rule does
+    // not match, so the only thing deciding where these windows go is
+    // the workspace's style.
+    let probe = profile_binary(PROBE).expect("the probe is built");
+    let program = probe.display().to_string();
+    session.launch(&program, &["LayoutA", "layout-probe"]).expect("first probe launches");
+    let a = session.wait_for_window("LayoutA").expect("first probe maps");
+    session.launch(&program, &["LayoutB", "layout-probe"]).expect("second probe launches");
+    let b = session.wait_for_window("LayoutB").expect("second probe maps");
+    let tiled = poll_until(Duration::from_secs(10), "both windows to settle into the layout", || {
+        let world = session.world().ok()?;
+        (!world.spatial.moving && world.spatial.managed == 2).then_some(world)
+    })
+    .expect("Mosaic manages both windows");
+    let (frame_a, frame_b) = (
+        tiled.frame_of(a.id).expect("A has a frame"),
+        tiled.frame_of(b.id).expect("B has a frame"),
+    );
+    assert!(frame_a.mapped && frame_b.mapped);
+    assert!(
+        frame_a.x + frame_a.w as i32 <= frame_b.x || frame_b.x + frame_b.w as i32 <= frame_a.x,
+        "two Mosaic windows sit side by side, not on top of each other: A={frame_a:?} B={frame_b:?}"
+    );
+
+    // ---- 3. A live SUPER+L survives the re-read of an unrelated edit -
+    session.door().chord(keys::LEFTMETA, KEY_L).expect("super+l");
+    poll_until(Duration::from_secs(5), "SUPER+L to switch workspace 1 to Flow", || {
+        (tiled_layout(&session, 1).as_deref() == Some("scrolling")).then_some(())
+    })
+    .expect("Omarchy's SUPER+L is the native toggle");
+
+    // The unrelated edit: the window rule's size, in the user's own
+    // file. The re-read has demonstrably landed once that rule sizes a
+    // new window — the same evidence the edit test above uses.
+    std::fs::write(user_config_path(&session), user_hyprland_lua(SECOND_SIZE, "SUPER + SHIFT + K"))
+        .expect("rewrite their config");
+    let log_path = session.dir.join("compositor.log");
+    poll_until(Duration::from_secs(15), "the session to notice the edited Hyprland config", || {
+        std::fs::read_to_string(&log_path).ok().filter(|log| log.contains("Hyprland configuration changed")).map(|_| ())
+    })
+    .expect("the watch should have noticed the edit");
+    session.launch(&program, &[]).expect("a probe under the float rule launches");
+    poll_until(Duration::from_secs(10), "the re-read window rule to size a new window", || {
+        let world = session.world().ok()?;
+        let window = world.window_matching(PROBE)?;
+        (window.w == SECOND_SIZE.0 && window.h == SECOND_SIZE.1).then_some(())
+    })
+    .expect("the re-read was applied");
+    assert_eq!(
+        tiled_layout(&session, 1).as_deref(),
+        Some("scrolling"),
+        "a re-read of an unrelated edit must not undo the live SUPER+L"
+    );
+    assert_eq!(tiled_layout(&session, 2).as_deref(), Some("scrolling"));
+
+    // ---- 4. Omarchy's toggle script saving a changed rule still lands
+    std::fs::write(
+        session.dir.join("state").join(saved_layout),
+        "hl.workspace_rule({ workspace = \"2\", layout = \"dwindle\" })\n",
+    )
+    .expect("rewrite the saved layout");
+    poll_until(Duration::from_secs(15), "the changed workspace rule to be applied", || {
+        (tiled_layout(&session, 2).as_deref() == Some("dwindle")).then_some(())
+    })
+    .expect("a rule whose value changed is applied by the re-read");
+    assert_eq!(
+        tiled_layout(&session, 1).as_deref(),
+        Some("scrolling"),
+        "the toggled workspace is still left alone"
+    );
 }
 
 /// Omarchy's stock `SUPER + Arrow` binding crosses the complete live

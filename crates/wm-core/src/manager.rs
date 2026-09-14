@@ -318,6 +318,11 @@ pub struct WindowManager<B: Backend> {
     current_workspace: usize,
     workspace_count: usize,
     layouts: Vec<crate::spatial::WorkspaceLayout>,
+    /// The style a workspace starts in when nothing chose one for it:
+    /// what every row grown on demand is seeded with, and what a
+    /// workspace never explicitly set follows when the default changes.
+    /// Installed by the shell from the desktop's configuration.
+    default_layout: crate::LayoutMode,
     layout_drop: Option<(ClientId, ClientId)>,
     layout_resize_snapshot: Option<crate::spatial::ResizeSnapshot>,
     layout_statistics: crate::LayoutStatistics,
@@ -414,6 +419,7 @@ impl<B: Backend> WindowManager<B> {
             current_workspace: 0,
             workspace_count: 1,
             layouts: vec![crate::spatial::WorkspaceLayout::default()],
+            default_layout: crate::LayoutMode::Freeform,
             layout_drop: None,
             layout_resize_snapshot: None,
             layout_statistics: crate::LayoutStatistics::default(),
@@ -1411,10 +1417,7 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         self.workspace_count = self.workspace_count.max(workspace + 1);
-        self.layouts.resize_with(
-            self.workspace_count,
-            crate::spatial::WorkspaceLayout::default,
-        );
+        self.grow_layouts();
         self.current_workspace = workspace;
         self.bump_protocol_state_revision();
         self.backend.publish_workspaces(self.workspace_count, self.current_workspace);

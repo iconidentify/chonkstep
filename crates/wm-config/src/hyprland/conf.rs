@@ -81,7 +81,12 @@ pub fn read(
             if block.is_empty() && name.eq_ignore_ascii_case("device") {
                 device = Some(DeviceBlock::default());
             } else if block.is_empty() {
-                if !name.eq_ignore_ascii_case("input") && !name.eq_ignore_ascii_case("cursor") {
+                if name.eq_ignore_ascii_case("general") {
+                    out.push(Directive::Ignored {
+                        kind: "block",
+                        detail: format!("{name} {{ … }}: only layout is read; the rest is Hyprland's look"),
+                    });
+                } else if !name.eq_ignore_ascii_case("input") && !name.eq_ignore_ascii_case("cursor") {
                     out.push(Directive::Ignored {
                         kind: "block",
                         detail: format!("{name} {{ … }}: a Hyprland subsystem this desktop has its own answer for"),
@@ -152,6 +157,14 @@ pub fn read(
                         kind: "input",
                         detail: truncate(line),
                     }),
+                }
+            } else if block.len() == 1 && block[0].eq_ignore_ascii_case("general") {
+                // The one `general` key that is not Hyprland's look:
+                // whether windows tile at all.
+                if let Some((name, value)) = line.split_once('=') {
+                    if name.trim().eq_ignore_ascii_case("layout") {
+                        out.push(Directive::DefaultLayout { layout: substitute(value.trim(), vars) });
+                    }
                 }
             }
             continue;
@@ -269,10 +282,9 @@ fn directive(keyword: &str, value: &str, out: &mut Vec<Directive>) {
             kind: "gesture",
             detail: truncate(value),
         }),
-        "workspace" => out.push(Directive::Ignored {
-            kind: "workspace-rule",
-            detail: truncate(value),
-        }),
+        "workspace" => workspace_rule(value, out),
+        // The colon spelling of `general { layout = … }`.
+        "general:layout" => out.push(Directive::DefaultLayout { layout: value.to_string() }),
         // Handled by `read`, which must retain scope between lines.
         "submap" => {}
         // The file graph, emitted in place so the loader splices the
@@ -289,6 +301,47 @@ fn directive(keyword: &str, value: &str, out: &mut Vec<Directive>) {
         _ => out.push(Directive::Ignored {
             kind: "keyword",
             detail: format!("{keyword} = {}", truncate(value)),
+        }),
+    }
+}
+
+/// `workspace = N, layout:dwindle, gapsin:0, …`: Hyprland's workspace
+/// rules. Only the layout of a numbered workspace is read. Every other
+/// rule earns its own line, and a selector that is not a number from 1
+/// to 99 is reported with the reason.
+fn workspace_rule(value: &str, out: &mut Vec<Directive>) {
+    let mut fields = value.split(',').map(str::trim);
+    let selector = fields.next().unwrap_or("");
+    let mut layout = None;
+    let mut reported = false;
+    for rule in fields.filter(|rule| !rule.is_empty()) {
+        match rule.split_once(':') {
+            Some((key, value)) if key.trim().eq_ignore_ascii_case("layout") => {
+                layout = Some(value.trim().to_string());
+            }
+            _ => {
+                reported = true;
+                out.push(Directive::Ignored {
+                    kind: "workspace-rule",
+                    detail: format!("workspace = {}, {}: only layout is read", truncate(selector), truncate(rule)),
+                });
+            }
+        }
+    }
+    let Some(layout) = layout else {
+        if !reported {
+            out.push(Directive::Ignored {
+                kind: "workspace-rule",
+                detail: format!("workspace = {}: names no layout", truncate(value)),
+            });
+        }
+        return;
+    };
+    match super::directive::workspace_number(selector) {
+        Ok(workspace) => out.push(Directive::WorkspaceLayout { workspace, layout }),
+        Err(why) => out.push(Directive::Ignored {
+            kind: "workspace-rule",
+            detail: format!("workspace = {}, layout:{}: {why}", truncate(selector), truncate(&layout)),
         }),
     }
 }

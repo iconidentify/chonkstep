@@ -766,6 +766,14 @@ pub struct Config {
     pub session_env: Vec<(String, String)>,
     pub input: InputConfig,
     pub monitor_rules: Vec<hyprland::directive::Monitor>,
+    /// The style every workspace starts in, from the live Hyprland
+    /// read's `general.layout` (`dwindle` is Mosaic, `scrolling` is
+    /// Flow). `None` — the built-in default — is Freeform.
+    pub default_layout: Option<wm_core::LayoutMode>,
+    /// Styles for particular workspaces, by 0-based index, from the
+    /// workspace rules in that same read. Ranked above
+    /// [`Self::default_layout`] for the workspaces they name.
+    pub workspace_layouts: BTreeMap<usize, wm_core::LayoutMode>,
     pub bindings: Vec<Binding>,
     pub layer_bindings: BTreeMap<String, Vec<Binding>>,
     /// Bindings on hardware switches, from the live Hyprland read.
@@ -871,6 +879,8 @@ impl Config {
             session_env: Vec::new(),
             input: InputConfig::default(),
             monitor_rules: Vec::new(),
+            default_layout: None,
+            workspace_layouts: BTreeMap::new(),
             bindings: Vec::new(),
             layer_bindings: BTreeMap::new(),
             switch_bindings: Vec::new(),
@@ -1570,6 +1580,8 @@ pub fn parse_with(
                 "autostart",
                 "input",
                 "monitor_rules",
+                "default_layout",
+                "workspace_layouts",
             ] {
                 config
                     .provenance
@@ -2159,6 +2171,8 @@ pub fn effective_config_report(config: &Config) -> String {
     line("omarchy_bar", format!("{:?}", config.omarchy_bar));
     line("input", format!("{:?}", config.input));
     line("monitor_rules", config.monitor_rules.len().to_string());
+    line("default_layout", format!("{:?}", config.default_layout));
+    line("workspace_layouts", config.workspace_layouts.len().to_string());
     line("keybindings", config.keybindings.len().to_string());
     line("commands", config.commands.len().to_string());
     line("autostart", config.autostart.len().to_string());

@@ -126,10 +126,7 @@ impl<B: Backend> WindowManager<B> {
             return false;
         }
         self.workspace_count = snapshot.spaces.len();
-        self.layouts.resize_with(
-            self.workspace_count,
-            crate::spatial::WorkspaceLayout::default,
-        );
+        self.grow_layouts();
         self.display_spaces = Some(DisplaySpaces {
             snapshot,
             reconciling: false,
@@ -479,10 +476,7 @@ impl<B: Backend> WindowManager<B> {
             output_display: key.into(),
         });
         self.workspace_count += 1;
-        self.layouts.resize_with(
-            self.workspace_count,
-            crate::spatial::WorkspaceLayout::default,
-        );
+        self.grow_layouts();
         Some(index)
     }
 
@@ -496,10 +490,7 @@ impl<B: Backend> WindowManager<B> {
         } else {
             let space = self.workspace_count;
             self.workspace_count += 1;
-            self.layouts.resize_with(
-                self.workspace_count,
-                crate::spatial::WorkspaceLayout::default,
-            );
+            self.grow_layouts();
             space
         };
         self.bump_protocol_state_revision();
@@ -1042,10 +1033,7 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         self.workspace_count = self.workspace_count.max(workspace + 1);
-        self.layouts.resize_with(
-            self.workspace_count,
-            crate::spatial::WorkspaceLayout::default,
-        );
+        self.grow_layouts();
         let state = self.display_spaces.as_mut().unwrap();
         let space = &state.snapshot.spaces[workspace];
         let Some(display) = state

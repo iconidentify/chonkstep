@@ -1075,6 +1075,42 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// else's configuration, which is most of them — see
     /// `wm_config::hyprland::wanted`.
     hyprland_config: Option<(wm_config::hyprland::Roots, wm_config::hyprland::Watch)>,
+    /// The per-workspace layout rules the last pass installed, so the
+    /// next pass applies only what changed — see
+    /// [`apply_workspace_layouts`].
+    applied_workspace_layouts: std::collections::BTreeMap<usize, wm_core::LayoutMode>,
+}
+
+/// Installs the workspace styles the configuration names:
+/// `default_layout` as the window manager's default, and each
+/// per-workspace rule through the same `set_workspace_layout` a toggle
+/// or an IPC request takes.
+///
+/// `applied` is the rule set from the last pass. The one-hertz watch
+/// over the Hyprland configuration fires on *any* file in the tree, so
+/// a re-read must not undo a live choice: only a rule whose value
+/// changed since the last pass is applied, and the default reaches
+/// only workspaces that never had a style chosen for them — `wm-core`
+/// keeps that distinction. A rule that disappeared leaves its
+/// workspace as it is; nothing in the file says what it should become,
+/// and the user's live desk is the better answer.
+///
+/// Precedence, highest first: a restored session's own modes (applied
+/// after this, in `tick`, when restore is on), then the per-workspace
+/// rule, then the default, then Freeform.
+fn apply_workspace_layouts<B: Backend>(
+    wm: &mut WindowManager<B>,
+    applied: &mut std::collections::BTreeMap<usize, wm_core::LayoutMode>,
+    default: Option<wm_core::LayoutMode>,
+    rules: &std::collections::BTreeMap<usize, wm_core::LayoutMode>,
+) {
+    wm.set_default_workspace_layout(default.unwrap_or_default());
+    for (&workspace, &mode) in rules {
+        if applied.get(&workspace) != Some(&mode) {
+            wm.set_workspace_layout(workspace, mode);
+        }
+    }
+    *applied = rules.clone();
 }
 
 /// The watch over the user's own Hyprland configuration, for a session
@@ -1277,6 +1313,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // else's configuration; on every other session this is
             // `None` and the poll in `tick` never touches the disk.
             hyprland_config: hyprland_watch(state),
+            applied_workspace_layouts: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1326,6 +1363,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // Omarchy's menu reaches the next window that maps without a
         // restart — see `wm_config::hyprland`.
         wm.set_float_policy(next.float_policy.clone());
+        // The workspace styles that same read names — Omarchy's
+        // `general.layout` and the per-workspace files its SUPER+L
+        // saves — through the one applier that knows what a re-read may
+        // and may not touch.
+        apply_workspace_layouts(wm, &mut self.applied_workspace_layouts, next.default_layout, &next.workspace_layouts);
         // The keyboard half of `input`. Staged on the backend and
         // installed on its next pass; a backend whose keymap is not
         // its own (the X11 session, where the server owns the layout)
@@ -3410,6 +3452,69 @@ mod adversarial_spaces_review {
         let records = layout_snapshot(&wm, &[]);
         assert_eq!(restored_geometry(wm.monitors_ref(), &records[0]), original,
             "fullscreen serialization must preserve the pre-maximize restore point");
+    }
+}
+
+#[cfg(test)]
+mod workspace_layouts {
+    use super::*;
+    use std::collections::BTreeMap;
+    use wm_core::fake_backend::{FakeBackend, FakeTheme};
+    use wm_core::LayoutMode;
+
+    /// A reload that touches an unrelated file re-applies the same
+    /// configuration. It must not revert a workspace the user switched
+    /// with SUPER+L, while a rule or default that did change still
+    /// lands where nobody chose otherwise.
+    #[test]
+    fn a_reread_never_undoes_a_live_toggle_and_still_applies_what_changed() {
+        let mut wm = WindowManager::new(FakeBackend::new(), Box::new(FakeTheme));
+        let mut applied = BTreeMap::new();
+        let rules = BTreeMap::from([(1, LayoutMode::Flow), (2, LayoutMode::Flow)]);
+        apply_workspace_layouts(&mut wm, &mut applied, Some(LayoutMode::Mosaic), &rules);
+        assert_eq!(wm.workspace_layout(0), LayoutMode::Mosaic, "general.layout = dwindle");
+        assert_eq!(wm.workspace_layout(1), LayoutMode::Flow, "the rule for workspace 2");
+        assert_eq!(wm.workspace_layout(2), LayoutMode::Flow, "the rule for workspace 3");
+
+        // SUPER+L twice on workspace 1: Mosaic, Flow, Mosaic — a chosen
+        // style that happens to equal the default. Once on workspace 2.
+        wm.toggle_workspace_layout();
+        wm.toggle_workspace_layout();
+        assert_eq!(wm.workspace_layout(0), LayoutMode::Mosaic);
+        wm.switch_workspace(1);
+        wm.toggle_workspace_layout();
+        assert_eq!(wm.workspace_layout(1), LayoutMode::Mosaic);
+
+        // An unrelated edit: the same configuration, read again.
+        apply_workspace_layouts(&mut wm, &mut applied, Some(LayoutMode::Mosaic), &rules);
+        assert_eq!(wm.workspace_layout(1), LayoutMode::Mosaic, "an unchanged rule is not re-applied over a toggle");
+        assert_eq!(wm.workspace_layout(0), LayoutMode::Mosaic);
+
+        // Omarchy's own toggle script saving workspace 3: that rule
+        // changed, so it lands; the untouched rule for workspace 2 still
+        // does not override the toggle.
+        let rules = BTreeMap::from([(1, LayoutMode::Flow), (2, LayoutMode::Mosaic)]);
+        apply_workspace_layouts(&mut wm, &mut applied, Some(LayoutMode::Mosaic), &rules);
+        assert_eq!(wm.workspace_layout(2), LayoutMode::Mosaic, "a changed rule is applied");
+        assert_eq!(wm.workspace_layout(1), LayoutMode::Mosaic, "an unchanged rule still leaves the toggle alone");
+
+        // A changed default reaches only workspaces nobody chose for.
+        wm.switch_workspace(4);
+        assert_eq!(wm.workspace_layout(4), LayoutMode::Mosaic, "a workspace first reached by a switch starts in the default");
+        apply_workspace_layouts(&mut wm, &mut applied, Some(LayoutMode::Flow), &rules);
+        assert_eq!(wm.workspace_layout(4), LayoutMode::Flow);
+        assert_eq!(wm.workspace_layout(3), LayoutMode::Flow);
+        assert_eq!(wm.workspace_layout(0), LayoutMode::Mosaic, "the toggled workspace keeps its style through a default change");
+        assert_eq!(wm.workspace_layout(1), LayoutMode::Mosaic);
+        assert_eq!(wm.workspace_layout(2), LayoutMode::Mosaic, "a ruled workspace keeps its rule through a default change");
+
+        // The configuration going away: Freeform is the default again,
+        // and a rule that vanished leaves its workspace as it is.
+        apply_workspace_layouts(&mut wm, &mut applied, None, &BTreeMap::new());
+        assert_eq!(wm.workspace_layout(3), LayoutMode::Freeform);
+        assert_eq!(wm.workspace_layout(2), LayoutMode::Mosaic);
+        assert_eq!(wm.workspace_layout(0), LayoutMode::Mosaic);
+        assert!(applied.is_empty());
     }
 }
 

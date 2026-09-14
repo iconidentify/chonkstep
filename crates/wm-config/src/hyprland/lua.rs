@@ -1120,6 +1120,9 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
         // different sentences to the person reading the log.
         "hl.layer_rule" => out.push(Directive::Ignored { kind: "layer-rule", detail: "layer-shell rules are Hyprland's; this compositor has its own".into() }),
         "hl.config" => emit_config(&arg(0), out),
+        // The per-workspace layout Omarchy's own toggle script saves
+        // under `~/.local/state/omarchy/workspace-layouts/`.
+        "hl.workspace_rule" => workspace_rule(&arg(0), out),
         "hl.gesture" => out.push(Directive::Ignored { kind: "gesture", detail: "touchpad gestures".into() }),
         // A rule for one input device, by the exact name written in it.
         "hl.device" => out.push(match &arg(0) {
@@ -1318,11 +1321,103 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
         }),
         None => {}
     }
+    // `general.layout` is the one key of Hyprland's look that is not a
+    // look: it decides whether windows tile at all, and this desktop
+    // has a style for each name it takes. The rest of `general` stays
+    // Hyprland's.
+    match root.iter().find(|(key, _)| key.as_deref() == Some("general")).map(|(_, value)| value) {
+        Some(Value::Table(fields)) => {
+            for (key, value) in fields {
+                if key.as_deref() != Some("layout") {
+                    continue;
+                }
+                out.push(match as_string(value) {
+                    Some(layout) => Directive::DefaultLayout { layout },
+                    None => Directive::Ignored {
+                        kind: "layout",
+                        detail: format!("general.layout = {}: computed at runtime, not carried over", describe(value)),
+                    },
+                });
+            }
+        }
+        Some(_) => out.push(Directive::Ignored {
+            kind: "config",
+            detail: "hl.config general table is unreadable".into(),
+        }),
+        None => {}
+    }
     if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor"))) {
         out.push(Directive::Ignored {
             kind: "config",
-            detail: "hl.config settings outside input and cursor are not carried over".into(),
+            detail: "hl.config settings outside input, cursor and general.layout are not carried over".into(),
         });
+    }
+}
+
+/// `hl.workspace_rule({ workspace = "N", layout = "…" })` — the one
+/// line `omarchy-hyprland-workspace-layout-toggle` writes per
+/// workspace. Only the layout of a numbered workspace is read. Every
+/// other key earns its own line, and a selector that is not a number
+/// from 1 to 99 — a special workspace above all — is named and left.
+fn workspace_rule(value: &Value, out: &mut Vec<Directive>) {
+    let Value::Table(fields) = value else {
+        out.push(Directive::Ignored {
+            kind: "workspace-rule",
+            detail: format!("hl.workspace_rule({}): not a table of workspace settings", describe(value)),
+        });
+        return;
+    };
+    for (key, value) in fields {
+        match key.as_deref() {
+            Some("workspace" | "layout") => {}
+            Some(key) => out.push(Directive::Ignored {
+                kind: "workspace-rule",
+                detail: format!("hl.workspace_rule(…) {key} = {}: only layout is read", describe(value)),
+            }),
+            None => out.push(Directive::Ignored {
+                kind: "workspace-rule",
+                detail: format!("hl.workspace_rule(…) with a positional value {}", describe(value)),
+            }),
+        }
+    }
+    let field = |name: &str| fields.iter().find(|(key, _)| key.as_deref() == Some(name)).map(|(_, value)| value);
+    let workspace = field("workspace");
+    let Some(selector) = workspace.and_then(as_string) else {
+        out.push(Directive::Ignored {
+            kind: "workspace-rule",
+            detail: format!(
+                "hl.workspace_rule(…): no readable workspace ({})",
+                workspace.map(describe).unwrap_or_else(|| "missing".into())
+            ),
+        });
+        return;
+    };
+    // Quoted and cut to a log line's length; the judgement below is
+    // made on the whole selector.
+    let shown = describe(&Value::Str(selector.clone()));
+    let Some(layout) = field("layout") else {
+        out.push(Directive::Ignored {
+            kind: "workspace-rule",
+            detail: format!("hl.workspace_rule(workspace = {shown}): names no layout"),
+        });
+        return;
+    };
+    let Some(layout) = as_string(layout) else {
+        out.push(Directive::Ignored {
+            kind: "workspace-rule",
+            detail: format!(
+                "hl.workspace_rule(workspace = {shown}): layout = {} is computed at runtime",
+                describe(layout)
+            ),
+        });
+        return;
+    };
+    match super::directive::workspace_number(&selector) {
+        Ok(workspace) => out.push(Directive::WorkspaceLayout { workspace, layout }),
+        Err(why) => out.push(Directive::Ignored {
+            kind: "workspace-rule",
+            detail: format!("hl.workspace_rule(workspace = {shown}): {why}"),
+        }),
     }
 }
 

@@ -1542,6 +1542,148 @@ fn lua_monitor_transform_lowers_to_the_same_extra_shape_as_conf() {
     }
 }
 
+// ---- workspace layouts ------------------------------------------------
+
+/// The Lua and conf spellings of the default layout and of a workspace
+/// rule lower onto the same two directives, still in Hyprland's words.
+#[test]
+fn the_layout_name_lowers_to_the_same_directives_from_both_syntaxes() {
+    let conf = |source: &str| {
+        let mut out = Vec::new();
+        conf::read(source, &mut Default::default(), &mut out);
+        out
+    };
+    let default_layout = Directive::DefaultLayout { layout: "dwindle".into() };
+    assert!(lua_out(&["hl.config({ general = { gaps_in = 5, layout = \"dwindle\" } })\n"]).contains(&default_layout));
+    assert!(conf("general {\n  gaps_in = 5\n  layout = dwindle\n}\n").contains(&default_layout));
+    assert!(conf("general:layout = dwindle\n").contains(&default_layout));
+    let rule = Directive::WorkspaceLayout { workspace: 2, layout: "scrolling".into() };
+    assert!(lua_out(&["hl.workspace_rule({ workspace = \"2\", layout = \"scrolling\" })\n"]).contains(&rule));
+    assert!(lua_out(&["hl.workspace_rule({ workspace = 2, layout = \"scrolling\" })\n"]).contains(&rule));
+    assert!(conf("workspace = 2, layout:scrolling\n").contains(&rule));
+}
+
+/// Omarchy's shipped `looknfeel` sets `general.layout = "dwindle"` in
+/// both syntaxes, and that is the one layout setting that is not a
+/// look: it is why an Omarchy desktop tiles. Both captured machines
+/// read it as Mosaic, and it reaches the config.
+#[test]
+fn omarchys_default_layout_reads_as_mosaic_from_both_machines() {
+    for roots in [machine(), conf_machine()] {
+        let reading = read(&roots);
+        assert_eq!(reading.default_layout, Some(wm_core::LayoutMode::Mosaic), "{:?}", reading.skipped);
+        assert!(reading.workspace_layouts.is_empty(), "the captured machine saved no workspace layouts");
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&roots))).unwrap();
+        assert_eq!(config.default_layout, Some(wm_core::LayoutMode::Mosaic));
+        assert_eq!(config.provenance.get("default_layout").map(String::as_str), Some("live Hyprland config"));
+    }
+    let config = crate::parse_with("desktop = \"omarchy\"", &|| None).unwrap();
+    assert_eq!(config.default_layout, None, "nothing to read leaves the built-in Freeform default");
+}
+
+/// The files Omarchy's own `omarchy-hyprland-workspace-layout-toggle`
+/// saves — one `hl.workspace_rule` per workspace under
+/// `~/.local/state/omarchy/workspace-layouts/` — are reached through
+/// `toggles.lua`'s `require_all` and read as that workspace's style.
+/// Every key but the two that matter, every selector that is not a
+/// numbered workspace, and every layout this desktop has no style for
+/// is reported on its own line; no call vanishes silently.
+#[test]
+fn saved_workspace_layouts_are_read_through_omarchys_own_include_chain() {
+    let home = scratch("workspace-layouts");
+    let layouts = home.join(".local/state/omarchy/workspace-layouts");
+    write(&layouts.join("2.lua"), "hl.workspace_rule({ workspace = \"2\", layout = \"scrolling\" })\n");
+    write(&layouts.join("3.lua"), "hl.workspace_rule({ workspace = \"3\", layout = \"dwindle\", gapsin = 0, monitor = \"DP-1\" })\n");
+    write(&layouts.join("bare.lua"), "hl.workspace_rule({ workspace = \"5\" })\n");
+    write(&layouts.join("far.lua"), "hl.workspace_rule({ workspace = \"150\", layout = \"scrolling\" })\n");
+    write(&layouts.join("magic.lua"), "hl.workspace_rule({ workspace = \"special:magic\", layout = \"scrolling\" })\n");
+    write(&layouts.join("master.lua"), "hl.workspace_rule({ workspace = \"4\", layout = \"master\" })\n");
+    write(&layouts.join("nil.lua"), "hl.workspace_rule(nil)\n");
+    let mut roots = machine();
+    // The scratch state root stands in front of the captured one, so
+    // `omarchy.workspace-layouts` resolves to the files above.
+    roots.module_path.insert(0, home.join(".local/state"));
+    let reading = read(&roots);
+
+    assert_eq!(
+        reading.workspace_layouts,
+        BTreeMap::from([(1, wm_core::LayoutMode::Flow), (2, wm_core::LayoutMode::Mosaic)]),
+        "workspace N is index N-1: {:?}",
+        reading.skipped
+    );
+    assert_eq!(reading.default_layout, Some(wm_core::LayoutMode::Mosaic));
+    let lines = |needle: &str| reading.skipped.iter().filter(|skip| skip.what.contains(needle)).count();
+    assert_eq!(lines("hl.workspace_rule(…) gapsin = 0"), 1, "one line per extra key: {:?}", reading.skipped);
+    assert_eq!(lines("hl.workspace_rule(…) monitor = \"DP-1\""), 1, "{:?}", reading.skipped);
+    assert_eq!(lines("hl.workspace_rule(workspace = \"special:magic\"): a special workspace"), 1, "{:?}", reading.skipped);
+    assert_eq!(lines("hl.workspace_rule(workspace = \"150\"): outside 1 to 99"), 1, "{:?}", reading.skipped);
+    assert_eq!(lines("hl.workspace_rule(workspace = \"5\"): names no layout"), 1, "{:?}", reading.skipped);
+    assert_eq!(lines("hl.workspace_rule(nil)"), 1, "{:?}", reading.skipped);
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what == "workspace 4, layout:master" && skip.why.contains("not a style")),
+        "{:?}",
+        reading.skipped
+    );
+    assert_eq!(lines("\"2\""), 0, "the rule that was read earns no skip line: {:?}", reading.skipped);
+    assert_eq!(lines("hl.workspace_rule"), 6, "every call this reader declined is on its own line: {:?}", reading.skipped);
+
+    let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&roots))).unwrap();
+    assert_eq!(config.workspace_layouts, reading.workspace_layouts);
+}
+
+/// The classic `workspace = N, rules…` line: the layout of a numbered
+/// workspace is read, every other rule is named, and every selector
+/// that is not a number from 1 to 99 says what it is instead.
+#[test]
+fn conf_workspace_rules_read_the_layout_and_report_the_rest_by_name() {
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "workspace = 2, layout:scrolling, gapsin:0\n",
+            "workspace = special:magic, layout:dwindle\n",
+            "workspace = 1, monitor:DP-1\n",
+            "workspace = name:mail, layout:dwindle\n",
+            "workspace = r[1-5], layout:dwindle\n",
+            "workspace = 0, layout:dwindle\n",
+            "general {\n  layout = master\n}\n",
+        ),
+        &mut Default::default(),
+        &mut out,
+    );
+    assert_eq!(
+        out.iter().filter(|d| matches!(d, Directive::WorkspaceLayout { .. })).count(),
+        1,
+        "{out:?}"
+    );
+    assert!(out.contains(&Directive::WorkspaceLayout { workspace: 2, layout: "scrolling".into() }));
+    let ignored: Vec<&str> = out
+        .iter()
+        .filter_map(|d| match d {
+            Directive::Ignored { kind: "workspace-rule", detail } => Some(detail.as_str()),
+            _ => None,
+        })
+        .collect();
+    for needle in [
+        "workspace = 2, gapsin:0: only layout is read",
+        "special:magic, layout:dwindle: a special workspace",
+        "workspace = 1, monitor:DP-1: only layout is read",
+        "name:mail, layout:dwindle: a named workspace",
+        "r[1-5], layout:dwindle: a workspace selector",
+        "workspace = 0, layout:dwindle: outside 1 to 99",
+    ] {
+        assert!(ignored.iter().any(|d| d.contains(needle)), "{needle}: {ignored:?}");
+    }
+    // A layout name this desktop has no style for is judged once, in
+    // the lowering, with a reason — and changes nothing.
+    let reading = lower(out, LoadReport { files: Vec::new(), skipped: Vec::new() });
+    assert_eq!(reading.default_layout, None);
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what == "general.layout = master" && skip.why.contains("not a style")),
+        "{:?}",
+        reading.skipped
+    );
+}
+
 // ---- the classic conf syntax ------------------------------------------
 
 /// The same machine's Omarchy 3 configuration, read through the other

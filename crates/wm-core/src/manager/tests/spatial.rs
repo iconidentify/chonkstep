@@ -781,3 +781,45 @@ fn spatial_keyboard_moves_to_an_empty_neighbor_output_and_focus_returns_spatiall
     assert!(!wm.move_layout_window(ids[0], FocusDirection::Up));
     assert_eq!(wm.client_output_index(ids[0]), 0);
 }
+
+/// A configured default is what every workspace starts in — including
+/// one first reached by a switch — and an explicit choice still wins
+/// over it, both at the time it is made and when the default moves.
+#[test]
+fn spatial_default_layout_seeds_new_workspaces_and_explicit_choices_survive_it() {
+    let (mut wm, ids) = spatial_desktop(2);
+    assert_eq!(wm.default_workspace_layout(), crate::LayoutMode::Freeform);
+    wm.set_default_workspace_layout(crate::LayoutMode::Mosaic);
+    assert_eq!(wm.default_workspace_layout(), crate::LayoutMode::Mosaic);
+    // The workspace that already existed had no chosen style, so it
+    // follows — and its windows tile rather than stay where they were.
+    assert_eq!(wm.workspace_layout(0), crate::LayoutMode::Mosaic);
+    assert!(ids.iter().all(|&id| wm.is_layout_managed(id)));
+
+    // A workspace created by switching to it starts in the default.
+    wm.switch_workspace(5);
+    assert_eq!(wm.workspace_count(), 6);
+    assert_eq!(wm.workspace_layout(5), crate::LayoutMode::Mosaic);
+    assert_eq!(wm.workspace_layout(3), crate::LayoutMode::Mosaic);
+
+    // An explicit choice overrides the default on that workspace only.
+    wm.set_workspace_layout(5, crate::LayoutMode::Flow);
+    assert_eq!(wm.workspace_layout(5), crate::LayoutMode::Flow);
+    assert_eq!(wm.workspace_layout(3), crate::LayoutMode::Mosaic);
+
+    // Choosing the style the default already gives still counts as a
+    // choice: a later default change must not take it away.
+    wm.set_workspace_layout(3, crate::LayoutMode::Mosaic);
+    wm.switch_workspace(0);
+    wm.toggle_workspace_layout();
+    assert_eq!(wm.workspace_layout(0), crate::LayoutMode::Flow);
+
+    wm.set_default_workspace_layout(crate::LayoutMode::Freeform);
+    assert_eq!(wm.workspace_layout(0), crate::LayoutMode::Flow, "a toggled workspace keeps its style");
+    assert_eq!(wm.workspace_layout(3), crate::LayoutMode::Mosaic, "an explicitly chosen style survives a default change");
+    assert_eq!(wm.workspace_layout(5), crate::LayoutMode::Flow);
+    assert_eq!(wm.workspace_layout(1), crate::LayoutMode::Freeform, "a workspace nobody chose for follows the default");
+    assert_eq!(wm.workspace_layout(4), crate::LayoutMode::Freeform);
+    wm.switch_workspace(7);
+    assert_eq!(wm.workspace_layout(7), crate::LayoutMode::Freeform);
+}

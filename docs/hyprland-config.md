@@ -198,6 +198,61 @@ number was a transcription of one of Omarchy's lines, and it got every
 thirty-eight of them right. The hardcoded rule stays behind this one as
 the answer for a machine with nothing to read.
 
+### Workspace layout
+
+The one layout setting that is not a look. `general.layout` decides
+whether windows tile at all, and chonkstep already answers to
+Hyprland's names for the two styles it has — `dwindle` is **Mosaic**,
+`scrolling` is **Flow** — so the name is read and nothing about
+Hyprland's drawing comes with it.
+
+```lua
+hl.config({ general = { layout = "dwindle" } })          -- Omarchy's looknfeel.lua
+hl.workspace_rule({ workspace = "2", layout = "scrolling" })
+```
+
+```ini
+general {
+    layout = dwindle
+}
+workspace = 2, layout:scrolling
+```
+
+- **`general.layout`** is the style every workspace *starts* in —
+  including one first reached with `SUPER+7`. Omarchy ships `dwindle`,
+  which is why an Omarchy desktop tiles from the first login rather
+  than after a `SUPER+L` on every workspace.
+- **A workspace rule's `layout`** is that one workspace's starting
+  style, ranked above the default. Omarchy's own
+  `omarchy-hyprland-workspace-layout-toggle` saves one of these per
+  workspace under `~/.local/state/omarchy/workspace-layouts/`, which
+  its `toggles.lua` reads back at login, and so does this. Workspace
+  `N` is chonkstep's index `N−1`, exactly as the IPC path resolves
+  `hyprctl eval 'hl.workspace_rule(…)'`. Only numbered workspaces from
+  1 to 99 are read: a `special:` workspace, a `name:`, a range and
+  every other key in the rule (`gapsin`, `monitor`, …) each earn their
+  own logged line.
+- **An unknown layout name** (`master`, `hy3`) is logged with its
+  name and changes nothing; the workspace keeps the style it would
+  have had.
+
+Precedence, highest first: a restored session's own workspace modes
+(`restore_session = true`, so an existing opt-in sees no change), then
+the workspace rule, then `general.layout`, then Freeform.
+
+**A live re-read never undoes a choice you made.** The watch fires on
+any file in the tree, so it applies only what changed: a rule whose
+value differs from the last read, and a changed default only on
+workspaces that never had a style chosen for them — by `SUPER+L`, by
+IPC, by a restored session or by a rule. A workspace you switched to
+Flow stays in Flow through an unrelated edit, while Omarchy's toggle
+script saving a *different* layout for a workspace still lands.
+
+A native `SUPER+L` changes the live workspace and is not written back
+to Omarchy's `workspace-layouts/` files; chonkstep's own session
+store records the modes, and reads them back when `restore_session`
+is on.
+
 ### `exec-once` → autostart
 
 `exec-once` lines, and the body of Lua's
@@ -257,7 +312,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Not read | Why |
 |---|---|
 | Hyprland requests chonkstep does not serve — `hyprctl`, and `omarchy-hyprland-*` scripts outside [the list below](#omarchys-hyprland-scripts) | Chonkstep answers Hyprland's IPC, but only with the requests it can apply, and `hyprctl` exits zero on a refusal, so a binding whose request is refused would be a key that silently does nothing. A script therefore runs only when every request it sends is proven served. The same rule filters chonkstep's Omarchy menu rows and `exec-once` lines. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
-| Gaps, borders, rounding, blur, shadows, animations, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. |
+| Gaps, borders, rounding, blur, shadows, animations (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. `general.layout` is the exception, [read above](#workspace-layout); the per-layout tables (`dwindle { … }`, `master { … }`, `scrolling { … }`) are not. |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
 | Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use `focus_follows_mouse` and native [`[input.gestures]`](gestures.md). Arbitrary Hyprland gesture bindings remain declined. Device properties listed below are applied; remaining declined values are logged. |
 | Unsupported window-rule properties | `opacity`, `no_blur`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
@@ -265,7 +320,8 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
 | Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
-| `submap`, workspace rules, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| `submap`, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| Workspace rules other than `layout`, and rules for `special:`, `name:` and range selectors | Only [the layout of a numbered workspace](#workspace-layout) is read. Every other rule and every other selector is logged by name. |
 | Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (such as `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
 | Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |

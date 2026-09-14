@@ -148,7 +148,13 @@ Three kinds of Omarchy binding get three different answers:
    imitation of it.
 3. **Workspace styles are native.** Super+T floats/rejoins a window,
    Super+L toggles Mosaic/Flow, and Super+Shift+L returns to Freeform.
-   Tree-only messages are quiet no-ops; grouping remains unsupported.
+   The style a workspace *starts* in comes from your configuration:
+   Omarchy's `general.layout = "dwindle"` makes every workspace
+   Mosaic from the first login, and the per-workspace files Omarchy's
+   own Super+L saves under `~/.local/state/omarchy/workspace-layouts/`
+   are honoured too — see
+   [hyprland-config.md](hyprland-config.md#workspace-layout). Tree-only
+   messages are quiet no-ops; grouping remains unsupported.
 
 ### Three chords we do differently
 

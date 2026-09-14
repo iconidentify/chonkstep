@@ -62,6 +62,11 @@ pub struct WindowPlacement {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorkspaceLayout {
     pub mode: LayoutMode,
+    /// Whether `mode` was chosen for this workspace — a toggle, an IPC
+    /// request, a restored session or a per-workspace rule — rather
+    /// than inherited from the manager's default. A changed default
+    /// leaves an explicit workspace alone.
+    pub explicit: bool,
     /// Includes floating and minimized clients so returning is reversible.
     pub order: Vec<ClientId>,
     pub viewports: std::collections::HashMap<String, i32>,

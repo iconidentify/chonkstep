@@ -40,18 +40,65 @@ impl<B: Backend> WindowManager<B> {
             .map_or(&[], |l| l.order.as_slice())
     }
 
+    /// The style a workspace starts in when nothing chose one for it.
+    pub fn default_workspace_layout(&self) -> LayoutMode {
+        self.default_layout
+    }
+
+    /// Changes the style new workspaces start in, and moves every
+    /// existing workspace that never had a style chosen for it — by a
+    /// toggle, an IPC request, a restored session or a per-workspace
+    /// rule — onto the new default. A workspace whose style was chosen
+    /// keeps it, so a configuration re-read can never undo a live
+    /// choice.
+    pub fn set_default_workspace_layout(&mut self, mode: LayoutMode) {
+        self.default_layout = mode;
+        self.grow_layouts();
+        for workspace in 0..self.workspace_count.min(self.layouts.len()) {
+            if !self.layouts[workspace].explicit && self.layouts[workspace].mode != mode {
+                self.apply_workspace_layout(workspace, mode, false);
+            }
+        }
+    }
+
+    /// A row for a workspace nothing has configured yet.
+    fn new_workspace_layout(&self) -> WorkspaceLayout {
+        WorkspaceLayout { mode: self.default_layout, ..Default::default() }
+    }
+
+    /// Grows the layout row to `workspace_count`, seeding every new
+    /// workspace with the default style. The one place the row grows,
+    /// so a workspace first reached by a switch, a move, a created
+    /// Space or a restored one all start the same way.
+    pub(super) fn grow_layouts(&mut self) {
+        let seed = self.new_workspace_layout();
+        self.layouts.resize_with(self.workspace_count, || seed.clone());
+    }
+
+    /// Chooses a workspace's style. The choice is remembered as the
+    /// workspace's own, so a later change of the default leaves it
+    /// alone — see [`Self::set_default_workspace_layout`].
     pub fn set_workspace_layout(&mut self, workspace: usize, mode: LayoutMode) {
-        if workspace >= MAX_WORKSPACES
-            || (workspace < self.workspace_count && self.workspace_layout(workspace) == mode)
-        {
+        self.apply_workspace_layout(workspace, mode, true);
+    }
+
+    fn apply_workspace_layout(&mut self, workspace: usize, mode: LayoutMode, explicit: bool) {
+        if workspace >= MAX_WORKSPACES {
+            return;
+        }
+        if workspace < self.workspace_count && self.workspace_layout(workspace) == mode {
+            if explicit {
+                self.grow_layouts();
+                self.layouts[workspace].explicit = true;
+            }
             return;
         }
         self.end_active_drag();
         if !self.ensure_display_space_slots(workspace + 1) { return; }
         self.workspace_count = self.workspace_count.max(workspace + 1);
-        self.layouts
-            .resize_with(self.workspace_count, WorkspaceLayout::default);
+        self.grow_layouts();
         self.layouts[workspace].mode = mode;
+        self.layouts[workspace].explicit |= explicit;
         if mode == LayoutMode::Freeform {
             let order = self.layouts[workspace].order.clone();
             for id in order {
@@ -183,8 +230,7 @@ impl<B: Backend> WindowManager<B> {
         c.placement = placement;
         c.layout_restore_order = Some(index);
         let workspace = c.workspace;
-        self.layouts
-            .resize_with(self.workspace_count, WorkspaceLayout::default);
+        self.grow_layouts();
         let order = &mut self.layouts[workspace].order;
         order.retain(|&other| other != id);
         order.push(id);
@@ -195,8 +241,7 @@ impl<B: Backend> WindowManager<B> {
 
     pub(super) fn register_layout_client(&mut self, id: ClientId) {
         let workspace = self.clients[id].workspace;
-        self.layouts
-            .resize_with(self.workspace_count, WorkspaceLayout::default);
+        self.grow_layouts();
         let order = &mut self.layouts[workspace].order;
         if order.contains(&id) {
             return;
