@@ -1435,3 +1435,65 @@ fn plain_devices_carries_the_active_keymap_line_scripts_grep_for() {
     assert!(!plain.trim_start().starts_with('{'), "plain devices is not JSON: {plain}");
     assert_eq!(ask_json("j/devices", &desk)["keyboards"][0]["active_keymap"], "German");
 }
+
+/// Omarchy's scaling script sends output, mode, position and scale
+/// together. Every key is read or the request is refused by name before
+/// anything changes, and a mode is checked against the output's own list.
+#[test]
+fn hl_monitor_reads_every_key_or_refuses_the_request_by_name() {
+    let desk = desktop();
+    let eval = |source: &str| dispatch::parse_eval(source, &desk);
+    assert_eq!(
+        eval(r#"hl.monitor({ output = "eDP-1", mode = "2560x1600@59.97", position = "auto", scale = 1.6 })"#),
+        Outcome::Run(Action::ConfigureMonitor {
+            output: "eDP-1".into(),
+            scale_120: Some(192),
+            mode: Some("2560x1600@59.97".into()),
+            position: Some("auto".into()),
+        })
+    );
+    assert_eq!(
+        eval(r#"hl.monitor({ output = "eDP-1", scale = 1.5 })"#),
+        Outcome::Run(Action::SetMonitorScale { output: "eDP-1".into(), scale_120: 180 })
+    );
+    assert_eq!(
+        eval(r#"hl.monitor({ output = "eDP-1", position = "2560x0" })"#),
+        Outcome::Run(Action::ConfigureMonitor {
+            output: "eDP-1".into(),
+            scale_120: None,
+            mode: None,
+            position: Some("2560x0".into()),
+        })
+    );
+    for (source, named) in [
+        (r#"hl.monitor({ output = "eDP-1", disabled = true, scale = 1.5 })"#, "disabled"),
+        (r#"hl.monitor({ output = "eDP-1", mirror = "DP-1" })"#, "mirror"),
+        (r#"hl.monitor({ output = "eDP-1", mode = "1920x1080@60", scale = 1.5 })"#, "1920x1080@60"),
+        (r#"hl.monitor({ output = "eDP-1", mode = "2560x1600@90" })"#, "2560x1600@90"),
+        (r#"hl.monitor({ output = "eDP-1", position = "left" })"#, "left"),
+        (r#"hl.monitor({ output = "eDP-1" })"#, "needs a mode"),
+    ] {
+        assert!(matches!(eval(source), Outcome::Unsupported(why) if why.contains(named)), "{source}: {:?}", eval(source));
+    }
+}
+
+/// A snapshot that lists no modes for an output (the nested backend has no
+/// connector to enumerate) cannot refuse a well-formed mode at parse: the
+/// compositor resolves it against the live output before answering. A
+/// malformed mode is still refused here.
+#[test]
+fn hl_monitor_defers_the_mode_check_when_the_snapshot_lists_no_modes() {
+    let mut desk = desktop();
+    desk.monitors[0].modes.clear();
+    let eval = |source: &str| dispatch::parse_eval(source, &desk);
+    assert_eq!(
+        eval(r#"hl.monitor({ output = "eDP-1", mode = "1280x800@60.00", position = "auto", scale = 1.25 })"#),
+        Outcome::Run(Action::ConfigureMonitor {
+            output: "eDP-1".into(),
+            scale_120: Some(150),
+            mode: Some("1280x800@60.00".into()),
+            position: Some("auto".into()),
+        })
+    );
+    assert!(matches!(eval(r#"hl.monitor({ output = "eDP-1", mode = "wide" })"#), Outcome::Unsupported(why) if why.contains("wide")));
+}

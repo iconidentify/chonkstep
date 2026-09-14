@@ -140,7 +140,13 @@ actions. Supported families include:
 - `exec -- <argv...>` as direct argv and Lua `exec_cmd` as shell
   source, including `[[...]]` and `[=[...]=]` strings;
 - `eval hl.dispatch(hl.dsp....)`;
-- `eval hl.monitor({ output=..., scale=... })` for a live output;
+- `eval hl.monitor({ output=..., mode=..., position=..., scale=... })` for a live
+  output. `mode` is `preferred`, `highrr`, `highres` or an advertised
+  `WxH@RATE`, and `position` is `auto` or `XxY`, each meaning what it means in a
+  monitor rule. Any other key, `disabled` and `mirror` included, refuses the
+  whole request, and a mode the output does not advertise is refused before
+  anything changes. The mode is set first; if the connector refuses it, the
+  reply is a refusal and the position and scale are left as they were;
 - `dispatch dpms on|off|toggle [OUTPUT]` for temporary connector power;
 - `switchxkblayout DEVICE next|prev|INDEX`, which changes the live XKB
   group and emits `activelayout` with its human-readable name;

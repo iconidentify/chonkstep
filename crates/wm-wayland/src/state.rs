@@ -2069,7 +2069,7 @@ pub(crate) fn refresh_matches(advertised: i32, requested: i32) -> bool {
     requested == 0 || advertised.abs_diff(requested) <= MODE_REFRESH_TOLERANCE_MHZ as u32
 }
 
-fn resolve_monitor_mode(output: &Output, modes: &[Mode], request: &str) -> Option<usize> {
+pub(crate) fn resolve_monitor_mode(output: &Output, modes: &[Mode], request: &str) -> Option<usize> {
     if modes.is_empty() {
         return None;
     }
@@ -2296,6 +2296,11 @@ pub(crate) fn apply_connector_hotplug(
         backend.layer_layout_dirty = true;
         backend.idle_policy_dirty = true;
     }
+    // The IPC mirror of each output's identity and mode list is indexed
+    // like `monitors`; left alone it would describe the pre-hotplug set,
+    // so `monitors -j` would list another output's modes and `hl.monitor`
+    // would check a request against them.
+    comp.sync_monitor_outputs();
     if comp.wm.spaces_mode() && comp.wm.interaction_config().separate_spaces {
         comp.wm.reconcile_display_spaces();
     } else {
@@ -2312,7 +2317,7 @@ pub(crate) fn apply_connector_hotplug(
     tracing::info!(outputs = comp.outputs.len(), "connector hotplug reconciled across the desktop");
 }
 
-fn parse_monitor_position(value: &str) -> Option<Point> {
+pub(crate) fn parse_monitor_position(value: &str) -> Option<Point> {
     let (x, y) = value.split_once(['x', 'X'])?;
     Some(Point::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
 }

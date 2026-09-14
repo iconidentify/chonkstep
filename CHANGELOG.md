@@ -5,6 +5,9 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- `hyprctl eval hl.monitor(...)` applies the `mode` and `position` Omarchy's
+  monitor scripts send with the scale, or refuses the whole request before
+  changing anything. It used to answer `ok` after applying only the scale.
 - Make every row of Omarchy's SUPER+K keybindings menu runnable. `hyprctl
   binds` reported window-management bindings with a `chonkstep` dispatcher and a
   Rust debug rendering, so picking toggle floating, maximize, layout, move or

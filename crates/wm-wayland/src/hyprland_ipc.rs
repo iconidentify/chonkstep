@@ -785,6 +785,16 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
         Action::SetMonitorScale { output, scale_120 } => {
             comp.set_output_scale(&output, scale_120 as f64 / 120.0)
         }
+        Action::ConfigureMonitor { output, scale_120, mode, position } => {
+            let scale = scale_120.map(|scale| f64::from(scale) / 120.0);
+            match crate::output_mgmt::configure_output(comp, &output, mode.as_deref(), position.as_deref(), scale) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%output, %error, "hl.monitor refused before changing the output");
+                    false
+                }
+            }
+        }
         Action::SetDpms { output, powered } => {
             crate::output_power::set_from_ipc(comp, output.as_deref(), powered)
         }
