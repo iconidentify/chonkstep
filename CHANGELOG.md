@@ -5,57 +5,269 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-14
+
+- Remove the built-in dock, its instruments and samplers, the dock tile
+  protocol with its Go and Python SDKs, the persistent workspace switcher and
+  `chonk-get` from both the Wayland and X11 sessions. Omarchy's bar supplies
+  the workspace indicator and system panels; desktop menus and the transient
+  Overview remain.
+- Add the Obsidian, Washi and Relay themes, each with light and dark
+  renditions. One theme drives window frames, desktop menus and window
+  navigation, and its Omarchy export coordinates the rest of the desktop.
+- Register missing built-in themes in Omarchy's theme picker at install time
+  and before the shell starts at each login or hot restart, so an upgrade adds
+  new themes. Existing theme directories and customizations are kept.
+- Add ChonkStep Help to the desktop menu: a searchable guide to the session's
+  resolved shortcuts, with a quick reference for layouts, Overview, Spaces and
+  gestures. The `help` action can be bound to open it directly.
+- Title the root menu "Omarchy" whenever Omarchy's shell or menu is installed,
+  even where `/etc/os-release` names the base distribution, such as Arch Linux
+  ARM. Other hosts, such as LCOS, keep their own OS name.
+- Show Codex, Claude Code, OpenCode and T3 Code agent sessions in an Omarchy
+  top-bar plugin, backed by a session service that runs outside the
+  compositor.
+- Report the full logical screen to bar clients on fractional-scale outputs,
+  so Omarchy's panels match layer-shell units.
+
+- Separate Spaces from the keyboard profile. `interaction_mode = "spaces"`
+  selects per-monitor and dedicated fullscreen Spaces, and `keyboard_mode`
+  selects the keys. The Mac keyboard profile is now experimental and off
+  unless `keyboard_mode = "mac"` is set; the legacy `interaction_mode = "mac"`
+  still implies Mac keys when `keyboard_mode` is unset.
+- Open Omarchy's launcher from Command-Space in the Mac keyboard profile when
+  `desktop = "omarchy"`. `[commands] omarchy-menu` and a `cmd+space` binding
+  still override it.
+- Default Overview to the classic arrangement, a desktop strip above large
+  live previews; `overview_style = "cards"` selects numbered workspace cards
+  with modern themes. Opening and closing Overview from the keyboard animates
+  on the gesture springs and can be reversed part-way.
+- Keep Overview under the fingers while busy windows change titles, resize or
+  appear; refresh live content without replacing the panel or resetting
+  progress.
+- Leave minimized windows out of Overview and its desktop previews. Restore
+  them from the window switcher or from their desktop preview tiles, which are
+  now on by default (`minimized_previews`). Modern themes use wider switcher
+  cards.
+- Keep a shaded window rolled up through Overview. Its card shows only the
+  titlebar strip, and choosing it focuses the window without unrolling it; a
+  click, a taskbar pick or an application's activation request still unrolls
+  it. It used to appear at full size, and picking it unrolled it.
+- Switch to the workspace of a window activated from elsewhere, in every
+  interaction mode. Omarchy's launch-or-focus chords, notification clicks and
+  `focuswindow` gave keyboard focus to a window on a hidden workspace, so the
+  next keystrokes went to an application nobody could see. Behind the lock,
+  such an activation marks the window urgent instead.
+- Size lock surfaces in logical units on fractional-scale outputs. Dividing by
+  the rounded-up integer scale shrank the lock surface.
+
+- Keep window frames and content aligned through buffer-density and viewport
+  changes, and cache decoration rasters against consistent layout inputs.
+- Keep a native Wayland window's size stable when its GPU buffer arrives late
+  during a resize drag. A JBR/Vulkan client on a 150% display could jump much
+  larger or smaller and separate from its titlebar. The resize density is now
+  kept until the requested size is committed at that density and the drag has
+  ended.
+- Keep client buffers and frames aligned during resize. A terminal's cell-grid
+  snap no longer leaves an oversized frame, a late frame from a resize burst
+  cannot undo the final request, and a newly mapped client's size is
+  acknowledged before its first drag.
+- Stretch a framed native window's buffer only while a resize reply is
+  pending. After a settled fullscreen or resize, a committed size that
+  differed from the frame interior kept the buffer stretched per axis, so
+  browser clicks and selections landed a few pixels off.
+- Keep a fullscreen window at its monitor's size when the client answers with
+  another buffer, such as a browser still showing its windowed frame or a
+  fixed-size game. The compositor adopted that size and resized the window
+  straight back on every pass, repainting about twenty times a second for as
+  long as the mismatch lasted.
+
+- Add the System 7 decoration style (`decoration_style = "system7"`): close
+  and zoom boxes, a striped active title, an original Chicago-metric title
+  atlas and a four-pixel invisible resize margin, checked against genuine
+  System 7.5 captures at 1x and 2x. Changing the style on reload reflows
+  existing windows in place on both backends, XWayland windows included.
+- Draw desktop menus, the window switcher, minimized icons and Overview
+  captions in the selected decoration style.
+- Add System 7 Classic, Light Gray and Dark Gray to Omarchy's theme picker,
+  each with its frame recipe and a QuickDraw desktop pattern tiled at native
+  pixel size. Under the default `decoration_style = "auto"`, a theme selects
+  its own frame recipe.
+- Frame client-drawn GTK4 and libadwaita apps, such as Files and Pinta, which
+  mapped with no ChonkStep frame: only a Close button and no usable resize
+  edges. They now get themed borders and resize edges around their own header
+  bar, and are told they are tiled so they drop their invisible shadow. At
+  session start a stock `appmenu:close` GTK button layout becomes
+  `appmenu:minimize,maximize,close`; a layout the user set is left alone.
+  `[decorations] frame_client_drawn = true` puts the full ChonkStep titlebar
+  above such an app's own header bar, a `[decorations] client_side` entry still
+  leaves an app bare, and a reload re-decides open windows.
+- Select decoration styles in the renderer without changing a pixel of the
+  existing default frames, checked by 720 compatibility fixtures and measured
+  performance gates.
+- Skip unchanged decoration-band uploads on both backends while retrying failed
+  X11 uploads and repainting correctly after frame resizes.
+
+- Report cursor and window positions and sizes through Hyprland IPC in logical
+  layout coordinates, matching xdg-output, and accept the same units in move
+  and resize dispatches. `cursorpos -j` answers in JSON.
 - `hyprctl eval hl.monitor(...)` applies the `mode` and `position` Omarchy's
   monitor scripts send with the scale, or refuses the whole request before
   changing anything. It used to answer `ok` after applying only the scale.
+  Disabling and mirroring an output are still refused by name. After a
+  monitor hotplug, `monitors -j` no longer reports another output's modes,
+  make and refresh rate.
 - Make every row of Omarchy's SUPER+K keybindings menu runnable. `hyprctl
-  binds` reported window-management bindings with a `chonkstep` dispatcher and a
-  Rust debug rendering, so picking toggle floating, maximize, layout, move or
+  binds` reported window-management bindings with a `chonkstep` dispatcher and
+  a Rust debug rendering, so picking toggle floating, maximize, layout, move or
   next workspace did nothing. Each binding now reports a verb that replays,
   shell commands are quoted so they rebuild exactly, `workspace +1`/`-1` step
   relative to the current workspace, and plain `devices` answers in Hyprland's
   block format.
+- Run Omarchy's pop-out, window-width, close-all, monitor-scaling and
+  workspace-layout scripts from their chords and menu rows, including SUPER+O,
+  SUPER+Home and CTRL+ALT+DELETE; every request they send is served. `hyprctl`
+  and scripts that need unserved requests (tiled fullscreen, transparency,
+  gaps, aspect, laptop display, clamshell, monitor watch, mirroring) stay
+  unbound, each with its own reason.
+- Bind Omarchy 4's twelve keyboard resize chords from its Lua configuration, and
+  refuse exact-size resize bindings instead of reading them as deltas. Every
+  bound resize delta, including chonkstep's own `grow-width`/`shrink-width`
+  family, is now in logical pixels, so on a scaled output each step is as large
+  as the same `hyprctl dispatch resizeactive` rather than a fraction of it.
+- Read the `suppress_event` window rule. Omarchy's `suppress_event maximize`
+  on every window now keeps a tile in its cell when an application asks to
+  be maximized; `fullscreen` works the same way, `activate` refuses focus
+  on activation, and the compositor's own verbs are unaffected.
 - Open fullscreen or maximized when a client asks before its window maps.
   An xdg toplevel's `set_fullscreen` or `set_maximized` during setup, and an
   X11 window's `_NET_WM_STATE` written while withdrawn, were dropped, so
   games and players that start fullscreen opened windowed. Both now apply at
   map, through the same path window rules can refuse.
-- Read the `suppress_event` window rule. Omarchy's `suppress_event maximize`
-  on every window now keeps a tile in its cell when an application asks to
-  be maximized; `fullscreen` works the same way, `activate` refuses focus
-  on activation, and the compositor's own verbs are unaffected.
+- Read `idle_inhibit` window rules by mode. Omarchy's `fullscreen` rule for
+  Steam and game-streaming clients counted as always on, so a Steam window
+  left on screen kept the session from dimming and locking. `focus` and
+  `fullscreen` now inhibit only in that state, and `hyprctl clients` reports
+  the result as `inhibitingIdle`.
+- Report the seat's layout list, such as `us,de`, in the `layout` field of
+  `hyprctl devices`, so Omarchy's keyboard-layout widget shows on multi-layout
+  seats. `active_keymap` still names the active layout.
+- Read `and`, `or`, `not` and comparisons in Hyprland Lua configuration the
+  way Lua does, keep `local` variables out of other files, and require `then`
+  after `if`. `if a and b` was read as `if a`, and a user file's `local
+  omarchy_default_bindings = false` turned Omarchy's default bindings off.
+  Calls the reader skips are now logged by name.
+- Bound recursion and work in the Lua configuration reader. `x = x or false`
+  followed by `if x then` looped forever or overflowed the stack, freezing the
+  desktop after a save to `~/.config/hypr` or crash-looping the login. Name
+  cycles, deep expressions, growing rebinds and nested loops now stop at a
+  logged limit.
+- Refuse Lua values known only at runtime instead of using their source text,
+  and fill an unset keyboard layout and variant from `/etc/vconsole.conf`.
+  Omarchy 4's `vconsole.XKBLAYOUT or "us"` reached libxkbcommon as the literal
+  layout, which fell back to a default keymap without Compose on Caps Lock.
+  `XKB_DEFAULT_*` variables and explicit configuration still take precedence.
+- Apply an output-management scale change, and place hotplugged monitors, from
+  the running session's configuration. A scale change from an output-management
+  client, made while `config.toml` did not parse, replaced bindings, input
+  settings and theme with the defaults, and a docked monitor lost its Hyprland
+  monitor rule.
+
 - Run Hyprland switch bindings (`switch:on:Lid Switch`, `switch:off:…`,
   `switch:…`) from both configuration syntaxes. Omarchy's lid-close handler
-  now locks the session as the lid shuts; only `bindl` switch bindings run
-  while locked, and opening the lid wakes sleeping screens and resets idle.
+  now locks the session as the lid shuts when no external monitor is
+  connected. While locked, only bindings marked locked run. Opening the lid
+  wakes sleeping screens and resets idle, and a session that starts with the
+  lid closed runs its `switch:on` binding at once.
+- Switch pointer, touch and tablet devices off and on by name with
+  `hl.device({ name = …, enabled = false })`, as Omarchy's touchpad keys and
+  menu toggles send, and read per-device `enabled`, `sensitivity`,
+  `accel_profile`, `natural_scroll`, `left_handed` and `tap_to_click` from
+  `device { }` blocks and `hl.device`. A disabled device releases what it held
+  and neither moves the pointer nor wakes the screen. Keyboards are never
+  disabled.
+- Lock Num Lock at session start under `numlock_by_default`, and apply drag
+  lock, three-finger drag, middle-button emulation, the tap button map, scroll
+  method and scroll button from both Hyprland syntaxes and `[input]`. Removing
+  a key restores the device default. Three-finger drag needs a libinput that
+  provides it.
+- Configure mouse and touchpad scrolling separately. Omarchy's touchpad-only
+  natural scrolling and 0.4 scroll factor also reversed and slowed every mouse.
+  `[input]` now configures mice and `[input.touchpad]` touchpads,
+  `scroll_touchpad` window rules apply, and small factors no longer round
+  high-resolution wheel steps away.
+- Hide the pointer while typing (`hide_on_key_press`), after a touch
+  (`hide_on_touch`) and after `inactive_timeout` seconds without pointer
+  input, read from Omarchy's `cursor` section or a new `[cursor]` table.
+  Bindings and bare modifiers do not hide it, and any pointer input shows it
+  again.
+- Draw the cursor shapes clients name through `wp_cursor_shape_manager_v1`,
+  such as the text beam, link hand and resize arrows, from the Xcursor theme at
+  each output's scale, honoring `XCURSOR_THEME` and a pinned `XCURSOR_SIZE`.
+  Tablet tools now draw a cursor. Theme files are read off the compositor
+  thread with size limits; animated shapes show their first frame.
+- Serve `hl.dsp.cursor.move` and `movecursor X Y` pointer warps in logical
+  coordinates, so Omarchy's keyboard-driven screenshot picker moves its
+  highlight. A warp is refused while locked or while a client holds a pointer
+  constraint.
+- Open the window menu when a client-drawn header bar asks for it, as GTK 4,
+  libadwaita and Qt do on right-click. The request must carry a current pointer
+  or keyboard serial and is refused while locked.
+
+- Allow capture shortcuts over desktop menus, submenus, Help and Overview.
+  Area selection leaves the panel visible and returns keyboard control to it
+  afterwards; full-screen capture also works during window drags, recording
+  and an existing selection.
+- Plan recording regions with the actual fractional scale and capture
+  rounding, so screen and area recording no longer fail at once on
+  fractional-scale displays.
+- Anchor window captures where the window is drawn. A client drawing its own
+  shadow was captured shifted by the shadow margin and cropped at the right
+  and bottom, in toplevel image capture, the window switcher, minimized tiles
+  and Overview.
+- `chonkrec start --demo` records compositor capture controls and cursors for
+  product walkthroughs, while concurrent normal captures stay clean. Recordings
+  recover across compositor restarts and open in Omacut when finalized.
+- Show a persistent, click-through boundary around the area being recorded,
+  with a subtle outward shadow and clipping to the selected display.
+- Bound recording keyframe gaps to one second, including recovery re-encoding.
+  This improves random access but can substantially increase file size on static
+  desktops; native CPU and storage measurements are documented.
+- Require actual video before reporting recording startup, flush small fragments
+  promptly, and normalize output rotation on both old and new wf-recorder
+  versions.
+
 - Hide `ext_foreign_toplevel_list_v1` and `ext_workspace_manager_v1` from
   clients admitted through `wp_security_context_v1`. The 0.4.4 boundary hid the
   wlr foreign-toplevel manager but missed its ext twin, so a sandboxed app could
   still read every window title and switch workspaces. `ext_idle_notifier_v1`
   stays visible by design.
-- Establish decoration-style selection in the renderer while preserving every
-  WindowMaker pixel, with 720 compatibility fixtures and measured performance gates.
-- Skip unchanged decoration-band uploads on both backends while retrying failed
-  X11 uploads and repainting correctly after frame resizes.
-- `chonkrec start --demo` records compositor capture controls and cursors for
-  product walkthroughs, while concurrent normal captures stay clean. Recordings
-  recover across compositor restarts and open in Omacut when finalized.
-- Keep Overview under the fingers while busy windows change titles, resize or
-  appear; refresh live content without replacing the panel or resetting progress.
-- Show a persistent, click-through boundary around the area being recorded,
-  with a subtle outward shadow and clipping to the selected display.
-- Keep window frames and content aligned through buffer-density and viewport
-  changes, and cache decoration rasters against consistent layout inputs.
-- Bound recording keyframe gaps to one second, including recovery re-encoding.
-  This improves random access but can substantially increase file size on static
-  desktops; native CPU and storage measurements are documented.
-- Require actual video before reporting recording startup, flush small fragments
-  promptly, and normalize output rotation on both old and new wf-recorder versions.
-- Bind Omarchy 4's twelve keyboard resize chords from its Lua configuration, and
-  refuse exact-size resize bindings instead of reading them as deltas. Every bound
-  resize delta, including chonkstep's own `grow-width`/`shrink-width` family, is
-  now in logical pixels, so on a scaled output each step is as large as the same
-  `hyprctl dispatch resizeactive` rather than a fraction of it.
+- Stop a Hyprland IPC request containing non-ASCII whitespace, such as
+  `dispatch<U+00A0>workspace 2`, from panicking the compositor and ending the
+  session.
+- Read Lua dispatch arguments as Lua 5.4 literals. An escaped quote ended an
+  `exec_cmd` string early, so `exec_cmd("notify-send \"build finished\"")` ran
+  `notify-send \` and answered `ok`, and a key name inside a string could be
+  taken for a field. Malformed literals are refused by name.
+
+- Keep a lock surface requested for an output that was just unplugged. A
+  locker racing the last monitor's removal panicked the compositor; the
+  surface now gets its configure, draws nowhere, and the session stays locked.
+- Keep gamma and color-transform ownership across monitor hotplug. After
+  docking, undocking or plugging in a projector, Omarchy's night light stopped
+  responding and a gamma client's restore on exit was dropped. Surviving
+  outputs keep their owners, and a control for a removed output is sent
+  `failed`.
+- Key DPMS output power controls by output identity. After a monitor was
+  unplugged, a power client could fail on a monitor that was still connected or
+  switch off a newly plugged one. A control for a removed output is now sent
+  `failed`.
+
+- Leave `~/.local/state/chonkstep/appearance-request` for its writer while it
+  is empty and less than a second old. A poll between a shell redirect's
+  truncate and its write, as in `echo light > appearance-request`, deleted the
+  empty file and lost the request. The documented poll interval is corrected
+  to 100 ms.
 
 ## [0.5.0] - 2026-09-10
 

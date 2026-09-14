@@ -112,8 +112,7 @@ See [keybindings](docs/keybindings.md), [gestures](docs/gestures.md),
 
 ## Install and try it
 
-The current source tree is the **0.5.0 development series**. Published packages
-may precede the dock removal and screenshots on this page; check the
+The current release is **0.6.0**. Check the
 [release notes](https://github.com/iconidentify/chonkstep/releases) for the
 version being installed.
 

@@ -26,7 +26,7 @@ a repeatable GTK appearance.
 cargo build --locked --release -p chonkstep-wayland
 python3 -B scripts/product-demo.py \
   --binary target/release/chonkstep-wayland \
-  --output /tmp/chonkstep-demo-0.5.0
+  --output /tmp/chonkstep-demo-0.6.0
 ```
 
 For Spaces, use a separate output directory:
@@ -34,7 +34,7 @@ For Spaces, use a separate output directory:
 ```sh
 python3 -B scripts/product-demo.py \
   --binary target/release/chonkstep-wayland \
-  --scenario spaces --output /tmp/chonkstep-spaces-0.5.0
+  --scenario spaces --output /tmp/chonkstep-spaces-0.6.0
 ```
 
 The output directory must be new. Dependencies: Weston with its GL headless
