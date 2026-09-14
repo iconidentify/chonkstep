@@ -653,6 +653,35 @@ fn xcursor_size_for(scale: f32) -> u32 {
     (24.0 * scale).round().max(1.0) as u32
 }
 
+/// Smallest and largest logical cursor size [`xcursor_base_size`]
+/// accepts from the environment.
+const XCURSOR_BASE_SIZES: std::ops::RangeInclusive<u32> = 8..=256;
+
+/// The logical (1x) cursor size the compositor draws named cursor
+/// shapes from: the user's own `XCURSOR_SIZE` when they pinned one,
+/// otherwise 24, which is also Omarchy's value.
+///
+/// The process variable cannot be read blindly. When the user set none,
+/// [`ensure_xcursor_size`] has already written `24 × scale` into it for
+/// X clients, and reading that back would multiply the scale in twice.
+/// So the value is taken only when `XCURSOR_SIZE_WAS_PRESET` says it was
+/// the user's. It comes from the environment, so it is clamped to a sane
+/// range, and an unparsable value is treated as no preference at all.
+pub fn xcursor_base_size() -> u32 {
+    let pinned = XCURSOR_SIZE_WAS_PRESET.get().copied().unwrap_or(false);
+    let value = pinned.then(|| std::env::var("XCURSOR_SIZE").ok()).flatten();
+    xcursor_base_size_from(value.as_deref())
+}
+
+/// The pure half of [`xcursor_base_size`]: `pinned` is the user's own
+/// value, if they set one.
+fn xcursor_base_size_from(pinned: Option<&str>) -> u32 {
+    pinned
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|size| size.clamp(*XCURSOR_BASE_SIZES.start(), *XCURSOR_BASE_SIZES.end()))
+        .unwrap_or(24)
+}
+
 /// The `XCURSOR_SIZE` to hand a freshly launched application, or `None`
 /// when the user pinned one of their own.
 ///
@@ -907,6 +936,16 @@ mod tests {
         // Floored, for the same reason the tile edge is: a hand-edited
         // `scale = 0.001` must not produce a zero-pixel cursor.
         assert_eq!(xcursor_size_for(0.001), 1);
+    }
+
+    #[test]
+    fn the_compositor_cursor_base_is_the_pinned_size_or_24_and_is_clamped() {
+        assert_eq!(xcursor_base_size_from(None), 24);
+        assert_eq!(xcursor_base_size_from(Some("48")), 48);
+        assert_eq!(xcursor_base_size_from(Some(" 32\n")), 32);
+        assert_eq!(xcursor_base_size_from(Some("big")), 24, "unparsable is no preference");
+        assert_eq!(xcursor_base_size_from(Some("0")), 8);
+        assert_eq!(xcursor_base_size_from(Some("100000")), 256);
     }
 
     #[test]

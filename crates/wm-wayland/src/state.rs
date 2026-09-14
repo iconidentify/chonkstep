@@ -2571,17 +2571,24 @@ pub struct Compositor {
     /// What the cursor should look like, per the focused client's
     /// `wl_pointer.set_cursor` (maintained by `input.rs`'s
     /// `SeatHandler::cursor_image`). Honored only while the pointer is
-    /// over client content; the renderer falls back to
-    /// `Compositor::cursors` for `Named` shapes and everywhere else
-    /// (see `push_cursor_elements`).
+    /// over client content, where a `Named` shape is drawn from the
+    /// Xcursor theme; everywhere else the renderer draws
+    /// `Compositor::cursors`' own set (see `push_cursor_elements`).
     pub cursor_status: CursorImageStatus,
+    /// The worker that loads named cursor shapes from the Xcursor theme,
+    /// or `None` when it could not be started (see `cursor_theme`).
+    pub(crate) cursor_theme: Option<crate::cursor_theme::ThemeLoader>,
+    /// Tablet tools in proximity, with their positions and requested
+    /// images, drawn like the pointer (see `input::TabletCursor`).
+    pub(crate) tablet_cursors: Vec<crate::input::TabletCursor>,
     /// The compositor's own pointer images — the arrow, and the resize
     /// double-arrows shown over frame edges — drawn whenever no client
     /// cursor surface applies: a compositor draws its own cursor, there
-    /// is no server to inherit one from. Which member is drawn is the
-    /// renderer's per-frame decision (see `push_cursor_elements`), fed
-    /// by what the pointer is over and what `Backend::set_frame_cursor`
-    /// recorded on the ledger.
+    /// is no server to inherit one from. Also holds the theme images
+    /// drawn for a client's named shapes (`CursorSet::themed`). Which
+    /// member is drawn is the renderer's per-frame decision (see
+    /// `push_cursor_elements`), fed by what the pointer is over and what
+    /// `Backend::set_frame_cursor` recorded on the ledger.
     pub(crate) cursors: CursorSet,
 
     /// Monotonic session clock for frame-callback timestamps.
@@ -2935,7 +2942,13 @@ impl Compositor {
         if let Some(scale) = self.wm.backend_mut().pending_cursor_scale.take() {
             tracing::info!(scale, "rebuilding the compositor's own pointer for the new UI scale");
             self.ui_scale = scale;
+            // The theme's named shapes are sized per output rather than
+            // by the UI scale, so they survive the rebuild;
+            // `cursor_theme::reconcile` below retires any size no output
+            // needs any more and requests the new ones.
+            let themed = std::mem::take(&mut self.cursors.themed);
             self.cursors = CursorSet::build(scale);
+            self.cursors.themed = themed;
             self.wm.backend_mut().mark_damaged();
             self.republish_xsettings();
             // Native Wayland clients ride the same drain, through the
@@ -2979,6 +2992,11 @@ impl Compositor {
                 });
             }
         }
+
+        // After the scale drain, so a rescale requests its cursor sizes in
+        // the same pass. Every other route to a new output scale (IPC,
+        // output management, hotplug) lands in `monitor_scales` too.
+        crate::cursor_theme::reconcile(self);
 
         // Lock upkeep comes after the scale drain so a lock surface is
         // reconfigured to a newly advertised scale in this same pass,
@@ -4293,11 +4311,18 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         pointer_location: (0.0, 0.0).into(),
         touchpad_pointer_captured: false,
         cursor_status: CursorImageStatus::default_named(),
+        cursor_theme: None,
+        tablet_cursors: Vec::new(),
         cursors: CursorSet::build(scale),
         start_time: Instant::now(),
         running: true,
         restart: false,
     };
+    // Named cursor shapes load on their own thread from here on. The
+    // environment the theme resolves through (`XCURSOR_THEME`,
+    // `XCURSOR_PATH`, the pinned `XCURSOR_SIZE`) is final by now.
+    crate::cursor_theme::set_base_size(&mut comp, chonk_shell::startup::xcursor_base_size());
+    comp.cursor_theme = crate::cursor_theme::init(&comp.loop_handle.clone());
     crate::hyprland_ipc::refresh_keyboard_layout(&mut comp);
 
     // Cross into the lock domain before the first dispatch. Clients
@@ -4509,8 +4534,9 @@ fn restart_in_place(nested: bool, host_display: &crate::restart::HostDisplay) ->
 /// matching the scaled cursor the X11 backend draws for the root
 /// window. Hand-authored rather than loaded from an Xcursor theme —
 /// the compositor must have a cursor before any theme machinery could
-/// run, and clients that care set their own via `wl_pointer.set_cursor`
-/// anyway.
+/// run. Only a client's named shapes come from the theme, once the
+/// worker in `cursor_theme` has loaded them; this arrow is what they
+/// draw until then, and what `default` always draws.
 ///
 /// `scale` is the session's UI scale, and it has to be baked into the
 /// pixels here because nothing downstream will apply it: the buffer is
@@ -4553,6 +4579,9 @@ pub(crate) struct CursorSet {
     resize_horizontal: CursorSprite,
     resize_southeast: CursorSprite,
     resize_southwest: CursorSprite,
+    /// Client-named shapes from the Xcursor theme, filled in by the
+    /// theme worker's deliveries. Carried across a UI-scale rebuild.
+    pub(crate) themed: crate::cursor_theme::ThemedCursors,
 }
 
 impl CursorSet {
@@ -4574,6 +4603,7 @@ impl CursorSet {
             resize_horizontal: build_resize_cursor(scale, right_angle),
             resize_southeast: build_resize_cursor(scale, -right_angle / 2.0),
             resize_southwest: build_resize_cursor(scale, right_angle / 2.0),
+            themed: Default::default(),
         }
     }
 

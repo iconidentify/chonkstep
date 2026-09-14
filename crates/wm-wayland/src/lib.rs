@@ -28,6 +28,7 @@ mod capture;
 mod capture_tool;
 mod core_protocols;
 mod ctm;
+mod cursor_theme;
 mod data_control;
 mod decoration;
 mod diagnostics;

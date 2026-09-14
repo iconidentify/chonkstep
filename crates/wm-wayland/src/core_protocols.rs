@@ -73,7 +73,18 @@ const MAX_ACTIVATION_TOKENS_GLOBAL: usize = 4_096;
 const MAX_IME_POPUPS_PER_CLIENT: usize = 16;
 const MAX_IME_POPUPS_GLOBAL: usize = 256;
 
-impl smithay::wayland::tablet_manager::TabletSeatHandler for Compositor {}
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Compositor {
+    /// A tool's cursor surface, hide or named shape. The tablet handlers
+    /// never move the pointer, so without this a pen hovering the desk
+    /// drew no cursor at all. See `input::set_tablet_cursor_image`.
+    fn tablet_tool_image(
+        &mut self,
+        tool: &smithay::backend::input::TabletToolDescriptor,
+        image: smithay::input::pointer::CursorImageStatus,
+    ) {
+        crate::input::set_tablet_cursor_image(self, tool, image);
+    }
+}
 
 /// `zwp_xwayland_keyboard_grab_v1`: an XWayland client asking to keep
 /// every key, because the X client behind it called `XGrabKeyboard`.

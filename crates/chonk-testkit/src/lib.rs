@@ -340,6 +340,12 @@ pub struct SessionOptions {
     /// making. Applied after the harness's own variables, so a test
     /// can also deliberately override one of those.
     pub env: Vec<(String, String)>,
+    /// Variables removed from the compositor's environment before
+    /// [`Self::env`] is applied — for a test whose subject is read from
+    /// variables the developer's own session also sets, such as
+    /// `XCURSOR_SIZE` or `XCURSOR_THEME`, which would otherwise decide
+    /// the result by being inherited.
+    pub env_remove: Vec<String>,
     /// Files seeded into the isolated `XDG_CONFIG_HOME` root itself
     /// (not under `chonkstep/`) before boot, as `(relative path,
     /// contents)` — the config-side twin of [`Self::state_root_files`],
@@ -464,7 +470,8 @@ impl Session {
         let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
         let log_err = log.try_clone().map_err(|e| e.to_string())?;
 
-        let compositor = Command::new(compositor_binary()?)
+        let mut command = Command::new(compositor_binary()?);
+        command
             .env("XDG_CONFIG_HOME", &config_home)
             .env("XDG_STATE_HOME", &state_home)
             .env("CHONKSTEP_BACKEND", "winit")
@@ -512,7 +519,11 @@ impl Session {
             .env_remove("XKB_DEFAULT_MODEL")
             .env_remove("XKB_DEFAULT_LAYOUT")
             .env_remove("XKB_DEFAULT_VARIANT")
-            .env_remove("XKB_DEFAULT_OPTIONS")
+            .env_remove("XKB_DEFAULT_OPTIONS");
+        for name in &options.env_remove {
+            command.env_remove(name);
+        }
+        let compositor = command
             .envs(options.env.iter().map(|(name, value)| (name.as_str(), value.as_str())))
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))

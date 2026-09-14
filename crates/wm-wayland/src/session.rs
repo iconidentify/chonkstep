@@ -2587,6 +2587,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         hyprland_state_dirty,
         pointer_location,
         cursor_status,
+        tablet_cursors,
         cursors,
         surface_outputs,
         dmabuf,
@@ -2718,6 +2719,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             renderer,
             *pointer_location,
             cursor_status,
+            tablet_cursors,
             cursors,
             viewport,
         );

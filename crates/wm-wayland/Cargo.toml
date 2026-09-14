@@ -71,6 +71,12 @@ png = "0.18"
 # bounded IDAT chunks, preserving the fast compressor's original grouping.
 fdeflate = "0.3"
 cosmic-text = "0.19"
+# Named cursor shapes (`wp_cursor_shape_v1`) drawn from the user's
+# Xcursor theme; see `cursor_theme.rs`. Already in the graph through
+# Smithay's `wayland-cursor`, so depending on it directly adds no crate.
+# It resolves `XCURSOR_PATH` and `Inherits`; the files it finds are
+# still read and bounds-checked by ChonkStep on a worker thread.
+xcursor = "0.3"
 # Protocol code generation for the one interface no published crate
 # carries: `hyprland-focus-grab-v1` (see `focus_grab.rs` and the XML
 # vendored beside it in `protocols/`). Omarchy's Quickshell desktop

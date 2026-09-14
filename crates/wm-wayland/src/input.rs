@@ -474,6 +474,7 @@ pub(crate) fn reset_client_input_focus(state: &mut Compositor) {
     let seat = state.seat.clone();
     let time = state.start_time.elapsed().as_millis() as u32;
     cancel_active_touches(state);
+    state.tablet_cursors.clear();
     let tools = with_input(&seat, |input| std::mem::take(&mut input.active_tablet_tools));
     let tablet_seat = seat.tablet_seat();
     for descriptor in tools {
@@ -1239,11 +1240,53 @@ fn queue_tablet_axes<I: InputBackend, E: TabletToolEvent<I>>(
     }
 }
 
+/// Tablet tools with a cursor on screen at once. Each is a physical tool
+/// in proximity, so a real desk has one or two.
+const MAX_TABLET_CURSORS: usize = 16;
+
+/// A tablet tool in proximity: where it is, and what it last asked to
+/// look like. Created at proximity-in showing the arrow, the image a
+/// pointer has before any client sets one, and removed at proximity-out
+/// or when the lock changes the input domain. The renderer draws it like
+/// the pointer (`renderer::build_scene_into`).
+pub(crate) struct TabletCursor {
+    tool: TabletToolDescriptor,
+    pub(crate) position: LogicalPoint<f64, Logical>,
+    pub(crate) status: smithay::input::pointer::CursorImageStatus,
+}
+
+fn track_tablet_cursor(state: &mut Compositor, tool: &TabletToolDescriptor, position: LogicalPoint<f64, Logical>) {
+    if let Some(cursor) = state.tablet_cursors.iter_mut().find(|cursor| cursor.tool == *tool) {
+        cursor.position = position;
+    } else if state.tablet_cursors.len() < MAX_TABLET_CURSORS {
+        state.tablet_cursors.push(TabletCursor {
+            tool: tool.clone(),
+            position,
+            status: smithay::input::pointer::CursorImageStatus::default_named(),
+        });
+    }
+}
+
+/// Records a tool's requested image. Only a tool in proximity has an
+/// entry, so a request can neither outlive the tool's visit nor grow the
+/// set; Smithay has already checked that the requester holds its focus.
+pub(crate) fn set_tablet_cursor_image(
+    state: &mut Compositor,
+    tool: &TabletToolDescriptor,
+    image: smithay::input::pointer::CursorImageStatus,
+) {
+    if let Some(cursor) = state.tablet_cursors.iter_mut().find(|cursor| cursor.tool == *tool) {
+        cursor.status = image;
+        state.wm.backend_mut().mark_damaged();
+    }
+}
+
 fn on_tablet_axis<I: InputBackend>(state: &mut Compositor, event: I::TabletToolAxisEvent) {
     reveal_cursor(state);
     let position = tablet_position::<I, _>(state, &event);
     let descriptor = event.tool();
     let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
+    track_tablet_cursor(state, &descriptor, position);
     remember_tablet_tool(&state.seat, descriptor);
     queue_tablet_axes::<I, _>(&tool, &event);
     let focus = tablet_focus(state.wm.backend(), position);
@@ -1259,12 +1302,14 @@ fn on_tablet_proximity<I: InputBackend>(state: &mut Compositor, event: I::Tablet
     queue_tablet_axes::<I, _>(&tool, &event);
     match event.state() {
         ProximityState::In => {
+            track_tablet_cursor(state, &descriptor, position);
             remember_tablet_tool(&state.seat, descriptor);
             let focus = tablet_focus(state.wm.backend(), position);
             tool.motion(position, focus, &tablet, SERIAL_COUNTER.next_serial(), event.time_msec());
         }
         ProximityState::Out => {
             tool.proximity_out(event.time_msec());
+            state.tablet_cursors.retain(|cursor| cursor.tool != descriptor);
             forget_tablet_tool(&state.seat, &descriptor);
         }
     }
@@ -1276,6 +1321,7 @@ fn on_tablet_tip<I: InputBackend>(state: &mut Compositor, event: I::TabletToolTi
     let position = tablet_position::<I, _>(state, &event);
     let descriptor = event.tool();
     let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
+    track_tablet_cursor(state, &descriptor, position);
     remember_tablet_tool(&state.seat, descriptor);
     queue_tablet_axes::<I, _>(&tool, &event);
     let focus = tablet_focus(state.wm.backend(), position);
@@ -3282,8 +3328,9 @@ fn lock_hit(
 /// LibreOffice's pointer kept being drawn over the desktop, the dock,
 /// and every frame the pointer crossed afterwards.
 pub(crate) enum PointerSubject {
-    /// Client content: the client's `wl_pointer.set_cursor` choice
-    /// applies, falling back to the arrow when it never made one.
+    /// Client content: the client's `wl_pointer.set_cursor` surface or
+    /// `wp_cursor_shape_v1` shape applies, falling back to the arrow
+    /// when it never made one.
     Client,
     /// One of our frames' chrome, with the resize cursor the frame
     /// last asked for (`Backend::set_frame_cursor`), if any.

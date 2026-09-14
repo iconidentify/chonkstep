@@ -253,6 +253,39 @@ portal can set `QT_QPA_PLATFORMTHEME=xdgdesktopportal` in their own
 environment; Qt apps launched after that follow the same portal
 setting as GTK.
 
+## Cursors
+
+Which pointer you see depends on who is asking for it.
+
+- **ChonkStep's own cursors follow no theme.** Over the desktop, the Dock,
+  shell surfaces and a blanked lock screen the pointer is ChonkStep's
+  hand-drawn arrow, and over ChonkStep's window frames it is that arrow or
+  one of its resize double-arrows. They are drawn at the UI scale.
+- **Named cursor shapes follow your Xcursor theme.** Native applications
+  that speak `wp_cursor_shape_v1` -- GTK 4, Qt 6, Chromium, SDL 3, foot,
+  Alacritty, slurp -- name a shape (a text beam, a link hand, a crosshair,
+  a resize arrow, a busy cursor) instead of drawing one, and the
+  compositor draws it from the theme while the pointer, or a tablet pen,
+  is over that application's content. The exception is `default`, the
+  ordinary pointer, which stays ChonkStep's arrow so the pointer does not
+  change style as it crosses into a window.
+- **Cursors an application draws itself** (XWayland applications, older
+  toolkits) are shown as drawn, at the size `XCURSOR_SIZE` gave them.
+
+The theme is `XCURSOR_THEME`, or `default` when that is unset, looked up
+through `XCURSOR_PATH` (or the standard icon directories) and its
+`Inherits` chain; on a stock Omarchy desk `default` inherits Adwaita.
+Only Xcursor themes are read, not hyprcursor themes or `HYPRCURSOR_SIZE`.
+The size is the `XCURSOR_SIZE` you pinned, or 24 if you pinned none,
+multiplied by each output's scale and matched to the nearest size the
+theme ships; that image is drawn pixel for pixel, never stretched.
+
+The theme is read off the compositor's thread at session start, and read
+again for new sizes when output scales change. Until it has loaded, and
+for any shape the theme lacks or ships as a malformed or oversized file,
+the arrow stands in. Animated shapes show their first frame. A different
+`XCURSOR_THEME` takes effect from the next session.
+
 ## Terminals
 
 The terminal palette (foreground, background, cursor, the full
