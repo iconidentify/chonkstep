@@ -1839,6 +1839,12 @@ impl<B: Backend> WindowManager<B> {
         if window_rule.focus_on_activate == Some(false) {
             client.flags.insert(ClientFlags::NO_ACTIVATE);
         }
+        if window_rule.suppress_maximize {
+            client.flags.insert(ClientFlags::SUPPRESS_MAXIMIZE);
+        }
+        if window_rule.suppress_fullscreen {
+            client.flags.insert(ClientFlags::SUPPRESS_FULLSCREEN);
+        }
 
         let mut request = Self::decoration_request(&client, None);
         // A client-decorated window is laid out as though the frame were
@@ -3742,9 +3748,18 @@ impl<B: Backend> WindowManager<B> {
         let Some(&id) = self.window_index.get(&window) else {
             return;
         };
+        let flags = self.clients.get(id).map_or(ClientFlags::empty(), |client| client.flags);
         let mut maximize_directions = MaximizeDirections::empty();
+        let mut suppressed = false;
         for state in [Some(first), second].into_iter().flatten() {
             match state {
+                NetState::Fullscreen
+                    if flags.contains(ClientFlags::SUPPRESS_FULLSCREEN)
+                        && request_enters(action, flags.contains(ClientFlags::FULLSCREEN)) =>
+                {
+                    tracing::debug!(?id, "window rule suppressed a client fullscreen request");
+                    suppressed = true;
+                }
                 NetState::Fullscreen => self.apply_fullscreen_action(id, action),
                 NetState::MaximizedHorz => maximize_directions |= MaximizeDirections::HORIZONTAL,
                 NetState::MaximizedVert => maximize_directions |= MaximizeDirections::VERTICAL,
@@ -3754,7 +3769,27 @@ impl<B: Backend> WindowManager<B> {
             }
         }
         if !maximize_directions.is_empty() {
-            self.apply_maximize_action(id, action, maximize_directions);
+            let mut current = MaximizeDirections::empty();
+            if flags.contains(ClientFlags::MAXIMIZED_H) {
+                current |= MaximizeDirections::HORIZONTAL;
+            }
+            if flags.contains(ClientFlags::MAXIMIZED_V) {
+                current |= MaximizeDirections::VERTICAL;
+            }
+            if flags.contains(ClientFlags::SUPPRESS_MAXIMIZE)
+                && request_enters(action, current.contains(maximize_directions))
+            {
+                tracing::debug!(?id, "window rule suppressed a client maximize request");
+                suppressed = true;
+            } else {
+                self.apply_maximize_action(id, action, maximize_directions);
+            }
+        }
+        // A refusal is still an answer: republish the unchanged state, so
+        // an X11 client's `_NET_WM_STATE` does not keep the state it asked
+        // for, and a Wayland client's owed configure describes the truth.
+        if suppressed {
+            self.publish_client_net_state(id);
         }
     }
 
@@ -4933,6 +4968,16 @@ fn directional_score(source: Rect, candidate: Rect, direction: FocusDirection) -
     let dx = source_center.0.abs_diff(candidate_center.0) as u128;
     let dy = source_center.1.abs_diff(candidate_center.1) as u128;
     Some((13 * major * major + perpendicular * perpendicular, dx * dx + dy * dy))
+}
+
+/// Whether a client's state request would turn a state on: the half a
+/// `suppress_event` rule refuses. Leaving a state stays allowed, so a
+/// window the compositor maximized can still restore itself.
+fn request_enters(action: NetStateAction, currently: bool) -> bool {
+    match action {
+        NetStateAction::Remove => false,
+        NetStateAction::Add | NetStateAction::Toggle => !currently,
+    }
 }
 
 #[cfg(test)]
@@ -9879,6 +9924,84 @@ mod tests {
         let client = wm.client(id).unwrap();
         assert!(!client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
         assert_eq!(client.geometry, original_geometry, "removing both axes must restore the pre-maximize geometry");
+    }
+
+    /// Omarchy's first window rule, `suppress_event = "maximize"` on
+    /// every window: a client's own request to maximize or go fullscreen
+    /// is answered with its unchanged state, while the compositor's verb
+    /// still maximizes and the client may leave that again.
+    #[test]
+    fn a_suppress_event_rule_refuses_client_state_requests_but_not_compositor_verbs() {
+        #[derive(Debug)]
+        struct Suppresses;
+
+        impl FloatPolicy for Suppresses {
+            fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+                None
+            }
+
+            fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+                crate::placement::WindowRuleDecision {
+                    suppress_maximize: true,
+                    suppress_fullscreen: true,
+                    ..Default::default()
+                }
+            }
+        }
+
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(Suppresses)));
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let geometry = wm.client(id).unwrap().geometry;
+        let published = wm.backend().published_net_states.len();
+
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Add,
+            first: NetState::MaximizedHorz,
+            second: Some(NetState::MaximizedVert),
+        });
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Toggle,
+            first: NetState::Fullscreen,
+            second: None,
+        });
+        let client = wm.client(id).unwrap();
+        assert!(!client
+            .flags
+            .intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V | ClientFlags::FULLSCREEN));
+        assert_eq!(client.geometry, geometry, "a refused request moves nothing");
+        assert_eq!(
+            wm.backend().published_net_states.len(),
+            published + 2,
+            "each refusal is answered with the unchanged state"
+        );
+        assert_eq!(
+            wm.backend().published_net_states.last(),
+            Some(&(window, false, false, false, false, false, false))
+        );
+
+        wm.toggle_maximize_full(id);
+        assert!(
+            wm.client(id).unwrap().flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V),
+            "the compositor's own verb still maximizes"
+        );
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Remove,
+            first: NetState::MaximizedHorz,
+            second: Some(NetState::MaximizedVert),
+        });
+        assert!(
+            !wm.client(id).unwrap().flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V),
+            "the client may still leave a maximize it did not ask for"
+        );
     }
 
     #[test]

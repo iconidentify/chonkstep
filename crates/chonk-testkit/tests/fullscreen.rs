@@ -417,6 +417,78 @@ fn a_clients_maximize_control_is_answered_with_maximized() {
     assert!(!log.contains("answer REFUSED"), "no request in this test was refused:\n{log}");
 }
 
+/// Omarchy's first window rule, `suppress_event maximize` on every
+/// window: an application's own maximize control is answered with its
+/// unchanged state, and neither it nor its neighbour leaves its Mosaic
+/// cell.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn a_suppressed_maximize_request_keeps_every_tile_in_its_cell() {
+    use std::io::{Read, Write};
+
+    fn settled(session: &mut Session) -> chonk_testkit::World {
+        poll_until(Duration::from_secs(5), "layout settlement", || {
+            let world = session.world().ok()?;
+            (!world.spatial.moving && world.gesture.is_none()).then_some(world)
+        })
+        .expect("the layout settles")
+    }
+    fn cell(world: &chonk_testkit::World, app: &str) -> (i32, i32, u32, u32) {
+        let window = world.window_matching(app).expect("the tile is in the world");
+        (window.x, window.y, window.w, window.h)
+    }
+
+    let probe = profile_binary("chonk-fullscreen-probe").expect("cargo build -p chonk-testkit builds the probe");
+    let mut session = Session::boot(
+        "maximize-suppressed",
+        SessionOptions {
+            scale: Some(1.0),
+            config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into(),
+            config_root_files: vec![(
+                "hypr/hyprland.conf".into(),
+                "windowrule = suppress_event maximize, match:class .*\nbind = SUPER, F12, workspace, 1\n".into(),
+            )],
+            ..SessionOptions::default()
+        },
+    )
+    .expect("the nested compositor boots");
+    for (title, app) in [("TileA", "tile-a"), ("TileB", "tile-b")] {
+        session.launch(&probe.to_string_lossy(), &[title, app]).expect("the probe launches");
+        session.wait_for_window(app).expect("the probe maps");
+    }
+    let socket = std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap())
+        .join("hypr")
+        .join(session.hyprland_signature().unwrap())
+        .join(".socket.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.write_all(b"/dispatch layout mosaic").unwrap();
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).unwrap();
+    assert_eq!(reply, "ok", "Mosaic is selected");
+    session.door().barrier().unwrap();
+
+    let before = settled(&mut session);
+    let (a, b) = (cell(&before, "tile-a"), cell(&before, "tile-b"));
+    assert_ne!(a, b, "two tiles share the output");
+    let door = session.door();
+    door.click(f64::from(b.0) + f64::from(b.2) / 2.0, f64::from(b.1) + f64::from(b.3) / 2.0)
+        .expect("a click focuses the second tile");
+    door.barrier().unwrap();
+    press(&mut session, KEY_M);
+
+    let log_path = session.dir.join("client-1-chonk-fullscreen-probe.log");
+    let log = poll_until(Duration::from_secs(10), "the refused maximize to be answered", || {
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        log.contains("asked maximized=true, told maximized=false").then_some(log)
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{}\n{}", std::fs::read_to_string(&log_path).unwrap_or_default(), session.log()));
+    let after = settled(&mut session);
+    assert_eq!(cell(&after, "tile-b"), b, "the requesting tile keeps its cell:\n{log}");
+    assert_eq!(cell(&after, "tile-a"), a, "its neighbour does not move");
+    assert!(session.compositor_alive());
+}
+
 #[test]
 #[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
 fn screensaver_covers_the_output_without_any_imported_window_rules() {

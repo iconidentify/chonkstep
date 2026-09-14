@@ -5,6 +5,10 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Read the `suppress_event` window rule. Omarchy's `suppress_event maximize`
+  on every window now keeps a tile in its cell when an application asks to
+  be maximized; `fullscreen` works the same way, `activate` refuses focus
+  on activation, and the compositor's own verbs are unaffected.
 - Run Hyprland switch bindings (`switch:on:Lid Switch`, `switch:off:…`,
   `switch:…`) from both configuration syntaxes. Omarchy's lid-close handler
   now locks the session as the lid shuts; only `bindl` switch bindings run

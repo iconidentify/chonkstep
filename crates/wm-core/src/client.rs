@@ -104,6 +104,12 @@ bitflags::bitflags! {
         /// visible, but focus, close and drag gestures are redirected
         /// to the live modal child until the dialog is dismissed.
         const MODAL = 1 << 11;
+        /// A window rule refuses this client's own requests to maximize
+        /// (`suppress_event maximize`). Compositor verbs still apply, and
+        /// the client may still leave a maximize the compositor gave it.
+        const SUPPRESS_MAXIMIZE = 1 << 12;
+        /// The same refusal for entering fullscreen.
+        const SUPPRESS_FULLSCREEN = 1 << 13;
     }
 }
 

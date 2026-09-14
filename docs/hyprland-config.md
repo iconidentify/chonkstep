@@ -147,7 +147,7 @@ windowrule   = float on, match:class steam               # 0.53+
 
 The supported properties are `float`, `size`, `center`, `idle_inhibit`,
 `pin`, `no_focus`, `no_initial_focus`, `focus_on_activate`,
-`fullscreen`, `maximize`, and `scroll_touchpad`. They match `class` and `title` as regular
+`fullscreen`, `maximize`, `suppress_event`, and `scroll_touchpad`. They match `class` and `title` as regular
 expressions, matched against the entire class or title, as in Hyprland's
 `RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
@@ -165,6 +165,16 @@ sticky across workspaces. Focus exclusions affect initial focus and
 later activation requests separately. Fullscreen and maximize are
 applied after initial placement, with maximize underneath fullscreen so
 unfullscreen restores the expected state.
+
+`suppress_event` takes a list of client requests to ignore. `maximize`
+and `fullscreen` ignore an application's own request to enter that state,
+which is how Omarchy's first rule keeps every window in its tile when an
+application asks to be maximized. The refusal is answered with the
+window's unchanged state. ChonkStep's own verbs, the window menu and IPC
+still apply, and an application may still leave a state it did not ask
+for. `activate` and `activatefocus` stop activation requests from
+focusing the window, like `focus_on_activate = false`. Any other event is
+reported by name.
 
 Every unsupported property produces its own `Skipped` line naming both
 the property and matcher. A rule with an unsupported matcher is refused
@@ -250,7 +260,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Gaps, borders, rounding, blur, shadows, animations, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
 | Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use `focus_follows_mouse` and native [`[input.gestures]`](gestures.md). Arbitrary Hyprland gesture bindings remain declined. Device properties listed below are applied; remaining declined values are logged. |
-| Unsupported window-rule properties | `opacity`, `no_blur`, `suppress_event`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
+| Unsupported window-rule properties | `opacity`, `no_blur`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
 | A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
 | Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
@@ -649,7 +659,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=179 commands=120 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=169
+      float_rules=48 monitors=1 skipped=168
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

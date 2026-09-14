@@ -312,6 +312,11 @@ pub struct WindowRuleDecision {
     pub fullscreen: bool,
     /// Enter full horizontal-and-vertical maximize after mapping.
     pub maximize: bool,
+    /// Ignore the client's own requests to maximize (`suppress_event
+    /// maximize`). The compositor's verbs still maximize the window.
+    pub suppress_maximize: bool,
+    /// Ignore the client's own requests to enter fullscreen.
+    pub suppress_fullscreen: bool,
     /// The touchpad scroll factor while the pointer is over this window,
     /// replacing the global touchpad factor (`scroll_touchpad`).
     pub touchpad_scroll_factor: Option<f64>,
