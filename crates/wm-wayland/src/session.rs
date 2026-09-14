@@ -215,6 +215,98 @@ fn connector_is_non_desktop(drm: &DrmDeviceFd, connector: connector::Handle) -> 
     })
 }
 
+/// What this session does with one connector, decided the same way at
+/// startup ([`pick_outputs`]) and on every later rescan
+/// ([`rescan_session_outputs`]). Those two are the only places that
+/// decide whether a connector is driven; a connector skipped at login
+/// stays skipped through every hotplug, and one adopted stays adopted
+/// while its classification holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectorUse {
+    /// Connected, desktop, with modes: gets a crtc and a `wl_output`.
+    Drive,
+    Disconnected,
+    /// The kernel marks it `non-desktop` (an HMD): reserved for a
+    /// lease/VR runtime, never driven, even if it has modes.
+    NonDesktop,
+    /// Connected but nothing to scan out at.
+    NoModes,
+}
+
+/// The classification behind [`ConnectorUse`]. `non_desktop` must come
+/// from a property read *after* the forced probe that produced `state`:
+/// userspace cannot set the property, but the kernel rewrites it from
+/// each new sink's EDID, so a headset plugged into the port a monitor
+/// just left changes the answer within one debounce window.
+fn connector_use(state: connector::State, non_desktop: bool, has_modes: bool) -> ConnectorUse {
+    if state != connector::State::Connected {
+        ConnectorUse::Disconnected
+    } else if non_desktop {
+        ConnectorUse::NonDesktop
+    } else if !has_modes {
+        ConnectorUse::NoModes
+    } else {
+        ConnectorUse::Drive
+    }
+}
+
+/// The structural delta one connector rescan applies, computed by
+/// [`rescan_plan`] from the probe results alone so the set arithmetic
+/// is testable without a DRM device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RescanPlan {
+    /// Indices into the driven list whose connector is no longer
+    /// [`ConnectorUse::Drive`] — unplugged, gone from the resource
+    /// list, or turned non-desktop. Descending, so removing by index
+    /// from the same list is safe.
+    remove: Vec<usize>,
+    /// Connectors to adopt, in probe order: [`ConnectorUse::Drive`]
+    /// and not yet driven.
+    adopt: Vec<connector::Handle>,
+    /// Every connector the probe classified [`ConnectorUse::NonDesktop`],
+    /// driven or not — the reserved set this rescan leaves alone.
+    reserved: Vec<connector::Handle>,
+}
+
+/// Decides what a rescan removes and adopts. `driven` is the connector
+/// of each current output, in output order; `probed` is every
+/// connector the forced probe could read, with its classification.
+///
+/// `keep` lists connectors the plan must leave exactly as they are —
+/// neither adopted nor removed, whatever the probe says. Nothing passes
+/// one today; it is the hook for a connector that is present but
+/// deliberately not driven (a parked or disabled output), which must
+/// survive a rescan without being mistaken for an unplug.
+fn rescan_plan(
+    driven: &[connector::Handle],
+    probed: &[(connector::Handle, ConnectorUse)],
+    keep: &[connector::Handle],
+) -> RescanPlan {
+    let use_of = |handle: connector::Handle| {
+        probed.iter().find(|(probed, _)| *probed == handle).map(|(_, use_)| *use_)
+    };
+    let mut remove: Vec<usize> = driven
+        .iter()
+        .enumerate()
+        .filter(|(_, handle)| !keep.contains(handle) && use_of(**handle) != Some(ConnectorUse::Drive))
+        .map(|(index, _)| index)
+        .collect();
+    remove.sort_unstable_by(|a, b| b.cmp(a));
+    let adopt = probed
+        .iter()
+        .filter(|(handle, use_)| {
+            *use_ == ConnectorUse::Drive && !driven.contains(handle) && !keep.contains(handle)
+        })
+        .map(|(handle, _)| *handle)
+        .collect();
+    let reserved = probed
+        .iter()
+        .filter(|(_, use_)| *use_ == ConnectorUse::NonDesktop)
+        .map(|(handle, _)| *handle)
+        .collect();
+    RescanPlan { remove, adopt, reserved }
+}
+
 /// The stable, user-facing portion of a connector's EDID. This is the
 /// same three-part description Hyprland prints and accepts after a
 /// `desc:` monitor selector; the connector name is intentionally not
@@ -648,6 +740,11 @@ pub(crate) struct SessionGraphics {
     /// burst of udev changes and every forced connector probe may block;
     /// one absolute deadline coalesces that burst into one walk.
     hotplug_due: Option<Instant>,
+    /// Connectors the kernel marks `non-desktop`, as of the last
+    /// enumeration. Never driven; kept so a burst of hotplug events
+    /// logs each newly reserved headset once rather than per rescan,
+    /// and so a lease path can advertise the same set startup skipped.
+    non_desktop: Vec<connector::Handle>,
 }
 
 /// One output being scanned out: its crtc, its place in the global
@@ -1155,7 +1252,7 @@ pub(crate) fn init(
     //    opening `/dev/dri/cardN` directly would work as root and then
     //    strand the device on the first VT switch.
     let (device_path, device) = open_first_usable_device(&mut seat_session, &seat_name)?;
-    let Device { mut drm, notifier: drm_notifier, gbm, connectors } = device;
+    let Device { mut drm, notifier: drm_notifier, gbm, connectors, non_desktop } = device;
     tracing::info!(
         device = %device_path.display(),
         outputs = connectors.len(),
@@ -1585,6 +1682,7 @@ pub(crate) fn init(
             last_service: Instant::now(),
             strict_release,
             hotplug_due: None,
+            non_desktop,
         })),
         outputs: setups,
     })
@@ -1928,30 +2026,47 @@ pub(crate) fn service_connector_hotplug(comp: &mut Compositor) {
     }
 }
 
+/// Walks every connector after a hotplug or VT resume and applies the
+/// [`rescan_plan`]: outputs whose connector stopped being
+/// [`ConnectorUse::Drive`] leave through the same removal the unplug
+/// case always took (so a monitor swapped for a headset on one port
+/// within a debounce window is removed, not kept on the headset), and
+/// newly drivable connectors are adopted. The non-desktop property is
+/// read fresh after every forced probe — never cached — because the
+/// kernel rewrites it from each new sink's EDID.
 fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, Vec<OutputSetup>), String> {
     let resources = session
         .drm
         .resource_handles()
         .map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
-    let mut connected = Vec::new();
+    let mut probed: Vec<(connector::Handle, ConnectorUse)> = Vec::new();
+    let mut drivable: Vec<connector::Info> = Vec::new();
     for handle in resources.connectors() {
         match session.drm.get_connector(*handle, true) {
-            Ok(info) if info.state() == connector::State::Connected && !info.modes().is_empty() => {
-                connected.push(info);
+            Ok(info) => {
+                let use_ = connector_use(
+                    info.state(),
+                    connector_is_non_desktop(session.drm.device_fd(), *handle),
+                    !info.modes().is_empty(),
+                );
+                probed.push((*handle, use_));
+                match use_ {
+                    ConnectorUse::Drive => drivable.push(info),
+                    ConnectorUse::NonDesktop if !session.non_desktop.contains(handle) => tracing::info!(
+                        connector = %connector_name(&info),
+                        "connector is marked non-desktop; reserved for a lease/VR runtime, not driven"
+                    ),
+                    ConnectorUse::NonDesktop | ConnectorUse::Disconnected | ConnectorUse::NoModes => {}
+                }
             }
-            Ok(_) => {}
             Err(error) => tracing::debug!(?handle, ?error, "connector probe failed during hotplug rescan"),
         }
     }
 
-    let connected_handles: Vec<connector::Handle> = connected.iter().map(connector::Info::handle).collect();
-    let mut removed: Vec<usize> = session
-        .outputs
-        .iter()
-        .enumerate()
-        .filter_map(|(index, output)| (!connected_handles.contains(&output.connector)).then_some(index))
-        .collect();
-    removed.sort_unstable_by(|a, b| b.cmp(a));
+    let driven: Vec<connector::Handle> = session.outputs.iter().map(|output| output.connector).collect();
+    let plan = rescan_plan(&driven, &probed, &[]);
+    session.non_desktop = plan.reserved;
+    let removed = plan.remove;
     for index in &removed {
         let mut output = session.outputs.remove(*index);
         if let Some(mut feedback) = output.presentation.take() {
@@ -1970,8 +2085,8 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, 
         .max()
         .unwrap_or(0);
     let mut added = Vec::new();
-    for info in connected {
-        if session.outputs.iter().any(|output| output.connector == info.handle()) {
+    for info in drivable {
+        if !plan.adopt.contains(&info.handle()) {
             continue;
         }
         let Some(mode) = preferred_mode(&info) else { continue };
@@ -2978,6 +3093,8 @@ struct Device {
     /// Never empty — a device with nothing plugged in is not a device
     /// this session can run on (see [`probe_device`]).
     connectors: Vec<ConnectorTarget>,
+    /// Connected connectors [`pick_outputs`] reserved as non-desktop.
+    non_desktop: Vec<connector::Handle>,
 }
 
 /// A connector this session will drive, with the crtc and mode chosen
@@ -3171,14 +3288,16 @@ fn probe_device(seat_session: &mut LibSeatSession, path: &Path) -> Result<Device
 
     let (drm, notifier) =
         DrmDevice::new(fd.clone(), true).map_err(|error| format!("not a usable DRM device: {error}"))?;
-    let connectors = pick_outputs(&drm)?;
+    let (connectors, non_desktop) = pick_outputs(&drm)?;
     let gbm = GbmDevice::new(fd).map_err(|error| format!("GBM init failed: {error}"))?;
 
-    Ok(Device { drm, notifier, gbm, connectors })
+    Ok(Device { drm, notifier, gbm, connectors, non_desktop })
 }
 
 /// Picks the connectors this session paints on: every connected one
 /// that has both a mode and a free crtc, in the kernel's enumeration
+/// order, plus the connectors it reserved as non-desktop — the same
+/// classification ([`connector_use`]) every later rescan applies. Kernel
 /// order — which is stable across boots on a given machine, and is
 /// therefore what decides which monitor is primary and how the outputs
 /// are laid out left to right (see the module docs: there is no
@@ -3189,7 +3308,7 @@ fn probe_device(seat_session: &mut LibSeatSession, path: &Path) -> Result<Device
 /// render-only node or the wrong GPU announces itself, and [`init`]'s
 /// candidate walk should move on to the next one rather than come up
 /// with a session nobody can see.
-fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
+fn pick_outputs(drm: &DrmDevice) -> Result<(Vec<ConnectorTarget>, Vec<connector::Handle>), String> {
     let resources =
         drm.resource_handles().map_err(|error| format!("no KMS resources (a render-only node?): {error}"))?;
 
@@ -3197,6 +3316,7 @@ fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
     // diagnosable from one log line instead of a bisect.
     let mut skipped: Vec<String> = Vec::new();
     let mut targets: Vec<ConnectorTarget> = Vec::new();
+    let mut non_desktop: Vec<connector::Handle> = Vec::new();
     for handle in resources.connectors() {
         let info = match drm.get_connector(*handle, true) {
             Ok(info) => info,
@@ -3206,18 +3326,26 @@ fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
             }
         };
         let name = connector_name(&info);
-        if info.state() != connector::State::Connected {
-            skipped.push(format!("{name} is {:?}", info.state()));
-            continue;
-        }
-        if connector_is_non_desktop(drm.device_fd(), *handle) {
-            skipped.push(format!("{name} is marked non-desktop (reserved for a lease/VR runtime)"));
-            continue;
-        }
-        let Some(mode) = preferred_mode(&info) else {
-            skipped.push(format!("{name} is connected but reports no modes"));
-            continue;
+        let mode = preferred_mode(&info);
+        let reason = match connector_use(
+            info.state(),
+            connector_is_non_desktop(drm.device_fd(), *handle),
+            mode.is_some(),
+        ) {
+            ConnectorUse::Drive => None,
+            ConnectorUse::Disconnected => Some(format!("{name} is {:?}", info.state())),
+            ConnectorUse::NonDesktop => {
+                non_desktop.push(*handle);
+                Some(format!("{name} is marked non-desktop (reserved for a lease/VR runtime)"))
+            }
+            ConnectorUse::NoModes => Some(format!("{name} is connected but reports no modes")),
         };
+        if let Some(reason) = reason {
+            skipped.push(reason);
+            continue;
+        }
+        // `Drive` implies a mode; the `else` only satisfies the type.
+        let Some(mode) = mode else { continue };
         // A crtc drives exactly one output, so one already spoken for by
         // an earlier connector is not a candidate for this one — which
         // is also the ceiling on how many monitors this session lights
@@ -3235,7 +3363,7 @@ fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
         if !skipped.is_empty() {
             tracing::debug!(skipped = %skipped.join(", "), "connectors this session will not drive");
         }
-        return Ok(targets);
+        return Ok((targets, non_desktop));
     }
     Err(if skipped.is_empty() {
         "the device exposes no connectors at all".to_string()
@@ -3314,6 +3442,93 @@ mod tests {
         edid[72..77].copy_from_slice(&[0, 0, 0, 0xff, 0]);
         edid[77..90].copy_from_slice(b"ABC123\n      ");
         edid
+    }
+
+    fn handle(id: u32) -> connector::Handle {
+        connector::Handle::from(std::num::NonZeroU32::new(id).unwrap())
+    }
+
+    #[test]
+    fn connector_use_classifies_every_connector_state() {
+        assert_eq!(connector_use(connector::State::Disconnected, false, true), ConnectorUse::Disconnected);
+        assert_eq!(connector_use(connector::State::Unknown, false, true), ConnectorUse::Disconnected);
+        // Non-desktop wins over having modes: a headset advertises
+        // modes like any panel and must still not be driven.
+        assert_eq!(connector_use(connector::State::Connected, true, true), ConnectorUse::NonDesktop);
+        assert_eq!(connector_use(connector::State::Connected, true, false), ConnectorUse::NonDesktop);
+        assert_eq!(connector_use(connector::State::Connected, false, false), ConnectorUse::NoModes);
+        assert_eq!(connector_use(connector::State::Connected, false, true), ConnectorUse::Drive);
+    }
+
+    /// The bug: a headset appearing after startup was collected like a
+    /// monitor and adopted. The plan must reserve it instead.
+    #[test]
+    fn rescan_plan_does_not_adopt_an_undriven_non_desktop_connector() {
+        let (monitor, headset) = (handle(1), handle(2));
+        let plan = rescan_plan(
+            &[monitor],
+            &[(monitor, ConnectorUse::Drive), (headset, ConnectorUse::NonDesktop)],
+            &[],
+        );
+        assert!(plan.remove.is_empty());
+        assert!(plan.adopt.is_empty());
+        assert_eq!(plan.reserved, vec![headset]);
+    }
+
+    /// A monitor unplugged and a headset plugged into the same port
+    /// within one debounce window: the connector is still connected
+    /// with modes, but its classification changed, so its output goes
+    /// out through the unplug path rather than staying on the headset.
+    #[test]
+    fn rescan_plan_removes_a_driven_connector_that_turned_non_desktop() {
+        let (left, right) = (handle(1), handle(2));
+        let plan =
+            rescan_plan(&[left, right], &[(left, ConnectorUse::Drive), (right, ConnectorUse::NonDesktop)], &[]);
+        assert_eq!(plan.remove, vec![1]);
+        assert!(plan.adopt.is_empty());
+        assert_eq!(plan.reserved, vec![right]);
+    }
+
+    #[test]
+    fn rescan_plan_adopts_and_removes_desktop_connectors_as_before() {
+        let (a, b, c, d) = (handle(1), handle(2), handle(3), handle(4));
+        // `a` unplugged, `b` vanished from the resource list entirely,
+        // `c` still driven, `d` newly plugged in with modes.
+        let plan = rescan_plan(
+            &[a, b, c],
+            &[(a, ConnectorUse::Disconnected), (c, ConnectorUse::Drive), (d, ConnectorUse::Drive)],
+            &[],
+        );
+        // Descending so removal by index from the same list is safe.
+        assert_eq!(plan.remove, vec![1, 0]);
+        assert_eq!(plan.adopt, vec![d]);
+        assert!(plan.reserved.is_empty());
+
+        // A connected connector without modes is neither adopted nor,
+        // if it was driven, kept.
+        let plan = rescan_plan(&[a], &[(a, ConnectorUse::NoModes), (d, ConnectorUse::NoModes)], &[]);
+        assert_eq!(plan.remove, vec![0]);
+        assert!(plan.adopt.is_empty());
+
+        // Nothing changed: an empty plan.
+        assert_eq!(rescan_plan(&[a], &[(a, ConnectorUse::Drive)], &[]), RescanPlan::default());
+    }
+
+    /// The `keep` hook: a connector listed there is left exactly as it
+    /// is, whether the probe says it is drivable or gone.
+    #[test]
+    fn rescan_plan_leaves_kept_connectors_alone() {
+        let (driven, parked) = (handle(1), handle(2));
+        let plan = rescan_plan(
+            &[driven, parked],
+            &[(driven, ConnectorUse::Drive), (parked, ConnectorUse::Drive)],
+            &[parked],
+        );
+        assert_eq!(plan, RescanPlan::default());
+        let plan = rescan_plan(&[driven], &[(driven, ConnectorUse::Drive), (parked, ConnectorUse::Drive)], &[parked]);
+        assert_eq!(plan, RescanPlan::default());
+        let plan = rescan_plan(&[driven, parked], &[(driven, ConnectorUse::Drive)], &[parked]);
+        assert_eq!(plan, RescanPlan::default());
     }
 
     #[test]
