@@ -5,6 +5,11 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Hide `ext_foreign_toplevel_list_v1` and `ext_workspace_manager_v1` from
+  clients admitted through `wp_security_context_v1`. The 0.4.4 boundary hid the
+  wlr foreign-toplevel manager but missed its ext twin, so a sandboxed app could
+  still read every window title and switch workspaces. `ext_idle_notifier_v1`
+  stays visible by design.
 - Establish decoration-style selection in the renderer while preserving every
   WindowMaker pixel, with 720 compatibility fixtures and measured performance gates.
 - Skip unchanged decoration-band uploads on both backends while retrying failed

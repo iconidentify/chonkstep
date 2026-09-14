@@ -7,6 +7,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 use wayland_client::protocol::{wl_callback, wl_compositor, wl_registry, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_list_v1;
+use wayland_protocols::ext::workspace::v1::client::ext_workspace_manager_v1;
 use wayland_protocols::wp::security_context::v1::client::{
     wp_security_context_manager_v1, wp_security_context_v1,
 };
@@ -61,7 +63,9 @@ ignore_events!(
     wp_security_context_v1::WpSecurityContextV1,
     wl_compositor::WlCompositor,
     wl_surface::WlSurface,
-    zwlr_layer_shell_v1::ZwlrLayerShellV1
+    zwlr_layer_shell_v1::ZwlrLayerShellV1,
+    ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+    ext_workspace_manager_v1::ExtWorkspaceManagerV1
 );
 
 struct Client {
@@ -165,6 +169,8 @@ fn confined_clients_keep_application_globals_but_cannot_bind_desktop_privileges(
         "zwlr_virtual_pointer_manager_v1",
         "zwlr_output_manager_v1",
         "zwlr_foreign_toplevel_manager_v1",
+        "ext_foreign_toplevel_list_v1",
+        "ext_workspace_manager_v1",
         "zwp_input_method_manager_v2",
     ] {
         assert!(
@@ -196,19 +202,34 @@ fn confined_clients_keep_application_globals_but_cannot_bind_desktop_privileges(
         .create_surface(&confined.queue.handle(), ())
         .commit();
     confined.sync().unwrap();
+    // Deliberately visible: presence apps set an "away" status from idle
+    // notifications, and idleness is all this global reveals.
+    assert!(
+        confined.state.globals.contains_key("ext_idle_notifier_v1"),
+        "ext_idle_notifier_v1 is classified as visible to confined clients"
+    );
     // Knowing a global's numeric ID from an ordinary connection must not
     // bypass the registry filter when a confined connection forges a bind.
-    let (name, _) = creator.state.globals["zwlr_layer_shell_v1"];
-    let _: zwlr_layer_shell_v1::ZwlrLayerShellV1 =
-        confined
-            .registry
-            .bind(name, 1, &confined.queue.handle(), ());
-    let error = confined
-        .sync()
-        .expect_err("forged privileged bind must disconnect the confined client");
-    assert!(
-        !error.contains("timed out"),
-        "a timeout is not proof of bind rejection"
-    );
+    // A refused bind disconnects its client, so each forgery gets its own.
+    for interface in ["zwlr_layer_shell_v1", "ext_foreign_toplevel_list_v1", "ext_workspace_manager_v1"] {
+        let mut forger = Client::connect(UnixStream::connect(&path).unwrap());
+        let (name, _) = creator.state.globals[interface];
+        let handle = forger.queue.handle();
+        match interface {
+            "zwlr_layer_shell_v1" => {
+                let _: zwlr_layer_shell_v1::ZwlrLayerShellV1 = forger.registry.bind(name, 1, &handle, ());
+            }
+            "ext_foreign_toplevel_list_v1" => {
+                let _: ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1 = forger.registry.bind(name, 1, &handle, ());
+            }
+            _ => {
+                let _: ext_workspace_manager_v1::ExtWorkspaceManagerV1 = forger.registry.bind(name, 1, &handle, ());
+            }
+        }
+        let error = forger
+            .sync()
+            .expect_err(&format!("forged {interface} bind must disconnect the confined client"));
+        assert!(!error.contains("timed out"), "a timeout is not proof of bind rejection ({interface})");
+    }
     creator.sync().unwrap();
 }

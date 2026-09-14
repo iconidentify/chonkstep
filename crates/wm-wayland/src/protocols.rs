@@ -514,7 +514,12 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
         "wlr protocols advertised"
     );
     ProtocolState {
-        ext_list: ForeignToplevelListState::new::<Compositor>(display_handle),
+        // Every window's title and app id: the same information the wlr
+        // foreign-toplevel manager carries, so the same sandbox boundary.
+        ext_list: ForeignToplevelListState::new_with_filter::<Compositor>(
+            display_handle,
+            crate::state::privileged_global_visible,
+        ),
         ext_toplevels: HashMap::new(),
         managers: Vec::new(),
         toplevels: HashMap::new(),

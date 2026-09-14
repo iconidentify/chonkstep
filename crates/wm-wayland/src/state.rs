@@ -1511,8 +1511,15 @@ pub(crate) fn client_is_confined(client: &smithay::reexports::wayland_server::Cl
 
 /// Capabilities that affect other clients belong to ordinary desktop helpers,
 /// not clients explicitly admitted through a sandbox security context. Keep
-/// this gate shared so capture, input injection, clipboard monitoring and
-/// output/session management enforce the same boundary.
+/// this gate shared so capture, input injection, clipboard monitoring,
+/// window lists, workspace control and output/session management enforce the
+/// same boundary.
+///
+/// Deliberately left visible to confined clients: the ordinary application
+/// protocols, `ext_idle_notifier_v1` (a presence app's "away" status reveals
+/// only that the user is idle, which any focused window can already infer),
+/// and `zwp_keyboard_shortcuts_inhibit_manager_v1`, whose grants are gated
+/// separately. Classify each new global here rather than let it default.
 pub(crate) fn privileged_global_visible(
     client: &smithay::reexports::wayland_server::Client,
 ) -> bool {
