@@ -2235,6 +2235,7 @@ pub(crate) fn apply_connector_hotplug(
     }
     crate::input::reconcile_pointer_after_output_change(comp);
     crate::gamma::outputs_changed(comp);
+    crate::output_power::outputs_changed(comp);
     comp.output_mgmt.mark_dirty();
     comp.session_lock.mark_dirty();
     comp.layer_shell.needs_arrange = true;
