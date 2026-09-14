@@ -2564,33 +2564,31 @@ pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Optio
         .iter()
         .position(|parked| parked.name == name)
         .ok_or_else(|| format!("{name} is not a parked output"))?;
-    let parked = session.parked.remove(at);
-    if let Some(mut output) = parked.output {
+    if let Some(mut output) = session.parked[at].output.take() {
+        session.parked.remove(at);
         output.powered = true;
         output.dirty = true;
         output.full_damage_required = true;
         output.drm_compositor.reset_buffer_ages();
         output.frame_clock.disarm();
-        tracing::info!(output = %parked.name, "output unparked: back in the layout on its kept crtc");
+        tracing::info!(output = %name, "output unparked: back in the layout on its kept crtc");
         session.outputs.push(output);
         return Ok(None);
     }
     // The crtc went to a newer connector; find another and start over.
+    // Keep the parked record until adoption succeeds. Any probe or
+    // allocation can fail (including across a VT switch); the next
+    // enable must still find the connector and be able to retry.
+    let connector = session.parked[at].connector;
     let resources = session
         .drm
         .resource_handles()
         .map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
     let info = session
         .drm
-        .get_connector(parked.connector, false)
+        .get_connector(connector, false)
         .map_err(|error| format!("could not read connector {name}: {error}"))?;
-    let restore = |session: &mut SessionGraphics| session.parked.push(ParkedConnector {
-        name: parked.name.clone(),
-        connector: parked.connector,
-        output: None,
-    });
     let Some(mode) = preferred_mode(&info) else {
-        restore(session);
         return Err(format!("{name} reports no modes"));
     };
     let taken: Vec<crtc::Handle> = session
@@ -2600,7 +2598,6 @@ pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Optio
         .chain(session.parked.iter().filter_map(|parked| parked.output.as_ref().map(|output| output.crtc)))
         .collect();
     let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken) else {
-        restore(session);
         return Err(format!("{name} has no free crtc to come back on"));
     };
     let target = ConnectorTarget { info, crtc, mode };
@@ -2615,14 +2612,12 @@ pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Optio
         .unwrap_or(0);
     match attach_output(&mut session.drm, &session.gbm, session.render_node, &session.render_formats, &target, Point::new(next_x, 0)) {
         Ok((output, setup)) => {
-            tracing::info!(output = %parked.name, ?crtc, "output unparked: re-adopted on a fresh crtc");
+            session.parked.remove(at);
+            tracing::info!(output = %name, ?crtc, "output unparked: re-adopted on a fresh crtc");
             session.outputs.push(output);
             Ok(Some(setup))
         }
-        Err(error) => {
-            restore(session);
-            Err(format!("could not re-adopt {name}: {error}"))
-        }
+        Err(error) => Err(format!("could not re-adopt {name}: {error}")),
     }
 }
 
