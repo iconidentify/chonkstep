@@ -260,6 +260,10 @@ pub struct InputConfig {
     pub drag_lock: Option<bool>,
     pub tap_button_map: Option<wm_core::TapButtonMap>,
     pub drag_3fg: Option<wm_core::MultiFingerDrag>,
+    /// Rules for single devices by exact name: Hyprland's `device` blocks and
+    /// `hl.device` calls, and Omarchy's persisted touchpad and touchscreen
+    /// disables.
+    pub devices: Vec<wm_core::DeviceRule>,
 }
 
 /// The system's own keyboard configuration: the `XKB*` keys of

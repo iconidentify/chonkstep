@@ -673,6 +673,7 @@ impl<'a> Loader<'a> {
         for entry in local {
             match entry {
                 Directive::Include(include) => self.include(&include, path, out, depth),
+                Directive::PersistedDeviceDisable { kind } => self.persisted_device_disable(&kind, out),
                 other => out.push(other),
             }
         }
@@ -789,6 +790,46 @@ impl<'a> Loader<'a> {
         matched
     }
 
+    /// A device disable Omarchy persisted for `kind`: one line naming the
+    /// device, in the file Omarchy's toggle writes. The path is under
+    /// `~/.local/state` whatever `XDG_STATE_HOME` says, as Omarchy's own
+    /// toggle and module hardcode it. The line is data from a USB
+    /// descriptor: it becomes a device name, bounded and checked, and is
+    /// never read as Lua or passed to anything that could run it. A
+    /// missing file is the ordinary case of nothing disabled.
+    fn persisted_device_disable(&mut self, kind: &str, out: &mut Vec<Directive>) {
+        use std::io::Read;
+        let Some(home) = &self.roots.facts.home else {
+            return;
+        };
+        let path = home.join(".local/state/omarchy/toggles/hypr").join(format!("{kind}-disabled-name"));
+        let Ok(file) = std::fs::File::open(&path) else {
+            return;
+        };
+        // One byte past the longest name, so an oversized line is seen as one.
+        let mut bytes = Vec::new();
+        if file.take(wm_core::DeviceRule::MAX_NAME as u64 + 2).read_to_end(&mut bytes).is_err() {
+            self.note("device", path.display().to_string(), "unreadable");
+            return;
+        }
+        let line = bytes.split(|byte| *byte == b'\n').next().unwrap_or_default();
+        match std::str::from_utf8(line) {
+            Ok(name) if !name.is_empty() && name.len() <= wm_core::DeviceRule::MAX_NAME && !name.contains(char::is_control) => {
+                out.push(Directive::Device {
+                    name: name.to_string(),
+                    settings: vec![("enabled".into(), "false".into())],
+                });
+            }
+            // Omarchy's own module skips an empty line.
+            Ok("") => {}
+            _ => self.note(
+                "device",
+                path.display().to_string(),
+                "not a device name: one line of at most 256 bytes of text with no control characters",
+            ),
+        }
+    }
+
     /// `default.hypr.omarchy` against the module search path, exactly
     /// as `bootstrap.lua` sets it up: `~/.local/state`, then
     /// `~/.config`, then `$OMARCHY_PATH`.
@@ -900,6 +941,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
             }
             Directive::Input { name, value } => input(&mut reading, &name, &value),
             Directive::Cursor { name, value } => cursor(&mut reading, &name, &value),
+            Directive::Device { name, settings } => device(&mut reading, name, settings),
             Directive::ExecOnce { command } => autostart(&mut reading, &command),
             Directive::WindowRule(rule) => window_rules.push(rule),
             Directive::Monitor(line) => reading.monitors.lines.push(line),
@@ -909,7 +951,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
                 why: "not carried over; see docs/hyprland-config.md".into(),
             }),
             // Spliced by the loader; unreachable here, and harmless.
-            Directive::Include(_) => {}
+            Directive::Include(_) | Directive::PersistedDeviceDisable { .. } => {}
         }
     }
     let (float_rules, notes) = rules::compile(&window_rules);
@@ -1266,6 +1308,71 @@ fn cursor(reading: &mut Reading, name: &str, value: &str) {
         what: format!("{name} = {value}"),
         why: why.into(),
     });
+}
+
+/// One device rule, merged into an earlier rule for the same name as a
+/// later statement in a configuration wins. The name is matched exactly,
+/// never as a pattern, and it and the number of rules are bounded, because
+/// device names come from USB descriptors.
+fn device(reading: &mut Reading, name: String, settings: Vec<(String, String)>) {
+    let skip = |reading: &mut Reading, what: String, why: &str| {
+        reading.skipped.push(Skipped { kind: "device".into(), what, why: why.into() })
+    };
+    if name.is_empty() || name.len() > wm_core::DeviceRule::MAX_NAME || name.contains(char::is_control) {
+        let shown: String = name.chars().take(64).collect();
+        return skip(
+            reading,
+            format!("device {shown:?}"),
+            "a device rule names one device exactly, in 1 to 256 bytes with no control characters",
+        );
+    }
+    let index = match reading.input.devices.iter().position(|rule| rule.name == name) {
+        Some(index) => index,
+        None if reading.input.devices.len() >= wm_core::DeviceRule::MAX_RULES => {
+            return skip(reading, format!("device {name:?}"), "more than 64 device rules in one configuration");
+        }
+        None => {
+            reading.input.devices.push(wm_core::DeviceRule { name: name.clone(), ..Default::default() });
+            reading.input.devices.len() - 1
+        }
+    };
+    for (key, value) in settings {
+        let value = value.trim().trim_matches(['\"', '\'']);
+        let rule = &mut reading.input.devices[index];
+        let setting = key.trim().to_ascii_lowercase();
+        let switch = match setting.as_str() {
+            "enabled" => Some(&mut rule.enabled),
+            "natural_scroll" => Some(&mut rule.natural_scroll),
+            "left_handed" => Some(&mut rule.left_handed),
+            "tap_to_click" | "tap-to-click" => Some(&mut rule.tap_to_click),
+            _ => None,
+        };
+        if let Some(switch) = switch {
+            match toggle(value) {
+                Some(enabled) => *switch = Some(enabled),
+                None => skip(reading, format!("device {name:?} {key} = {value}"), "device toggle must be true or false"),
+            }
+            continue;
+        }
+        let why = match setting.as_str() {
+            "sensitivity" => match value.parse::<f64>() {
+                Ok(speed) if speed.is_finite() && (-1.0..=1.0).contains(&speed) => {
+                    rule.sensitivity = Some(speed);
+                    continue;
+                }
+                _ => "pointer sensitivity must be between -1 and 1",
+            },
+            "accel_profile" => match value.to_ascii_lowercase().as_str() {
+                profile @ ("flat" | "adaptive") => {
+                    rule.accel_profile = Some(profile.to_string());
+                    continue;
+                }
+                _ => "acceleration profile must be flat or adaptive",
+            },
+            _ => "per-device setting is not implemented; a device rule carries enabled, sensitivity, accel_profile, natural_scroll, left_handed and tap_to_click",
+        };
+        skip(reading, format!("device {name:?} {key} = {value}"), why);
+    }
 }
 
 /// One `exec-once` line, filtered.

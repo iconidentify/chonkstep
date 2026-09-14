@@ -849,6 +849,54 @@ fn switchxkblayout_is_a_named_group_action_not_an_unknown_request() {
     }
 }
 
+/// Omarchy's touchpad and touchscreen toggles send
+/// `hl.device({ name = "…", enabled = … })`, after escaping backslashes and
+/// double quotes in the device's name. The name has to arrive whole, and only
+/// a pointer, touch or tablet device with no keys can be switched off.
+#[test]
+fn hl_device_is_a_named_switch_for_one_pointing_device() {
+    use chonk_hyprland_ipc::state::PointerDevice;
+    let trackpad = r#"Apple "Magic" \Trackpad"#;
+    let mut desk = desktop();
+    desk.devices.mice.push(PointerDevice { name: trackpad.into() });
+    desk.devices.touch.push(PointerDevice { name: "ELAN9008:00 04F3:2C82".into() });
+    desk.devices.keyboards.push(Keyboard {
+        name: "Logitech USB Receiver".into(),
+        layout: "us".into(),
+        active_keymap: "English (US)".into(),
+        active_layout_index: 0,
+    });
+    desk.devices.mice.push(PointerDevice { name: "Logitech USB Receiver".into() });
+    // `omarchy-toggle-input-device`'s own quoting of the name.
+    let quoted = trackpad.replace('\\', r"\\").replace('"', r#"\""#);
+    for (enabled, word) in [(false, "false"), (true, "true")] {
+        let wire = format!(r#"/eval hl.device({{ name = "{quoted}", enabled = {word} }})"#);
+        let (response, actions) = answer_payload(wire.as_bytes(), &desk);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions, vec![Action::SetInputDeviceEnabled { name: trackpad.into(), enabled }], "{wire}");
+    }
+    let (response, actions) = answer_payload(br#"/eval hl.device({ name = "ELAN9008:00 04F3:2C82", enabled = false })"#, &desk);
+    assert_eq!((response.trim(), actions.len()), ("ok", 1), "a touchscreen is switched the same way");
+    for (wire, reason) in [
+        (r#"/eval hl.device({ name = "Apple ", enabled = false })"#, "no pointer, touch or tablet device"),
+        (r#"/eval hl.device({ name = "Logitech USB Receiver", enabled = false })"#, "with keys stays on"),
+        (r#"/eval hl.device({ name = "chonkstep-pointer", enabled = false })"#, "nested session"),
+        (r#"/eval hl.device({ name = "chonkstep-keyboard", enabled = true })"#, "nested session"),
+        (r#"/eval hl.device({ name = "ELAN9008:00 04F3:2C82" })"#, "enabled = true or false"),
+        (r#"/eval hl.device({ name = ELAN, enabled = false })"#, "quoted string"),
+        (
+            r#"/eval hl.device({ name = "ELAN9008:00 04F3:2C82", enabled = false, sensitivity = 0.5 })"#,
+            "sensitivity belongs in the configuration",
+        ),
+        (r#"/eval hl.device({ name = "ELAN9008:00 04F3:2C82", enabled = false }"#, "unterminated"),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &desk);
+        assert!(response.starts_with("Invalid dispatcher") && response.contains(reason), "{wire}: {response}");
+        assert!(!response.contains("unknown eval expression"), "{wire}: {response}");
+        assert!(actions.is_empty(), "{wire}");
+    }
+}
+
 #[test]
 fn unknown_requests_answer_the_way_hyprland_does() {
     let response = ask("/nonsense", &desktop());

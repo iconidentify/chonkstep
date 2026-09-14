@@ -538,6 +538,35 @@ pub struct PointerConfig {
     pub drag_lock: Option<bool>,
     pub tap_button_map: Option<TapButtonMap>,
     pub drag_3fg: Option<MultiFingerDrag>,
+    /// Rules for single devices, laid over everything above.
+    pub devices: Vec<DeviceRule>,
+}
+
+/// Settings for one input device, named exactly as libinput names it: the
+/// name `hyprctl devices` reports, and never a pattern.
+///
+/// Each `Some` field overrides the class and desktop-wide setting for that
+/// device alone. The names come from USB descriptors, so the list and each
+/// name are bounded where a configuration is read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeviceRule {
+    pub name: String,
+    /// `false` stops the device sending events. A device with keys is never
+    /// stopped, whatever its rule says.
+    pub enabled: Option<bool>,
+    pub sensitivity: Option<f64>,
+    pub accel_profile: Option<String>,
+    /// For whichever class the device is in.
+    pub natural_scroll: Option<bool>,
+    pub left_handed: Option<bool>,
+    pub tap_to_click: Option<bool>,
+}
+
+impl DeviceRule {
+    /// The most rules one configuration carries.
+    pub const MAX_RULES: usize = 64;
+    /// The longest device name a rule matches, in bytes.
+    pub const MAX_NAME: usize = 256;
 }
 
 

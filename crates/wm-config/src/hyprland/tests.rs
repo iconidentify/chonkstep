@@ -727,6 +727,134 @@ fn out_of_range_touchpad_and_pointer_values_are_refused_by_name() {
     assert!(reading.skipped.is_empty(), "{:?}", reading.skipped);
 }
 
+/// A device rule reaches one device by its exact name, written either way,
+/// merges with a later rule for the same name, and keeps only the settings a
+/// rule can carry.
+#[test]
+fn device_rules_are_read_by_exact_name_from_either_syntax() {
+    let lua = scratch("device-rules-lua");
+    write(
+        &lua.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.device({ name = "epic-mouse-v1", sensitivity = -0.5, enabled = false, scroll_factor = 2 })
+hl.device({ name = "SynPS/2 Synaptics TouchPad", natural_scroll = true, tap_to_click = true })
+hl.device({ name = "epic-mouse-v1", accel_profile = "flat" })
+"#,
+    );
+    let conf = scratch("device-rules-conf");
+    write(
+        &conf.join(".config/hypr/hyprland.conf"),
+        concat!(
+            "device {\n    sensitivity = -0.5\n    name = epic-mouse-v1\n    enabled = false\n    scroll_factor = 2\n}\n",
+            "device {\n    name = SynPS/2 Synaptics TouchPad\n    natural_scroll = true\n    tap-to-click = true\n}\n",
+            "device {\n    name = epic-mouse-v1\n    accel_profile = flat\n}\n",
+        ),
+    );
+    let mouse = wm_core::DeviceRule {
+        name: "epic-mouse-v1".into(),
+        enabled: Some(false),
+        sensitivity: Some(-0.5),
+        accel_profile: Some("flat".into()),
+        ..Default::default()
+    };
+    let touchpad = wm_core::DeviceRule {
+        name: "SynPS/2 Synaptics TouchPad".into(),
+        natural_scroll: Some(true),
+        tap_to_click: Some(true),
+        ..Default::default()
+    };
+    for root in [lua, conf] {
+        let reading = read(&Roots::under(&root));
+        assert_eq!(reading.input.devices, [mouse.clone(), touchpad.clone()], "{root:?}: {:?}", reading.skipped);
+        assert!(
+            skipped_why(&reading, "scroll_factor").is_some_and(|why| why.contains("not implemented")),
+            "{root:?}: a setting a rule cannot carry is named: {:?}",
+            reading.skipped
+        );
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+        assert_eq!(config.input.devices, [mouse.clone(), touchpad.clone()], "{root:?}");
+    }
+}
+
+#[test]
+fn device_rules_without_a_plain_name_and_past_the_bound_are_refused_by_name() {
+    let mut source = String::new();
+    for index in 0..70 {
+        source.push_str(&format!("hl.device({{ name = \"device {index}\", enabled = false }})\n"));
+    }
+    source.push_str(concat!(
+        "hl.device({ name = \"\", enabled = false })\n",
+        "hl.device({ enabled = false })\n",
+        "hl.device({ name = device_name, enabled = false })\n",
+        "hl.device({ name = \"late\", enabled = decided_later })\n",
+        "hl.device({ name = \"bell\\n\", enabled = false })\n",
+        "hl.device({ name = \"late\", enabled = sometimes })\n",
+    ));
+    source.push_str(&format!("hl.device({{ name = \"{}\", enabled = false }})\n", "x".repeat(300)));
+    let root = scratch("device-rules-refused");
+    write(&root.join(".config/hypr/hyprland.lua"), &source);
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.input.devices.len(), wm_core::DeviceRule::MAX_RULES);
+    let why = |needle: &str| reading.skipped.iter().filter(|skip| skip.why.contains(needle)).count();
+    let what = |needle: &str| reading.skipped.iter().filter(|skip| skip.what.contains(needle)).count();
+    assert_eq!(why("more than 64 device rules"), 6, "{:?}", reading.skipped);
+    assert_eq!(why("1 to 256 bytes"), 3, "an empty name, a control character and an oversized name");
+    assert_eq!(what("needs the device's name"), 1);
+    assert_eq!(what("is not a string in the file"), 1);
+    assert_eq!(what("is computed at runtime"), 2);
+}
+
+/// Omarchy keeps a touchpad or touchscreen disable as one line naming the
+/// device and re-applies it through `disabled_input_device`. That line came
+/// from a USB descriptor: it is read as a name and never as Lua, and a line
+/// that is not a name is refused.
+#[test]
+fn omarchys_persisted_device_disable_is_read_as_data_and_never_as_lua() {
+    let root = scratch("persisted-device-disable");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        concat!(
+            "local disabled_input_device = require(\"default.hypr.disabled-input-device\")\n",
+            "disabled_input_device(\"touchpad\")\n",
+            "disabled_input_device(\"touchscreen\")\n",
+            "disabled_input_device(\"keyboard\")\n",
+        ),
+    );
+    // The module reads the file itself and calls `hl.device` at runtime; its
+    // body is a function definition, never a rule of its own.
+    write(
+        &root.join("omarchy/default/hypr/disabled-input-device.lua"),
+        "return function(kind)\n  hl.device({ name = \"never\", enabled = false })\nend\n",
+    );
+    let hostile = r#"Evil \" }) os.execute("touch pwned") hl.device({ name = ""#;
+    let toggles = root.join(".local/state/omarchy/toggles/hypr");
+    write(&toggles.join("touchpad-disabled-name"), &format!("{hostile}\n"));
+    let reading = read(&Roots::under(&root));
+    assert_eq!(
+        reading.input.devices,
+        [wm_core::DeviceRule { name: hostile.into(), enabled: Some(false), ..Default::default() }],
+        "{:?}",
+        reading.skipped
+    );
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what.contains("disabled_input_device(") && skip.what.contains("touchpad and touchscreen")),
+        "a kind Omarchy never persists is named: {:?}",
+        reading.skipped
+    );
+    assert!(!root.join("pwned").exists());
+
+    write(&toggles.join("touchscreen-disabled-name"), "ELAN\u{7}Touch\n");
+    write(&toggles.join("touchpad-disabled-name"), &"x".repeat(400));
+    let reading = read(&Roots::under(&root));
+    assert!(reading.input.devices.is_empty(), "{:?}", reading.input.devices);
+    assert_eq!(
+        reading.skipped.iter().filter(|skip| skip.kind == "device" && skip.why.contains("not a device name")).count(),
+        2,
+        "{:?}",
+        reading.skipped
+    );
+}
+
 /// Omarchy's look turns on `cursor:hide_on_key_press`. The keys that
 /// decide when the pointer hides arrive from either syntax, the warp key
 /// Omarchy sets beside it is declined by name, and the rest of the
@@ -2799,12 +2927,15 @@ fn every_call_the_lua_reader_meets_is_recorded() {
     };
     assert_eq!(count("animation", "hl.curve("), 5, "{:?}", reading.skipped);
     assert_eq!(count("animation", "hl.animation("), 16);
-    assert_eq!(count("lua-call", "disabled_input_device("), 2);
+    // Omarchy's persisted touchpad and touchscreen disables are read as
+    // data now, and the captured machine has none.
+    assert_eq!(count("lua-call", "disabled_input_device("), 0);
+    assert!(reading.input.devices.is_empty(), "{:?}", reading.input.devices);
     assert_eq!(count("include", "dofile("), 1);
     let out = lua_out(&[concat!(
         "cover(0)\n",
         "fit()\n",
-        "hl.device({ name = \"touchpad\", enabled = false })\n",
+        "hl.device(settings)\n",
         "hl.workspace_rule({ workspace = \"1\" })\n",
         "hl.dispatch(hl.dsp.window.close())\n",
         "hl.timer(function() end, { timeout = 10 })\n",
@@ -3080,7 +3211,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        171,
+        169,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -3090,7 +3221,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=179 commands=120 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=171"),
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=169"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

@@ -685,6 +685,9 @@ pub struct WaylandBackend {
     pub(crate) pending_keyboard: Option<wm_core::KeyboardConfig>,
     pub(crate) pending_pointer: Option<wm_core::PointerConfig>,
     pub(crate) pointer_config: wm_core::PointerConfig,
+    /// Which input devices are switched off by name, from the configuration
+    /// and from live `hl.device` requests.
+    pub(crate) input_device_states: crate::input::devices::DeviceStates,
     /// Post-libinput axis multipliers, also used by the nested backend:
     /// one for wheel, tilt and button scrolling, one for finger scrolling.
     pub(crate) pointer_scroll_factor: f64,
@@ -1094,6 +1097,7 @@ impl WaylandBackend {
             pending_keyboard: None,
             pending_pointer: None,
             pointer_config: wm_core::PointerConfig::default(),
+            input_device_states: Default::default(),
             pointer_scroll_factor: 1.0,
             touchpad_scroll_factor: 1.0,
             keyboard_layout: String::new(),
@@ -2626,6 +2630,25 @@ fn retain_wanted_sources<T>(
 }
 
 impl Compositor {
+    /// Installs a pointer configuration: the scroll factors, the pointer's
+    /// hide policy, and every libinput device, with live `hl.device`
+    /// requests folded into its device rules. Whatever a device this
+    /// switches off was holding is released before libinput stops it.
+    pub(crate) fn apply_pointer_config(&mut self, mut config: wm_core::PointerConfig, now: Instant) {
+        let backend = self.wm.backend_mut();
+        config.devices = backend.input_device_states.rules();
+        backend.pointer_config.devices.clone_from(&config.devices);
+        backend.pointer_scroll_factor = config.pointer.scroll_factor.unwrap_or(1.0);
+        backend.touchpad_scroll_factor = config.touchpad.scroll_factor.unwrap_or(1.0);
+        if backend.cursor_visibility.configure(&config.cursor, now) {
+            backend.mark_damaged();
+        }
+        crate::input::devices::release_newly_disabled(self);
+        crate::session::apply_pointer_config(&mut self.graphics, &config, self.touchpad_pointer_captured);
+    }
+}
+
+impl Compositor {
     /// Drains everything the protocol handlers queued since the last
     /// pass, in exactly the X11 binary loop's order — keymap
     /// interception before dispatch, motion coalescing, notification
@@ -2654,13 +2677,7 @@ impl Compositor {
             self.wm.backend_mut().mark_damaged();
         }
         if let Some(config) = self.wm.backend_mut().pending_pointer.take() {
-            let backend = self.wm.backend_mut();
-            backend.pointer_scroll_factor = config.pointer.scroll_factor.unwrap_or(1.0);
-            backend.touchpad_scroll_factor = config.touchpad.scroll_factor.unwrap_or(1.0);
-            if backend.cursor_visibility.configure(&config.cursor, dispatch_started) {
-                backend.mark_damaged();
-            }
-            crate::session::apply_pointer_config(&mut self.graphics, &config, self.touchpad_pointer_captured);
+            self.apply_pointer_config(config, dispatch_started);
         }
         tracing::debug_span!("dispatch_phase", phase = "connector_hotplug")
             .in_scope(|| crate::session::service_connector_hotplug(self));

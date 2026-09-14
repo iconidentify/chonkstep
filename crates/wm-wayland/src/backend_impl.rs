@@ -2009,7 +2009,11 @@ impl Backend for WaylandBackend {
         self.pending_keyboard = Some(config);
     }
 
-    fn set_pointer_config(&mut self, config: wm_core::PointerConfig) {
+    fn set_pointer_config(&mut self, mut config: wm_core::PointerConfig) {
+        // Live `hl.device` requests ride along with the configured rules;
+        // `input::devices` decides which of the two is the newer word.
+        self.input_device_states.configure(&config.devices);
+        config.devices = self.input_device_states.rules();
         self.pointer_config = config.clone();
         self.pending_pointer = Some(config);
     }

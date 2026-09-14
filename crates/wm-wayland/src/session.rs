@@ -50,6 +50,7 @@
 //! - **No DRM leasing.** A crtc is never handed to another process,
 //!   so a VR headset cannot take one over.
 
+mod device_rules;
 mod pointer;
 mod scroll;
 mod touchpad;
@@ -2343,6 +2344,13 @@ fn configure_libinput_device(device: &mut libinput_crate::Device, config: &wm_co
     use libinput_crate::{AccelProfile, ClickMethod};
 
     let mut rejected = Vec::new();
+    let name = device.name().to_string();
+    // Send-events first, so a device switched off stops before anything
+    // else about it is written; its settings still apply for when it is
+    // switched back on.
+    device_rules::configure_send_events(device, &name, config, &mut rejected);
+    let applied = device_rules::for_device(config, &name);
+    let config: &wm_core::PointerConfig = &applied;
     if let Err(error) = touchpad::configure(device, config.disable_while_typing, captured) {
         rejected.push(format!("disable_while_typing: {error:?}"));
     }

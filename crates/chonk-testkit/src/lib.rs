@@ -1547,6 +1547,22 @@ impl Door {
         self.send(&format!("button {button} {}", if pressed { "press" } else { "release" }))
     }
 
+    /// Hotplugs (`present`) or unplugs a keyless pointer called `name`, a
+    /// single word, so per-device rules have a device they may switch off.
+    pub fn pointer_device(&mut self, name: &str, present: bool) -> Result<(), String> {
+        self.send(&format!("pointer-device {} {name}", if present { "add" } else { "remove" }))
+    }
+
+    /// Absolute pointer motion, reported by the pointer called `name`.
+    pub fn motion_from(&mut self, name: &str, x: f64, y: f64) -> Result<(), String> {
+        self.send(&format!("from {name} motion {x} {y}"))
+    }
+
+    /// A pointer button, reported by the pointer called `name`.
+    pub fn button_from(&mut self, name: &str, button: &str, pressed: bool) -> Result<(), String> {
+        self.send(&format!("from {name} button {button} {}", if pressed { "press" } else { "release" }))
+    }
+
     /// Keyboard key by *evdev* keycode (`KEY_*` from
     /// input-event-codes.h — e.g. 125 LEFTMETA, 103 UP, 28 ENTER, 1
     /// ESC); the door applies the xkb +8 offset itself. `pressed` true

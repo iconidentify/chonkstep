@@ -540,6 +540,90 @@ fn typing_and_touch_hide_the_pointer_until_it_moves() {
     assert!(shown(&mut session, "auto-hide-after-touch-then-motion"));
 }
 
+/// Omarchy's touchpad and touchscreen toggles send `hl.device` with the name
+/// `devices` reports. Switched off, that device no longer moves the pointer
+/// or counts as activity, a button it was holding comes back up at the
+/// client, and every other device keeps working. Switched back on, it moves
+/// the pointer again. The nested session's own logical devices are refused
+/// by name.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn a_device_switched_off_by_name_stops_moving_the_pointer_and_releases_its_button() {
+    const TRACKPAD: &str = "chonkstep-test-trackpad";
+    let mut options = SessionOptions { scale: Some(1.0), ..SessionOptions::default() };
+    options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+    let mut session = Session::boot("hypr-ipc-device-switch", options).expect("nested session");
+    let dir = socket_dir(&session);
+    let switch = |enabled: bool, name: &str| format!(r#"/eval hl.device({{ name = "{name}", enabled = {enabled} }})"#);
+    for name in ["chonkstep-pointer", "chonkstep-keyboard"] {
+        let reply = request(&dir, &switch(false, name));
+        assert!(reply.starts_with("Invalid dispatcher") && reply.contains("nested session"), "{name}: {reply}");
+    }
+
+    session.door().pointer_device(TRACKPAD, true).unwrap();
+    session.door().barrier().unwrap();
+    let devices = json(&dir, "j/devices");
+    assert!(
+        devices["mice"].as_array().unwrap().iter().any(|mouse| mouse["name"] == TRACKPAD),
+        "the hotplugged pointer is listed by name: {devices}"
+    );
+
+    let probe = profile_binary("chonk-input-probe").expect("cargo build -p chonk-testkit builds the probe");
+    session.launch(probe.to_str().unwrap(), &["1"]).expect("the input probe launches");
+    let window = session.wait_for_window("input-probe").expect("the input probe maps");
+    let (x, y) = (window.x + 80, window.y + 70);
+    let probe_lines = |session: &Session, kind: &str| {
+        session.client_log("chonk-input-probe").lines().filter(|line| line.split_whitespace().nth(2) == Some(kind)).count()
+    };
+    session.door().motion_from(TRACKPAD, f64::from(x), f64::from(y)).unwrap();
+    session.door().button_from(TRACKPAD, "left", true).unwrap();
+    session.door().barrier().unwrap();
+    poll_until(EVENT, "the trackpad's press to reach the probe", || (probe_lines(&session, "press") == 1).then_some(()))
+        .unwrap();
+
+    assert_eq!(request(&dir, &switch(false, TRACKPAD)).trim(), "ok");
+    poll_until(EVENT, "the held button to come back up", || (probe_lines(&session, "release") == 1).then_some(()))
+        .expect("switching a device off releases the button it held");
+    let at = json(&dir, "j/cursorpos");
+    assert_eq!(at, serde_json::json!({ "x": x, "y": y }));
+    session.door().motion_from(TRACKPAD, f64::from(x + 120), f64::from(y + 40)).unwrap();
+    session.door().barrier().unwrap();
+    assert_eq!(json(&dir, "j/cursorpos"), at, "a switched-off device must not move the pointer");
+    session.door().motion(f64::from(x + 10), f64::from(y + 10)).unwrap();
+    session.door().barrier().unwrap();
+    assert_eq!(json(&dir, "j/cursorpos"), serde_json::json!({ "x": x + 10, "y": y + 10 }), "other devices keep working");
+
+    // Idleness, through the protocol a locker binds: the switched-off
+    // device's motion is not activity, and the door's still is.
+    let watcher = profile_binary("chonk-fullscreen-probe").expect("probe is built").display().to_string();
+    session.launch(&watcher, &["IdleWatch", "idle-watch", "animate-watch-idle"]).expect("the idle watcher launches");
+    session.wait_for_window("IdleWatch").expect("the idle watcher maps");
+    let watched = |session: &Session, line: &str| session.client_log(&watcher).lines().filter(|seen| *seen == line).count();
+    let frames = |session: &Session| session.client_log(&watcher).matches("animation frame=").count();
+    poll_until(EVENT, "the watcher to see the session go idle", || (watched(&session, "idle state=idled") >= 1).then_some(()))
+        .unwrap();
+    let resumed = watched(&session, "idle state=resumed");
+    for step in 0..4 {
+        session.door().motion_from(TRACKPAD, f64::from(x + 20 * step), f64::from(y)).unwrap();
+        session.door().barrier().unwrap();
+    }
+    // Two more reported frames are two more trips around the watcher's event
+    // loop, so a `resumed` sent for that motion would already be logged.
+    let seen = frames(&session);
+    poll_until(EVENT, "the watcher to keep dispatching", || (frames(&session) >= seen + 2).then_some(())).unwrap();
+    assert_eq!(watched(&session, "idle state=resumed"), resumed, "a switched-off device must not count as activity");
+    session.door().motion(f64::from(x), f64::from(y)).unwrap();
+    poll_until(EVENT, "the door's motion to end the idle period", || {
+        (watched(&session, "idle state=resumed") > resumed).then_some(())
+    })
+    .unwrap();
+
+    assert_eq!(request(&dir, &switch(true, TRACKPAD)).trim(), "ok");
+    session.door().motion_from(TRACKPAD, f64::from(x + 30), f64::from(y + 30)).unwrap();
+    session.door().barrier().unwrap();
+    assert_eq!(json(&dir, "j/cursorpos"), serde_json::json!({ "x": x + 30, "y": y + 30 }), "switched back on, it moves the pointer");
+}
+
 /// The mapping protocol has two requests, and both are a join: whether
 /// a caller holds the wlr manager's handle or the frozen
 /// `ext_foreign_toplevel_list_v1` handle, the address that comes back

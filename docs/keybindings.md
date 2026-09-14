@@ -107,13 +107,13 @@ example:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-151 bindings, including four native capture shortcuts, derived from Omarchy's
+154 bindings, including four native capture shortcuts, derived from Omarchy's
 own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
 expands them. A `run <name>` action names an entry the preset declares
 in `[commands]`; the third column is the argv it runs, which is
-Omarchy's own command line. Selecting this keymap declares all 83 of
+Omarchy's own command line. Selecting this keymap declares all 86 of
 those commands, so nothing here needs a `[commands]` table of your own.
 
 Three of these differ from what Omarchy does with the chord —
@@ -276,6 +276,9 @@ helpers are supported directly.
 | `kbdbrightnessup`        | `run omarchy-kbd-brightness-up`        | `omarchy-brightness-keyboard up`                                                                                    |
 | `kbdbrightnessdown`      | `run omarchy-kbd-brightness-down`      | `omarchy-brightness-keyboard down`                                                                                  |
 | `kbdlightonoff`          | `run omarchy-kbd-brightness-cycle`     | `omarchy-brightness-keyboard cycle`                                                                                 |
+| `touchpadtoggle`         | `run omarchy-touchpad-toggle`          | `omarchy-toggle-touchpad`                                                                                           |
+| `touchpadon`             | `run omarchy-touchpad-on`              | `omarchy-toggle-touchpad on`                                                                                        |
+| `touchpadoff`            | `run omarchy-touchpad-off`             | `omarchy-toggle-touchpad off`                                                                                       |
 | `playpause`              | `run omarchy-media-play-pause`         | `omarchy-shell media playPause`                                                                                     |
 | `audiopause`             | `run omarchy-media-play-pause`         | `omarchy-shell media playPause`                                                                                     |
 | `audionext`              | `run omarchy-media-next`               | `omarchy-shell media next`                                                                                          |
@@ -289,7 +292,7 @@ helpers are supported directly.
 
 ### Deliberately unbound
 
-25 groups of Omarchy chords remain unbound in the static preset. The table
+24 groups of Omarchy chords remain unbound in the static preset. The table
 explains each limit; the live configuration reader supports additional chords.
 
 | Omarchy chord                                                                                      | What Omarchy does with it                                            | Why not here                                                |
@@ -317,7 +320,6 @@ explains each limit; the live configuration reader supports additional chords.
 | `super+ctrl+alt+delete` | toggle laptop display mirroring | mirrors an output, which ChonkStep does not do |
 | `super+ctrl+z / super+ctrl+alt+z`                                                                  | cursor zoom in / reset                                               | commands Hyprland beyond the requests ChonkStep serves      |
 | `switch:on/off:Lid Switch`                                                                         | run the lid-close and clamshell handlers                             | a switch binding, which only the live Omarchy configuration carries |
-| `touchpad toggle / on / off`                                                                       | enable and disable the touchpad                                      | commands Hyprland beyond the requests ChonkStep serves      |
 | `super+ctrl+x, f9`                                                                                 | voxtype dictation: toggle, and push-to-talk                          | Omarchy binds it conditionally; a table of constants cannot |
 
 The remaining gap most worth knowing about — toggling Omarchy's bar —

@@ -256,7 +256,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
 | `submap`, workspace rules, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
-| Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (`disabled_input_device`, `hl.device`, `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
+| Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (such as `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
 | Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |
 
@@ -392,6 +392,20 @@ device, which is where a trackpoint or trackball wants them. `[input]` and
 `[input.touchpad]` in `config.toml` take the same scroll and middle-button
 keys for each class. Removing any of these keys restores each device's
 libinput default. A value out of range is logged with its key and skipped.
+
+A device rule applies to one device, named exactly as `hyprctl devices`
+lists it: a `device { name = …; … }` block, or `hl.device({ name = "…", … })`
+in Lua. A rule carries `enabled`, `sensitivity`, `accel_profile`,
+`natural_scroll`, `left_handed` and `tap_to_click`, each laid over the
+settings above for that device alone. Any other key is logged and skipped,
+and at most 64 rules are read. `enabled = false` stops the device sending
+events, through hotplug and resume, and is never applied to a device that
+has keys. Omarchy's touchpad and touchscreen toggles keep a disable as one
+line of data in `~/.local/state/omarchy/toggles/hypr/<kind>-disabled-name`.
+When `toggles.lua` calls `disabled_input_device`, that line is read as a
+device name, never as Lua, and becomes the same rule. The toggles reach the
+running session through `hyprctl eval hl.device(…)`, described in
+[hyprland-ipc.md](hyprland-ipc.md).
 
 Scrolling is configured per device class. `input:natural_scroll` and
 `input:scroll_factor` (or `[input]` in `config.toml`) apply to mice,
@@ -635,7 +649,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=179 commands=120 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=171
+      float_rules=47 monitors=1 skipped=169
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

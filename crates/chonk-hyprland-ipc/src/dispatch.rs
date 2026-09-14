@@ -24,7 +24,7 @@
 //! beginning with `Invalid dispatcher`. The server logs and counts each
 //! one because most non-interactive callers will otherwise hide it.
 
-use crate::state::{workspace_index_from_hypr_id, Snapshot, Window};
+use crate::state::{workspace_index_from_hypr_id, Snapshot, Window, NESTED_DEVICES};
 
 /// What a dispatch request asks chonkstep to do.
 ///
@@ -78,6 +78,11 @@ pub enum Action {
     /// live session property used by Omarchy's screensaver, not a
     /// persisted Hyprland configuration mutation.
     SetCursorHidden(bool),
+    /// Switch one input device on or off by its exact libinput name: the
+    /// request Omarchy's touchpad and touchscreen toggles make. Parsing has
+    /// already refused a name that no pointer, touch or tablet device
+    /// carries, and switching off a name that any keyboard carries.
+    SetInputDeviceEnabled { name: String, enabled: bool },
     /// Move the pointer to a point in logical layout coordinates, the
     /// units `cursorpos` and `clients` report. The host refuses it while
     /// the session is locked or a client holds a pointer constraint.
@@ -480,8 +485,8 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         }
         return Outcome::Unsupported("hl.config property mutation is not supported by chonkstep".to_string());
     }
-    if source.starts_with("hl.device(") {
-        return Outcome::Unsupported("hl.device enable/disable is not supported by this input backend".to_string());
+    if let Some(call) = source.strip_prefix("hl.device(") {
+        return parse_device(call.strip_suffix(')'), snapshot);
     }
     if let Some(call) = source.strip_prefix("hl.workspace_rule(") {
         let args = match lua_arguments(call.strip_suffix(')').unwrap_or(call)) {
@@ -499,6 +504,55 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         };
     }
     Outcome::Unknown(format!("unknown eval expression {source:?}"))
+}
+
+/// The longest device name `hl.device` accepts: the bound a configuration's
+/// device rules have, since both name the same devices.
+const MAX_DEVICE_NAME: usize = 256;
+
+/// `hl.device({ name = "…", enabled = BOOL })`. Only `enabled` changes at
+/// runtime, and every other device setting belongs in the configuration.
+/// The name is a Lua string with its escapes decoded, and has to be exactly
+/// a device the snapshot lists: a name cut short at an escaped quote would
+/// be a plausible, different device.
+fn parse_device(body: Option<&str>, snapshot: &Snapshot) -> Outcome {
+    let args = match body.map(lua_arguments) {
+        Some(Ok(args)) => args,
+        Some(Err(error)) => return Outcome::Unsupported(format!("hl.device: invalid Lua arguments: {error}")),
+        None => return Outcome::Unsupported("hl.device: invalid Lua arguments: unterminated call".to_string()),
+    };
+    let Some(Literal::Str(name)) = lua_value(&args, "name") else {
+        return Outcome::Unsupported("hl.device requires the device's name as a quoted string".to_string());
+    };
+    if name.is_empty() || name.len() > MAX_DEVICE_NAME {
+        return Outcome::Unsupported(format!("hl.device names a device in 1 to {MAX_DEVICE_NAME} bytes"));
+    }
+    let Some(enabled) = lua_field(&args, "enabled").as_deref().and_then(parse_bool) else {
+        return Outcome::Unsupported("hl.device requires enabled = true or false".to_string());
+    };
+    let keys = args.iter().flat_map(|arg| match arg {
+        Literal::Table(fields) => fields.as_slice(),
+        _ => &[],
+    });
+    if let Some(key) = keys.filter_map(|(key, _)| key.as_deref()).find(|key| !matches!(*key, "name" | "enabled")) {
+        return Outcome::Unsupported(format!("hl.device changes only enabled at runtime; {key} belongs in the configuration"));
+    }
+    if NESTED_DEVICES.contains(&name.as_str()) {
+        return Outcome::Unsupported(format!(
+            "{name:?} is the nested session's logical device, not a libinput device, and cannot be switched"
+        ));
+    }
+    let devices = &snapshot.devices;
+    if !enabled && devices.keyboards.iter().any(|keyboard| keyboard.name == *name) {
+        return Outcome::Unsupported(format!(
+            "hl.device will not disable {name:?}: a device with keys stays on, so the lock screen can always be typed into"
+        ));
+    }
+    let known = devices.mice.iter().chain(&devices.touch).chain(&devices.tablets).any(|device| device.name == *name);
+    if !known {
+        return Outcome::Unsupported(format!("hl.device names no pointer, touch or tablet device {name:?}"));
+    }
+    Outcome::Run(Action::SetInputDeviceEnabled { name: name.clone(), enabled })
 }
 
 fn layout_action(workspace: usize, mode: &str) -> Outcome {

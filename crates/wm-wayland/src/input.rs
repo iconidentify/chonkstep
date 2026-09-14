@@ -59,6 +59,7 @@
 
 pub(crate) mod constraints;
 pub(crate) mod cursor_visibility;
+pub(crate) mod devices;
 pub(crate) mod gestures;
 pub(crate) mod keyboard;
 mod seat;
@@ -175,6 +176,8 @@ struct InputState {
     /// finger dragging titlebar or shell chrome keeps reaching the
     /// object it landed on after it moves outside that object's rect.
     active_touches: HashMap<smithay::backend::input::TouchSlot, TouchRoute>,
+    /// What each device holds, so switching one off can release it.
+    device_holds: devices::Holds,
 }
 
 #[derive(Clone, Copy)]
@@ -767,6 +770,13 @@ impl InputFamily {
 /// winit dev loop and a future libinput session share every line of
 /// routing policy — only the raw event types differ.
 pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event: InputEvent<I>) {
+    // A device switched off by name sends nothing, activity included, so a
+    // palm on a disabled touchpad neither moves the pointer nor wakes the
+    // screen. See `devices`.
+    if devices::from_disabled_device(state, &event) {
+        return;
+    }
+    devices::note_holds(state, &event);
     let family = InputFamily::of(&event);
     // Every input event this compositor routes is user activity to the
     // idle timers, decided here at the one funnel both backends share.

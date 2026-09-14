@@ -625,6 +625,11 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("kbdbrightnessup", "run omarchy-kbd-brightness-up"),
     ("kbdbrightnessdown", "run omarchy-kbd-brightness-down"),
     ("kbdlightonoff", "run omarchy-kbd-brightness-cycle"),
+    // Omarchy's toggle script finds the touchpad in `hyprctl devices` and
+    // switches it with `hl.device`, both of which this desktop serves.
+    ("touchpadtoggle", "run omarchy-touchpad-toggle"),
+    ("touchpadon", "run omarchy-touchpad-on"),
+    ("touchpadoff", "run omarchy-touchpad-off"),
     ("playpause", "run omarchy-media-play-pause"),
     ("audiopause", "run omarchy-media-play-pause"),
     ("audionext", "run omarchy-media-next"),
@@ -751,8 +756,6 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+ctrl+alt+delete", "toggle laptop display mirroring", Unbound::OUTPUT_MIRROR),
     ("super+ctrl+z / super+ctrl+alt+z", "cursor zoom in / reset", Unbound::HyprlandOnly),
     ("switch:on/off:Lid Switch", "run the lid-close and clamshell handlers", Unbound::SWITCH),
-    // media.lua
-    ("touchpad toggle / on / off", "enable and disable the touchpad", Unbound::HyprlandOnly),
     // voxtype.lua
     ("super+ctrl+x, f9", "voxtype dictation: toggle, and push-to-talk", Unbound::Conditional),
 ];
@@ -857,6 +860,9 @@ pub const OMARCHY_COMMANDS: &[(&str, &[&str])] = &[
     ("omarchy-show-weather", &["omarchy-notification-weather"]),
     ("omarchy-toggle-idle", &["omarchy-toggle-idle"]),
     ("omarchy-toggle-nightlight", &["omarchy-toggle-nightlight"]),
+    ("omarchy-touchpad-off", &["omarchy-toggle-touchpad", "off"]),
+    ("omarchy-touchpad-on", &["omarchy-toggle-touchpad", "on"]),
+    ("omarchy-touchpad-toggle", &["omarchy-toggle-touchpad"]),
     ("omarchy-transcode", &["omarchy-transcode"]),
     ("omarchy-volume-down", &["omarchy-audio-output-volume", "lower"]),
     ("omarchy-volume-down-fine", &["omarchy-audio-output-volume", "-1"]),

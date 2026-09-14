@@ -61,6 +61,8 @@
 //! |---|---|
 //! | `motion X Y` | absolute pointer motion to (X, Y) in global (output) coordinates; floats accepted |
 //! | `button left\|middle\|right press\|release` | pointer button by name |
+//! | `pointer-device add\|remove NAME` | hotplugs a keyless pointer called NAME (one word), for per-device rules |
+//! | `from NAME motion X Y` / `from NAME button …` | the same pointer commands, reported by the pointer called NAME |
 //! | `touch down\|motion SLOT X Y` | touch position in global output coordinates |
 //! | `touch up SLOT` | release a touch slot |
 //! | `touch cancel\|frame` | cancel the touch sequence or finish its input frame |
@@ -160,29 +162,40 @@ pub(crate) struct TestInput;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TestDevice {
     switch: Option<std::rc::Rc<str>>,
+    /// A pointer with no keys, announced by `pointer-device` and speaking
+    /// through `from`, so per-device rules have a device they may disable.
+    pointer: Option<std::rc::Rc<str>>,
 }
 
 impl TestDevice {
-    const DOOR: Self = Self { switch: None };
+    const DOOR: Self = Self { switch: None, pointer: None };
+
+    fn pointer(name: &str) -> Option<Self> {
+        (1..=256).contains(&name.len()).then(|| Self { switch: None, pointer: Some(name.into()) })
+    }
 }
 
 impl Device for TestDevice {
     fn id(&self) -> String {
-        match self.switch {
-            None => "chonkstep-test-door".into(),
-            Some(_) => "chonkstep-test-switch".into(),
+        match (&self.switch, &self.pointer) {
+            (Some(_), _) => "chonkstep-test-switch".into(),
+            (None, Some(name)) => format!("chonkstep-test-pointer:{name}"),
+            (None, None) => "chonkstep-test-door".into(),
         }
     }
     fn name(&self) -> String {
-        match &self.switch {
-            None => "chonkstep test door".into(),
-            Some(name) => name.to_string(),
+        match (&self.switch, &self.pointer) {
+            (Some(name), _) | (None, Some(name)) => name.to_string(),
+            (None, None) => "chonkstep test door".into(),
         }
     }
     fn has_capability(&self, capability: DeviceCapability) -> bool {
-        match self.switch {
-            None => matches!(capability, DeviceCapability::Keyboard | DeviceCapability::Pointer | DeviceCapability::Touch),
-            Some(_) => matches!(capability, DeviceCapability::Switch),
+        match (&self.switch, &self.pointer) {
+            (Some(_), _) => matches!(capability, DeviceCapability::Switch),
+            (None, Some(_)) => matches!(capability, DeviceCapability::Pointer),
+            (None, None) => {
+                matches!(capability, DeviceCapability::Keyboard | DeviceCapability::Pointer | DeviceCapability::Touch)
+            }
         }
     }
     fn usb_id(&self) -> Option<(u32, u32)> {
@@ -233,6 +246,7 @@ pub(crate) struct TestButtonEvent {
     code: u32,
     state: ButtonState,
     time: u64,
+    device: TestDevice,
 }
 
 impl Event<TestInput> for TestButtonEvent {
@@ -240,7 +254,7 @@ impl Event<TestInput> for TestButtonEvent {
         self.time
     }
     fn device(&self) -> TestDevice {
-        TestDevice::DOOR
+        self.device.clone()
     }
 }
 
@@ -262,6 +276,7 @@ pub(crate) struct TestMotionEvent {
     x: f64,
     y: f64,
     time: u64,
+    device: TestDevice,
 }
 
 impl Event<TestInput> for TestMotionEvent {
@@ -269,7 +284,7 @@ impl Event<TestInput> for TestMotionEvent {
         self.time
     }
     fn device(&self) -> TestDevice {
-        TestDevice::DOOR
+        self.device.clone()
     }
 }
 
@@ -640,10 +655,10 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                         }
                         (x, y)
                     };
-                    TestTouchEvent { position: TestMotionEvent { x, y, time }, slot: Some(slot).into() }
+                    TestTouchEvent { position: TestMotionEvent { x, y, time, device: TestDevice::DOOR }, slot: Some(slot).into() }
                 }
                 Some("cancel" | "frame") => TestTouchEvent {
-                    position: TestMotionEvent { x: 0.0, y: 0.0, time }, slot: None.into(),
+                    position: TestMotionEvent { x: 0.0, y: 0.0, time, device: TestDevice::DOOR }, slot: None.into(),
                 },
                 _ => {
                     reply_err(stream, "touch wants down|motion|up|cancel|frame");
@@ -686,7 +701,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 reply_err(stream, "switch NAME must be 1 to 256 bytes");
                 return;
             }
-            let event = TestSwitchEvent { device: TestDevice { switch: Some(name.into()) }, switch, state, time };
+            let event = TestSwitchEvent { device: TestDevice { switch: Some(name.into()), pointer: None }, switch, state, time };
             crate::input::process_input_event::<TestInput>(comp, InputEvent::SwitchToggle { event });
         }
         Some("input-reset") => {
@@ -754,17 +769,32 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             }
             crate::input::process_input_event::<TestInput>(comp, input);
         }
-        Some("motion") => {
-            let (Some(Ok(x)), Some(Ok(y))) =
-                (words.next().map(str::parse::<f64>), words.next().map(str::parse::<f64>))
-            else {
-                reply_err(stream, "motion wants: motion X Y");
+        Some("motion") => inject_motion(&mut words, TestDevice::DOOR, stream, comp, time),
+        // A keyless pointer by name, for the per-device rules: announced and
+        // withdrawn like a hotplugged mouse, then speaking through `from`.
+        Some("pointer-device") => {
+            let action = words.next();
+            let device = words.next().and_then(TestDevice::pointer);
+            let input = match (action, device, words.next()) {
+                (Some("add"), Some(device), None) => InputEvent::DeviceAdded { device },
+                (Some("remove"), Some(device), None) => InputEvent::DeviceRemoved { device },
+                _ => {
+                    reply_err(stream, "pointer-device wants add|remove NAME (1 to 256 bytes, no spaces)");
+                    return;
+                }
+            };
+            crate::input::process_input_event::<TestInput>(comp, input);
+        }
+        Some("from") => {
+            let Some(device) = words.next().and_then(TestDevice::pointer) else {
+                reply_err(stream, "from wants NAME motion X Y|button left|middle|right press|release");
                 return;
             };
-            crate::input::process_input_event::<TestInput>(
-                comp,
-                InputEvent::PointerMotionAbsolute { event: TestMotionEvent { x, y, time } },
-            );
+            match words.next() {
+                Some("motion") => inject_motion(&mut words, device, stream, comp, time),
+                Some("button") => inject_button(&mut words, device, stream, comp, time),
+                _ => reply_err(stream, "from wants NAME motion X Y|button left|middle|right press|release"),
+            }
         }
         // Relative motion, which no other route on this backend can
         // produce: winit's `PointerMotionEvent` is `UnusedEvent`, so a
@@ -783,26 +813,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             };
             crate::input::inject_pointer_motion(comp, dx, dy, time as u32);
         }
-        Some("button") => {
-            // input-event-codes.h values, the same ones a mouse sends.
-            let code = match words.next() {
-                Some("left") => 0x110,
-                Some("middle") => 0x112,
-                Some("right") => 0x111,
-                _ => {
-                    reply_err(stream, "button wants: button left|middle|right press|release");
-                    return;
-                }
-            };
-            let Some(state) = parse_button_state(words.next()) else {
-                reply_err(stream, "button wants: button left|middle|right press|release");
-                return;
-            };
-            crate::input::process_input_event::<TestInput>(
-                comp,
-                InputEvent::PointerButton { event: TestButtonEvent { code, state, time } },
-            );
-        }
+        Some("button") => inject_button(&mut words, TestDevice::DOOR, stream, comp, time),
         Some("key") => {
             let Some(Ok(code)) = words.next().map(str::parse::<u32>) else {
                 reply_err(stream, "key wants: key EVDEV_CODE press|release");
@@ -1114,6 +1125,52 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
         Some(other) => reply_err(stream, &format!("unknown command {other:?}")),
         None => {}
     }
+}
+
+/// `motion X Y`, reported by `device`.
+fn inject_motion(
+    words: &mut std::str::SplitWhitespace<'_>,
+    device: TestDevice,
+    stream: &mut UnixStream,
+    comp: &mut Compositor,
+    time: u64,
+) {
+    let (Some(Ok(x)), Some(Ok(y))) = (words.next().map(str::parse::<f64>), words.next().map(str::parse::<f64>)) else {
+        let _ = stream.write_all(b"err motion wants: motion X Y\n");
+        return;
+    };
+    crate::input::process_input_event::<TestInput>(
+        comp,
+        InputEvent::PointerMotionAbsolute { event: TestMotionEvent { x, y, time, device } },
+    );
+}
+
+/// `button left|middle|right press|release`, reported by `device`.
+fn inject_button(
+    words: &mut std::str::SplitWhitespace<'_>,
+    device: TestDevice,
+    stream: &mut UnixStream,
+    comp: &mut Compositor,
+    time: u64,
+) {
+    // input-event-codes.h values, the same ones a mouse sends.
+    let code = match words.next() {
+        Some("left") => 0x110,
+        Some("middle") => 0x112,
+        Some("right") => 0x111,
+        _ => {
+            let _ = stream.write_all(b"err button wants: button left|middle|right press|release\n");
+            return;
+        }
+    };
+    let Some(state) = parse_button_state(words.next()) else {
+        let _ = stream.write_all(b"err button wants: button left|middle|right press|release\n");
+        return;
+    };
+    crate::input::process_input_event::<TestInput>(
+        comp,
+        InputEvent::PointerButton { event: TestButtonEvent { code, state, time, device } },
+    );
 }
 
 fn parse_button_state(word: Option<&str>) -> Option<ButtonState> {

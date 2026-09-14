@@ -51,6 +51,13 @@ pub enum Directive {
     Input { name: String, value: String },
     /// One key from Hyprland's `cursor {}` table.
     Cursor { name: String, value: String },
+    /// `device { name = …; … }` / `hl.device({ name = …, … })`: settings
+    /// for one input device, named exactly, still in the file's own words.
+    Device { name: String, settings: Vec<(String, String)> },
+    /// Omarchy's `disabled_input_device("touchpad")`: a disable Omarchy
+    /// stores as one line of data naming the device. The loader reads the
+    /// line as a name; nothing ever runs it as Lua.
+    PersistedDeviceDisable { kind: String },
     /// `exec-once = cmd` / `hl.exec_cmd(cmd)` inside an
     /// `hl.on("hyprland.start", …)` block / `o.launch_on_start(cmd)`.
     ExecOnce { command: String },
