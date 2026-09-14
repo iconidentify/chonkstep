@@ -99,10 +99,13 @@
 //!   position, scale, and 0/90/180/270-degree transforms are applied
 //!   once outputs exist. Disable, mirror, and other extras refuse their
 //!   whole line.
-//! - **Anything that commands Hyprland.** `hyprctl` and the
-//!   `omarchy-hyprland-*` scripts talk to a compositor that is not
-//!   running; those bindings stay unbound, the same filter
-//!   `chonk_shell::omarchy_menu` applies to menu rows.
+//! - **Hyprland requests chonkstep does not serve.** `hyprctl` and any
+//!   `omarchy-hyprland-*` script outside
+//!   [`dispatch::SERVED_OMARCHY_SCRIPTS`] stay unbound, with a reason
+//!   naming what a known script needs. The listed scripts send only
+//!   requests this desktop's Hyprland IPC applies, which a conformance
+//!   test proves, and run like any other command.
+//!   `chonk_shell::omarchy_menu` applies the same predicate to menu rows.
 //!
 //! Every one of these is logged when it is met, not silently dropped.
 
@@ -119,7 +122,6 @@ use std::path::{Path, PathBuf};
 use directive::{Directive, Include};
 use wm_core::KeyCombo;
 
-use crate::preset::Unbound;
 use crate::Action;
 
 /// The most files one read will open. Omarchy's own tree is about
@@ -1082,8 +1084,9 @@ fn parse_input_bool(
 /// One `exec-once` line, filtered.
 ///
 /// Two filters, and both exist because starting the wrong thing here
-/// is worse than starting nothing. A command that talks to Hyprland
-/// cannot work; and Omarchy's own shell is already started by
+/// is worse than starting nothing. A command whose Hyprland requests
+/// chonkstep does not serve can only half-work; and Omarchy's own shell
+/// is already started by
 /// `chonk_shell::omarchy_shell`, at the point in the session where
 /// Hyprland's `autostart` would have started it, so taking it from
 /// this list too would start a second copy of the bar.
@@ -1121,11 +1124,11 @@ fn autostart(reading: &mut Reading, command: &str) {
         .next()
         .unwrap_or(&effective)
         .to_string();
-    if dispatch::commands_hyprland(&base) || dispatch::commands_hyprland(&effective) {
+    if let Some(reason) = dispatch::hyprland_refusal(&base).or_else(|| dispatch::hyprland_refusal(&effective)) {
         reading.skipped.push(Skipped {
             kind: "exec-once".into(),
             what: command.to_string(),
-            why: Unbound::HyprlandOnly.reason().to_string(),
+            why: reason.reason().to_string(),
         });
         return;
     }

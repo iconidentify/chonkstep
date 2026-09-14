@@ -367,28 +367,52 @@ fn the_bind_helper_forms_expand_exactly_as_omarchy_expands_them() {
     );
 }
 
-/// A chord that runs `hyprctl` or an `omarchy-hyprland-*` script
-/// commands a compositor that is not running, and is left unbound —
-/// the same filter `chonk_shell::omarchy_menu` applies to menu rows.
-/// `hyprpicker` is deliberately *not* caught by it: it is an ordinary
-/// layer-shell client and works here.
+/// A chord that runs `hyprctl` or an `omarchy-hyprland-*` script whose
+/// requests chonkstep does not serve is left unbound, with a reason
+/// naming what the script needs — the same predicate
+/// `chonk_shell::omarchy_menu` applies to menu rows. The scripts on
+/// `dispatch::SERVED_OMARCHY_SCRIPTS` send only requests the IPC
+/// applies, and bind like any other command; they were refused by a
+/// name test for years after the IPC began serving them. `hyprpicker`
+/// is deliberately *not* caught either: it is an ordinary layer-shell
+/// client and works here.
 #[test]
 fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
+    use crate::preset::Unbound;
     let reading = read(&machine());
-    assert_eq!(
-        action_for(&reading, "super+backspace"),
-        None,
-        "omarchy-hyprland-window-transparency-toggle"
-    );
-    assert_eq!(
-        action_for(&reading, "super+slash"),
-        None,
-        "omarchy-hyprland-monitor-scaling"
-    );
-    assert_eq!(
-        skipped_why(&reading, "SUPER + BACKSPACE"),
-        Some(crate::preset::Unbound::HyprlandOnly.reason().to_string())
-    );
+    for (chord, argv) in [
+        ("super+o", &["omarchy-hyprland-window-pop"][..]),
+        ("super+alt+home", &["omarchy-hyprland-window-width", "save"]),
+        ("super+home", &["omarchy-hyprland-window-width", "restore"]),
+        ("super+slash", &["omarchy-hyprland-monitor-scaling", "up"]),
+        ("super+alt+slash", &["omarchy-hyprland-monitor-scaling", "down"]),
+        ("ctrl+alt+delete", &["omarchy-hyprland-window-close-all"]),
+    ] {
+        let argv: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
+        assert_eq!(argv_for(&reading, chord), Some(argv), "{chord} runs its served script");
+    }
+    for (chord, what, reason) in [
+        ("super+ctrl+f", "SUPER + CTRL + F (Tiled full screen)", Unbound::CLIENT_FULLSCREEN),
+        ("super+backspace", "SUPER + BACKSPACE (Toggle window transparency)", Unbound::OPACITY),
+        ("super+shift+backspace", "SUPER + SHIFT + BACKSPACE (Toggle window gaps)", Unbound::GAPS),
+        (
+            "super+ctrl+backspace",
+            "SUPER + CTRL + BACKSPACE (Toggle single-window square aspect)",
+            Unbound::LAYOUT_OPTION,
+        ),
+        ("super+ctrl+delete", "SUPER + CTRL + Delete (Toggle laptop display)", Unbound::OUTPUT_DISABLE),
+        (
+            "super+ctrl+alt+delete",
+            "SUPER + CTRL + ALT + Delete (Toggle laptop display mirroring)",
+            Unbound::OUTPUT_MIRROR,
+        ),
+    ] {
+        assert_eq!(action_for(&reading, chord), None, "{chord} must stay unbound");
+        assert_eq!(skipped_why(&reading, what), Some(reason.reason().to_string()), "{what}");
+    }
+    // The lid switches never reach the script filter: a switch is not a
+    // chord this desktop can grab.
+    assert!(skipped_why(&reading, "switch:off:Lid Switch").is_some());
     assert_eq!(
         argv_for(&reading, "super+print"),
         Some(vec![
@@ -745,8 +769,9 @@ fn autostart_comes_out_of_the_start_handler() {
     );
 }
 
-/// Two autostart entries must not be carried: one commands Hyprland,
-/// and one is a second copy of the shell this desktop already starts.
+/// Two autostart entries must not be carried: one is Omarchy's monitor
+/// watcher, whose display toggles need output disable, and one is a
+/// second copy of the shell this desktop already starts.
 #[test]
 fn autostart_refuses_the_two_things_that_would_be_worse_than_nothing() {
     let reading = read(&machine());
@@ -760,6 +785,10 @@ fn autostart_refuses_the_two_things_that_would_be_worse_than_nothing() {
             .iter()
             .any(|c| c.contains("omarchy-hyprland-monitor-watch")),
         "commands Hyprland: {flat:?}"
+    );
+    assert_eq!(
+        skipped_why(&reading, "omarchy-hyprland-monitor-watch"),
+        Some(crate::preset::Unbound::OUTPUT_DISABLE.reason().to_string())
     );
     assert!(
         !flat.iter().any(|c| c.contains("omarchy-launch-shell")),
@@ -2181,14 +2210,16 @@ fn the_documented_switch_is_the_real_one() {
 fn every_reason_a_binding_can_be_refused_for_is_explained_somewhere() {
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     const CARD: &str = include_str!("../../../../docs/keybindings.md");
-    for reason in [
+    let named = [
         crate::preset::Unbound::TilingOnly,
         crate::preset::Unbound::HyprlandOnly,
         crate::preset::Unbound::NoVerb,
         crate::preset::Unbound::NotAKey,
         crate::preset::Unbound::Conditional,
         crate::preset::Unbound::Declined,
-    ] {
+    ];
+    let scripts = dispatch::UNSERVED_OMARCHY_SCRIPTS.iter().map(|(_, reason)| *reason);
+    for reason in named.into_iter().chain(scripts) {
         let text = reason.reason();
         assert!(
             GUIDE.contains(text) || CARD.contains(text) || explained_in_prose(GUIDE, reason),
@@ -2203,7 +2234,9 @@ fn every_reason_a_binding_can_be_refused_for_is_explained_somewhere() {
 fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
     let phrase = match reason {
         crate::preset::Unbound::TilingOnly => "there is nothing to split",
-        crate::preset::Unbound::HyprlandOnly => "talks to a compositor that is not running",
+        crate::preset::Unbound::HyprlandOnly => "only when every request it sends is proven served",
+        // A script's reason is specific to it, so the guide has to quote it.
+        crate::preset::Unbound::Unserved(text) => text,
         crate::preset::Unbound::NoVerb => "has no verb for",
         crate::preset::Unbound::NotAKey => "Not key chords; this config format cannot express one",
         crate::preset::Unbound::Conditional => "answered by asking the file system",
@@ -2216,8 +2249,8 @@ fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
 /// reader actually produces from it.
 ///
 /// `docs/omarchy-mode.md` tells a reader what they gain by having a
-/// real Omarchy configuration rather than the baked table — "153
-/// bindings over 113 commands, against the baked table's 127 over 77",
+/// real Omarchy configuration rather than the baked table — "167
+/// bindings over 119 commands, against the baked table's 151 over 83",
 /// and 38 float rules where the hardcoded one had a single prefix.
 /// Those numbers are the argument for the whole module, and a number
 /// in prose is the first thing to go stale. Pinned here against the
@@ -2229,12 +2262,12 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     let reading = read(&machine());
     assert_eq!(
         reading.keybindings.len(),
-        161,
+        167,
         "bindings read from the captured machine"
     );
     assert_eq!(
         reading.commands.len(),
-        113,
+        119,
         "commands declared for global and scoped bindings"
     );
     assert_eq!(
@@ -2248,17 +2281,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        163,
+        157,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("161\nbindings over 113 commands") || MODE.contains("161 bindings over 113 commands"),
-        "docs/omarchy-mode.md no longer quotes the 161 bindings over 113 commands this machine produces"
+        MODE.contains("167\nbindings over 119 commands") || MODE.contains("167 bindings over 119 commands"),
+        "docs/omarchy-mode.md no longer quotes the 167 bindings over 119 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=161 commands=113 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=163"),
+        GUIDE.contains("files=42 bindings=167 commands=119 env=8 autostart=4")
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=157"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

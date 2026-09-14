@@ -81,8 +81,9 @@
 //!   Omarchy's search and `summon` routes. A cascade menu has no use
 //!   for a duplicate branch, and nothing shipped declares one.
 //! * **Hyprland-only actions.** An action that invokes `hyprctl` or an
-//!   `omarchy-hyprland-*` script commands a compositor that is not
-//!   running; those rows are hidden by [`is_hyprland_only`]. Everything
+//!   `omarchy-hyprland-*` script whose requests chonkstep does not serve
+//!   is hidden by [`is_hyprland_only`], which asks the keymap's own
+//!   predicate, so a row and the chord for the same script agree. Everything
 //!   else stays, including "Learn → Hyprland" — a manual is not a
 //!   compositor call.
 //! * **Icons, `title`, `aliases`, `description`.** The Nerd Font glyph
@@ -656,10 +657,14 @@ fn parent_of(id: &str, explicit: Option<&str>, ids: &HashSet<String>) -> Option<
     None
 }
 
-/// Whether an action commands Hyprland rather than the desktop: any
-/// shell word of the command whose basename is `hyprctl` or begins
-/// with `omarchy-hyprland-`. Words are split on whitespace and on the
-/// shell's operator characters, so `pkill x || hyprctl reload` and
+/// Whether an action commands Hyprland in a way chonkstep does not
+/// serve: any shell word of the command that
+/// `wm_config::hyprland::dispatch::commands_hyprland` refuses, which is
+/// `hyprctl` and every `omarchy-hyprland-*` script outside the served
+/// allow-list. It is the predicate the keymap and `exec-once` use, so a
+/// menu row cannot be hidden while the chord for the same script works.
+/// Words are split on whitespace and on the shell's operator
+/// characters, so `pkill x || hyprctl reload` and
 /// `a; omarchy-hyprland-foo` both match while `hyprpicker`,
 /// `hyprsunset` and a URL mentioning hyprland do not: the rule names
 /// the compositor's control surface, not everything with `hypr` in it.
@@ -667,8 +672,7 @@ pub fn is_hyprland_only(action: &str) -> bool {
     action
         .split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '<' | '>' | '\'' | '"' | '`'))
         .filter(|word| !word.is_empty())
-        .map(|word| word.rsplit('/').next().unwrap_or(word))
-        .any(|word| word == "hyprctl" || word.starts_with("omarchy-hyprland-"))
+        .any(wm_config::hyprland::dispatch::commands_hyprland)
 }
 
 // ----------------------------------------------------------- conditions
@@ -1349,6 +1353,36 @@ mod tests {
         assert!(!is_hyprland_only("omarchy-launch-webapp 'https://wiki.hypr.land/'"));
         assert!(!is_hyprland_only("omarchy-launch-floating-terminal-with-presentation omarchy-refresh-hyprland"));
         assert!(!is_hyprland_only("echo hyprctl-ish"));
+        // Scripts whose requests the IPC serves run like any other
+        // command; the ones it does not serve stay hidden.
+        assert!(!is_hyprland_only("omarchy-hyprland-monitor-scaling up"));
+        assert!(!is_hyprland_only("/usr/bin/omarchy-hyprland-window-pop"));
+        assert!(!is_hyprland_only("omarchy-hyprland-workspace-layout-toggle"));
+        assert!(is_hyprland_only("omarchy-hyprland-window-tiled-fullscreen-toggle"));
+        assert!(is_hyprland_only("omarchy-hyprland-some-future-script"));
+    }
+
+    /// Omarchy's "Workspace Layout" row runs the same script the
+    /// keymap binds to `super+l`. The menu kept a filter of its own
+    /// that hid the row while the chord worked.
+    #[test]
+    fn a_row_for_a_served_script_is_kept_and_an_unserved_one_is_skipped() {
+        let entries = vec![
+            ("trigger".to_string(), entry(&[("label", "Trigger")])),
+            ("trigger.toggle".to_string(), entry(&[("label", "Toggle")])),
+            (
+                "trigger.toggle.workspace-layout".to_string(),
+                entry(&[("label", "Workspace Layout"), ("action", "omarchy-hyprland-workspace-layout-toggle")]),
+            ),
+            (
+                "trigger.toggle.window-gaps".to_string(),
+                entry(&[("label", "Window Gaps"), ("action", "omarchy-hyprland-window-gaps-toggle")]),
+            ),
+        ];
+        let model = MenuModel::build(entries);
+        assert_eq!(model.skipped(), &[("trigger.toggle.window-gaps".to_string(), Skip::HyprlandOnly)]);
+        let items = model.items(None, 0, u32::MAX);
+        assert_eq!(labels(submenu(submenu(&items, "Trigger"), "Toggle")), ["Workspace Layout"]);
     }
 
     #[test]

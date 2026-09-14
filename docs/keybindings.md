@@ -107,13 +107,13 @@ example:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-145 bindings, including four native capture shortcuts, derived from Omarchy's
+151 bindings, including four native capture shortcuts, derived from Omarchy's
 own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
 expands them. A `run <name>` action names an entry the preset declares
 in `[commands]`; the third column is the argv it runs, which is
-Omarchy's own command line. Selecting this keymap declares all 77 of
+Omarchy's own command line. Selecting this keymap declares all 83 of
 those commands, so nothing here needs a `[commands]` table of your own.
 
 Three of these differ from what Omarchy does with the chord —
@@ -147,11 +147,15 @@ helpers are supported directly.
 | `super+alt+shift+f`      | `run omarchy-files-here`               | `omarchy-launch-nautilus-cwd`                                                                                       |
 | `super+shift+n`          | `run omarchy-editor`                   | `omarchy-launch-editor`                                                                                             |
 | `super+w`                | `close`                                | --                                                                                                                  |
+| `ctrl+alt+delete` | `run omarchy-close-all` | `omarchy-hyprland-window-close-all` |
 | `super+f`                | `toggle-fullscreen`                    | --                                                                                                                  |
 | `super+alt+f`            | `toggle-maximize`                      | --                                                                                                                  |
 | `super+j` | `layout-noop` | -- |
 | `super+p` | `layout-noop` | -- |
 | `super+ctrl+f` | `toggle-maximize` | -- |
+| `super+o` | `run omarchy-window-pop` | `omarchy-hyprland-window-pop` |
+| `super+alt+home` | `run omarchy-window-width-save` | `omarchy-hyprland-window-width save` |
+| `super+home` | `run omarchy-window-width-restore` | `omarchy-hyprland-window-width restore` |
 | `super+equal` | `grow-width` | -- |
 | `super+minus` | `shrink-width` | -- |
 | `super+shift+equal` | `grow-height` | -- |
@@ -200,6 +204,8 @@ helpers are supported directly.
 | `super+shift+alt+9`      | `workspace-send 9`                     | --                                                                                                                  |
 | `super+shift+alt+0`      | `workspace-send 10`                    | --                                                                                                                  |
 | `super+alt+s`            | `miniaturize`                          | --                                                                                                                  |
+| `super+slash` | `run omarchy-monitor-scaling-up` | `omarchy-hyprland-monitor-scaling up` |
+| `super+alt+slash` | `run omarchy-monitor-scaling-down` | `omarchy-hyprland-monitor-scaling down` |
 | `super+ctrl+v`           | `run omarchy-clipboard`                | `omarchy-shell shell toggle omarchy.clipboard`                                                                      |
 | `super+space`            | `run omarchy-menu`                     | `omarchy-menu toggle`                                                                                               |
 | `super+shift+f23`        | `run omarchy-menu`                     | `omarchy-menu toggle`                                                                                               |
@@ -283,15 +289,13 @@ helpers are supported directly.
 
 ### Deliberately unbound
 
-26 groups of Omarchy chords remain unbound in the static preset. The table
+25 groups of Omarchy chords remain unbound in the static preset. The table
 explains each limit; the live configuration reader supports additional chords.
 
 | Omarchy chord                                                                                      | What Omarchy does with it                                            | Why not here                                                |
 |----------------------------------------------------------------------------------------------------|----------------------------------------------------------------------|-------------------------------------------------------------|
 | `super+alt+return, super+ctrl+return, super+shift+{a,c,d,e,g,m,o,p,s,w,x,y,/}, +alt/ctrl variants` | Omarchy's preinstalled application, TUI and webapp chords            | Omarchy binds it conditionally; a table of constants cannot |
 | `super+c / super+v / super+x`                                                                      | universal copy / paste / cut, by synthesising Ctrl+C/V/X at the seat | chonkstep has no verb for it, and no command can stand in   |
-| `super+o` | pop the window out, floating and pinned | requires window groups or a feature ChonkStep does not provide |
-| `super+home / super+alt+home`                                                                      | restore / save window width                                          | commands Hyprland, which is not running                     |
 | `super+g / super+alt+g` | toggle grouping / move out of group | requires window groups or a feature ChonkStep does not provide |
 | `super+alt+left/right/up/down` | move the window into the group in that direction | requires window groups or a feature ChonkStep does not provide |
 | `super+alt+tab / super+alt+shift+tab` | next / previous window in the group | requires window groups or a feature ChonkStep does not provide |
@@ -302,17 +306,18 @@ explains each limit; the live configuration reader supports additional chords.
 | `super+ctrl+tab`                                                                                   | the workspace before this one                                        | chonkstep has no verb for it, and no command can stand in   |
 | `super+shift+alt+left/right/up/down`                                                               | move the workspace to the monitor in that direction                  | chonkstep has no verb for it, and no command can stand in   |
 | `ctrl+alt+tab / ctrl+alt+shift+tab`                                                                | focus the next / previous monitor                                    | chonkstep has no verb for it, and no command can stand in   |
-| `ctrl+alt+delete`                                                                                  | close every window                                                   | commands Hyprland, which is not running                     |
-| `super+slash / super+alt+slash`                                                                    | monitor scaling up / down                                            | commands Hyprland, which is not running                     |
 | `super+mouse wheel, super+drag`                                                                    | scroll through workspaces; move and resize by mouse                  | not a key chord this config format can express              |
 | `super+k`                                                                                          | Omarchy's keybinding cheatsheet                                      | declined on purpose — see the note under the table          |
 | `super+shift+space`                                                                                | toggle Omarchy's top bar                                             | chonkstep has no verb for it, and no command can stand in   |
-| `super+ctrl+d`                                                                                     | Omarchy's display panel                                              | commands Hyprland, which is not running                     |
-| `super+backspace / super+shift+backspace / super+ctrl+backspace`                                   | window transparency; window gaps; single-window square aspect        | commands Hyprland, which is not running                     |
-| `super+ctrl+delete / super+ctrl+alt+delete`                                                        | toggle the laptop display; toggle mirroring                          | commands Hyprland, which is not running                     |
-| `super+ctrl+z / super+ctrl+alt+z`                                                                  | cursor zoom in / reset                                               | commands Hyprland, which is not running                     |
+| `super+ctrl+d`                                                                                     | Omarchy's display panel                                              | commands Hyprland beyond the requests ChonkStep serves      |
+| `super+backspace` | window transparency | needs per-window opacity, which ChonkStep does not model |
+| `super+shift+backspace` | window gaps | toggles Hyprland's gaps, which ChonkStep does not read |
+| `super+ctrl+backspace` | single-window square aspect | toggles a Hyprland layout option, which ChonkStep does not read |
+| `super+ctrl+delete` | toggle the laptop display | disables an output, which ChonkStep does not do |
+| `super+ctrl+alt+delete` | toggle laptop display mirroring | mirrors an output, which ChonkStep does not do |
+| `super+ctrl+z / super+ctrl+alt+z`                                                                  | cursor zoom in / reset                                               | commands Hyprland beyond the requests ChonkStep serves      |
 | `switch:on/off:Lid Switch`                                                                         | run the lid-close and clamshell handlers                             | not a key chord this config format can express              |
-| `touchpad toggle / on / off`                                                                       | enable and disable the touchpad                                      | commands Hyprland, which is not running                     |
+| `touchpad toggle / on / off`                                                                       | enable and disable the touchpad                                      | commands Hyprland beyond the requests ChonkStep serves      |
 | `super+ctrl+x, f9`                                                                                 | voxtype dictation: toggle, and push-to-talk                          | Omarchy binds it conditionally; a table of constants cannot |
 
 The remaining gap most worth knowing about — toggling Omarchy's bar —

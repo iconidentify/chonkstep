@@ -36,3 +36,11 @@ tracing = "0.1"
 # later `fcntl`. Writing a second copy of that would mean maintaining a
 # second copy of its bugs.
 chonk-ipc = { path = "../chonk-ipc" }
+
+[dev-dependencies]
+# Test-only, and pointing the permitted way. `wm-config` decides which
+# Omarchy scripts may run, and the only honest proof of that list is
+# feeding each script's requests through this crate's own answer table.
+# The conformance test iterates the list itself, so a script cannot be
+# admitted without a fixture. `wm-config` does not depend on this crate.
+wm-config = { path = "../wm-config" }

@@ -209,7 +209,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 
 | Not read | Why |
 |---|---|
-| Anything commanding Hyprland — `hyprctl`, `omarchy-hyprland-*` | It talks to a compositor that is not running, so the binding could only fail. The same filter chonkstep's Omarchy menu already applies to menu rows. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
+| Hyprland requests chonkstep does not serve — `hyprctl`, and `omarchy-hyprland-*` scripts outside [the list below](#omarchys-hyprland-scripts) | Chonkstep answers Hyprland's IPC, but only with the requests it can apply, and `hyprctl` exits zero on a refusal, so a binding whose request is refused would be a key that silently does nothing. A script therefore runs only when every request it sends is proven served. The same rule filters chonkstep's Omarchy menu rows and `exec-once` lines. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
 | Gaps, borders, rounding, blur, shadows, animations, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
 | Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use `focus_follows_mouse` and native [`[input.gestures]`](gestures.md). Arbitrary Hyprland gesture bindings remain declined. Device properties listed below are applied; remaining declined values are logged. |
@@ -221,6 +221,45 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | `submap`, workspace rules, `plugin`, `bezier`, `animation` | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
 | Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |
+
+### Omarchy's Hyprland scripts
+
+Omarchy implements several window and display chords as
+`omarchy-hyprland-*` scripts that drive the compositor through `hyprctl`.
+These five send only requests chonkstep's Hyprland IPC applies, so their
+bindings, menu rows and autostart lines run as written. The list lives in
+`crates/wm-config/src/hyprland/dispatch.rs`, and
+`crates/chonk-hyprland-ipc/tests/protocol.rs` feeds every request each
+script sends through the IPC, failing if one is refused or a field the
+script reads is missing. A script cannot join the list without that proof.
+
+| Script | Omarchy's use of it |
+|---|---|
+| `omarchy-hyprland-window-pop` | `SUPER + O`: pop the window out, floating and pinned, or put it back |
+| `omarchy-hyprland-window-width` | `SUPER + ALT + Home` / `SUPER + Home`: save / restore the window's width |
+| `omarchy-hyprland-window-close-all` | `CTRL + ALT + DELETE`: close every window, then show workspace 1 |
+| `omarchy-hyprland-monitor-scaling` | `SUPER + SLASH` / `SUPER + ALT + SLASH`: step the focused monitor's scale |
+| `omarchy-hyprland-workspace-layout-toggle` | The menu's Workspace Layout row. Its `SUPER + L` binding takes chonkstep's own `toggle-layout`. |
+
+On a Freeform workspace the pop-out's float toggle does nothing, because
+Freeform has no layout to float a window out of; the window is still
+resized, centred, pinned and raised.
+
+`hyprctl` itself, and every other `omarchy-hyprland-*` script, is refused
+as "commands Hyprland beyond the requests ChonkStep serves". That is also
+the answer for a script a future Omarchy adds. The ones Omarchy binds or
+starts are refused with the piece they need:
+
+| Script | Why not here |
+|---|---|
+| `omarchy-hyprland-window-tiled-fullscreen-toggle` | needs client-only fullscreen, which ChonkStep does not model |
+| `omarchy-hyprland-window-transparency-toggle` | needs per-window opacity, which ChonkStep does not model |
+| `omarchy-hyprland-window-gaps-toggle` | toggles Hyprland's gaps, which ChonkStep does not read |
+| `omarchy-hyprland-window-single-square-aspect-toggle` | toggles a Hyprland layout option, which ChonkStep does not read |
+| `omarchy-hyprland-monitor-internal` | disables an output, which ChonkStep does not do |
+| `omarchy-hyprland-monitor-internal-mirror` | mirrors an output, which ChonkStep does not do |
+| `omarchy-hyprland-monitor-clamshell` | disables an output, which ChonkStep does not do |
+| `omarchy-hyprland-monitor-watch` | disables an output, which ChonkStep does not do |
 
 ### Bindings this desktop has no verb for
 
@@ -497,8 +536,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=161 commands=113 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=163
+      files=42 bindings=167 commands=119 env=8 autostart=4
+      float_rules=47 monitors=1 skipped=157
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

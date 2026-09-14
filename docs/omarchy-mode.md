@@ -86,10 +86,14 @@ the menu is not undone the next time you log in.
   every posture: it would paint over chonkstep's wallpaper and eat every
   click on the desk, right-click included. The desk stays chonkstep's
   and wears Omarchy's background picture through the theme.
-- **Anything that commands Hyprland.** `hyprctl` and the
-  `omarchy-hyprland-*` scripts talk to a compositor that is not running.
-  The root menu already leaves those rows out; the keymap leaves those
-  chords unbound for the same reason.
+- **Hyprland requests chonkstep does not serve.** `hyprctl`, and the
+  `omarchy-hyprland-*` scripts that send a request chonkstep's Hyprland
+  IPC cannot apply, stay out: the root menu leaves those rows out and the
+  keymap leaves those chords unbound, by one shared rule. The scripts
+  whose every request is served (pop-out, window width, close-all,
+  monitor scaling and the workspace layout toggle) run as Omarchy wrote
+  them; [hyprland-config.md](hyprland-config.md#omarchys-hyprland-scripts)
+  lists both sides.
 
 ---
 
@@ -180,8 +184,8 @@ between "chonkstep knows what Omarchy's chords were in August" and
 "Omarchy's menu still configures your machine": rebind a key through
 their UI and the running session follows it within a second.
 
-On the machine this was developed on the live read produced **161
-bindings over 113 commands**, against the baked table's 145 over 77 —
+On the machine this was developed on the live read produced **167
+bindings over 119 commands**, against the baked table's 151 over 83 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
 file test that only a live read can make.
@@ -201,7 +205,7 @@ what the live read falls back to.
 
 Both tables live in the keybinding card, beside chonkstep's own:
 **[keybindings.md](keybindings.md), under "The Omarchy keymap"**
-— 145 bindings over 77 declared commands, then the 26 groups of Omarchy
+— 151 bindings over 83 declared commands, then the 25 groups of Omarchy
 chords that remain unbound and why. Both are transcribed
 from `crates/wm-config/src/preset.rs`, which is the authoritative list;
 `crates/wm-config/tests/preset_doc.rs` fails if the card and the table

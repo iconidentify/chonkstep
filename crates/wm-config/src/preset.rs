@@ -447,6 +447,10 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     // vocabulary itself, and `OMARCHY_UNBOUND` says so one chord at a
     // time.
     ("super+w", "close"),
+    // Omarchy's own scripts for these, which send only Hyprland
+    // requests chonkstep serves; see
+    // `hyprland::dispatch::SERVED_OMARCHY_SCRIPTS`.
+    ("ctrl+alt+delete", "run omarchy-close-all"),
     ("super+f", "toggle-fullscreen"),
     // Omarchy's "Full width" is Hyprland's `maximized` mode, which
     // fills the workarea and keeps the chrome — chonkstep's
@@ -462,6 +466,9 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+j", "layout-noop"),
     ("super+p", "layout-noop"),
     ("super+ctrl+f", "toggle-maximize"),
+    ("super+o", "run omarchy-window-pop"),
+    ("super+alt+home", "run omarchy-window-width-save"),
+    ("super+home", "run omarchy-window-width-restore"),
     ("super+equal", "grow-width"),
     ("super+minus", "shrink-width"),
     ("super+shift+equal", "grow-height"),
@@ -527,6 +534,8 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     // double-clicking that tile rather than by the same chord. See
     // docs/omarchy-mode.md for the difference spelled out.
     ("super+alt+s", "miniaturize"),
+    ("super+slash", "run omarchy-monitor-scaling-up"),
+    ("super+alt+slash", "run omarchy-monitor-scaling-down"),
     // -- clipboard.lua ------------------------------------------------
     ("super+ctrl+v", "run omarchy-clipboard"),
     // -- utilities.lua: the menu, the pickers, the panels -------------
@@ -643,11 +652,19 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
 pub enum Unbound {
     /// A grouping or layout-specific operation outside the three styles.
     TilingOnly,
-    /// Commands Hyprland itself (`hyprctl`, an `omarchy-hyprland-*`
-    /// script, or a `hl.config` write from Lua). The compositor it
-    /// talks to is not running, so the binding could only fail. Same
-    /// filter `chonk_shell::omarchy_menu` applies to menu rows.
+    /// Commands Hyprland beyond what chonkstep serves: `hyprctl`, an
+    /// `omarchy-hyprland-*` script outside
+    /// `hyprland::dispatch::SERVED_OMARCHY_SCRIPTS`, a Hyprland-only
+    /// dispatcher, or a `hl.config` write from Lua. Chonkstep answers
+    /// Hyprland's IPC, but only with the requests it can apply, and
+    /// `hyprctl` exits zero on a refusal, so the binding would be a key
+    /// that silently does nothing. The same predicate filters
+    /// `chonk_shell::omarchy_menu`'s rows.
     HyprlandOnly,
+    /// A known Omarchy script that sends a Hyprland request chonkstep
+    /// does not serve. The text names the missing piece; the named
+    /// constants below are the ones in use.
+    Unserved(&'static str),
     /// Chonkstep has no verb for it yet, and no command could stand in
     /// because the semantics are the window manager's own.
     NoVerb,
@@ -667,11 +684,21 @@ pub enum Unbound {
 }
 
 impl Unbound {
+    /// A window that keeps its tile while its client is told it is
+    /// fullscreen (Omarchy's tiled fullscreen).
+    pub const CLIENT_FULLSCREEN: Self = Self::Unserved("needs client-only fullscreen, which ChonkStep does not model");
+    pub const OPACITY: Self = Self::Unserved("needs per-window opacity, which ChonkStep does not model");
+    pub const GAPS: Self = Self::Unserved("toggles Hyprland's gaps, which ChonkStep does not read");
+    pub const LAYOUT_OPTION: Self = Self::Unserved("toggles a Hyprland layout option, which ChonkStep does not read");
+    pub const OUTPUT_DISABLE: Self = Self::Unserved("disables an output, which ChonkStep does not do");
+    pub const OUTPUT_MIRROR: Self = Self::Unserved("mirrors an output, which ChonkStep does not do");
+
     /// The one-line reason, as the docs table prints it.
     pub fn reason(self) -> &'static str {
         match self {
             Self::TilingOnly => "requires window groups or a feature ChonkStep does not provide",
-            Self::HyprlandOnly => "commands Hyprland, which is not running",
+            Self::HyprlandOnly => "commands Hyprland beyond the requests ChonkStep serves",
+            Self::Unserved(why) => why,
             Self::NoVerb => "chonkstep has no verb for it, and no command can stand in",
             Self::NotAKey => "not a key chord this config format can express",
             Self::Conditional => "Omarchy binds it conditionally; a table of constants cannot",
@@ -701,8 +728,6 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
         Unbound::NoVerb,
     ),
     // tiling.lua
-    ("super+o", "pop the window out, floating and pinned", Unbound::TilingOnly),
-    ("super+home / super+alt+home", "restore / save window width", Unbound::HyprlandOnly),
     ("super+g / super+alt+g", "toggle grouping / move out of group", Unbound::TilingOnly),
     ("super+alt+left/right/up/down", "move the window into the group in that direction", Unbound::TilingOnly),
     ("super+alt+tab / super+alt+shift+tab", "next / previous window in the group", Unbound::TilingOnly),
@@ -713,19 +738,16 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+ctrl+tab", "the workspace before this one", Unbound::NoVerb),
     ("super+shift+alt+left/right/up/down", "move the workspace to the monitor in that direction", Unbound::NoVerb),
     ("ctrl+alt+tab / ctrl+alt+shift+tab", "focus the next / previous monitor", Unbound::NoVerb),
-    ("ctrl+alt+delete", "close every window", Unbound::HyprlandOnly),
-    ("super+slash / super+alt+slash", "monitor scaling up / down", Unbound::HyprlandOnly),
     ("super+mouse wheel, super+drag", "scroll through workspaces; move and resize by mouse", Unbound::NotAKey),
     // utilities.lua
     ("super+k", "Omarchy's keybinding cheatsheet", Unbound::Declined),
     ("super+shift+space", "toggle Omarchy's top bar", Unbound::NoVerb),
     ("super+ctrl+d", "Omarchy's display panel", Unbound::HyprlandOnly),
-    (
-        "super+backspace / super+shift+backspace / super+ctrl+backspace",
-        "window transparency; window gaps; single-window square aspect",
-        Unbound::HyprlandOnly,
-    ),
-    ("super+ctrl+delete / super+ctrl+alt+delete", "toggle the laptop display; toggle mirroring", Unbound::HyprlandOnly),
+    ("super+backspace", "window transparency", Unbound::OPACITY),
+    ("super+shift+backspace", "window gaps", Unbound::GAPS),
+    ("super+ctrl+backspace", "single-window square aspect", Unbound::LAYOUT_OPTION),
+    ("super+ctrl+delete", "toggle the laptop display", Unbound::OUTPUT_DISABLE),
+    ("super+ctrl+alt+delete", "toggle laptop display mirroring", Unbound::OUTPUT_MIRROR),
     ("super+ctrl+z / super+ctrl+alt+z", "cursor zoom in / reset", Unbound::HyprlandOnly),
     ("switch:on/off:Lid Switch", "run the lid-close and clamshell handlers", Unbound::NotAKey),
     // media.lua
@@ -762,6 +784,7 @@ pub const OMARCHY_COMMANDS: &[(&str, &[&str])] = &[
     ("omarchy-browser-private", &["omarchy-launch-browser", "--private"]),
     ("omarchy-calculator", &["omacalc"]),
     ("omarchy-clipboard", &["omarchy-shell", "shell", "toggle", "omarchy.clipboard"]),
+    ("omarchy-close-all", &["omarchy-hyprland-window-close-all"]),
     // `pkill hyprpicker || hyprpicker -a`, Omarchy's own line. The
     // name carries Hyprland's prefix but the tool does not: hyprpicker
     // is an ordinary wlr-layer-shell + wlr-screencopy client, both of
@@ -792,6 +815,8 @@ pub const OMARCHY_COMMANDS: &[(&str, &[&str])] = &[
     ("omarchy-menu-theme", &["omarchy-menu", "toggle", "theme"]),
     ("omarchy-menu-toggles", &["omarchy-menu", "toggle", "toggle"]),
     ("omarchy-mic-mute", &["omarchy-audio-input-mute"]),
+    ("omarchy-monitor-scaling-down", &["omarchy-hyprland-monitor-scaling", "down"]),
+    ("omarchy-monitor-scaling-up", &["omarchy-hyprland-monitor-scaling", "up"]),
     ("omarchy-notification-dismiss", &["omarchy-shell", "notifications", "dismissOne"]),
     ("omarchy-notification-dismiss-all", &["omarchy-shell", "notifications", "dismissAll"]),
     ("omarchy-notification-history", &["omarchy-shell", "notifications", "showHistory"]),
@@ -839,6 +864,9 @@ pub const OMARCHY_COMMANDS: &[(&str, &[&str])] = &[
     ("omarchy-volume-up-fine", &["omarchy-audio-output-volume", "+1"]),
     ("omarchy-webcam-larger", &["omarchy-capture-webcam-resize", "larger"]),
     ("omarchy-webcam-smaller", &["omarchy-capture-webcam-resize", "smaller"]),
+    ("omarchy-window-pop", &["omarchy-hyprland-window-pop"]),
+    ("omarchy-window-width-restore", &["omarchy-hyprland-window-width", "restore"]),
+    ("omarchy-window-width-save", &["omarchy-hyprland-window-width", "save"]),
 ];
 
 #[cfg(test)]
@@ -931,9 +959,6 @@ mod tests {
         // checked mechanically; the rest describe a family (`super+1..0`)
         // and are expanded here by hand where a family is checkable.
         let literal = [
-            "super+o",
-            "super+home",
-            "super+alt+home",
             "super+g",
             "super+alt+g",
             "super+alt+tab",

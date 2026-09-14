@@ -14,6 +14,7 @@ use chonk_hyprland_ipc::request::Request;
 use chonk_hyprland_ipc::server::answer_payload;
 use chonk_hyprland_ipc::state::{Devices, Keyboard, Monitor, MonitorMode, Snapshot, Window, Workspace};
 use chonk_hyprland_ipc::{Differ, Outcome};
+use wm_config::hyprland::dispatch::SERVED_OMARCHY_SCRIPTS;
 
 fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monitor {
     Monitor {
@@ -561,6 +562,137 @@ fn a_key_name_inside_a_lua_string_value_is_not_a_field() {
     let (response, actions) =
         answer_payload(br#"dispatch hl.dsp.focus({ window = "title:workspace = 3" })"#, &snapshot);
     assert_eq!(actions, vec![Action::FocusWindow(4_294_967_297)], "got {response:?}");
+}
+
+// ---------------------------------------------------------------------
+// Omarchy's scripts, whole: the proof behind wm-config's allow-list.
+// ---------------------------------------------------------------------
+
+/// One request an Omarchy script sends, as `hyprctl` writes it.
+enum ScriptRequest {
+    /// A `-j` query, with the `jq` paths the script reads from each
+    /// object in the answer.
+    Query(&'static str, &'static [&'static str]),
+    /// A dispatch or eval, which must be applied rather than refused.
+    Mutation(String),
+}
+
+/// The requests of each script on `SERVED_OMARCHY_SCRIPTS`, transcribed
+/// from Omarchy 4.0.2's `bin/`, with this desk's window, output and
+/// workspace substituted where the script interpolates one. Only the
+/// first half of each `lua || classic` pair is here: `hyprctl` exits
+/// zero whatever the reply, so the fallback never runs, which is exactly
+/// why the first half has to be served.
+fn served_script_requests(snapshot: &Snapshot) -> Vec<(&'static str, Vec<ScriptRequest>)> {
+    use ScriptRequest::{Mutation, Query};
+    let window = format!("address:{}", snapshot.windows[0].address());
+    let output = &snapshot.monitors[0].name;
+    let dispatch = |lua: &str| Mutation(format!("/dispatch {lua}"));
+    vec![
+        (
+            "omarchy-hyprland-window-pop",
+            vec![
+                Query("j/activewindow", &["pinned", "address"]),
+                // Already popped: return it to the layout.
+                dispatch(&format!(r#"hl.dsp.window.pin({{ window = "{window}" }})"#)),
+                dispatch(&format!(r#"hl.dsp.window.float({{ window = "{window}", action = "toggle" }})"#)),
+                dispatch(&format!(r#"hl.dsp.window.tag({{ window = "{window}", tag = "-pop" }})"#)),
+                // Popping out, at the default size or one given as arguments.
+                dispatch(&format!(r#"hl.dsp.window.resize({{ window = "{window}", x = 1300, y = 900 }})"#)),
+                dispatch(&format!(r#"hl.dsp.window.move({{ window = "{window}", x = 40, y = 30 }})"#)),
+                dispatch(&format!(r#"hl.dsp.window.center({{ window = "{window}" }})"#)),
+                dispatch(&format!(r#"hl.dsp.window.alter_zorder({{ window = "{window}", mode = "top" }})"#)),
+                dispatch(&format!(r#"hl.dsp.window.tag({{ window = "{window}", tag = "+pop" }})"#)),
+            ],
+        ),
+        (
+            "omarchy-hyprland-window-width",
+            vec![
+                Query("j/activewindow", &["class", "initialClass", "title", "workspace.id", "size.0", "address"]),
+                Query("j/clients", &["address", "size.0"]),
+                // The direction probe, then the correction.
+                dispatch(&format!(r#"hl.dsp.window.resize({{ window = "{window}", x = 10, y = 0, relative = true }})"#)),
+                dispatch(&format!(r#"hl.dsp.window.resize({{ window = "{window}", x = -10, y = 0, relative = true }})"#)),
+            ],
+        ),
+        (
+            "omarchy-hyprland-window-close-all",
+            vec![
+                Query("j/clients", &["address"]),
+                dispatch(&format!(r#"hl.dsp.window.close({{ window = "{window}" }})"#)),
+                dispatch(r#"hl.dsp.focus({ workspace = "1" })"#),
+            ],
+        ),
+        (
+            "omarchy-hyprland-monitor-scaling",
+            vec![
+                Query("j/monitors", &["focused", "name", "scale", "width", "height", "refreshRate"]),
+                Mutation(format!(
+                    r#"/eval hl.monitor({{ output = "{output}", mode = "2560x1600@120", position = "auto", scale = 1.6 }})"#
+                )),
+            ],
+        ),
+        (
+            "omarchy-hyprland-workspace-layout-toggle",
+            vec![
+                Query("j/activeworkspace", &["id", "tiledLayout"]),
+                Mutation(r#"/eval hl.workspace_rule({ workspace = "1", layout = "scrolling" })"#.to_string()),
+                Mutation(r#"/eval hl.workspace_rule({ workspace = "1", layout = "dwindle" })"#.to_string()),
+            ],
+        ),
+    ]
+}
+
+/// A `jq`-style path into a JSON value; a missing step is `null`.
+fn json_path<'a>(value: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    path.split('.').fold(value, |value, step| match step.parse::<usize>() {
+        Ok(index) => &value[index],
+        Err(_) => &value[step],
+    })
+}
+
+/// `wm-config` binds an `omarchy-hyprland-*` script only when it is on
+/// `SERVED_OMARCHY_SCRIPTS`, and this is what makes the list true: every
+/// request each listed script sends is applied, and every field it reads
+/// is present. A script on the list with no fixture fails, and so does a
+/// fixture for a script that is not listed, so the list and the proof
+/// cannot drift apart. A future Omarchy that adds a request to one of
+/// these scripts has to be added here, where a refusal fails the test
+/// instead of shipping a chord that quietly does nothing.
+#[test]
+fn omarchy_scripts_send_only_served_requests() {
+    let snapshot = desktop();
+    let fixtures = served_script_requests(&snapshot);
+    for script in SERVED_OMARCHY_SCRIPTS {
+        let Some((_, requests)) = fixtures.iter().find(|(name, _)| name == script) else {
+            panic!("{script} is allow-listed without a fixture of the requests it sends");
+        };
+        for request in requests {
+            match request {
+                ScriptRequest::Query(wire, fields) => {
+                    let value = ask_json(wire, &snapshot);
+                    let objects: Vec<&serde_json::Value> = match value.as_array() {
+                        Some(items) => items.iter().collect(),
+                        None => vec![&value],
+                    };
+                    assert!(!objects.is_empty(), "{script}: {wire} answered nothing to read");
+                    for object in objects {
+                        for field in *fields {
+                            assert!(!json_path(object, field).is_null(), "{script} reads .{field} from {wire}: {object}");
+                        }
+                    }
+                }
+                ScriptRequest::Mutation(wire) => {
+                    let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+                    assert_eq!(response, "ok", "{script} sends {wire:?}");
+                    assert_eq!(actions.len(), 1, "{script} sends {wire:?}, which must be one applied action");
+                }
+            }
+        }
+    }
+    for (name, _) in &fixtures {
+        assert!(SERVED_OMARCHY_SCRIPTS.contains(name), "{name} has a fixture but is not allow-listed");
+    }
 }
 
 #[test]
