@@ -57,6 +57,7 @@ pub fn read(
     // binding inside the canonical resize submap becomes a global grab
     // here, including ordinary typing keys such as `1`.
     let mut submap: Option<String> = None;
+    let mut device: Option<DeviceBlock> = None;
     for raw in source.lines() {
         let stripped = strip_comment(raw);
         let line = stripped.trim();
@@ -64,15 +65,23 @@ pub fn read(
             continue;
         }
         if line == "}" {
-            if let Some(name) = block.pop() {
-                let _ = name;
+            let closed = block.pop();
+            if block.is_empty() && closed.is_some_and(|name| name.eq_ignore_ascii_case("device")) {
+                if let Some(DeviceBlock { name, settings }) = device.take() {
+                    out.push(match name {
+                        Some(name) => Directive::Device { name, settings },
+                        None => Directive::Ignored { kind: "device", detail: "device { … } with no name".into() },
+                    });
+                }
             }
             continue;
         }
         if let Some(name) = line.strip_suffix('{') {
             let name = name.trim();
-            if block.is_empty() {
-                if !name.eq_ignore_ascii_case("input") {
+            if block.is_empty() && name.eq_ignore_ascii_case("device") {
+                device = Some(DeviceBlock::default());
+            } else if block.is_empty() {
+                if !name.eq_ignore_ascii_case("input") && !name.eq_ignore_ascii_case("cursor") {
                     out.push(Directive::Ignored {
                         kind: "block",
                         detail: format!("{name} {{ … }}: a Hyprland subsystem this desktop has its own answer for"),
@@ -87,12 +96,49 @@ pub fn read(
                     kind: "input",
                     detail: format!("nested input block {name} {{ … }} is not implemented"),
                 });
+            } else if block.first().is_some_and(|root| root.eq_ignore_ascii_case("cursor")) {
+                out.push(Directive::Ignored {
+                    kind: "cursor",
+                    detail: format!("nested cursor block {name} {{ … }} is not implemented"),
+                });
+            } else if block.first().is_some_and(|root| root.eq_ignore_ascii_case("device")) {
+                out.push(Directive::Ignored {
+                    kind: "device",
+                    detail: format!("nested device block {name} {{ … }} is not implemented"),
+                });
             }
             block.push(name.to_string());
             continue;
         }
         if !block.is_empty() {
-            if !block.is_empty() && block[0].eq_ignore_ascii_case("input") {
+            if block.len() == 1 && block[0].eq_ignore_ascii_case("device") {
+                match (line.split_once('='), device.as_mut()) {
+                    (Some((key, value)), Some(DeviceBlock { name, settings })) => {
+                        let key = key.trim().to_ascii_lowercase();
+                        let value = substitute(value.trim(), vars);
+                        if key == "name" {
+                            *name = Some(value);
+                        } else {
+                            settings.push((key, value));
+                        }
+                    }
+                    _ => out.push(Directive::Ignored {
+                        kind: "device",
+                        detail: truncate(line),
+                    }),
+                }
+            } else if block.len() == 1 && block[0].eq_ignore_ascii_case("cursor") {
+                match line.split_once('=') {
+                    Some((name, value)) => out.push(Directive::Cursor {
+                        name: name.trim().to_ascii_lowercase(),
+                        value: substitute(value.trim(), vars),
+                    }),
+                    None => out.push(Directive::Ignored {
+                        kind: "cursor",
+                        detail: truncate(line),
+                    }),
+                }
+            } else if block[0].eq_ignore_ascii_case("input") {
                 match line.split_once('=') {
                     Some((name, value)) => out.push(Directive::Input {
                         name: if block.len() == 2 && block[1].eq_ignore_ascii_case("touchpad") {
@@ -158,6 +204,14 @@ pub fn read(
         }
         directive(keyword, &value, out);
     }
+}
+
+/// The `device { … }` block being read. A block may give its `name` after
+/// its settings, so the directive is emitted only when the block closes.
+#[derive(Default)]
+struct DeviceBlock {
+    name: Option<String>,
+    settings: Vec<(String, String)>,
 }
 
 fn directive(keyword: &str, value: &str, out: &mut Vec<Directive>) {

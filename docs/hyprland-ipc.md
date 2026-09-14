@@ -141,11 +141,28 @@ actions. Supported families include:
   group and emits `activelayout` with its human-readable name;
 - `eval hl.config({ cursor = { invisible = BOOL } })`, the live
   cursor-visibility property used by Omarchy's screensaver;
+- `eval hl.device({ name = "NAME", enabled = BOOL })`, the request
+  Omarchy's touchpad and touchscreen toggles send. `NAME` is a quoted Lua
+  string, escapes included, and must be exactly the name of a pointer,
+  touch or tablet device that `devices` lists. A name that any keyboard
+  carries is never disabled, and the nested backend's logical
+  `chonkstep-keyboard` and `chonkstep-pointer` are refused by name. A
+  disabled device stops sending events before the reply is written: it no
+  longer moves the pointer or counts as activity, a button or touch it
+  held is released, and it stays off across hotplug and resume until it
+  is enabled again or the configuration changes its own rule for that
+  device;
+- `eval hl.dispatch(hl.dsp.cursor.move({ x = X, y = Y }))` and
+  `dispatch movecursor X Y`, which warp the pointer to a logical layout point
+  as `cursorpos` reports it (Omarchy's screenshot picker moves its highlight
+  this way). A warp is refused while the session is locked or a client holds
+  a pointer constraint;
 - `reload`, which re-reads chonkstep/Hyprland configuration and emits
   `configreloaded` only after it has applied.
 
 `hl.config`, `hl.device`, and `hl.workspace_rule` are recognized and
-refused by name when their requested property is not modeled. They are
+refused by name when their requested property is not modeled (for
+`hl.device`, anything besides `enabled`, which belongs in the configuration). They are
 not reported as unknown syntax. Monitor scaling validates the output
 and range before changing anything, so an Omarchy script cannot record
 a scale that the compositor said it applied but did not.

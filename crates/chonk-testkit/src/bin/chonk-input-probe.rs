@@ -2,6 +2,11 @@
 //!
 //! A real committed buffer scale / viewport is essential: a compositor-only
 //! hit-test assertion cannot see a click grab retaining an obsolete origin.
+//!
+//! `cursor-shape <name>` names a `wp_cursor_shape_v1` shape on every pointer
+//! enter, the way GTK 4, Qt 6 and Chromium set their cursors, and reports
+//! `cursor-shape applied <serial>` once the compositor has processed it.
+//! `resizable` drops the fixed maximum size so the frame offers resize edges.
 
 #[path = "chonk-input-probe/constraints.rs"]
 mod constraints;
@@ -14,7 +19,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::FileExt;
 
 use wayland_client::protocol::{
-    wl_buffer,
+    wl_buffer, wl_callback,
     wl_compositor::WlCompositor,
     wl_data_device,
     wl_data_device_manager::{DndAction, WlDataDeviceManager},
@@ -27,6 +32,10 @@ use wayland_client::protocol::{
     wl_touch,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1},
+    wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+};
 use wayland_protocols::wp::pointer_gestures::zv1::client::{
     zwp_pointer_gestures_v1::ZwpPointerGesturesV1,
     zwp_pointer_gesture_swipe_v1::{self, ZwpPointerGestureSwipeV1},
@@ -86,9 +95,16 @@ struct Probe {
     surface: Option<WlSurface>,
     pointer_surface: Option<WlSurface>,
     drag_mode: bool,
+    cursor_shape: Option<Shape>,
+    cursor_shape_manager: Option<WpCursorShapeManagerV1>,
+    cursor_shape_device: Option<WpCursorShapeDeviceV1>,
     position: (f64, f64),
     sequence: u64,
 }
+
+/// The enter serial a `set_shape` used. The sync sent after it is
+/// answered only once the compositor has processed that request.
+struct CursorShapeApplied(u32);
 
 impl Probe {
     fn report(&mut self, kind: &str) {
@@ -145,6 +161,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                 }
                 "zwp_keyboard_shortcuts_inhibit_manager_v1" => {
                     probe.shortcuts_manager = Some(registry.bind(name, 1, qh, ()))
+                }
+                "wp_cursor_shape_manager_v1" => {
+                    probe.cursor_shape_manager = Some(registry.bind(name, 1, qh, ()))
                 }
                 _ => {}
             }
@@ -302,15 +321,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
         _: &wl_pointer::WlPointer,
         event: wl_pointer::Event,
         _: &(),
-        _: &Connection,
+        connection: &Connection,
         qh: &QueueHandle<Self>,
     ) {
         match event {
             wl_pointer::Event::Enter {
+                serial,
                 surface,
                 surface_x,
                 surface_y,
-                ..
             } => {
                 say(if Some(&surface) == probe.surface.as_ref() {
                     "entered root"
@@ -320,6 +339,17 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
                 probe.pointer_surface = Some(surface);
                 probe.position = (surface_x, surface_y);
                 probe.report("enter");
+                if let Some(shape) = probe.cursor_shape {
+                    let device = probe.cursor_shape_device.get_or_insert_with(|| {
+                        probe
+                            .cursor_shape_manager
+                            .as_ref()
+                            .expect("wp_cursor_shape_manager_v1")
+                            .get_pointer(probe.pointer.as_ref().expect("pointer"), qh, ())
+                    });
+                    device.set_shape(serial, shape);
+                    connection.display().sync(qh, CursorShapeApplied(serial));
+                }
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -367,6 +397,21 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
             }
             wl_pointer::Event::Leave { .. } => probe.report("leave"),
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, CursorShapeApplied> for Probe {
+    fn event(
+        _: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        applied: &CursorShapeApplied,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            say(&format!("cursor-shape applied {}", applied.0));
         }
     }
 }
@@ -588,7 +633,9 @@ ignore_events!(
     wl_shm_pool::WlShmPool,
     wl_buffer::WlBuffer,
     WpViewporter,
-    WpViewport
+    WpViewport,
+    WpCursorShapeManagerV1,
+    WpCursorShapeDeviceV1
 );
 
 /// The `--csd-input-region` buffer, drawn the way a toolkit with client-side
@@ -615,6 +662,20 @@ fn csd_shadow_buffer(width: i32, height: i32, scale: f64) -> Vec<u8> {
     bytes
 }
 
+/// The shape named by `cursor-shape <name>`, in the protocol's spelling.
+fn cursor_shape_arg() -> Option<Shape> {
+    let name = std::env::args().skip_while(|arg| arg != "cursor-shape").nth(1)?;
+    Some(match name.as_str() {
+        "default" => Shape::Default,
+        "text" => Shape::Text,
+        "pointer" => Shape::Pointer,
+        "crosshair" => Shape::Crosshair,
+        "wait" => Shape::Wait,
+        "ew_resize" => Shape::EwResize,
+        other => panic!("unsupported test cursor shape {other}"),
+    })
+}
+
 fn main() {
     let scale: f64 = std::env::args()
         .nth(1)
@@ -634,6 +695,7 @@ fn main() {
         interactive: interactive::State::from_args(),
         inhibit: std::env::args().any(|arg| arg == "inhibit"),
         drag_mode: std::env::args().any(|arg| arg == "dnd"),
+        cursor_shape: cursor_shape_arg(),
         seat_version: if std::env::args().any(|arg| arg == "legacy-keyboard") {
             5
         } else {
@@ -704,7 +766,7 @@ fn main() {
         region.destroy();
     }
     toplevel.set_min_size(content_w, content_h);
-    if !probe.interactive.enabled() {
+    if !probe.interactive.enabled() && !std::env::args().any(|arg| arg == "resizable") {
         toplevel.set_max_size(content_w, content_h);
     }
     surface.commit();

@@ -58,6 +58,8 @@
 //! it.
 
 pub(crate) mod constraints;
+pub(crate) mod cursor_visibility;
+pub(crate) mod devices;
 pub(crate) mod gestures;
 pub(crate) mod keyboard;
 mod seat;
@@ -74,7 +76,7 @@ use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent, GestureEndEvent,
     GesturePinchUpdateEvent as BackendPinchUpdateEvent, GestureSwipeUpdateEvent as BackendSwipeUpdateEvent,
     Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent, MouseButton as InputMouseButton,
-    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, ProximityState, SwitchToggleEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, ProximityState, Switch, SwitchState, SwitchToggleEvent,
     TabletToolButtonEvent, TabletToolDescriptor, TabletToolEvent, TabletToolProximityEvent,
     TabletToolTipEvent, TabletToolTipState, TouchEvent,
 };
@@ -174,6 +176,8 @@ struct InputState {
     /// finger dragging titlebar or shell chrome keeps reaching the
     /// object it landed on after it moves outside that object's rect.
     active_touches: HashMap<smithay::backend::input::TouchSlot, TouchRoute>,
+    /// What each device holds, so switching one off can release it.
+    device_holds: devices::Holds,
 }
 
 #[derive(Clone, Copy)]
@@ -473,6 +477,7 @@ pub(crate) fn reset_client_input_focus(state: &mut Compositor) {
     let seat = state.seat.clone();
     let time = state.start_time.elapsed().as_millis() as u32;
     cancel_active_touches(state);
+    state.tablet_cursors.clear();
     let tools = with_input(&seat, |input| std::mem::take(&mut input.active_tablet_tools));
     let tablet_seat = seat.tablet_seat();
     for descriptor in tools {
@@ -731,6 +736,8 @@ impl InputFamily {
         }
     }
 
+    /// Switches are the one family whose idle policy depends on the
+    /// event's state; [`switch_resets_idle`] decides those per toggle.
     fn resets_idle(self) -> bool {
         matches!(
             self,
@@ -763,6 +770,13 @@ impl InputFamily {
 /// winit dev loop and a future libinput session share every line of
 /// routing policy — only the raw event types differ.
 pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event: InputEvent<I>) {
+    // A device switched off by name sends nothing, activity included, so a
+    // palm on a disabled touchpad neither moves the pointer nor wakes the
+    // screen. See `devices`.
+    if devices::from_disabled_device(state, &event) {
+        return;
+    }
+    devices::note_holds(state, &event);
     let family = InputFamily::of(&event);
     // Every input event this compositor routes is user activity to the
     // idle timers, decided here at the one funnel both backends share.
@@ -936,11 +950,43 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
         InputEvent::TouchUp { event } => on_touch_up::<I>(state, event),
         InputEvent::TouchCancel { event: _ } => on_touch_cancel(state),
         InputEvent::TouchFrame { event: _ } => on_touch_frame(state),
-        InputEvent::SwitchToggle { event } => {
-            tracing::info!(switch = ?event.switch(), state = ?event.state(), "input switch toggled");
-        }
+        InputEvent::SwitchToggle { event } => on_switch_toggle::<I>(state, event),
         InputEvent::Special(_) => {}
     }
+}
+
+// -- switches -----------------------------------------------------------
+
+/// The most switch toggles one dispatch pass holds. A real lid produces
+/// one per open or close; the bound keeps a flapping or hostile device
+/// from growing the queue.
+const MAX_PENDING_SWITCHES: usize = 16;
+
+/// Stages a switch toggle for the switch bindings, which resolve in
+/// `dispatch_pending` beside key bindings. The device name is compared
+/// there, never interpreted.
+fn on_switch_toggle<I: InputBackend>(state: &mut Compositor, event: I::SwitchToggleEvent) {
+    let on = event.state() == SwitchState::On;
+    let switch = event.switch();
+    let device = event.device().name();
+    tracing::info!(?switch, on, ?device, "input switch toggled");
+    if switch_resets_idle(switch, on) {
+        crate::output_power::wake_all(state);
+        crate::idle::note_activity(state);
+    }
+    let pending = &mut state.wm.backend_mut().pending_switches;
+    if pending.len() < MAX_PENDING_SWITCHES {
+        pending.push((device, on));
+    } else {
+        tracing::warn!(?device, on, "switch toggles are arriving faster than they resolve; dropping one");
+    }
+}
+
+/// A lid opening is someone sitting down at the machine: it wakes the
+/// screens and resets the idle timers. A lid closing is not activity,
+/// and neither is tablet mode.
+fn switch_resets_idle(switch: Option<Switch>, on: bool) -> bool {
+    switch == Some(Switch::Lid) && !on
 }
 
 // -- touch --------------------------------------------------------------
@@ -968,6 +1014,12 @@ fn on_touch_down<I: InputBackend>(state: &mut Compositor, event: I::TouchDownEve
         focus,
         &TouchDown { slot, location: position, serial, time: event.time_msec() },
     );
+    let backend = state.wm.backend_mut();
+    if backend.pointer_config.cursor.hide_on_touch == Some(true)
+        && backend.cursor_visibility.hide(cursor_visibility::AutoHide::Touch)
+    {
+        backend.mark_damaged();
+    }
 
     if !state.wm.backend().locked {
         let target = press_target(&hit);
@@ -1198,10 +1250,53 @@ fn queue_tablet_axes<I: InputBackend, E: TabletToolEvent<I>>(
     }
 }
 
+/// Tablet tools with a cursor on screen at once. Each is a physical tool
+/// in proximity, so a real desk has one or two.
+const MAX_TABLET_CURSORS: usize = 16;
+
+/// A tablet tool in proximity: where it is, and what it last asked to
+/// look like. Created at proximity-in showing the arrow, the image a
+/// pointer has before any client sets one, and removed at proximity-out
+/// or when the lock changes the input domain. The renderer draws it like
+/// the pointer (`renderer::build_scene_into`).
+pub(crate) struct TabletCursor {
+    tool: TabletToolDescriptor,
+    pub(crate) position: LogicalPoint<f64, Logical>,
+    pub(crate) status: smithay::input::pointer::CursorImageStatus,
+}
+
+fn track_tablet_cursor(state: &mut Compositor, tool: &TabletToolDescriptor, position: LogicalPoint<f64, Logical>) {
+    if let Some(cursor) = state.tablet_cursors.iter_mut().find(|cursor| cursor.tool == *tool) {
+        cursor.position = position;
+    } else if state.tablet_cursors.len() < MAX_TABLET_CURSORS {
+        state.tablet_cursors.push(TabletCursor {
+            tool: tool.clone(),
+            position,
+            status: smithay::input::pointer::CursorImageStatus::default_named(),
+        });
+    }
+}
+
+/// Records a tool's requested image. Only a tool in proximity has an
+/// entry, so a request can neither outlive the tool's visit nor grow the
+/// set; Smithay has already checked that the requester holds its focus.
+pub(crate) fn set_tablet_cursor_image(
+    state: &mut Compositor,
+    tool: &TabletToolDescriptor,
+    image: smithay::input::pointer::CursorImageStatus,
+) {
+    if let Some(cursor) = state.tablet_cursors.iter_mut().find(|cursor| cursor.tool == *tool) {
+        cursor.status = image;
+        state.wm.backend_mut().mark_damaged();
+    }
+}
+
 fn on_tablet_axis<I: InputBackend>(state: &mut Compositor, event: I::TabletToolAxisEvent) {
+    reveal_cursor(state);
     let position = tablet_position::<I, _>(state, &event);
     let descriptor = event.tool();
     let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
+    track_tablet_cursor(state, &descriptor, position);
     remember_tablet_tool(&state.seat, descriptor);
     queue_tablet_axes::<I, _>(&tool, &event);
     let focus = tablet_focus(state.wm.backend(), position);
@@ -1210,18 +1305,21 @@ fn on_tablet_axis<I: InputBackend>(state: &mut Compositor, event: I::TabletToolA
 }
 
 fn on_tablet_proximity<I: InputBackend>(state: &mut Compositor, event: I::TabletToolProximityEvent) {
+    reveal_cursor(state);
     let position = tablet_position::<I, _>(state, &event);
     let descriptor = event.tool();
     let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
     queue_tablet_axes::<I, _>(&tool, &event);
     match event.state() {
         ProximityState::In => {
+            track_tablet_cursor(state, &descriptor, position);
             remember_tablet_tool(&state.seat, descriptor);
             let focus = tablet_focus(state.wm.backend(), position);
             tool.motion(position, focus, &tablet, SERIAL_COUNTER.next_serial(), event.time_msec());
         }
         ProximityState::Out => {
             tool.proximity_out(event.time_msec());
+            state.tablet_cursors.retain(|cursor| cursor.tool != descriptor);
             forget_tablet_tool(&state.seat, &descriptor);
         }
     }
@@ -1229,9 +1327,11 @@ fn on_tablet_proximity<I: InputBackend>(state: &mut Compositor, event: I::Tablet
 }
 
 fn on_tablet_tip<I: InputBackend>(state: &mut Compositor, event: I::TabletToolTipEvent) {
+    reveal_cursor(state);
     let position = tablet_position::<I, _>(state, &event);
     let descriptor = event.tool();
     let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
+    track_tablet_cursor(state, &descriptor, position);
     remember_tablet_tool(&state.seat, descriptor);
     queue_tablet_axes::<I, _>(&tool, &event);
     let focus = tablet_focus(state.wm.backend(), position);
@@ -1245,6 +1345,7 @@ fn on_tablet_tip<I: InputBackend>(state: &mut Compositor, event: I::TabletToolTi
 }
 
 fn on_tablet_button<I: InputBackend>(state: &mut Compositor, event: I::TabletToolButtonEvent) {
+    reveal_cursor(state);
     let descriptor = event.tool();
     let (_, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
     remember_tablet_tool(&state.seat, descriptor);
@@ -1461,6 +1562,15 @@ pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key
             }
         }
     });
+    // A press that reaches a client is typing; one the compositor consumed
+    // as a binding is not, and neither is a bare modifier.
+    if matches!(route, FilterResult::Forward)
+        && key_state == KeyState::Pressed
+        && cursor_visibility::hides_on_key(&state.wm.backend().pointer_config.cursor, physical_combo.keysym)
+        && state.wm.backend_mut().cursor_visibility.hide(cursor_visibility::AutoHide::Typing)
+    {
+        state.wm.backend_mut().mark_damaged();
+    }
     if matches!(route, FilterResult::Forward) {
         if state.wm.mac_keyboard() || state.mac_keyboard.has_held(keycode) {
             keyboard::mac::forward(state, &keyboard, keyboard::mac::Delivery {
@@ -1608,10 +1718,29 @@ pub(crate) fn release_pointer_constraint(state: &mut Compositor) {
     });
     sync_touchpad_typing(state);
     if let Some(target) = warp_to {
-        let position = confine_to_outputs(&state.wm.backend().monitors, target);
-        let time = state.start_time.elapsed().as_millis() as u32;
-        pointer_moved(state, position, time, None, PointerDelivery::Motion);
+        move_pointer_to(state, target);
     }
+}
+
+/// Moves the pointer the way hardware motion would: confined to the
+/// outputs, with enter, leave, hover and cursor damage all coming from
+/// `pointer_moved`.
+fn move_pointer_to(state: &mut Compositor, target: LogicalPoint<f64, Logical>) {
+    let position = confine_to_outputs(&state.wm.backend().monitors, target);
+    let time = state.start_time.elapsed().as_millis() as u32;
+    pointer_moved(state, position, time, None, PointerDelivery::Motion);
+}
+
+/// Warps the pointer to a point in the compositor's global coordinates on a
+/// script's request (`hl.dsp.cursor.move`). Refused while the session is
+/// locked, because the lock surface owns the pointer, and while a client
+/// holds a pointer constraint, which is a promise to that client.
+pub(crate) fn warp_pointer(state: &mut Compositor, target: Point) -> bool {
+    if state.wm.backend().locked || constraints::is_captured(state) {
+        return false;
+    }
+    move_pointer_to(state, (f64::from(target.x), f64::from(target.y)).into());
+    true
 }
 
 /// Apply capture transitions before the next hardware dispatch. The settled
@@ -1770,6 +1899,15 @@ enum PointerDelivery {
     LockedSilent,
 }
 
+/// Visible pointer input shows a pointer the compositor hid for typing,
+/// touch or idleness, and restarts the idle clock.
+fn reveal_cursor(state: &mut Compositor) {
+    let backend = state.wm.backend_mut();
+    if backend.cursor_visibility.reveal(&backend.pointer_config.cursor, std::time::Instant::now) {
+        backend.mark_damaged();
+    }
+}
+
 fn pointer_moved(
     state: &mut Compositor,
     position: LogicalPoint<f64, Logical>,
@@ -1792,6 +1930,7 @@ fn pointer_moved(
         }
         return;
     }
+    reveal_cursor(state);
     let serial = SERIAL_COUNTER.next_serial();
     // Floor, not round: a pointer at x=10.7 is over pixel 10, and
     // rounding at the output's far edge would name a pixel outside
@@ -2034,6 +2173,7 @@ fn pointer_button(
     button_state: ButtonState,
     button: Option<MouseButton>,
 ) {
+    reveal_cursor(state);
     let serial = SERIAL_COUNTER.next_serial();
     let pressed = button_state == ButtonState::Pressed;
     if !state.wm.backend().locked && pressed && state.wm.backend().gesture_scene.is_some() {
@@ -2479,6 +2619,7 @@ fn press_target(hit: &Hit) -> PressTarget {
 /// notches (`wm_core::ScrollDelta` records why), so it is the side
 /// that accumulates.
 fn on_pointer_axis<I: InputBackend>(state: &mut Compositor, event: I::PointerAxisEvent) {
+    reveal_cursor(state);
     if route_shell_scroll::<I>(state, &event) {
         return;
     }
@@ -3197,8 +3338,9 @@ fn lock_hit(
 /// LibreOffice's pointer kept being drawn over the desktop, the dock,
 /// and every frame the pointer crossed afterwards.
 pub(crate) enum PointerSubject {
-    /// Client content: the client's `wl_pointer.set_cursor` choice
-    /// applies, falling back to the arrow when it never made one.
+    /// Client content: the client's `wl_pointer.set_cursor` surface or
+    /// `wp_cursor_shape_v1` shape applies, falling back to the arrow
+    /// when it never made one.
     Client,
     /// One of our frames' chrome, with the resize cursor the frame
     /// last asked for (`Backend::set_frame_cursor`), if any.
@@ -3694,6 +3836,7 @@ mod tests {
     fn every_input_family_has_an_explicit_lock_route_and_idle_policy() {
         use InputFamily::*;
         use LockedInputRoute::*;
+        use smithay::backend::input::Switch;
 
         let cases = [
             (DeviceLifecycle, false, NoClientDelivery),
@@ -3710,6 +3853,12 @@ mod tests {
         for (family, resets_idle, locked_route) in cases {
             assert_eq!(family.resets_idle(), resets_idle, "idle policy for {family:?}");
             assert_eq!(family.locked_route(), locked_route, "lock route for {family:?}");
+        }
+        // The switch family's exception, decided per toggle: only a lid
+        // opening is activity.
+        assert!(switch_resets_idle(Some(Switch::Lid), false));
+        for (switch, on) in [(Some(Switch::Lid), true), (Some(Switch::TabletMode), false), (Some(Switch::TabletMode), true), (None, false)] {
+            assert!(!switch_resets_idle(switch, on), "{switch:?} on={on}");
         }
     }
 

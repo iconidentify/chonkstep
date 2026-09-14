@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chonk_hyprland_ipc::{MAX_EVENT_CLIENTS, MAX_REQUEST_CLIENTS};
-use chonk_testkit::{HyprlandSources, poll_until, profile_binary, Session, SessionOptions};
+use chonk_testkit::{keys, HyprlandSources, poll_until, profile_binary, Session, SessionOptions};
 
 const EVENT: Duration = Duration::from_secs(10);
 
@@ -422,6 +422,206 @@ fn screensaver_cursor_visibility_is_live_and_owned() {
         hidden.path.display(),
         after_owner_death.path.display()
     );
+}
+
+/// Omarchy's screenshot picker moves slurp's highlight between windows by
+/// warping the pointer with `hl.dsp.cursor.move`, in the logical units
+/// `cursorpos` reports, and reads the result back the same way. A script
+/// must never move the pointer behind the lock.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn a_scripted_pointer_warp_lands_where_cursorpos_reports_and_never_behind_the_lock() {
+    for (scale, name) in [(1.0, "hypr-ipc-warp-1x"), (1.5, "hypr-ipc-warp-1.5x")] {
+        let mut options = SessionOptions { scale: Some(scale), ..SessionOptions::default() };
+        options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+        let mut session = Session::boot(name, options).expect("nested session");
+        let dir = socket_dir(&session);
+        for (warp, x, y) in [
+            ("/eval hl.dispatch(hl.dsp.cursor.move({ x = 300, y = 200 }))", 300, 200),
+            ("/dispatch movecursor 120 90", 120, 90),
+        ] {
+            assert_eq!(request(&dir, warp).trim(), "ok", "{warp} at scale {scale}");
+            session.door().barrier().unwrap();
+            assert_eq!(json(&dir, "j/cursorpos"), serde_json::json!({ "x": x, "y": y }), "{warp} at scale {scale}");
+        }
+        if scale != 1.0 {
+            continue;
+        }
+        let probe = profile_binary("chonk-lock-probe").expect("cargo build -p chonk-testkit builds the probe");
+        session.launch(probe.to_str().unwrap(), &["--hold"]).expect("the locker launches");
+        poll_until(EVENT, "the locker to hold the lock", || {
+            session.client_log("chonk-lock-probe").contains("holding the lock").then_some(())
+        })
+        .unwrap();
+        let before = json(&dir, "j/cursorpos");
+        assert_ne!(
+            request(&dir, "/eval hl.dispatch(hl.dsp.cursor.move({ x = 40, y = 40 }))").trim(),
+            "ok",
+            "a script cannot move the pointer behind the lock"
+        );
+        session.door().barrier().unwrap();
+        assert_eq!(json(&dir, "j/cursorpos"), before);
+    }
+}
+
+/// Omarchy's look turns on `cursor:hide_on_key_press`: typing into a window
+/// gets the pointer out of the way until it next moves, and a touch does the
+/// same with `hide_on_touch`. The compositor's own hide must not disturb the
+/// screensaver's owned `invisible` flag in either direction.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn typing_and_touch_hide_the_pointer_until_it_moves() {
+    let mut options = SessionOptions {
+        config_extra: concat!(
+            "[cursor]\nhide_on_key_press = true\nhide_on_touch = true\n\n",
+            "[commands]\nnoop = [\"true\"]\n\n",
+            "[keybindings]\n\"super+x\" = \"run noop\"\n",
+        )
+        .into(),
+        ..SessionOptions::default()
+    };
+    options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+    let mut session = Session::boot("hypr-ipc-cursor-auto-hide", options).expect("nested session");
+    let dir = socket_dir(&session);
+    session
+        .launch("zenity", &["--question", "--title", "typing-target", "--text", "type here"])
+        .expect("launch a focused window to type into");
+    session.wait_for_window("typing-target").expect("the typing target maps");
+
+    let (x, y) = (48_u32, 48_u32);
+    // Motion away and back, so the comparison is at the same position.
+    let wiggle = |session: &mut Session| {
+        session.door().motion(f64::from(x + 6), f64::from(y)).unwrap();
+        session.door().motion(f64::from(x), f64::from(y)).unwrap();
+        session.door().barrier().unwrap();
+    };
+    wiggle(&mut session);
+    let visible = session.screenshot_with_cursor("auto-hide-visible").unwrap();
+    let shown = |session: &mut Session, name: &str| {
+        session.door().barrier().unwrap();
+        let shot = session.screenshot_with_cursor(name).unwrap();
+        changed_cursor_pixels(&visible, &shot, x, y) <= 4
+    };
+    let hidden = |session: &mut Session, name: &str| {
+        session.door().barrier().unwrap();
+        let shot = session.screenshot_with_cursor(name).unwrap();
+        changed_cursor_pixels(&visible, &shot, x, y) > 16
+    };
+
+    session.door().tap_key(keys::LEFTSHIFT).unwrap();
+    assert!(shown(&mut session, "auto-hide-after-modifier"), "a bare modifier must not hide the pointer");
+
+    session.door().key(keys::LEFTMETA, true).unwrap();
+    session.door().tap_key(keys::X).unwrap();
+    session.door().key(keys::LEFTMETA, false).unwrap();
+    assert!(shown(&mut session, "auto-hide-after-binding"), "a key consumed by a binding is not typing");
+
+    session.door().tap_key(keys::X).unwrap();
+    assert!(hidden(&mut session, "auto-hide-after-typing"), "a key delivered to the window hides the pointer");
+    assert_eq!(request(&dir, "/keyword cursor:invisible false").trim(), "ok");
+    assert!(hidden(&mut session, "auto-hide-survives-visible-keyword"), "the screensaver flag cannot reveal a typing hide");
+    wiggle(&mut session);
+    assert!(shown(&mut session, "auto-hide-after-motion"), "the next motion shows the pointer again");
+
+    assert_eq!(request(&dir, "/keyword cursor:invisible true").trim(), "ok");
+    session.door().tap_key(keys::X).unwrap();
+    wiggle(&mut session);
+    assert!(hidden(&mut session, "invisible-survives-typing-and-motion"), "motion cannot reveal a screensaver hide");
+    assert_eq!(request(&dir, "/keyword cursor:invisible false").trim(), "ok");
+    assert!(shown(&mut session, "invisible-released"));
+
+    // On the dialog's label, which a tap leaves alone; its buttons would close it.
+    session.door().touch_down(0, 220.0, 110.0).unwrap();
+    session.door().touch_frame().unwrap();
+    session.door().touch_up(0).unwrap();
+    session.door().touch_frame().unwrap();
+    assert!(hidden(&mut session, "auto-hide-after-touch"), "a touch hides the pointer");
+    wiggle(&mut session);
+    assert!(shown(&mut session, "auto-hide-after-touch-then-motion"));
+}
+
+/// Omarchy's touchpad and touchscreen toggles send `hl.device` with the name
+/// `devices` reports. Switched off, that device no longer moves the pointer
+/// or counts as activity, a button it was holding comes back up at the
+/// client, and every other device keeps working. Switched back on, it moves
+/// the pointer again. The nested session's own logical devices are refused
+/// by name.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn a_device_switched_off_by_name_stops_moving_the_pointer_and_releases_its_button() {
+    const TRACKPAD: &str = "chonkstep-test-trackpad";
+    let mut options = SessionOptions { scale: Some(1.0), ..SessionOptions::default() };
+    options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+    let mut session = Session::boot("hypr-ipc-device-switch", options).expect("nested session");
+    let dir = socket_dir(&session);
+    let switch = |enabled: bool, name: &str| format!(r#"/eval hl.device({{ name = "{name}", enabled = {enabled} }})"#);
+    for name in ["chonkstep-pointer", "chonkstep-keyboard"] {
+        let reply = request(&dir, &switch(false, name));
+        assert!(reply.starts_with("Invalid dispatcher") && reply.contains("nested session"), "{name}: {reply}");
+    }
+
+    session.door().pointer_device(TRACKPAD, true).unwrap();
+    session.door().barrier().unwrap();
+    let devices = json(&dir, "j/devices");
+    assert!(
+        devices["mice"].as_array().unwrap().iter().any(|mouse| mouse["name"] == TRACKPAD),
+        "the hotplugged pointer is listed by name: {devices}"
+    );
+
+    let probe = profile_binary("chonk-input-probe").expect("cargo build -p chonk-testkit builds the probe");
+    session.launch(probe.to_str().unwrap(), &["1"]).expect("the input probe launches");
+    let window = session.wait_for_window("input-probe").expect("the input probe maps");
+    let (x, y) = (window.x + 80, window.y + 70);
+    let probe_lines = |session: &Session, kind: &str| {
+        session.client_log("chonk-input-probe").lines().filter(|line| line.split_whitespace().nth(2) == Some(kind)).count()
+    };
+    session.door().motion_from(TRACKPAD, f64::from(x), f64::from(y)).unwrap();
+    session.door().button_from(TRACKPAD, "left", true).unwrap();
+    session.door().barrier().unwrap();
+    poll_until(EVENT, "the trackpad's press to reach the probe", || (probe_lines(&session, "press") == 1).then_some(()))
+        .unwrap();
+
+    assert_eq!(request(&dir, &switch(false, TRACKPAD)).trim(), "ok");
+    poll_until(EVENT, "the held button to come back up", || (probe_lines(&session, "release") == 1).then_some(()))
+        .expect("switching a device off releases the button it held");
+    let at = json(&dir, "j/cursorpos");
+    assert_eq!(at, serde_json::json!({ "x": x, "y": y }));
+    session.door().motion_from(TRACKPAD, f64::from(x + 120), f64::from(y + 40)).unwrap();
+    session.door().barrier().unwrap();
+    assert_eq!(json(&dir, "j/cursorpos"), at, "a switched-off device must not move the pointer");
+    session.door().motion(f64::from(x + 10), f64::from(y + 10)).unwrap();
+    session.door().barrier().unwrap();
+    assert_eq!(json(&dir, "j/cursorpos"), serde_json::json!({ "x": x + 10, "y": y + 10 }), "other devices keep working");
+
+    // Idleness, through the protocol a locker binds: the switched-off
+    // device's motion is not activity, and the door's still is.
+    let watcher = profile_binary("chonk-fullscreen-probe").expect("probe is built").display().to_string();
+    session.launch(&watcher, &["IdleWatch", "idle-watch", "animate-watch-idle"]).expect("the idle watcher launches");
+    session.wait_for_window("IdleWatch").expect("the idle watcher maps");
+    let watched = |session: &Session, line: &str| session.client_log(&watcher).lines().filter(|seen| *seen == line).count();
+    let frames = |session: &Session| session.client_log(&watcher).matches("animation frame=").count();
+    poll_until(EVENT, "the watcher to see the session go idle", || (watched(&session, "idle state=idled") >= 1).then_some(()))
+        .unwrap();
+    let resumed = watched(&session, "idle state=resumed");
+    for step in 0..4 {
+        session.door().motion_from(TRACKPAD, f64::from(x + 20 * step), f64::from(y)).unwrap();
+        session.door().barrier().unwrap();
+    }
+    // Two more reported frames are two more trips around the watcher's event
+    // loop, so a `resumed` sent for that motion would already be logged.
+    let seen = frames(&session);
+    poll_until(EVENT, "the watcher to keep dispatching", || (frames(&session) >= seen + 2).then_some(())).unwrap();
+    assert_eq!(watched(&session, "idle state=resumed"), resumed, "a switched-off device must not count as activity");
+    session.door().motion(f64::from(x), f64::from(y)).unwrap();
+    poll_until(EVENT, "the door's motion to end the idle period", || {
+        (watched(&session, "idle state=resumed") > resumed).then_some(())
+    })
+    .unwrap();
+
+    assert_eq!(request(&dir, &switch(true, TRACKPAD)).trim(), "ok");
+    session.door().motion_from(TRACKPAD, f64::from(x + 30), f64::from(y + 30)).unwrap();
+    session.door().barrier().unwrap();
+    assert_eq!(json(&dir, "j/cursorpos"), serde_json::json!({ "x": x + 30, "y": y + 30 }), "switched back on, it moves the pointer");
 }
 
 /// The mapping protocol has two requests, and both are a join: whether

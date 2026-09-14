@@ -625,6 +625,11 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("kbdbrightnessup", "run omarchy-kbd-brightness-up"),
     ("kbdbrightnessdown", "run omarchy-kbd-brightness-down"),
     ("kbdlightonoff", "run omarchy-kbd-brightness-cycle"),
+    // Omarchy's toggle script finds the touchpad in `hyprctl devices` and
+    // switches it with `hl.device`, both of which this desktop serves.
+    ("touchpadtoggle", "run omarchy-touchpad-toggle"),
+    ("touchpadon", "run omarchy-touchpad-on"),
+    ("touchpadoff", "run omarchy-touchpad-off"),
     ("playpause", "run omarchy-media-play-pause"),
     ("audiopause", "run omarchy-media-play-pause"),
     ("audionext", "run omarchy-media-next"),
@@ -669,8 +674,7 @@ pub enum Unbound {
     /// because the semantics are the window manager's own.
     NoVerb,
     /// Not a key chord this config format can express: a mouse button
-    /// or wheel binding, a hardware switch, or a bare X keycode with no
-    /// keysym behind it.
+    /// or wheel binding, or a bare X keycode with no keysym behind it.
     NotAKey,
     /// Omarchy binds it only when something else is installed — its own
     /// preinstalled-applications flag, or a tool it probes for with
@@ -692,6 +696,8 @@ impl Unbound {
     pub const LAYOUT_OPTION: Self = Self::Unserved("toggles a Hyprland layout option, which ChonkStep does not read");
     pub const OUTPUT_DISABLE: Self = Self::Unserved("disables an output, which ChonkStep does not do");
     pub const OUTPUT_MIRROR: Self = Self::Unserved("mirrors an output, which ChonkStep does not do");
+    /// A hardware switch: the baked table holds key chords only.
+    pub const SWITCH: Self = Self::Unserved("a switch binding, which only the live Omarchy configuration carries");
 
     /// The one-line reason, as the docs table prints it.
     pub fn reason(self) -> &'static str {
@@ -749,9 +755,7 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+ctrl+delete", "toggle the laptop display", Unbound::OUTPUT_DISABLE),
     ("super+ctrl+alt+delete", "toggle laptop display mirroring", Unbound::OUTPUT_MIRROR),
     ("super+ctrl+z / super+ctrl+alt+z", "cursor zoom in / reset", Unbound::HyprlandOnly),
-    ("switch:on/off:Lid Switch", "run the lid-close and clamshell handlers", Unbound::NotAKey),
-    // media.lua
-    ("touchpad toggle / on / off", "enable and disable the touchpad", Unbound::HyprlandOnly),
+    ("switch:on/off:Lid Switch", "run the lid-close and clamshell handlers", Unbound::SWITCH),
     // voxtype.lua
     ("super+ctrl+x, f9", "voxtype dictation: toggle, and push-to-talk", Unbound::Conditional),
 ];
@@ -856,6 +860,9 @@ pub const OMARCHY_COMMANDS: &[(&str, &[&str])] = &[
     ("omarchy-show-weather", &["omarchy-notification-weather"]),
     ("omarchy-toggle-idle", &["omarchy-toggle-idle"]),
     ("omarchy-toggle-nightlight", &["omarchy-toggle-nightlight"]),
+    ("omarchy-touchpad-off", &["omarchy-toggle-touchpad", "off"]),
+    ("omarchy-touchpad-on", &["omarchy-toggle-touchpad", "on"]),
+    ("omarchy-touchpad-toggle", &["omarchy-toggle-touchpad"]),
     ("omarchy-transcode", &["omarchy-transcode"]),
     ("omarchy-volume-down", &["omarchy-audio-output-volume", "lower"]),
     ("omarchy-volume-down-fine", &["omarchy-audio-output-volume", "-1"]),

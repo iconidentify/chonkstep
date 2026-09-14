@@ -108,6 +108,32 @@ Two things a hand-written table could not do, and this can:
   an `if` that could not be answered) is not taken to be `nil` either.
   An `if` whose condition is not followed by `then` is skipped whole.
 
+### Switch bindings
+
+`switch:on:NAME`, `switch:off:NAME` and `switch:NAME` bind a hardware
+switch instead of a key, in both syntaxes: `bindl = , switch:on:Lid
+Switch, exec, …` in conf, `o.bind("switch:on:Lid Switch", nil, …, {
+locked = true })` in Lua. `on` is a lid closing or tablet mode starting,
+`off` the reverse, and a bare name answers both. `NAME` is the device
+name libinput reports, the one `hyprctl devices` lists under `switches`,
+and it must match exactly: Apple Silicon calls its lid `Apple SMC
+power/lid events`, which is why Omarchy binds both names. A switch
+binding runs its command the way a key binding does, and `unbind` takes
+the same spelling. While the session is locked only bindings marked
+locked (`bindl`, `locked = true`) run, so Omarchy's lid handlers still
+answer on the lock screen. Opening the lid wakes sleeping screens and
+counts as activity for idle timers; closing it does neither. One
+configuration holds at most 32 switch bindings.
+
+On a stock Omarchy install, closing the lid runs
+`omarchy-system-lid-close`, which locks the session straight away when
+no external monitor is connected. The clamshell handler Omarchy binds
+beside it, `omarchy-hyprland-monitor-clamshell`, stays unbound: it
+disables outputs through Hyprland requests ChonkStep does not serve, so
+it is reported like any other script outside the served list. The baked
+Omarchy keymap holds key chords only, so switch bindings come from the
+live configuration.
+
 ### Window rules
 
 `windowrule`, `windowrulev2` and `o.window` / `hl.window_rule`, in all
@@ -227,10 +253,10 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Unsupported window-rule properties | `opacity`, `no_blur`, `suppress_event`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
 | A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
-| Mouse, wheel and switch bindings (`bindm`, `mouse:272`, `mouse_up`, `switch:on:Lid Switch`) | Not key chords; this config format cannot express one. |
+| Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
 | `submap`, workspace rules, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
-| Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (`disabled_input_device`, `hl.device`, `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
+| Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (such as `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
 | Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |
 
@@ -329,8 +355,12 @@ non-empty `XKB_DEFAULT_*` variable wins, then a value the configuration
 spells out (an empty one included), then `/etc/vconsole.conf`, then
 libxkbcommon's default. Omarchy's `us,` prefix for a layout with no
 Latin letters is not applied. `repeat_rate` and `repeat_delay` configure
-both client key repeat and `binde` actions. These hardware-facing values
-transfer; whole-desktop interaction policy does not. In particular,
+both client key repeat and `binde` actions. `numlock_by_default`, which
+Omarchy turns on, locks Num Lock when the session installs its keymap, when
+a later edit replaces the keymap, and when a reload newly turns the setting
+on. Any other reload leaves Num Lock where you put it, so pressing the key
+to turn it off is not undone by the next edit to your configuration. These
+hardware-facing values transfer; whole-desktop interaction policy does not. In particular,
 Hyprland's `follow_mouse` is logged and ignored—even when it is `1` in
 Omarchy's shipped defaults—so a stock Omarchy install retains
 chonkstep's click-to-focus default. Set `focus_follows_mouse = true` in
@@ -347,6 +377,36 @@ Pointer configuration is also carried from both classic `input {}` /
 `disable_while_typing`, `clickfinger_behavior`, and `left_handed` are applied
 where the device advertises them.
 
+The touchpad's tapping settings reach touchpads only: `touchpad:tap-and-drag`
+(`tap_and_drag` in a Lua table), `touchpad:drag_lock` (0 or 1; libinput's
+sticky mode 2 is newer than the libinput binding chonkstep is built with and
+is refused by name), `touchpad:tap_button_map` (`lrm` or `lmr`), and
+`touchpad:drag_3fg` (0 off, 1 three fingers, 2 four fingers). Three-finger
+drag needs libinput 1.27 or later. On an older libinput the session still
+starts, and each touchpad that was asked for it logs
+`drag_3fg: requires a newer libinput`. `touchpad:middle_button_emulation`
+applies to touchpads, while `input:scroll_method` (`2fg`, `edge`,
+`on_button_down` or `no_scroll`) and `input:scroll_button` (an evdev button
+code, 0 through 300, 0 meaning the device's own) apply to every other
+device, which is where a trackpoint or trackball wants them. `[input]` and
+`[input.touchpad]` in `config.toml` take the same scroll and middle-button
+keys for each class. Removing any of these keys restores each device's
+libinput default. A value out of range is logged with its key and skipped.
+
+A device rule applies to one device, named exactly as `hyprctl devices`
+lists it: a `device { name = …; … }` block, or `hl.device({ name = "…", … })`
+in Lua. A rule carries `enabled`, `sensitivity`, `accel_profile`,
+`natural_scroll`, `left_handed` and `tap_to_click`, each laid over the
+settings above for that device alone. Any other key is logged and skipped,
+and at most 64 rules are read. `enabled = false` stops the device sending
+events, through hotplug and resume, and is never applied to a device that
+has keys. Omarchy's touchpad and touchscreen toggles keep a disable as one
+line of data in `~/.local/state/omarchy/toggles/hypr/<kind>-disabled-name`.
+When `toggles.lua` calls `disabled_input_device`, that line is read as a
+device name, never as Lua, and becomes the same rule. The toggles reach the
+running session through `hyprctl eval hl.device(…)`, described in
+[hyprland-ipc.md](hyprland-ipc.md).
+
 Scrolling is configured per device class. `input:natural_scroll` and
 `input:scroll_factor` (or `[input]` in `config.toml`) apply to mice,
 trackpoints and every other device that is not a touchpad;
@@ -360,6 +420,18 @@ high-resolution wheel units keep their fraction between events instead of
 rounding it away. A `scroll_touchpad` window rule replaces the touchpad
 factor while the pointer is over a matching window. Unsupported capabilities
 are named per device without rejecting the rest of the configuration.
+
+The `cursor {}` block and Omarchy's `cursor` table carry the settings that
+decide when the pointer hides. `hide_on_key_press`, which Omarchy turns on,
+hides it while you type into a window; a bare modifier or a key a binding
+consumes does not. `hide_on_touch` hides it on a touch, and
+`inactive_timeout` hides it after that many seconds without pointer input
+(zero never does; the compositor honours one second through an hour). Any
+pointer motion, click, scroll or tablet input shows it again. The warp keys
+(`warp_on_change_workspace`, `no_warps` and the rest) are declined by name:
+chonkstep moves the pointer only when you do or a script asks with
+`cursor.move`. The zoom keys are not implemented. A `[cursor]` table in
+`config.toml` takes the same three keys and wins over both.
 
 Active pointer locks and confinement temporarily suspend `disable_while_typing`
 so games can receive keyboard and touchpad motion together. This includes
@@ -576,8 +648,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=179 commands=119 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=172
+      files=42 bindings=179 commands=120 env=8 autostart=4
+      float_rules=47 monitors=1 skipped=169
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

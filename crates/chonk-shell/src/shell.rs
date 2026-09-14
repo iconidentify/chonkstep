@@ -1337,22 +1337,35 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             options: next.input.options.clone(),
             repeat_rate: next.input.repeat_rate,
             repeat_delay: next.input.repeat_delay,
+            numlock_by_default: next.input.numlock_by_default,
         });
         wm.backend_mut().set_pointer_config(wm_core::PointerConfig {
             sensitivity: next.input.sensitivity,
             pointer: wm_core::ScrollClass {
                 natural_scroll: next.input.natural_scroll,
                 scroll_factor: next.input.scroll_factor,
+                scroll_method: next.input.scroll_method,
+                scroll_button: next.input.scroll_button,
+                middle_button_emulation: next.input.middle_button_emulation,
             },
             touchpad: wm_core::ScrollClass {
                 natural_scroll: next.input.touchpad_natural_scroll,
                 scroll_factor: next.input.touchpad_scroll_factor,
+                scroll_method: next.input.touchpad_scroll_method,
+                scroll_button: next.input.touchpad_scroll_button,
+                middle_button_emulation: next.input.touchpad_middle_button_emulation,
             },
+            cursor: next.input.cursor.clone(),
             tap_to_click: next.input.tap_to_click,
             disable_while_typing: next.input.disable_while_typing,
             clickfinger_behavior: next.input.clickfinger_behavior,
             left_handed: next.input.left_handed,
             accel_profile: next.input.accel_profile.clone(),
+            tap_and_drag: next.input.tap_and_drag,
+            drag_lock: next.input.drag_lock,
+            tap_button_map: next.input.tap_button_map,
+            drag_3fg: next.input.drag_3fg,
+            devices: next.input.devices.clone(),
         });
         // ...and then re-ask for every window already on the desk. A
         // rule that only reached windows opened after it was written
@@ -1749,6 +1762,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn keymap_release_action(&self, combo: &KeyCombo) -> Option<Action> {
         if self.help.visible() { return None; }
         self.release_keymap.get(combo).cloned()
+    }
+
+    /// The actions a hardware switch toggle runs, in configuration
+    /// order. While the session is locked only `locked` bindings answer,
+    /// as for keys.
+    pub fn switch_actions(&self, device: &str, on: bool, locked: bool) -> Vec<Action> {
+        self.state
+            .switch_bindings
+            .iter()
+            .filter(|binding| binding.runs(device, on, locked))
+            .map(|binding| binding.action.clone())
+            .collect()
     }
 
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {

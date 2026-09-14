@@ -278,6 +278,7 @@ fn capture_output(comp: &mut Compositor) -> Result<PendingImage, String> {
         graphics,
         pointer_location,
         cursor_status,
+        tablet_cursors,
         cursors,
         ..
     } = comp;
@@ -294,6 +295,7 @@ fn capture_output(comp: &mut Compositor) -> Result<PendingImage, String> {
         renderer,
         *pointer_location,
         cursor_status,
+        tablet_cursors,
         cursors,
         // No viewport offset: the capture *is* the global space, so
         // every element stays at the coordinate the ledger holds it at.
@@ -364,7 +366,7 @@ pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window:
         }
         (elements, Color32F::new(0.0, 0.0, 0.0, 0.0))
     } else {
-        build_scene(wm.backend(), renderer, *pointer_location, &smithay::input::pointer::CursorImageStatus::Hidden, cursors, viewport)
+        build_scene(wm.backend(), renderer, *pointer_location, &smithay::input::pointer::CursorImageStatus::Hidden, &[], cursors, viewport)
     };
     render_offscreen_pending(renderer, &mut elements, viewport.size, 1.0, clear_color)
 }

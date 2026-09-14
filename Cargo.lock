@@ -3435,6 +3435,7 @@ dependencies = [
  "wm-theme",
  "wm-theme-api",
  "x11rb",
+ "xcursor",
  "zbus",
 ]
 

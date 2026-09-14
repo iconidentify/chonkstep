@@ -488,9 +488,14 @@ fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
         assert_eq!(action_for(&reading, chord), None, "{chord} must stay unbound");
         assert_eq!(skipped_why(&reading, what), Some(reason.reason().to_string()), "{what}");
     }
-    // The lid switches never reach the script filter: a switch is not a
-    // chord this desktop can grab.
-    assert!(skipped_why(&reading, "switch:off:Lid Switch").is_some());
+    // The clamshell half of Omarchy's lid bindings binds as a switch and
+    // then meets the script filter: it disables outputs through requests
+    // this desktop does not serve.
+    assert!(
+        skipped_why(&reading, "switch:off:Lid Switch").is_some_and(|why| !why.contains("pointer or switch")),
+        "{:?}",
+        reading.skipped
+    );
     assert_eq!(
         argv_for(&reading, "super+print"),
         Some(vec![
@@ -629,6 +634,316 @@ o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
     }
 }
 
+/// Omarchy sets `numlock_by_default`, and its user template offers
+/// `drag_3fg` beside the other documented touchpad keys. Each arrives from
+/// either syntax as a typed value, and each keeps to its device class: a
+/// touchpad's middle-button emulation is not a trackball's, and the
+/// trackball's scroll method is not the touchpad's.
+#[test]
+fn the_documented_touchpad_and_pointer_keys_are_carried_by_class() {
+    let lua = scratch("input-extras-lua");
+    write(
+        &lua.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.config({ input = {
+  numlock_by_default = true, scroll_method = "on_button_down", scroll_button = 274,
+  touchpad = {
+    tap_and_drag = false, drag_lock = 1, middle_button_emulation = true,
+    tap_button_map = "lmr", drag_3fg = 2,
+  },
+} })
+"#,
+    );
+    let conf = scratch("input-extras-conf");
+    write(
+        &conf.join(".config/hypr/hyprland.conf"),
+        concat!(
+            "input {\n",
+            "    numlock_by_default = true\n",
+            "    scroll_method = on_button_down\n",
+            "    scroll_button = 274\n",
+            "    touchpad {\n",
+            "        tap-and-drag = false\n",
+            "        drag_lock = 1\n",
+            "        middle_button_emulation = true\n",
+            "        tap_button_map = lmr\n",
+            "        drag_3fg = 2\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    for root in [lua, conf] {
+        let reading = read(&Roots::under(&root));
+        let input = &reading.input;
+        assert!(!reading.skipped.iter().any(|skip| skip.kind == "input"), "{root:?}: {:?}", reading.skipped);
+        assert_eq!(input.numlock_by_default, Some(true), "{root:?}");
+        assert_eq!(input.scroll_method, Some(wm_core::ScrollMethod::OnButtonDown));
+        assert_eq!(input.scroll_button, Some(274));
+        assert_eq!(input.touchpad_scroll_method, None, "a mouse's scroll method must not reach touchpads");
+        assert_eq!(input.touchpad_middle_button_emulation, Some(true));
+        assert_eq!(input.middle_button_emulation, None, "a touchpad's middle-button emulation must not reach mice");
+        assert_eq!(input.tap_and_drag, Some(false));
+        assert_eq!(input.drag_lock, Some(true));
+        assert_eq!(input.tap_button_map, Some(wm_core::TapButtonMap::LeftMiddleRight));
+        assert_eq!(input.drag_3fg, Some(wm_core::MultiFingerDrag::FourFingers));
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+        assert_eq!(config.input.numlock_by_default, Some(true), "{root:?}");
+        assert_eq!(config.input.drag_3fg, Some(wm_core::MultiFingerDrag::FourFingers));
+    }
+}
+
+#[test]
+fn out_of_range_touchpad_and_pointer_values_are_refused_by_name() {
+    for (name, value, reason) in [
+        ("touchpad:drag_lock", "2", "sticky"),
+        ("touchpad:drag_lock", "maybe", "true or false"),
+        ("touchpad:drag_3fg", "3", "four fingers"),
+        ("touchpad:drag_3fg", "-1", "four fingers"),
+        ("touchpad:tap_button_map", "rml", "lrm or lmr"),
+        ("touchpad:tap-and-drag", "sometimes", "true or false"),
+        ("touchpad:middle_button_emulation", "2", "true or false"),
+        ("scroll_method", "natural", "on_button_down"),
+        ("scroll_button", "301", "0 through 300"),
+        ("scroll_button", "-1", "0 through 300"),
+        ("scroll_button", "BTN_MIDDLE", "0 through 300"),
+        ("numlock_by_default", "on-ish", "true or false"),
+    ] {
+        let mut reading = Reading::default();
+        input(&mut reading, name, value);
+        assert_eq!(reading.input, crate::InputConfig::default(), "{name} = {value}");
+        assert_eq!(reading.skipped.len(), 1, "{name} = {value}");
+        let skip = &reading.skipped[0];
+        assert_eq!(skip.what, format!("{name} = {value}"), "the refusal names the key and the value");
+        assert!(skip.why.contains(reason), "{name} = {value}: {}", skip.why);
+    }
+    let mut reading = Reading::default();
+    input(&mut reading, "scroll_button", "0");
+    input(&mut reading, "scroll_button", "300");
+    input(&mut reading, "touchpad:drag_3fg", "0");
+    input(&mut reading, "scroll_method", "NO_SCROLL");
+    assert_eq!(reading.input.scroll_button, Some(300));
+    assert_eq!(reading.input.drag_3fg, Some(wm_core::MultiFingerDrag::Disabled));
+    assert_eq!(reading.input.scroll_method, Some(wm_core::ScrollMethod::NoScroll));
+    assert!(reading.skipped.is_empty(), "{:?}", reading.skipped);
+}
+
+/// A device rule reaches one device by its exact name, written either way,
+/// merges with a later rule for the same name, and keeps only the settings a
+/// rule can carry.
+#[test]
+fn device_rules_are_read_by_exact_name_from_either_syntax() {
+    let lua = scratch("device-rules-lua");
+    write(
+        &lua.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.device({ name = "epic-mouse-v1", sensitivity = -0.5, enabled = false, scroll_factor = 2 })
+hl.device({ name = "SynPS/2 Synaptics TouchPad", natural_scroll = true, tap_to_click = true })
+hl.device({ name = "epic-mouse-v1", accel_profile = "flat" })
+"#,
+    );
+    let conf = scratch("device-rules-conf");
+    write(
+        &conf.join(".config/hypr/hyprland.conf"),
+        concat!(
+            "device {\n    sensitivity = -0.5\n    name = epic-mouse-v1\n    enabled = false\n    scroll_factor = 2\n}\n",
+            "device {\n    name = SynPS/2 Synaptics TouchPad\n    natural_scroll = true\n    tap-to-click = true\n}\n",
+            "device {\n    name = epic-mouse-v1\n    accel_profile = flat\n}\n",
+        ),
+    );
+    let mouse = wm_core::DeviceRule {
+        name: "epic-mouse-v1".into(),
+        enabled: Some(false),
+        sensitivity: Some(-0.5),
+        accel_profile: Some("flat".into()),
+        ..Default::default()
+    };
+    let touchpad = wm_core::DeviceRule {
+        name: "SynPS/2 Synaptics TouchPad".into(),
+        natural_scroll: Some(true),
+        tap_to_click: Some(true),
+        ..Default::default()
+    };
+    for root in [lua, conf] {
+        let reading = read(&Roots::under(&root));
+        assert_eq!(reading.input.devices, [mouse.clone(), touchpad.clone()], "{root:?}: {:?}", reading.skipped);
+        assert!(
+            skipped_why(&reading, "scroll_factor").is_some_and(|why| why.contains("not implemented")),
+            "{root:?}: a setting a rule cannot carry is named: {:?}",
+            reading.skipped
+        );
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+        assert_eq!(config.input.devices, [mouse.clone(), touchpad.clone()], "{root:?}");
+    }
+}
+
+#[test]
+fn device_rules_without_a_plain_name_and_past_the_bound_are_refused_by_name() {
+    let mut source = String::new();
+    for index in 0..70 {
+        source.push_str(&format!("hl.device({{ name = \"device {index}\", enabled = false }})\n"));
+    }
+    source.push_str(concat!(
+        "hl.device({ name = \"\", enabled = false })\n",
+        "hl.device({ enabled = false })\n",
+        "hl.device({ name = device_name, enabled = false })\n",
+        "hl.device({ name = \"late\", enabled = decided_later })\n",
+        "hl.device({ name = \"bell\\n\", enabled = false })\n",
+        "hl.device({ name = \"late\", enabled = sometimes })\n",
+    ));
+    source.push_str(&format!("hl.device({{ name = \"{}\", enabled = false }})\n", "x".repeat(300)));
+    let root = scratch("device-rules-refused");
+    write(&root.join(".config/hypr/hyprland.lua"), &source);
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.input.devices.len(), wm_core::DeviceRule::MAX_RULES);
+    let why = |needle: &str| reading.skipped.iter().filter(|skip| skip.why.contains(needle)).count();
+    let what = |needle: &str| reading.skipped.iter().filter(|skip| skip.what.contains(needle)).count();
+    assert_eq!(why("more than 64 device rules"), 6, "{:?}", reading.skipped);
+    assert_eq!(why("1 to 256 bytes"), 3, "an empty name, a control character and an oversized name");
+    assert_eq!(what("needs the device's name"), 1);
+    assert_eq!(what("is not a string in the file"), 1);
+    assert_eq!(what("is computed at runtime"), 2);
+}
+
+/// Omarchy keeps a touchpad or touchscreen disable as one line naming the
+/// device and re-applies it through `disabled_input_device`. That line came
+/// from a USB descriptor: it is read as a name and never as Lua, and a line
+/// that is not a name is refused.
+#[test]
+fn omarchys_persisted_device_disable_is_read_as_data_and_never_as_lua() {
+    let root = scratch("persisted-device-disable");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        concat!(
+            "local disabled_input_device = require(\"default.hypr.disabled-input-device\")\n",
+            "disabled_input_device(\"touchpad\")\n",
+            "disabled_input_device(\"touchscreen\")\n",
+            "disabled_input_device(\"keyboard\")\n",
+        ),
+    );
+    // The module reads the file itself and calls `hl.device` at runtime; its
+    // body is a function definition, never a rule of its own.
+    write(
+        &root.join("omarchy/default/hypr/disabled-input-device.lua"),
+        "return function(kind)\n  hl.device({ name = \"never\", enabled = false })\nend\n",
+    );
+    let hostile = r#"Evil \" }) os.execute("touch pwned") hl.device({ name = ""#;
+    let toggles = root.join(".local/state/omarchy/toggles/hypr");
+    write(&toggles.join("touchpad-disabled-name"), &format!("{hostile}\n"));
+    let reading = read(&Roots::under(&root));
+    assert_eq!(
+        reading.input.devices,
+        [wm_core::DeviceRule { name: hostile.into(), enabled: Some(false), ..Default::default() }],
+        "{:?}",
+        reading.skipped
+    );
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what.contains("disabled_input_device(") && skip.what.contains("touchpad and touchscreen")),
+        "a kind Omarchy never persists is named: {:?}",
+        reading.skipped
+    );
+    assert!(!root.join("pwned").exists());
+
+    write(&toggles.join("touchscreen-disabled-name"), "ELAN\u{7}Touch\n");
+    write(&toggles.join("touchpad-disabled-name"), &"x".repeat(400));
+    let reading = read(&Roots::under(&root));
+    assert!(reading.input.devices.is_empty(), "{:?}", reading.input.devices);
+    assert_eq!(
+        reading.skipped.iter().filter(|skip| skip.kind == "device" && skip.why.contains("not a device name")).count(),
+        2,
+        "{:?}",
+        reading.skipped
+    );
+}
+
+/// Omarchy's look turns on `cursor:hide_on_key_press`. The keys that
+/// decide when the pointer hides arrive from either syntax, the warp key
+/// Omarchy sets beside it is declined by name, and the rest of the
+/// section is still reported rather than dropped.
+#[test]
+fn the_cursor_table_carries_when_the_pointer_hides_and_declines_warps() {
+    let lua = scratch("cursor-table-lua");
+    write(
+        &lua.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.config({
+  general = { gaps_in = 5 },
+  cursor = {
+    hide_on_key_press = true, hide_on_touch = true, inactive_timeout = 2.5,
+    warp_on_change_workspace = 1, zoom_factor = 2,
+  },
+})
+"#,
+    );
+    let conf = scratch("cursor-table-conf");
+    write(
+        &conf.join(".config/hypr/hyprland.conf"),
+        concat!(
+            "cursor {\n",
+            "    hide_on_key_press = true\n",
+            "    hide_on_touch = yes\n",
+            "    inactive_timeout = 2.5\n",
+            "    warp_on_change_workspace = 1\n",
+            "    zoom_factor = 2\n",
+            "}\n",
+            "general {\n",
+            "    gaps_in = 5\n",
+            "}\n",
+        ),
+    );
+    for root in [lua, conf] {
+        let reading = read(&Roots::under(&root));
+        assert_eq!(
+            reading.input.cursor,
+            wm_core::CursorBehaviour {
+                hide_on_key_press: Some(true),
+                hide_on_touch: Some(true),
+                inactive_timeout: Some(2.5),
+            },
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(
+            skipped_why(&reading, "warp_on_change_workspace").is_some_and(|why| why.contains("never warps")),
+            "{root:?}: a warp key must be declined by name: {:?}",
+            reading.skipped
+        );
+        assert!(
+            skipped_why(&reading, "zoom_factor").is_some_and(|why| why.contains("not implemented")),
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(
+            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input and cursor")),
+            "{root:?}: the rest of the configuration is still reported: {:?}",
+            reading.skipped
+        );
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+        assert_eq!(config.input.cursor.hide_on_key_press, Some(true), "{root:?}");
+    }
+}
+
+#[test]
+fn cursor_values_are_validated_before_they_are_carried() {
+    for (name, value) in [
+        ("hide_on_key_press", "maybe"),
+        ("inactive_timeout", "-1"),
+        ("inactive_timeout", "NaN"),
+        ("inactive_timeout", "inf"),
+        ("inactive_timeout", "soon"),
+    ] {
+        let mut reading = Reading::default();
+        cursor(&mut reading, name, value);
+        assert_eq!(reading.input.cursor, wm_core::CursorBehaviour::default(), "{name} = {value}");
+        assert_eq!(reading.skipped.len(), 1, "{name} = {value}");
+    }
+    let mut reading = Reading::default();
+    cursor(&mut reading, "INACTIVE_TIMEOUT", "0");
+    cursor(&mut reading, "hide_on_touch", "off");
+    assert_eq!(reading.input.cursor.inactive_timeout, Some(0.0), "zero is a valid never");
+    assert_eq!(reading.input.cursor.hide_on_touch, Some(false));
+    assert!(reading.skipped.is_empty(), "{:?}", reading.skipped);
+}
+
 #[test]
 fn keyboard_repeat_accepts_zero_and_rejects_out_of_range_values() {
     for value in [0, 1, 1000] {
@@ -676,7 +991,7 @@ fn keyboard_only_configuration_is_usable_without_replacing_default_bindings() {
 fn a_value_computed_at_runtime_is_refused_rather_than_rendered() {
     let out = lua_out(&[concat!(
         "x = y or \"z\"\n",
-        "hl.config({ input = { kb_layout = x, touchpad = { natural_scroll = x } } })\n",
+        "hl.config({ input = { kb_layout = x, touchpad = { natural_scroll = x } }, cursor = { hide_on_key_press = x } })\n",
         "o.window(\"foot\", { size = x })\n",
         "o.window(x, { float = true })\n",
         "hl.window_rule({ match = { class = x }, float = true })\n",
@@ -687,12 +1002,12 @@ fn a_value_computed_at_runtime_is_refused_rather_than_rendered() {
         assert!(
             !matches!(
                 directive,
-                Directive::Input { .. } | Directive::WindowRule(_) | Directive::Monitor(_)
+                Directive::Input { .. } | Directive::Cursor { .. } | Directive::WindowRule(_) | Directive::Monitor(_)
             ),
             "built from a value only running code could give: {directive:?}"
         );
     }
-    for name in ["kb_layout", "natural_scroll", "size", "class", "mode", "transform"] {
+    for name in ["kb_layout", "natural_scroll", "hide_on_key_press", "size", "class", "mode", "transform"] {
         assert!(
             out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains(name))),
             "{name} was not refused by name: {out:?}"
@@ -826,15 +1141,110 @@ fn metadata_only_is_empty_but_release_bindings_and_monitors_are_not() {
     }
 }
 
-/// Bindings that are not key chords at all — the mouse wheel, a mouse
-/// button, the lid switch — are refused by name rather than mangled
-/// into some nearby keysym.
+/// Pointer bindings — the mouse wheel, a mouse button — are not key
+/// chords and are refused by name rather than mangled into some nearby
+/// keysym. The lid switch binds as a switch.
 #[test]
-fn pointer_and_switch_bindings_are_refused_by_name() {
+fn pointer_bindings_are_refused_by_name_and_the_lid_switch_binds() {
     let reading = read(&machine());
     assert!(skipped_why(&reading, "mouse_down").is_some_and(|w| w.contains("pointer or switch")));
     assert!(skipped_why(&reading, "mouse:272").is_some_and(|w| w.contains("pointer or switch")));
-    assert!(skipped_why(&reading, "Lid Switch").is_some_and(|w| w.contains("pointer or switch")));
+    let shape: Vec<_> = reading.switch_bindings.iter().map(|b| (b.device.as_str(), b.edge, b.locked)).collect();
+    assert_eq!(shape, [("Lid Switch", crate::SwitchEdge::On, true)], "{:?}", reading.skipped);
+    assert!(
+        matches!(&reading.switch_bindings[0].action, Action::Run(name)
+            if reading.commands.get(name).is_some_and(|argv| argv.iter().any(|arg| arg.contains("omarchy-system-lid-close")))),
+        "closing the lid runs Omarchy's lock-on-close handler: {:?}",
+        reading.switch_bindings
+    );
+}
+
+/// Switch bindings read the same from conf and Lua: the edge, the exact
+/// device name, the locked flag, and `unbind`. A nameless switch is
+/// refused by name.
+#[test]
+fn switch_bindings_carry_edge_device_and_lock_from_either_syntax() {
+    let lua = scratch("switch-bindings-lua");
+    write(
+        &lua.join(".config/hypr/hyprland.lua"),
+        r#"
+o.bind("switch:on:Lid Switch", nil, "lock-now", { locked = true })
+hl.bind("switch:off:Lid Switch", "wake-panel")
+hl.bind("switch:Tablet Mode Switch", "flip")
+hl.bind("switch:on:", "nameless")
+hl.bind("switch:on:Gone", "gone")
+hl.unbind("switch:on:Gone")
+"#,
+    );
+    let conf = scratch("switch-bindings-conf");
+    write(
+        &conf.join(".config/hypr/hyprland.conf"),
+        concat!(
+            "bindl = , switch:on:Lid Switch, exec, lock-now\n",
+            "bind = , switch:off:Lid Switch, exec, wake-panel\n",
+            "bind = , switch:Tablet Mode Switch, exec, flip\n",
+            "bind = , switch:on:, exec, nameless\n",
+            "bind = , switch:on:Gone, exec, gone\n",
+            "unbind = , switch:on:Gone\n",
+        ),
+    );
+    for root in [lua, conf] {
+        let reading = read(&Roots::under(&root));
+        let shape: Vec<_> = reading.switch_bindings.iter().map(|b| (b.device.as_str(), b.edge, b.locked)).collect();
+        assert_eq!(
+            shape,
+            [
+                ("Lid Switch", crate::SwitchEdge::On, true),
+                ("Lid Switch", crate::SwitchEdge::Off, false),
+                ("Tablet Mode Switch", crate::SwitchEdge::Any, false),
+            ],
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(
+            reading.skipped.iter().any(|skip| skip.what.contains("switch:on:") && skip.why.contains("device name")),
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(reading.keybindings.is_empty(), "{root:?}: a switch is never a key chord");
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+        assert_eq!(config.switch_bindings, reading.switch_bindings, "{root:?}");
+    }
+}
+
+#[test]
+fn switch_bindings_are_bounded_and_run_by_exact_name_edge_and_lock() {
+    let mut reading = Reading::default();
+    let run = directive::Dispatcher::Exec("true".into());
+    for n in 0..=crate::SwitchBinding::MAX {
+        bind(&mut reading, &format!("switch:on:Switch {n}"), None, directive::BindFlags::default(), &run);
+    }
+    bind(&mut reading, "switch:on:Switch 0", None, directive::BindFlags::default(), &run);
+    assert_eq!(reading.switch_bindings.len(), crate::SwitchBinding::MAX, "a rebinding replaces within the bound");
+    assert!(
+        skipped_why(&reading, &format!("Switch {}", crate::SwitchBinding::MAX)).is_some_and(|why| why.contains("more than")),
+        "{:?}",
+        reading.skipped
+    );
+    let mut reading = Reading::default();
+    bind(&mut reading, &format!("switch:{}", "x".repeat(257)), None, directive::BindFlags::default(), &run);
+    assert!(reading.switch_bindings.is_empty());
+    assert_eq!(reading.skipped.len(), 1);
+
+    let binding = crate::SwitchBinding {
+        device: "Lid Switch".into(),
+        edge: crate::SwitchEdge::On,
+        action: Action::Run("x".into()),
+        locked: false,
+    };
+    assert!(binding.runs("Lid Switch", true, false));
+    assert!(!binding.runs("Lid Switch", false, false), "the other edge");
+    assert!(!binding.runs("lid switch", true, false), "names match exactly");
+    assert!(!binding.runs("Lid Switch", true, true), "an unlocked binding waits out the lock");
+    let locked = crate::SwitchBinding { locked: true, edge: crate::SwitchEdge::Any, ..binding };
+    assert!(locked.runs("Lid Switch", true, true) && locked.runs("Lid Switch", false, true));
+    assert_eq!(keys::switch_for("SWITCH:OFF:Lid Switch"), Some(("Lid Switch", crate::SwitchEdge::Off)));
+    assert_eq!(keys::switch_for("SUPER + L"), None);
 }
 
 // ---- window rules -----------------------------------------------------
@@ -2517,12 +2927,15 @@ fn every_call_the_lua_reader_meets_is_recorded() {
     };
     assert_eq!(count("animation", "hl.curve("), 5, "{:?}", reading.skipped);
     assert_eq!(count("animation", "hl.animation("), 16);
-    assert_eq!(count("lua-call", "disabled_input_device("), 2);
+    // Omarchy's persisted touchpad and touchscreen disables are read as
+    // data now, and the captured machine has none.
+    assert_eq!(count("lua-call", "disabled_input_device("), 0);
+    assert!(reading.input.devices.is_empty(), "{:?}", reading.input.devices);
     assert_eq!(count("include", "dofile("), 1);
     let out = lua_out(&[concat!(
         "cover(0)\n",
         "fit()\n",
-        "hl.device({ name = \"touchpad\", enabled = false })\n",
+        "hl.device(settings)\n",
         "hl.workspace_rule({ workspace = \"1\" })\n",
         "hl.dispatch(hl.dsp.window.close())\n",
         "hl.timer(function() end, { timeout = 10 })\n",
@@ -2767,7 +3180,7 @@ fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
 ///
 /// `docs/omarchy-mode.md` tells a reader what they gain by having a
 /// real Omarchy configuration rather than the baked table — "167
-/// bindings over 119 commands, against the baked table's 151 over 83",
+/// bindings over 120 commands, against the baked table's 151 over 83",
 /// and 38 float rules where the hardcoded one had a single prefix.
 /// Those numbers are the argument for the whole module, and a number
 /// in prose is the first thing to go stale. Pinned here against the
@@ -2784,7 +3197,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert_eq!(
         reading.commands.len(),
-        119,
+        120,
         "commands declared for global and scoped bindings"
     );
     assert_eq!(
@@ -2798,17 +3211,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        172,
+        169,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("179\nbindings over 119 commands") || MODE.contains("179 bindings over 119 commands"),
-        "docs/omarchy-mode.md no longer quotes the 179 bindings over 119 commands this machine produces"
+        MODE.contains("179\nbindings over 120 commands") || MODE.contains("179 bindings over 120 commands"),
+        "docs/omarchy-mode.md no longer quotes the 179 bindings over 120 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=179 commands=119 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=172"),
+        GUIDE.contains("files=42 bindings=179 commands=120 env=8 autostart=4")
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=169"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

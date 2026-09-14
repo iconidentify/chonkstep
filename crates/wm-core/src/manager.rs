@@ -1702,6 +1702,15 @@ impl<B: Backend> WindowManager<B> {
                 self.handle_modal_changed(window, modal)
             }
             BackendEvent::MoveRequest(window) => self.handle_move_request(window),
+            BackendEvent::WindowMenuRequested { window, at } => {
+                // The same menu a right-click on our own titlebar opens, for a
+                // window whose client draws its titlebar itself.
+                if let Some(&id) = self.window_index.get(&window) {
+                    if self.clients.get(id).is_some_and(|client| client.lifecycle == Lifecycle::Normal) {
+                        self.notifications.push_back(Notification::WindowMenuRequested { id, at });
+                    }
+                }
+            }
             BackendEvent::DragEnded => self.commit_active_drag(),
             BackendEvent::DragCancelled => self.end_active_drag(),
             BackendEvent::ResizeRequest { window, edge } => self.handle_resize_request(window, edge),
@@ -8647,6 +8656,35 @@ mod tests {
 
         wm.dispatch(BackendEvent::Destroyed(window));
         assert!(!wm.has_touchpad_scroll_rules(), "destroying the window drops its rule");
+    }
+
+    #[test]
+    fn a_client_window_menu_request_opens_the_menu_only_for_a_normal_window() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        while wm.take_notification().is_some() {}
+
+        let at = Point::new(120, 45);
+        wm.dispatch(BackendEvent::WindowMenuRequested { window, at });
+        let opened: Vec<_> = std::iter::from_fn(|| wm.take_notification())
+            .filter_map(|notification| match notification {
+                Notification::WindowMenuRequested { id, at } => Some((id, at)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, vec![(id, at)]);
+
+        wm.miniaturize(id);
+        while wm.take_notification().is_some() {}
+        wm.dispatch(BackendEvent::WindowMenuRequested { window, at });
+        assert!(
+            std::iter::from_fn(|| wm.take_notification())
+                .all(|notification| !matches!(notification, Notification::WindowMenuRequested { .. })),
+            "a miniaturized window opens no menu"
+        );
     }
 
     #[test]

@@ -514,7 +514,12 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
         "wlr protocols advertised"
     );
     ProtocolState {
-        ext_list: ForeignToplevelListState::new::<Compositor>(display_handle),
+        // Every window's title and app id: the same information the wlr
+        // foreign-toplevel manager carries, so the same sandbox boundary.
+        ext_list: ForeignToplevelListState::new_with_filter::<Compositor>(
+            display_handle,
+            crate::state::privileged_global_visible,
+        ),
         ext_toplevels: HashMap::new(),
         managers: Vec::new(),
         toplevels: HashMap::new(),
@@ -1538,7 +1543,7 @@ fn prepare_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) -> 
         return None;
     }
 
-    let Compositor { wm, graphics, pointer_location, cursor_status, cursors, protocols, .. } = comp;
+    let Compositor { wm, graphics, pointer_location, cursor_status, tablet_cursors, cursors, protocols, .. } = comp;
     let cache_index = protocols
         .capture_targets
         .iter()
@@ -1592,12 +1597,14 @@ fn prepare_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) -> 
 
     let hidden = CursorImageStatus::Hidden;
     let status = if first.overlay_cursor { &*cursor_status } else { &hidden };
+    let tools = if first.overlay_cursor { tablet_cursors.as_slice() } else { &[] };
     let clear_color = build_scene_into(
         &mut target.scene_scratch,
         wm.backend(),
         renderer,
         *pointer_location,
         status,
+        tools,
         cursors,
         first.region,
     );
@@ -1731,7 +1738,7 @@ pub(crate) fn capture_region(
         return Err("capture region is empty".to_string());
     }
 
-    let Compositor { wm, graphics, pointer_location, cursor_status, cursors, protocols, .. } = comp;
+    let Compositor { wm, graphics, pointer_location, cursor_status, tablet_cursors, cursors, protocols, .. } = comp;
     let cache_index = protocols
         .capture_targets
         .iter()
@@ -1773,12 +1780,14 @@ pub(crate) fn capture_region(
 
     let hidden = CursorImageStatus::Hidden;
     let status = if overlay_cursor { &*cursor_status } else { &hidden };
+    let tools = if overlay_cursor { tablet_cursors.as_slice() } else { &[] };
     let clear_color = build_scene_into(
         &mut target.scene_scratch,
         wm.backend(),
         renderer,
         *pointer_location,
         status,
+        tools,
         cursors,
         region,
     );

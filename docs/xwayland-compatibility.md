@@ -364,9 +364,11 @@ Under the Wayland session the compositor draws the pointer itself. An X11
 client's cursor arrives through XWayland as an ordinary `wl_pointer.set_cursor`
 surface and is composited, so X11 applications do get their own shapes. Their
 *size* comes from `XCURSOR_SIZE` in the client's environment, with the launch-
-time-only caveat from the scaling section. There is no cursor *theme* loading
-at all: the compositor's own arrow is hand-authored rather than read from an
-Xcursor theme, so it will not match a theme you have configured elsewhere.
+time-only caveat from the scaling section. The compositor's own arrow and
+resize cursors are hand-authored rather than read from an Xcursor theme, so
+they will not match a theme you have configured elsewhere. Only the shapes a
+native client *names* through `wp_cursor_shape_v1` are drawn from the Xcursor
+theme; see [Cursors](appearance.md#cursors).
 
 ## Per application
 

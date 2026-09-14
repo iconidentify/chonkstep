@@ -354,14 +354,14 @@ fn build_snapshot(
     // keyboard list makes Omarchy's layout widget poll forever.
     if devices.keyboards.is_empty() {
         devices.keyboards.push(Keyboard {
-            name: "chonkstep-keyboard".into(),
+            name: chonk_hyprland_ipc::state::NESTED_KEYBOARD.into(),
             layout: configured_layout.clone(),
             active_keymap,
             active_layout_index,
         });
     }
     if devices.mice.is_empty() {
-        devices.mice.push(PointerDevice { name: "chonkstep-pointer".into() });
+        devices.mice.push(PointerDevice { name: chonk_hyprland_ipc::state::NESTED_POINTER.into() });
     }
     Snapshot {
         monitors,
@@ -704,6 +704,7 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
         Action::SwitchKeyboardLayout { device, target } => {
             switch_keyboard_layout(comp, &device, target)
         }
+        Action::SetInputDeviceEnabled { name, enabled } => crate::input::devices::set_enabled(comp, &name, enabled),
         Action::SetCursorHidden(hidden) => {
             let owner = hidden.then(|| {
                 comp.seat
@@ -726,6 +727,15 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
                 backend.mark_damaged();
             }
             true
+        }
+        Action::WarpPointer { x, y } => {
+            // Logical layout units in, ledger pixels out, through the scale
+            // of the output that owns the point, so a mixed-DPI desk lands
+            // on the requested spot.
+            let logical = Point::new(x, y);
+            let index = logical_monitor_index(comp.wm.backend(), logical);
+            let physical = OutputCoordinates::for_output(comp.wm.backend(), index).physical_position(logical);
+            crate::input::warp_pointer(comp, physical)
         }
         Action::ReloadConfig => {
             comp.shell.reload_config(&mut comp.wm);
@@ -791,7 +801,7 @@ fn switch_keyboard_layout(comp: &mut Compositor, device: &str, target: LayoutTar
             .input_devices
             .iter()
             .any(|input| input.keyboard && input.name == device)
-        && device != "chonkstep-keyboard"
+        && device != chonk_hyprland_ipc::state::NESTED_KEYBOARD
     {
         return false;
     }

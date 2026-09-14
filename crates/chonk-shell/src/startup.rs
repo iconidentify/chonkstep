@@ -201,6 +201,7 @@ pub struct SessionState {
     /// Full binding metadata for phase, lock and repeat behavior.
     pub bindings: Vec<wm_config::Binding>,
     pub layer_bindings: std::collections::BTreeMap<String, Vec<wm_config::Binding>>,
+    pub switch_bindings: Vec<wm_config::SwitchBinding>,
     pub input: wm_config::InputConfig,
     pub interaction: wm_core::InteractionConfig,
     pub monitor_rules: Vec<wm_config::hyprland::directive::Monitor>,
@@ -283,6 +284,7 @@ impl SessionState {
                 config.bindings.clone()
             },
             layer_bindings: config.layer_bindings.clone(),
+            switch_bindings: config.switch_bindings.clone(),
             input: config.input.clone(),
             interaction: config.interaction.clone(),
             monitor_rules: config.monitor_rules.clone(),
@@ -651,6 +653,35 @@ fn xcursor_size_for(scale: f32) -> u32 {
     (24.0 * scale).round().max(1.0) as u32
 }
 
+/// Smallest and largest logical cursor size [`xcursor_base_size`]
+/// accepts from the environment.
+const XCURSOR_BASE_SIZES: std::ops::RangeInclusive<u32> = 8..=256;
+
+/// The logical (1x) cursor size the compositor draws named cursor
+/// shapes from: the user's own `XCURSOR_SIZE` when they pinned one,
+/// otherwise 24, which is also Omarchy's value.
+///
+/// The process variable cannot be read blindly. When the user set none,
+/// [`ensure_xcursor_size`] has already written `24 × scale` into it for
+/// X clients, and reading that back would multiply the scale in twice.
+/// So the value is taken only when `XCURSOR_SIZE_WAS_PRESET` says it was
+/// the user's. It comes from the environment, so it is clamped to a sane
+/// range, and an unparsable value is treated as no preference at all.
+pub fn xcursor_base_size() -> u32 {
+    let pinned = XCURSOR_SIZE_WAS_PRESET.get().copied().unwrap_or(false);
+    let value = pinned.then(|| std::env::var("XCURSOR_SIZE").ok()).flatten();
+    xcursor_base_size_from(value.as_deref())
+}
+
+/// The pure half of [`xcursor_base_size`]: `pinned` is the user's own
+/// value, if they set one.
+fn xcursor_base_size_from(pinned: Option<&str>) -> u32 {
+    pinned
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|size| size.clamp(*XCURSOR_BASE_SIZES.start(), *XCURSOR_BASE_SIZES.end()))
+        .unwrap_or(24)
+}
+
 /// The `XCURSOR_SIZE` to hand a freshly launched application, or `None`
 /// when the user pinned one of their own.
 ///
@@ -908,6 +939,16 @@ mod tests {
     }
 
     #[test]
+    fn the_compositor_cursor_base_is_the_pinned_size_or_24_and_is_clamped() {
+        assert_eq!(xcursor_base_size_from(None), 24);
+        assert_eq!(xcursor_base_size_from(Some("48")), 48);
+        assert_eq!(xcursor_base_size_from(Some(" 32\n")), 32);
+        assert_eq!(xcursor_base_size_from(Some("big")), 24, "unparsable is no preference");
+        assert_eq!(xcursor_base_size_from(Some("0")), 8);
+        assert_eq!(xcursor_base_size_from(Some("100000")), 256);
+    }
+
+    #[test]
     fn decoration_style_resolves_from_config_on_every_reload() {
         for name in ["system7", "windowmaker", "modern", "system7"] {
             let config = wm_config::parse(&format!("decoration_style = {name:?}")).unwrap();
@@ -949,6 +990,7 @@ mod tests {
             session_env: Vec::new(),
             bindings: Vec::new(),
             layer_bindings: BTreeMap::new(),
+            switch_bindings: Vec::new(),
             input: wm_config::InputConfig::default(),
             interaction: wm_core::InteractionConfig::default(),
             monitor_rules: Vec::new(),

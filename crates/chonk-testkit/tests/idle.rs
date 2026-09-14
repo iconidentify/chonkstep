@@ -179,3 +179,43 @@ fn a_fullscreen_mode_idle_rule_holds_only_while_its_window_is_fullscreen() {
         .unwrap();
     assert!(session.compositor_alive());
 }
+
+/// Opening a laptop lid is someone sitting down at the machine, so it
+/// resumes an idle session; closing it is not activity. The switch has a
+/// test name and nothing is bound to it.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn opening_the_lid_resets_idle_and_closing_it_does_not() {
+    const LID: &str = "ChonkStep Test Lid";
+    let mut session = Session::boot("lid-switch-idle", SessionOptions::default()).expect("session boots");
+    let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
+    let program = probe.display().to_string();
+    session
+        .launch(&program, &["IdleWatcher", "idle-watcher", "animate-watch-idle"])
+        .expect("idle watcher launches");
+    session.wait_for_window("IdleWatcher").expect("the watcher maps");
+    poll_until(SETTLE, "the client to arm its idle notification", || {
+        session.client_log(&program).contains("idle watch armed").then_some(())
+    })
+    .unwrap();
+    let count = |session: &Session, state: &str| session.client_log(&program).matches(&format!("idle state={state}")).count();
+    poll_until(SETTLE, "an untouched session to idle", || (count(&session, "idled") > 0).then_some(())).unwrap();
+
+    let resumed = count(&session, "resumed");
+    session.door().switch("lid", true, LID).unwrap();
+    let start = animation_frame(&session.client_log(&program)).unwrap_or(0);
+    // Sixty self-timed commits, about four notification periods: a close
+    // that counted as activity would have resumed the session by now.
+    poll_until(SETTLE, "sixty animation frames after the lid closes", || {
+        animation_frame(&session.client_log(&program)).filter(|frame| *frame >= start + 60)
+    })
+    .unwrap();
+    assert_eq!(count(&session, "resumed"), resumed, "closing the lid is not user activity");
+
+    session.door().switch("lid", false, LID).unwrap();
+    poll_until(SETTLE, "opening the lid to resume the idle session", || {
+        (count(&session, "resumed") > resumed).then_some(())
+    })
+    .unwrap();
+    assert!(session.compositor_alive());
+}

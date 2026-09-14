@@ -1,4 +1,4 @@
-//! Opt-in real xdg move/resize requests using observed or deliberately invalid
+//! Opt-in real xdg move/resize/window-menu requests using observed or deliberately invalid
 //! input serials. F1: last pointer press; F2: zero; F3: wrong pointer serial;
 //! F4: last touch down; F5: serial supplied in a private fixture file.
 
@@ -24,6 +24,7 @@ pub(super) struct State {
 enum Operation {
     Move,
     Resize,
+    WindowMenu,
 }
 
 impl State {
@@ -33,6 +34,7 @@ impl State {
             match argument.as_str() {
                 "--interactive=move" => state.operation = Some(Operation::Move),
                 "--interactive=resize" => state.operation = Some(Operation::Resize),
+                "--interactive=show-window-menu" => state.operation = Some(Operation::WindowMenu),
                 _ => {
                     if let Some(path) = argument.strip_prefix("--serial-file=") {
                         state.serial_file = Some(path.into());
@@ -85,6 +87,7 @@ impl State {
                             Operation::Resize => {
                                 toplevel.resize(&seat, serial, ResizeEdge::BottomRight)
                             }
+                            Operation::WindowMenu => toplevel.show_window_menu(&seat, serial, 40, 20),
                         }
                         connection
                             .flush()
@@ -121,6 +124,7 @@ impl State {
         match operation {
             Operation::Move => toplevel._move(seat, serial),
             Operation::Resize => toplevel.resize(seat, serial, ResizeEdge::BottomRight),
+            Operation::WindowMenu => toplevel.show_window_menu(seat, serial, 40, 20),
         }
         say(&format!("interactive request {operation:?} {serial}"));
         Some(format!("interactive fence {key} {serial}"))

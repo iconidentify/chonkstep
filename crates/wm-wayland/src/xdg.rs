@@ -1762,6 +1762,52 @@ impl XdgShellHandler for Compositor {
         }
     }
 
+    fn show_window_menu(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: WlSeat,
+        serial: Serial,
+        location: smithay::utils::Point<i32, smithay::utils::Logical>,
+    ) {
+        // A client that draws its own titlebar asks for the window menu this
+        // way, and the capability is advertised, so the request is answered.
+        // Only for a real user action: the serial of this client's current
+        // pointer grab (a right-click on its header), or one issued while it
+        // held keyboard focus (a menu key).
+        let pointer_ok = self.pointer_grab_authorizes_toplevel(surface.wl_surface(), &seat, serial);
+        let keyboard_ok = self.seat.owns(&seat)
+            && self.seat.get_keyboard().is_some_and(|keyboard| {
+                keyboard
+                    .current_focus()
+                    .is_some_and(|focus| focus.surface().id().same_client_as(&surface.wl_surface().id()))
+                    && keyboard.last_enter().is_some_and(|enter| serial.is_no_older_than(&enter))
+            });
+        if !(pointer_ok || keyboard_ok) || self.wm.backend().locked {
+            tracing::debug!(?serial, "ignored xdg window menu request without an authorizing user action");
+            return;
+        }
+        let backend = self.wm.backend_mut();
+        let Some(window) = backend.window_for_surface(surface.wl_surface()) else {
+            return;
+        };
+        let at = {
+            let Some(record) = backend.windows.get(&window) else {
+                return;
+            };
+            // `location` is surface-local and logical. The ledger is physical,
+            // and the surface is drawn `content_offset` up and left of the
+            // content rect, so the point lands where the user clicked.
+            let scale = backend.window_surface_scale(record);
+            let local_x = (f64::from(location.x) * scale).round() as i32;
+            let local_y = (f64::from(location.y) * scale).round() as i32;
+            wm_core::Point::new(
+                record.content.pos.x.saturating_sub(record.content_offset.x).saturating_add(local_x),
+                record.content.pos.y.saturating_sub(record.content_offset.y).saturating_add(local_y),
+            )
+        };
+        backend.queue(WmEvent::WindowMenuRequested { window, at });
+    }
+
     fn resize_request(
         &mut self,
         surface: ToplevelSurface,

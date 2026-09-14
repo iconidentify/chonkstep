@@ -272,6 +272,9 @@ pub struct Reading {
     /// and its human description.
     pub bindings: Vec<crate::Binding>,
     pub layer_bindings: BTreeMap<String, Vec<crate::Binding>>,
+    /// `switch:on:Lid Switch` and its kin, later bindings on the same
+    /// device and edge replacing earlier ones.
+    pub switch_bindings: Vec<crate::SwitchBinding>,
     /// The argv every [`Action::Run`] above names, keyed by the name
     /// [`dispatch::command_name`] derived from the argv.
     pub commands: BTreeMap<String, Vec<String>>,
@@ -328,13 +331,14 @@ impl Reading {
         // replaced the built-in keybindings. Destructure exhaustively so a
         // future category cannot silently disappear at this loading boundary.
         let Self {
-            keybindings, explicit_keys, bindings, layer_bindings, commands, env, autostart,
+            keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
             float_rules, monitors, input, files: _, skipped: _,
         } = self;
         keybindings.is_empty()
             && explicit_keys.is_empty()
             && bindings.is_empty()
             && layer_bindings.is_empty()
+            && switch_bindings.is_empty()
             && commands.is_empty()
             && env.is_empty()
             && autostart.is_empty()
@@ -545,6 +549,7 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
         || reading.keybindings.iter().any(|(other, _)| other == key));
     config.bindings = reading.bindings.clone();
     config.layer_bindings = reading.layer_bindings.clone();
+    config.switch_bindings = reading.switch_bindings.clone();
     // Commands are *inserted*, so a `[commands]` entry of the same name
     // read later from the user's own file replaces this one — the same
     // rule `preset::apply_keymap` applies to its own declarations.
@@ -668,6 +673,7 @@ impl<'a> Loader<'a> {
         for entry in local {
             match entry {
                 Directive::Include(include) => self.include(&include, path, out, depth),
+                Directive::PersistedDeviceDisable { kind } => self.persisted_device_disable(&kind, out),
                 other => out.push(other),
             }
         }
@@ -784,6 +790,46 @@ impl<'a> Loader<'a> {
         matched
     }
 
+    /// A device disable Omarchy persisted for `kind`: one line naming the
+    /// device, in the file Omarchy's toggle writes. The path is under
+    /// `~/.local/state` whatever `XDG_STATE_HOME` says, as Omarchy's own
+    /// toggle and module hardcode it. The line is data from a USB
+    /// descriptor: it becomes a device name, bounded and checked, and is
+    /// never read as Lua or passed to anything that could run it. A
+    /// missing file is the ordinary case of nothing disabled.
+    fn persisted_device_disable(&mut self, kind: &str, out: &mut Vec<Directive>) {
+        use std::io::Read;
+        let Some(home) = &self.roots.facts.home else {
+            return;
+        };
+        let path = home.join(".local/state/omarchy/toggles/hypr").join(format!("{kind}-disabled-name"));
+        let Ok(file) = std::fs::File::open(&path) else {
+            return;
+        };
+        // One byte past the longest name, so an oversized line is seen as one.
+        let mut bytes = Vec::new();
+        if file.take(wm_core::DeviceRule::MAX_NAME as u64 + 2).read_to_end(&mut bytes).is_err() {
+            self.note("device", path.display().to_string(), "unreadable");
+            return;
+        }
+        let line = bytes.split(|byte| *byte == b'\n').next().unwrap_or_default();
+        match std::str::from_utf8(line) {
+            Ok(name) if !name.is_empty() && name.len() <= wm_core::DeviceRule::MAX_NAME && !name.contains(char::is_control) => {
+                out.push(Directive::Device {
+                    name: name.to_string(),
+                    settings: vec![("enabled".into(), "false".into())],
+                });
+            }
+            // Omarchy's own module skips an empty line.
+            Ok("") => {}
+            _ => self.note(
+                "device",
+                path.display().to_string(),
+                "not a device name: one line of at most 256 bytes of text with no control characters",
+            ),
+        }
+    }
+
     /// `default.hypr.omarchy` against the module search path, exactly
     /// as `bootstrap.lua` sets it up: `~/.local/state`, then
     /// `~/.config`, then `$OMARCHY_PATH`.
@@ -867,6 +913,11 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
                 flags,
                 &dispatcher,
             ),
+            Directive::Unbind { keys } if keys::switch_for(&keys).is_some() => {
+                if let Some((device, edge)) = keys::switch_for(&keys) {
+                    reading.switch_bindings.retain(|binding| binding.device != device || binding.edge != edge);
+                }
+            }
             Directive::Unbind { keys } => match keys::spec_for(&keys) {
                 Ok(spec) => {
                     if let Some(combo) = crate::parse_key(&spec) {
@@ -889,6 +940,8 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
                 env.push((name, value));
             }
             Directive::Input { name, value } => input(&mut reading, &name, &value),
+            Directive::Cursor { name, value } => cursor(&mut reading, &name, &value),
+            Directive::Device { name, settings } => device(&mut reading, name, settings),
             Directive::ExecOnce { command } => autostart(&mut reading, &command),
             Directive::WindowRule(rule) => window_rules.push(rule),
             Directive::Monitor(line) => reading.monitors.lines.push(line),
@@ -898,7 +951,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
                 why: "not carried over; see docs/hyprland-config.md".into(),
             }),
             // Spliced by the loader; unreachable here, and harmless.
-            Directive::Include(_) => {}
+            Directive::Include(_) | Directive::PersistedDeviceDisable { .. } => {}
         }
     }
     let (float_rules, notes) = rules::compile(&window_rules);
@@ -947,6 +1000,9 @@ fn bind(
         Some(text) => format!("{keys} ({text})"),
         None => keys.to_string(),
     };
+    if let Some(switch) = keys::switch_for(keys) {
+        return switch_bind(reading, what, switch, flags.locked, dispatcher);
+    }
     let spec = match keys::spec_for(keys) {
         Ok(spec) => spec,
         Err(trouble) => {
@@ -966,29 +1022,8 @@ fn bind(
         });
         return;
     };
-    let action = match dispatch::verb_for(dispatcher) {
-        dispatch::Verb::Action(action) => action,
-        dispatch::Verb::Run(argv) => {
-            if argv.is_empty() {
-                reading.skipped.push(Skipped {
-                    kind: "bind".into(),
-                    what,
-                    why: "empty command".into(),
-                });
-                return;
-            }
-            let name = dispatch::command_name(&argv);
-            reading.commands.insert(name.clone(), argv);
-            Action::Run(name)
-        }
-        dispatch::Verb::Unbound(reason) => {
-            reading.skipped.push(Skipped {
-                kind: "bind".into(),
-                what,
-                why: reason.reason().to_string(),
-            });
-            return;
-        }
+    let Some(action) = binding_action(reading, &what, dispatcher) else {
+        return;
     };
     // Press and release are independent namespaces. In particular the
     // F9 release half of push-to-talk must not replace its press half.
@@ -1009,6 +1044,71 @@ fn bind(
             .retain(|(existing, _)| *existing != combo);
         reading.keybindings.push((combo, action));
     }
+}
+
+/// What a binding's dispatcher does, through the three answers in
+/// [`dispatch`], or `None` with the reason recorded against `what`.
+fn binding_action(reading: &mut Reading, what: &str, dispatcher: &directive::Dispatcher) -> Option<Action> {
+    let why = match dispatch::verb_for(dispatcher) {
+        dispatch::Verb::Action(action) => return Some(action),
+        dispatch::Verb::Run(argv) if !argv.is_empty() => {
+            let name = dispatch::command_name(&argv);
+            reading.commands.insert(name.clone(), argv);
+            return Some(Action::Run(name));
+        }
+        dispatch::Verb::Run(_) => "empty command".to_string(),
+        dispatch::Verb::Unbound(reason) => reason.reason().to_string(),
+    };
+    reading.skipped.push(Skipped {
+        kind: "bind".into(),
+        what: what.to_string(),
+        why,
+    });
+    None
+}
+
+/// The longest switch device name a binding carries. Kernel input
+/// device names are far shorter; the bound keeps a hostile file from
+/// storing megabytes per binding.
+const MAX_SWITCH_NAME: usize = 256;
+
+/// `switch:on:Lid Switch` and its kin: a binding on a hardware switch,
+/// resolved through the same answers as a chord, so a script outside
+/// the served list stays unbound here too. A later binding on the same
+/// device and edge replaces an earlier one, as for a chord.
+fn switch_bind(
+    reading: &mut Reading,
+    what: String,
+    (device, edge): (&str, crate::SwitchEdge),
+    locked: bool,
+    dispatcher: &directive::Dispatcher,
+) {
+    let refuse = |reading: &mut Reading, why: String| {
+        reading.skipped.push(Skipped {
+            kind: "bind".into(),
+            what: what.clone(),
+            why,
+        })
+    };
+    if device.is_empty() || device.len() > MAX_SWITCH_NAME {
+        refuse(reading, format!("a switch binding needs a device name of 1 to {MAX_SWITCH_NAME} bytes"));
+        return;
+    }
+    let same = |binding: &crate::SwitchBinding| binding.device == device && binding.edge == edge;
+    if !reading.switch_bindings.iter().any(same) && reading.switch_bindings.len() >= crate::SwitchBinding::MAX {
+        refuse(reading, format!("more than {} switch bindings", crate::SwitchBinding::MAX));
+        return;
+    }
+    let Some(action) = binding_action(reading, &what, dispatcher) else {
+        return;
+    };
+    reading.switch_bindings.retain(|binding| !same(binding));
+    reading.switch_bindings.push(crate::SwitchBinding {
+        device: device.to_string(),
+        edge,
+        action,
+        locked,
+    });
 }
 
 fn input(reading: &mut Reading, name: &str, value: &str) {
@@ -1085,6 +1185,47 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
                 why: "acceleration profile must be flat or adaptive".into(),
             }),
         },
+        "numlock_by_default" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.numlock_by_default = Some(enabled))
+        }
+        // Hyprland's conf spells this one with hyphens and its Lua table
+        // with underscores.
+        "touchpad:tap-and-drag" | "touchpad:tap_and_drag" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.tap_and_drag = Some(enabled))
+        }
+        "touchpad:middle_button_emulation" => parse_input_bool(reading, name, &value, |input, enabled| {
+            input.touchpad_middle_button_emulation = Some(enabled)
+        }),
+        "touchpad:drag_lock" if value.trim() == "2" => refuse_input(
+            reading,
+            name,
+            &value,
+            "drag_lock 2 is libinput's sticky drag lock, which is newer than the libinput binding chonkstep is built with; 1 keeps a drag for a timeout",
+        ),
+        "touchpad:drag_lock" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.drag_lock = Some(enabled))
+        }
+        "touchpad:tap_button_map" => match wm_core::TapButtonMap::from_name(&value) {
+            Some(map) => reading.input.tap_button_map = Some(map),
+            None => refuse_input(reading, name, &value, "tap button map must be lrm or lmr"),
+        },
+        "touchpad:drag_3fg" => match value.trim().parse::<i64>().ok().and_then(wm_core::MultiFingerDrag::from_number) {
+            Some(drag) => reading.input.drag_3fg = Some(drag),
+            None => refuse_input(reading, name, &value, "drag_3fg must be 0 (off), 1 (three fingers) or 2 (four fingers)"),
+        },
+        "scroll_method" => match wm_core::ScrollMethod::from_name(&value) {
+            Some(method) => reading.input.scroll_method = Some(method),
+            None => refuse_input(reading, name, &value, "scroll method must be 2fg, edge, on_button_down or no_scroll"),
+        },
+        "scroll_button" => match value.trim().parse::<u32>() {
+            Ok(button) if button <= wm_core::MAX_SCROLL_BUTTON => reading.input.scroll_button = Some(button),
+            _ => refuse_input(
+                reading,
+                name,
+                &value,
+                "scroll button must be an evdev button code from 0 through 300 (0 is the device default)",
+            ),
+        },
         "follow_mouse" => reading.skipped.push(Skipped {
             kind: "input".into(),
             what: format!("follow_mouse = {value}"),
@@ -1104,18 +1245,133 @@ fn parse_input_bool(
     value: &str,
     assign: impl FnOnce(&mut crate::InputConfig, bool),
 ) {
-    let enabled = match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    };
-    match enabled {
+    match toggle(value) {
         Some(enabled) => assign(&mut reading.input, enabled),
         None => reading.skipped.push(Skipped {
             kind: "input".into(),
             what: format!("{name} = {value}"),
             why: "input toggle must be true or false".into(),
         }),
+    }
+}
+
+/// One `input` value refused by name, with what the setting accepts.
+fn refuse_input(reading: &mut Reading, name: &str, value: &str, why: &str) {
+    reading.skipped.push(Skipped {
+        kind: "input".into(),
+        what: format!("{name} = {value}"),
+        why: why.into(),
+    });
+}
+
+/// A Hyprland boolean, in any of the spellings its config accepts.
+fn toggle(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// One key of Hyprland's `cursor` table. The keys that decide when the
+/// pointer hides are carried. The warp keys are declined by name: this
+/// desktop moves the pointer only when the user, or a script's
+/// `cursor.move`, asks it to.
+fn cursor(reading: &mut Reading, name: &str, value: &str) {
+    let value = value.trim().trim_matches(['\"', '\'']);
+    let name = name.trim().to_ascii_lowercase();
+    let why = match name.as_str() {
+        "hide_on_key_press" | "hide_on_touch" => match toggle(value) {
+            Some(enabled) if name == "hide_on_key_press" => {
+                reading.input.cursor.hide_on_key_press = Some(enabled);
+                return;
+            }
+            Some(enabled) => {
+                reading.input.cursor.hide_on_touch = Some(enabled);
+                return;
+            }
+            None => "cursor toggle must be true or false",
+        },
+        "inactive_timeout" => match value.parse::<f64>() {
+            Ok(seconds) if seconds.is_finite() && seconds >= 0.0 => {
+                reading.input.cursor.inactive_timeout = Some(seconds);
+                return;
+            }
+            _ => "inactive_timeout must be a non-negative number of seconds (0 never hides)",
+        },
+        "warp_on_change_workspace" | "warp_on_toggle_special" | "warp_back_after_non_mouse_input" | "no_warps"
+        | "persistent_warps" => "chonkstep never warps the pointer on its own; only an explicit cursor.move moves it",
+        _ => "cursor setting is not implemented",
+    };
+    reading.skipped.push(Skipped {
+        kind: "cursor".into(),
+        what: format!("{name} = {value}"),
+        why: why.into(),
+    });
+}
+
+/// One device rule, merged into an earlier rule for the same name as a
+/// later statement in a configuration wins. The name is matched exactly,
+/// never as a pattern, and it and the number of rules are bounded, because
+/// device names come from USB descriptors.
+fn device(reading: &mut Reading, name: String, settings: Vec<(String, String)>) {
+    let skip = |reading: &mut Reading, what: String, why: &str| {
+        reading.skipped.push(Skipped { kind: "device".into(), what, why: why.into() })
+    };
+    if name.is_empty() || name.len() > wm_core::DeviceRule::MAX_NAME || name.contains(char::is_control) {
+        let shown: String = name.chars().take(64).collect();
+        return skip(
+            reading,
+            format!("device {shown:?}"),
+            "a device rule names one device exactly, in 1 to 256 bytes with no control characters",
+        );
+    }
+    let index = match reading.input.devices.iter().position(|rule| rule.name == name) {
+        Some(index) => index,
+        None if reading.input.devices.len() >= wm_core::DeviceRule::MAX_RULES => {
+            return skip(reading, format!("device {name:?}"), "more than 64 device rules in one configuration");
+        }
+        None => {
+            reading.input.devices.push(wm_core::DeviceRule { name: name.clone(), ..Default::default() });
+            reading.input.devices.len() - 1
+        }
+    };
+    for (key, value) in settings {
+        let value = value.trim().trim_matches(['\"', '\'']);
+        let rule = &mut reading.input.devices[index];
+        let setting = key.trim().to_ascii_lowercase();
+        let switch = match setting.as_str() {
+            "enabled" => Some(&mut rule.enabled),
+            "natural_scroll" => Some(&mut rule.natural_scroll),
+            "left_handed" => Some(&mut rule.left_handed),
+            "tap_to_click" | "tap-to-click" => Some(&mut rule.tap_to_click),
+            _ => None,
+        };
+        if let Some(switch) = switch {
+            match toggle(value) {
+                Some(enabled) => *switch = Some(enabled),
+                None => skip(reading, format!("device {name:?} {key} = {value}"), "device toggle must be true or false"),
+            }
+            continue;
+        }
+        let why = match setting.as_str() {
+            "sensitivity" => match value.parse::<f64>() {
+                Ok(speed) if speed.is_finite() && (-1.0..=1.0).contains(&speed) => {
+                    rule.sensitivity = Some(speed);
+                    continue;
+                }
+                _ => "pointer sensitivity must be between -1 and 1",
+            },
+            "accel_profile" => match value.to_ascii_lowercase().as_str() {
+                profile @ ("flat" | "adaptive") => {
+                    rule.accel_profile = Some(profile.to_string());
+                    continue;
+                }
+                _ => "acceleration profile must be flat or adaptive",
+            },
+            _ => "per-device setting is not implemented; a device rule carries enabled, sensitivity, accel_profile, natural_scroll, left_handed and tap_to_click",
+        };
+        skip(reading, format!("device {name:?} {key} = {value}"), why);
     }
 }
 

@@ -164,6 +164,29 @@ fn the_one_based_conversion_happens_exactly_once() {
     assert_eq!(actions, vec![Action::MoveToWorkspace { window: None, workspace: 2, follow: false }]);
 }
 
+/// `omarchy-capture-region --select-window` moves the pointer onto the next
+/// window with `hl.dsp.cursor.move`, in the logical units `cursorpos`
+/// reports. Both spellings reach one action; anything but two integers is
+/// refused by name rather than guessed at.
+#[test]
+fn a_pointer_warp_parses_in_both_spellings_and_refuses_anything_else() {
+    let snapshot = desktop();
+    for payload in [&b"/eval hl.dispatch(hl.dsp.cursor.move({ x = 10, y = 20 }))"[..], b"/dispatch movecursor 10 20"] {
+        let (_, actions) = answer_payload(payload, &snapshot);
+        assert_eq!(actions, vec![Action::WarpPointer { x: 10, y: 20 }], "{}", String::from_utf8_lossy(payload));
+    }
+    for payload in [
+        &b"/eval hl.dispatch(hl.dsp.cursor.move({ x = 1.5, y = 20 }))"[..],
+        b"/eval hl.dispatch(hl.dsp.cursor.move({ x = 10 }))",
+        b"/dispatch movecursor 10",
+        b"/dispatch movecursor ten 20",
+        b"/dispatch movecursor 10 20 30",
+    ] {
+        let (_, actions) = answer_payload(payload, &snapshot);
+        assert!(actions.is_empty(), "{} must be refused", String::from_utf8_lossy(payload));
+    }
+}
+
 /// Arriving on a workspace by a bare switch leaves nothing focused —
 /// a real wart on chonkstep's side, tracked separately. The IPC layer
 /// must report it rather than invent a focused window to fill the gap.
@@ -823,6 +846,54 @@ fn switchxkblayout_is_a_named_group_action_not_an_unknown_request() {
                 target: expected,
             }]
         );
+    }
+}
+
+/// Omarchy's touchpad and touchscreen toggles send
+/// `hl.device({ name = "…", enabled = … })`, after escaping backslashes and
+/// double quotes in the device's name. The name has to arrive whole, and only
+/// a pointer, touch or tablet device with no keys can be switched off.
+#[test]
+fn hl_device_is_a_named_switch_for_one_pointing_device() {
+    use chonk_hyprland_ipc::state::PointerDevice;
+    let trackpad = r#"Apple "Magic" \Trackpad"#;
+    let mut desk = desktop();
+    desk.devices.mice.push(PointerDevice { name: trackpad.into() });
+    desk.devices.touch.push(PointerDevice { name: "ELAN9008:00 04F3:2C82".into() });
+    desk.devices.keyboards.push(Keyboard {
+        name: "Logitech USB Receiver".into(),
+        layout: "us".into(),
+        active_keymap: "English (US)".into(),
+        active_layout_index: 0,
+    });
+    desk.devices.mice.push(PointerDevice { name: "Logitech USB Receiver".into() });
+    // `omarchy-toggle-input-device`'s own quoting of the name.
+    let quoted = trackpad.replace('\\', r"\\").replace('"', r#"\""#);
+    for (enabled, word) in [(false, "false"), (true, "true")] {
+        let wire = format!(r#"/eval hl.device({{ name = "{quoted}", enabled = {word} }})"#);
+        let (response, actions) = answer_payload(wire.as_bytes(), &desk);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions, vec![Action::SetInputDeviceEnabled { name: trackpad.into(), enabled }], "{wire}");
+    }
+    let (response, actions) = answer_payload(br#"/eval hl.device({ name = "ELAN9008:00 04F3:2C82", enabled = false })"#, &desk);
+    assert_eq!((response.trim(), actions.len()), ("ok", 1), "a touchscreen is switched the same way");
+    for (wire, reason) in [
+        (r#"/eval hl.device({ name = "Apple ", enabled = false })"#, "no pointer, touch or tablet device"),
+        (r#"/eval hl.device({ name = "Logitech USB Receiver", enabled = false })"#, "with keys stays on"),
+        (r#"/eval hl.device({ name = "chonkstep-pointer", enabled = false })"#, "nested session"),
+        (r#"/eval hl.device({ name = "chonkstep-keyboard", enabled = true })"#, "nested session"),
+        (r#"/eval hl.device({ name = "ELAN9008:00 04F3:2C82" })"#, "enabled = true or false"),
+        (r#"/eval hl.device({ name = ELAN, enabled = false })"#, "quoted string"),
+        (
+            r#"/eval hl.device({ name = "ELAN9008:00 04F3:2C82", enabled = false, sensitivity = 0.5 })"#,
+            "sensitivity belongs in the configuration",
+        ),
+        (r#"/eval hl.device({ name = "ELAN9008:00 04F3:2C82", enabled = false }"#, "unterminated"),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &desk);
+        assert!(response.starts_with("Invalid dispatcher") && response.contains(reason), "{wire}: {response}");
+        assert!(!response.contains("unknown eval expression"), "{wire}: {response}");
+        assert!(actions.is_empty(), "{wire}");
     }
 }
 

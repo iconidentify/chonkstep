@@ -241,6 +241,14 @@ pub struct Binding {
     pub release: bool,
 }
 
+/// The name the nested backend reports for its one logical keyboard.
+pub const NESTED_KEYBOARD: &str = "chonkstep-keyboard";
+/// The name the nested backend reports for its one logical pointer.
+pub const NESTED_POINTER: &str = "chonkstep-pointer";
+/// Both logical devices. Clients type and point through them, but they are
+/// not libinput devices, so nothing can switch them off.
+pub const NESTED_DEVICES: [&str; 2] = [NESTED_KEYBOARD, NESTED_POINTER];
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Devices {
     pub keyboards: Vec<Keyboard>,

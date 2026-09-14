@@ -111,14 +111,14 @@ mod tests {
     }
 
     fn natural(class: Option<bool>) -> ScrollClass {
-        ScrollClass { natural_scroll: class, scroll_factor: None }
+        ScrollClass { natural_scroll: class, ..ScrollClass::default() }
     }
 
     /// Omarchy's `input.lua` sets natural scrolling in its touchpad table
     /// only.
     fn omarchy() -> PointerConfig {
         PointerConfig {
-            touchpad: ScrollClass { natural_scroll: Some(true), scroll_factor: Some(0.4) },
+            touchpad: ScrollClass { natural_scroll: Some(true), scroll_factor: Some(0.4), ..ScrollClass::default() },
             ..PointerConfig::default()
         }
     }

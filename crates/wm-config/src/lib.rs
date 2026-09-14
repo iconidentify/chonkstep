@@ -169,6 +169,48 @@ pub struct Binding {
     pub release: bool,
 }
 
+/// Which edge of a hardware switch a [`SwitchBinding`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchEdge {
+    /// The switch turned on: a lid closed, tablet mode entered.
+    On,
+    /// The switch turned off: a lid opened, tablet mode left.
+    Off,
+    /// Either edge.
+    Any,
+}
+
+/// A binding on a hardware switch, Hyprland's `switch:on:Lid Switch`.
+///
+/// Keyed by the libinput device name, matched exactly. Apple Silicon
+/// names its lid differently, which is why Omarchy binds both names;
+/// a fuzzy match would run one machine's handler on another's switch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwitchBinding {
+    pub device: String,
+    pub edge: SwitchEdge,
+    pub action: Action,
+    /// Runs while the session is locked too (`bindl`, `locked = true`).
+    pub locked: bool,
+}
+
+impl SwitchBinding {
+    /// The most switch bindings one configuration holds.
+    pub const MAX: usize = 32;
+
+    /// Whether `device` turning `on` (or off) runs this binding, given
+    /// whether the session is locked.
+    pub fn runs(&self, device: &str, on: bool, locked: bool) -> bool {
+        (self.locked || !locked)
+            && self.device == device
+            && match self.edge {
+                SwitchEdge::On => on,
+                SwitchEdge::Off => !on,
+                SwitchEdge::Any => true,
+            }
+    }
+}
+
 /// Keyboard settings imported from Hyprland's `input {}` table.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InputConfig {
@@ -198,8 +240,30 @@ pub struct InputConfig {
     /// invert and slow a wheel.
     pub touchpad_natural_scroll: Option<bool>,
     pub touchpad_scroll_factor: Option<f64>,
+    /// Hyprland's `cursor` section and chonkstep's own `[cursor]` table.
+    pub cursor: wm_core::CursorBehaviour,
     pub left_handed: Option<bool>,
     pub accel_profile: Option<String>,
+    /// Num Lock when a keymap is installed; see [`wm_core::KeyboardConfig`].
+    pub numlock_by_default: Option<bool>,
+    /// Mouse-class `scroll_method`, `scroll_button` and middle-button
+    /// emulation (`[input]`, `input:scroll_method`).
+    pub scroll_method: Option<wm_core::ScrollMethod>,
+    pub scroll_button: Option<u32>,
+    pub middle_button_emulation: Option<bool>,
+    /// The touchpad-class trio (`[input.touchpad]`, `input:touchpad:*`).
+    pub touchpad_scroll_method: Option<wm_core::ScrollMethod>,
+    pub touchpad_scroll_button: Option<u32>,
+    pub touchpad_middle_button_emulation: Option<bool>,
+    /// Tapping settings, which only touchpads have.
+    pub tap_and_drag: Option<bool>,
+    pub drag_lock: Option<bool>,
+    pub tap_button_map: Option<wm_core::TapButtonMap>,
+    pub drag_3fg: Option<wm_core::MultiFingerDrag>,
+    /// Rules for single devices by exact name: Hyprland's `device` blocks and
+    /// `hl.device` calls, and Omarchy's persisted touchpad and touchscreen
+    /// disables.
+    pub devices: Vec<wm_core::DeviceRule>,
 }
 
 /// The system's own keyboard configuration: the `XKB*` keys of
@@ -624,6 +688,8 @@ pub struct Config {
     pub monitor_rules: Vec<hyprland::directive::Monitor>,
     pub bindings: Vec<Binding>,
     pub layer_bindings: BTreeMap<String, Vec<Binding>>,
+    /// Bindings on hardware switches, from the live Hyprland read.
+    pub switch_bindings: Vec<SwitchBinding>,
     pub keybindings: Vec<(KeyCombo, Action)>,
     /// Human-readable refusals retained for `hyprctl configerrors` and
     /// the offline inspection commands.
@@ -727,6 +793,7 @@ impl Config {
             monitor_rules: Vec::new(),
             bindings: Vec::new(),
             layer_bindings: BTreeMap::new(),
+            switch_bindings: Vec::new(),
             keybindings: vec![
                 bind("super+t", Action::Floating(None)),
                 bind("super+l", Action::ToggleLayout),
@@ -1231,11 +1298,73 @@ fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &s
                 }
                 _ => tracing::warn!(key = %setting, value = ?value, "config: input accel_profile must be \"flat\" or \"adaptive\", ignoring it"),
             },
+            "numlock_by_default" if prefix.is_empty() => match value.as_bool() {
+                Some(enabled) => config.numlock_by_default = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "middle_button_emulation" => match value.as_bool() {
+                Some(enabled) if prefix == "touchpad" => config.touchpad_middle_button_emulation = Some(enabled),
+                Some(enabled) => config.middle_button_emulation = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "scroll_method" => match value.as_str().and_then(wm_core::ScrollMethod::from_name) {
+                Some(method) if prefix == "touchpad" => config.touchpad_scroll_method = Some(method),
+                Some(method) => config.scroll_method = Some(method),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input scroll_method must be \"2fg\", \"edge\", \"on_button_down\" or \"no_scroll\", ignoring it"),
+            },
+            "scroll_button" => match value.as_integer().and_then(|button| u32::try_from(button).ok()) {
+                Some(button) if button <= wm_core::MAX_SCROLL_BUTTON && prefix == "touchpad" => {
+                    config.touchpad_scroll_button = Some(button)
+                }
+                Some(button) if button <= wm_core::MAX_SCROLL_BUTTON => config.scroll_button = Some(button),
+                _ => tracing::warn!(key = %setting, value = ?value, "config: input scroll_button must be an evdev button code from 0 through 300, ignoring it"),
+            },
+            "tap_and_drag" => match value.as_bool() {
+                Some(enabled) => config.tap_and_drag = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "drag_lock" => match value.as_bool() {
+                Some(enabled) => config.drag_lock = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input drag_lock must be a boolean, ignoring it"),
+            },
+            "tap_button_map" => match value.as_str().and_then(wm_core::TapButtonMap::from_name) {
+                Some(map) => config.tap_button_map = Some(map),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input tap_button_map must be \"lrm\" or \"lmr\", ignoring it"),
+            },
+            "drag_3fg" => match value.as_integer().and_then(wm_core::MultiFingerDrag::from_number) {
+                Some(drag) => config.drag_3fg = Some(drag),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input drag_3fg must be 0, 1 (three fingers) or 2 (four fingers), ignoring it"),
+            },
             "touchpad" if prefix.is_empty() => match value.as_table() {
                 Some(touchpad) => apply_input_table(config, touchpad, "touchpad"),
                 None => tracing::warn!(value = ?value, "config: [input.touchpad] must be a table, ignoring it"),
             },
             unknown => tracing::warn!(key = %setting, name = %unknown, "config: unknown input setting, ignoring it"),
+        }
+    }
+}
+
+/// `[cursor]`: when the compositor hides the pointer on its own. A value
+/// of the wrong type is warned about and leaves that key as it was.
+fn apply_cursor_table(cursor: &mut wm_core::CursorBehaviour, entries: &toml::Table) {
+    for (key, value) in entries {
+        match key.as_str() {
+            "hide_on_key_press" => match value.as_bool() {
+                Some(enabled) => cursor.hide_on_key_press = Some(enabled),
+                None => tracing::warn!(%key, ?value, "config: [cursor] setting must be a boolean, ignoring it"),
+            },
+            "hide_on_touch" => match value.as_bool() {
+                Some(enabled) => cursor.hide_on_touch = Some(enabled),
+                None => tracing::warn!(%key, ?value, "config: [cursor] setting must be a boolean, ignoring it"),
+            },
+            "inactive_timeout" => match input_number(value) {
+                Some(seconds) if seconds.is_finite() && seconds >= 0.0 => cursor.inactive_timeout = Some(seconds),
+                _ => tracing::warn!(
+                    %key, ?value,
+                    "config: [cursor] inactive_timeout must be a non-negative number of seconds (0 never hides), ignoring it"
+                ),
+            },
+            unknown => tracing::warn!(key = %unknown, "config: unknown [cursor] setting, ignoring it"),
         }
     }
 }
@@ -1607,6 +1736,15 @@ pub fn parse_with(
                 other => tracing::warn!(
                     value = ?other,
                     "config: [input] must be a table, ignoring it"
+                ),
+            },
+            // Read after the live Hyprland configuration, like every key in
+            // this walk, so a `[cursor]` setting here overrides Omarchy's.
+            "cursor" => match value {
+                toml::Value::Table(entries) => apply_cursor_table(&mut config.input.cursor, entries),
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: [cursor] must be a table, ignoring it"
                 ),
             },
             "commands" => match value {
@@ -2384,6 +2522,50 @@ scroll_factor = 0.4
     }
 
     #[test]
+    fn native_input_tables_carry_num_lock_tapping_and_the_scroll_method_by_class() {
+        let config = parse(
+            r#"
+[input]
+numlock_by_default = true
+scroll_method = "on_button_down"
+scroll_button = 274
+middle_button_emulation = true
+
+[input.touchpad]
+scroll_method = "edge"
+middle_button_emulation = false
+tap_and_drag = false
+drag_lock = true
+tap_button_map = "lmr"
+drag_3fg = 1
+numlock_by_default = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.input.numlock_by_default, Some(true), "Num Lock is a keyboard setting, not a touchpad's");
+        assert_eq!(config.input.scroll_method, Some(wm_core::ScrollMethod::OnButtonDown));
+        assert_eq!(config.input.scroll_button, Some(274));
+        assert_eq!(config.input.middle_button_emulation, Some(true));
+        assert_eq!(config.input.touchpad_scroll_method, Some(wm_core::ScrollMethod::Edge));
+        assert_eq!(config.input.touchpad_scroll_button, None);
+        assert_eq!(config.input.touchpad_middle_button_emulation, Some(false));
+        assert_eq!(config.input.tap_and_drag, Some(false));
+        assert_eq!(config.input.drag_lock, Some(true));
+        assert_eq!(config.input.tap_button_map, Some(wm_core::TapButtonMap::LeftMiddleRight));
+        assert_eq!(config.input.drag_3fg, Some(wm_core::MultiFingerDrag::ThreeFingers));
+
+        let refused = parse(
+            "[input]\nscroll_method = \"sideways\"\nscroll_button = 301\ndrag_3fg = 3\ntap_button_map = 1\ndrag_lock = 2\n",
+        )
+        .unwrap();
+        assert_eq!(refused.input.scroll_method, None);
+        assert_eq!(refused.input.scroll_button, None);
+        assert_eq!(refused.input.drag_3fg, None);
+        assert_eq!(refused.input.tap_button_map, None);
+        assert_eq!(refused.input.drag_lock, None);
+    }
+
+    #[test]
     fn mouse_and_touchpad_scroll_settings_stay_apart() {
         let config = parse(
             "[input]\nnatural_scroll = false\nscroll_factor = 2.0\n[input.touchpad]\nnatural_scroll = true\nscroll_factor = 0.4\n",
@@ -2393,6 +2575,39 @@ scroll_factor = 0.4
         assert_eq!(config.input.scroll_factor, Some(2.0));
         assert_eq!(config.input.touchpad_natural_scroll, Some(true));
         assert_eq!(config.input.touchpad_scroll_factor, Some(0.4));
+    }
+
+    #[test]
+    fn a_cursor_table_sets_when_the_pointer_hides_and_refuses_bad_values() {
+        let config = parse("[cursor]\nhide_on_key_press = true\nhide_on_touch = false\ninactive_timeout = 5\n").unwrap();
+        assert_eq!(
+            config.input.cursor,
+            wm_core::CursorBehaviour {
+                hide_on_key_press: Some(true),
+                hide_on_touch: Some(false),
+                inactive_timeout: Some(5.0),
+            }
+        );
+        let config = parse("[cursor]\nhide_on_key_press = 'yes'\ninactive_timeout = -1\n").unwrap();
+        assert_eq!(config.input.cursor, wm_core::CursorBehaviour::default());
+        let config = parse("[cursor]\ninactive_timeout = 0\n").unwrap();
+        assert_eq!(config.input.cursor.inactive_timeout, Some(0.0), "zero is a valid never");
+    }
+
+    #[test]
+    fn a_cursor_table_overrides_the_live_hyprland_reading() {
+        let live = || {
+            Some(hyprland::Reading {
+                input: InputConfig {
+                    cursor: wm_core::CursorBehaviour { hide_on_key_press: Some(true), ..Default::default() },
+                    ..InputConfig::default()
+                },
+                ..hyprland::Reading::default()
+            })
+        };
+        let text = "desktop = \"omarchy\"\n[cursor]\nhide_on_key_press = false\n";
+        let config = parse_with(text, &live).unwrap();
+        assert_eq!(config.input.cursor.hide_on_key_press, Some(false));
     }
 
     #[test]

@@ -204,6 +204,7 @@ pub(crate) fn build_scene(
     renderer: &mut GlesRenderer,
     pointer_location: SPoint<f64, smithay::utils::Logical>,
     cursor_status: &CursorImageStatus,
+    tablet_cursors: &[crate::input::TabletCursor],
     cursors: &crate::state::CursorSet,
     viewport: Rect,
 ) -> (Vec<SceneElement>, Color32F) {
@@ -214,6 +215,7 @@ pub(crate) fn build_scene(
         renderer,
         pointer_location,
         cursor_status,
+        tablet_cursors,
         cursors,
         viewport,
     );
@@ -223,12 +225,18 @@ pub(crate) fn build_scene(
 /// Rebuilds a scene in caller-owned storage, retaining the vector's
 /// allocation across frames. On-screen rendering uses one instance per
 /// output; one-shot offscreen consumers use [`build_scene`] instead.
+///
+/// `tablet_cursors` are the tablet tools in proximity. A capture that
+/// asks for no cursor passes none, alongside the `Hidden` pointer status
+/// it substitutes: a tool's image is a cursor like the pointer's.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_scene_into(
     elements: &mut Vec<SceneElement>,
     backend: &WaylandBackend,
     renderer: &mut GlesRenderer,
     pointer_location: SPoint<f64, smithay::utils::Logical>,
     cursor_status: &CursorImageStatus,
+    tablet_cursors: &[crate::input::TabletCursor],
     cursors: &crate::state::CursorSet,
     viewport: Rect,
 ) -> Color32F {
@@ -239,6 +247,13 @@ pub(crate) fn build_scene_into(
     elements.clear();
 
     push_cursor_elements(elements, renderer, backend, pointer_location, cursor_status, cursors, viewport);
+    // The pointer does not follow a pen, so each tool in proximity draws
+    // its own image at its own position, chosen exactly as the pointer's
+    // is: over a frame, the desktop or a blanked lock screen the
+    // compositor's sprites, over client content the client's request.
+    for tool in tablet_cursors {
+        push_cursor_elements(elements, renderer, backend, tool.position, &tool.status, cursors, viewport);
+    }
 
     // Input-method candidate windows belong above every application
     // surface (including overlay layers) and below only the pointer.
@@ -908,7 +923,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     // framebuffer) mutates while the ledger is read — both live on
     // `Compositor`, so destructure instead of going through `&mut
     // self` methods.
-    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, frame_stats, surface_outputs, dmabuf, gpu_timer, .. } = comp;
+    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, tablet_cursors, cursors, start_time, frame_stats, surface_outputs, dmabuf, gpu_timer, .. } = comp;
     let Graphics::Winit(winit_backend) = graphics else {
         return false;
     };
@@ -935,6 +950,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
             renderer,
             *pointer_location,
             cursor_status,
+            tablet_cursors,
             cursors,
             Rect::new(Point::new(0, 0), entry.size),
         );
@@ -1046,7 +1062,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
 /// fullscreen, clipping and surface membership without claiming KMS cadence.
 fn render_frame_winit_outputs(comp: &mut Compositor, capture_pending: bool) -> bool {
     use smithay::backend::renderer::element::utils::{RelocateRenderElement, Relocate};
-    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors,
+    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, tablet_cursors, cursors,
         start_time, surface_outputs, dmabuf, .. } = comp;
     let Graphics::Winit(backend) = graphics else { return false; };
     let mut elements = Vec::new();
@@ -1055,7 +1071,7 @@ fn render_frame_winit_outputs(comp: &mut Compositor, capture_pending: bool) -> b
         for entry in outputs.iter_mut() {
             let viewport = Rect::new(entry.position, entry.size);
             let scene = &mut entry.scene_scratch;
-            build_scene_into(scene, wm.backend(), renderer, *pointer_location, cursor_status, cursors, viewport);
+            build_scene_into(scene, wm.backend(), renderer, *pointer_location, cursor_status, tablet_cursors, cursors, viewport);
             crate::capture_tool::render(scene, renderer, wm.backend(), viewport);
             // Native output framebuffers enforce this boundary themselves.
             // The shared host framebuffer needs it before translating the head,
@@ -1665,21 +1681,32 @@ fn return_walk_stack(mut stack: Vec<TreeStep>) {
     WALK_STACK.with(|slot| *slot.borrow_mut() = stack);
 }
 
-/// Pushes the pointer's elements, picking the image by what the
-/// pointer is over ([`crate::input::pointer_subject`]) rather than by
-/// the last `CursorImageStatus` alone: the client-set cursor surface
-/// applies only over that client's own content (offset by its hotspot,
-/// which smithay stashes in the surface's data map); over our frames
-/// the compositor's own arrow — or the resize double-arrow the frame
-/// asked for through `Backend::set_frame_cursor` — is drawn; over the
-/// desktop and shell surfaces, the arrow. A status is a *statement by
-/// a client*, and it outlives the pointer's visit (no client un-sets a
-/// cursor on leave; leave means it may not), so trusting it everywhere
-/// kept LibreOffice's pointer on screen over the dock and every frame
-/// the pointer crossed after leaving it. `Named` cursor shapes also
-/// fall back to the arrow — shipping an Xcursor theme loader is not
-/// worth it for a nested dev backend, and clients that care set
-/// surface cursors.
+/// Pushes one cursor's elements (the pointer's, or a tablet tool's at
+/// its own position), picking the image by what that position is over
+/// ([`crate::input::pointer_subject`]) rather than by the last
+/// `CursorImageStatus` alone. A status is a *statement by a client*, and
+/// it outlives the pointer's visit (no client un-sets a cursor on leave;
+/// leave means it may not), so trusting it everywhere kept LibreOffice's
+/// pointer on screen over the dock and every frame the pointer crossed
+/// after leaving it. So:
+///
+/// - Over client content the client's choice applies. A cursor surface
+///   is drawn offset by its hotspot, which smithay stashes in the
+///   surface's data map. A named shape (`wp_cursor_shape_v1`) is drawn
+///   from the user's Xcursor theme at the output's nominal size, with
+///   the theme's hotspot (see [`crate::cursor_theme`]). `default`, a
+///   shape the theme lacks, and any shape the theme worker has not yet
+///   delivered draw ChonkStep's own arrow.
+/// - Over our frames, the arrow, or the resize double-arrow the frame
+///   asked for through `Backend::set_frame_cursor`.
+/// - Over the desktop and shell surfaces, the arrow.
+///
+/// Frames and the desktop keep the hand-drawn set even while a client's
+/// last status names a shape, so the pointer does not change style at
+/// every window edge. Every reason to draw no cursor at all still comes
+/// first: the IPC-hidden cursor, the compositor's own typing, touch and
+/// idle hide, the capture tool's selection cursor, and `Hidden`, which is
+/// also how a cursorless screencopy asks.
 pub(crate) fn push_cursor_elements(
     elements: &mut Vec<SceneElement>,
     renderer: &mut GlesRenderer,
@@ -1691,7 +1718,9 @@ pub(crate) fn push_cursor_elements(
 ) {
     let capture_cursor = crate::capture_tool::owns_cursor(backend,
         Point::new(location.x.floor() as i32, location.y.floor() as i32));
-    if backend.cursor_hidden && !capture_cursor {
+    // Either reason hides it: the IPC-owned flag, or the compositor's own
+    // typing, touch and idle policy (`input::cursor_visibility`).
+    if (backend.cursor_hidden || backend.cursor_visibility.hidden()) && !capture_cursor {
         return;
     }
     // The pointer has one position in global space. Build it in each
@@ -1719,15 +1748,23 @@ pub(crate) fn push_cursor_elements(
         crate::input::pointer_subject(backend, global)
     };
     let sprite = match subject {
-        crate::input::PointerSubject::Client => None,
+        crate::input::PointerSubject::Client => match status {
+            // "The ordinary pointer" stays ChonkStep's own arrow, so the
+            // style does not change as the pointer crosses onto an app.
+            CursorImageStatus::Named(smithay::input::pointer::CursorIcon::Default) => Some(cursors.arrow()),
+            CursorImageStatus::Named(icon) => {
+                Some(cursors.themed.get(*icon, backend.scale_at(viewport)).unwrap_or_else(|| cursors.arrow()))
+            }
+            _ => None,
+        },
         crate::input::PointerSubject::Frame(Some(edge)) => Some(cursors.for_edge(edge)),
         crate::input::PointerSubject::Frame(None) | crate::input::PointerSubject::Desktop => Some(cursors.arrow()),
     };
     if let Some(sprite) = sprite {
-        // The compositor's own image, hotspot-corrected: the resize
-        // double-arrows mark their center, not their corner, and
-        // drawing them uncorrected puts the visible crosshair half a
-        // glyph below-right of the edge the user is aiming at.
+        // A sprite, hotspot-corrected: the resize double-arrows mark
+        // their center, not their corner, and drawing them uncorrected
+        // puts the visible crosshair half a glyph below-right of the
+        // edge the user is aiming at; a theme image carries its own.
         let position = SPoint::<f64, smithay::utils::Logical>::from((
             location.x - sprite.hotspot.0 as f64,
             location.y - sprite.hotspot.1 as f64,
@@ -1789,8 +1826,9 @@ pub(crate) fn push_cursor_elements(
             }
         }
         _ => {
-            // A client that never set a cursor (or set a `Named` shape)
-            // gets the arrow. No hotspot offset and no size override:
+            // A client whose cursor surface has died gets the arrow
+            // (named shapes chose their sprite above, and `Hidden`
+            // returned before it). No hotspot offset and no size override:
             // the arrow's tip is its (0, 0) pixel, and the cursor set
             // has already rasterized the shape at the UI scale from
             // that same origin, so the tip stays under the pointer at

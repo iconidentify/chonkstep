@@ -1121,6 +1121,27 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
         "hl.layer_rule" => out.push(Directive::Ignored { kind: "layer-rule", detail: "layer-shell rules are Hyprland's; this compositor has its own".into() }),
         "hl.config" => emit_config(&arg(0), out),
         "hl.gesture" => out.push(Directive::Ignored { kind: "gesture", detail: "touchpad gestures".into() }),
+        // A rule for one input device, by the exact name written in it.
+        "hl.device" => out.push(match &arg(0) {
+            Value::Table(fields) => device_rule(fields),
+            other => Directive::Ignored {
+                kind: "device",
+                detail: format!("hl.device({}): not a table of device settings", describe(other)),
+            },
+        }),
+        // `local disabled_input_device = require("default.hypr.disabled-input-device")`
+        // and then `disabled_input_device("touchpad")`: Omarchy re-applying
+        // a disable it stored as data. The module's own Lua is never read;
+        // the loader reads the one line it names, as a name.
+        local if is_disabled_input_device(local, env) => match as_string(&arg(0)).as_deref() {
+            Some(kind @ ("touchpad" | "touchscreen")) => {
+                out.push(Directive::PersistedDeviceDisable { kind: kind.to_string() })
+            }
+            _ => out.push(Directive::Ignored {
+                kind: "device",
+                detail: format!("{local}({}): Omarchy persists only touchpad and touchscreen disables", describe(&arg(0))),
+            }),
+        },
         "hl.on" => out.push(Directive::Ignored { kind: "event", detail: "hl.on event handlers other than the start handler's body".into() }),
         // Hyprland's animation machinery, the Lua spelling of the
         // `bezier` and `animation` lines the conf reader names.
@@ -1175,6 +1196,46 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
             kind: "lua-call",
             detail: format!("{path}(…): not a configuration call this reader reads"),
         }),
+    }
+}
+
+/// Omarchy's module whose function re-applies a persisted device disable.
+const DISABLED_INPUT_DEVICE: &str = "default.hypr.disabled-input-device";
+
+/// Whether `path` is a name bound by `require` to Omarchy's
+/// `disabled-input-device` module, which returns the one function it holds.
+fn is_disabled_input_device(path: &str, env: &Env) -> bool {
+    matches!(
+        env.get(path),
+        Some(Value::Call { path: callee, args })
+            if callee == "require" && matches!(args.first(), Some(Value::Str(module)) if module == DISABLED_INPUT_DEVICE)
+    )
+}
+
+/// An `hl.device` table as a [`Directive::Device`]. The name has to be a
+/// string written in the file, and a table with any value known only at
+/// runtime is refused whole: half of a rule could reach a device the whole
+/// rule never named.
+fn device_rule(fields: &[(Option<String>, Value)]) -> Directive {
+    let refuse = |why: String| Directive::Ignored { kind: "device", detail: format!("hl.device({{ … }}) refused whole: {why}") };
+    let mut name = None;
+    let mut settings = Vec::new();
+    for (key, value) in fields {
+        let Some(key) = key else {
+            return refuse("a positional field is not a device setting".into());
+        };
+        match (key.as_str(), value) {
+            ("name", Value::Str(text)) => name = Some(text.clone()),
+            ("name", other) => return refuse(format!("the name {} is not a string in the file", describe(other))),
+            (_, value) => match property_text(value) {
+                Some(text) => settings.push((key.clone(), text)),
+                None => return refuse(format!("{key} = {} is computed at runtime", describe(value))),
+            },
+        }
+    }
+    match name {
+        Some(name) => Directive::Device { name, settings },
+        None => refuse("a device rule needs the device's name".into()),
     }
 }
 
@@ -1234,10 +1295,33 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
             detail: "hl.config input table is unreadable".into(),
         });
     }
-    if root.iter().any(|(key, _)| key.as_deref() != Some("input")) {
+    match root.iter().find(|(key, _)| key.as_deref() == Some("cursor")).map(|(_, value)| value) {
+        Some(Value::Table(fields)) => {
+            for (key, value) in fields {
+                let Some(key) = key else { continue };
+                out.push(match (value, property_text(value)) {
+                    (Value::Table(_), _) => Directive::Ignored {
+                        kind: "cursor",
+                        detail: format!("nested cursor setting {key} is not implemented"),
+                    },
+                    (_, Some(value)) => Directive::Cursor { name: key.clone(), value },
+                    (_, None) => Directive::Ignored {
+                        kind: "cursor",
+                        detail: format!("{key} = {}: computed at runtime, not carried over", describe(value)),
+                    },
+                });
+            }
+        }
+        Some(_) => out.push(Directive::Ignored {
+            kind: "cursor",
+            detail: "hl.config cursor table is unreadable".into(),
+        }),
+        None => {}
+    }
+    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor"))) {
         out.push(Directive::Ignored {
             kind: "config",
-            detail: "hl.config settings outside input are not carried over".into(),
+            detail: "hl.config settings outside input and cursor are not carried over".into(),
         });
     }
 }

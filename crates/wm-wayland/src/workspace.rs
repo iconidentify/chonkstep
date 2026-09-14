@@ -200,6 +200,12 @@ fn publish_to(
 }
 
 impl GlobalDispatch<ExtWorkspaceManagerV1, ()> for Compositor {
+    /// Switching workspaces is control over the user's desktop, so a
+    /// sandboxed client does not see the manager at all.
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
+    }
+
     fn bind(
         state: &mut Self,
         _dh: &DisplayHandle,

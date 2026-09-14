@@ -340,6 +340,12 @@ pub struct SessionOptions {
     /// making. Applied after the harness's own variables, so a test
     /// can also deliberately override one of those.
     pub env: Vec<(String, String)>,
+    /// Variables removed from the compositor's environment before
+    /// [`Self::env`] is applied — for a test whose subject is read from
+    /// variables the developer's own session also sets, such as
+    /// `XCURSOR_SIZE` or `XCURSOR_THEME`, which would otherwise decide
+    /// the result by being inherited.
+    pub env_remove: Vec<String>,
     /// Files seeded into the isolated `XDG_CONFIG_HOME` root itself
     /// (not under `chonkstep/`) before boot, as `(relative path,
     /// contents)` — the config-side twin of [`Self::state_root_files`],
@@ -464,7 +470,8 @@ impl Session {
         let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
         let log_err = log.try_clone().map_err(|e| e.to_string())?;
 
-        let compositor = Command::new(compositor_binary()?)
+        let mut command = Command::new(compositor_binary()?);
+        command
             .env("XDG_CONFIG_HOME", &config_home)
             .env("XDG_STATE_HOME", &state_home)
             .env("CHONKSTEP_BACKEND", "winit")
@@ -512,7 +519,11 @@ impl Session {
             .env_remove("XKB_DEFAULT_MODEL")
             .env_remove("XKB_DEFAULT_LAYOUT")
             .env_remove("XKB_DEFAULT_VARIANT")
-            .env_remove("XKB_DEFAULT_OPTIONS")
+            .env_remove("XKB_DEFAULT_OPTIONS");
+        for name in &options.env_remove {
+            command.env_remove(name);
+        }
+        let compositor = command
             .envs(options.env.iter().map(|(name, value)| (name.as_str(), value.as_str())))
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
@@ -1536,6 +1547,22 @@ impl Door {
         self.send(&format!("button {button} {}", if pressed { "press" } else { "release" }))
     }
 
+    /// Hotplugs (`present`) or unplugs a keyless pointer called `name`, a
+    /// single word, so per-device rules have a device they may switch off.
+    pub fn pointer_device(&mut self, name: &str, present: bool) -> Result<(), String> {
+        self.send(&format!("pointer-device {} {name}", if present { "add" } else { "remove" }))
+    }
+
+    /// Absolute pointer motion, reported by the pointer called `name`.
+    pub fn motion_from(&mut self, name: &str, x: f64, y: f64) -> Result<(), String> {
+        self.send(&format!("from {name} motion {x} {y}"))
+    }
+
+    /// A pointer button, reported by the pointer called `name`.
+    pub fn button_from(&mut self, name: &str, button: &str, pressed: bool) -> Result<(), String> {
+        self.send(&format!("from {name} button {button} {}", if pressed { "press" } else { "release" }))
+    }
+
     /// Keyboard key by *evdev* keycode (`KEY_*` from
     /// input-event-codes.h — e.g. 125 LEFTMETA, 103 UP, 28 ENTER, 1
     /// ESC); the door applies the xkb +8 offset itself. `pressed` true
@@ -1560,6 +1587,14 @@ impl Door {
     /// Change the live primary-output scale through normal output management.
     pub fn set_primary_scale(&mut self, scale: f64) -> Result<(), String> {
         self.send(&format!("primary-scale {scale}"))
+    }
+
+    /// A hardware switch toggle — `kind` is `lid` or `tablet-mode` — from
+    /// a switch device named `device`, through the production input
+    /// funnel, settled.
+    pub fn switch(&mut self, kind: &str, on: bool, device: &str) -> Result<(), String> {
+        self.send(&format!("switch {kind} {} {device}", if on { "on" } else { "off" }))?;
+        self.barrier()
     }
 
     /// A full tap: press, settle, release, settle — the two edges in

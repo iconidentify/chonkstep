@@ -13,13 +13,14 @@
 //! once rather than never or twice. So each test here checks the same
 //! way: give the command a side effect on disk, then look for the file.
 //!
-//! No `foot` or other client is needed — the commands under test write
-//! files, which keeps what is being proved narrow.
+//! Only the Num Lock test starts a client (`foot`), because whether a
+//! keypad key is a digit is a client's reading of it. Every other command
+//! under test writes a file, which keeps what is being proved narrow.
 
 use std::path::Path;
 use std::time::Duration;
 
-use chonk_testkit::{keys, poll_until, session_dir, Session, SessionOptions};
+use chonk_testkit::{keys, poll_until, profile_binary, session_dir, Session, SessionOptions};
 
 /// Long enough for a spawn, an exec and a small write to land, without
 /// making a failing test wait on the full default.
@@ -140,6 +141,125 @@ fn a_keypad_binding_fires_with_num_lock_off_and_on() {
     .expect("kp1 should run its command with Num Lock on");
 
     assert_eq!(writes, 2, "one physical press in each Num Lock state must run exactly once");
+}
+
+/// Omarchy ships `numlock_by_default = true`, so a numpad has to type
+/// digits from the first key of a session. The lock is applied as the
+/// keymap is installed and not on every reload: a user who turns Num Lock
+/// off keeps it off when the configuration is next re-read.
+#[test]
+#[ignore = "needs a live Wayland session to nest inside"]
+fn num_lock_starts_locked_by_default_and_a_reload_does_not_lock_it_again() {
+    let dir = session_dir("commands-numlock-default");
+    let typed = dir.join("typed");
+    let mut session = Session::boot(
+        "commands-numlock-default",
+        SessionOptions { config_extra: "[input]\nnumlock_by_default = true\n".into(), ..Default::default() },
+    )
+    .expect("session boots with Num Lock on by default");
+    // Each line the terminal reads lands in `typed`, so the file holds
+    // exactly what the client made of the keys.
+    session
+        .launch(
+            "foot",
+            &[
+                "--title=numlock-typing",
+                "--override=locked-title=yes",
+                "sh",
+                "-c",
+                r#"while IFS= read -r line; do printf '%s\n' "$line" >> "$1"; done"#,
+                "numlock-typing",
+                typed.to_str().expect("a UTF-8 scratch path"),
+            ],
+        )
+        .expect("foot launches");
+    let window = session.wait_for_window("numlock-typing").expect("the terminal maps");
+    session.door().click(f64::from(window.x + 40), f64::from(window.y + 40)).expect("focus the terminal");
+
+    session.door().tap_key(keys::KP1).expect("keypad 1 at session start");
+    session.door().tap_key(keys::ENTER).expect("end the line");
+    poll_until(SPAWNED, "the first typed line", || marker_lines(&dir, "typed", 1))
+        .expect("the terminal should read the first line");
+
+    session.door().tap_key(keys::NUMLOCK).expect("the user turns Num Lock off");
+    let reloads = session.log().matches("reload requested").count();
+    session.request_reload().expect("request a reload");
+    poll_until(SPAWNED, "the requested reload", || {
+        (session.log().matches("reload requested").count() > reloads).then_some(())
+    })
+    .expect("the compositor should reload");
+    session.door().barrier().expect("the reload has applied");
+    session.door().tap_key(keys::KP1).expect("keypad 1 after the reload");
+    session.door().tap_key(keys::ENTER).expect("end the line");
+    poll_until(SPAWNED, "the second typed line", || marker_lines(&dir, "typed", 2))
+        .expect("the terminal should read the second line");
+
+    let text = std::fs::read_to_string(&typed).expect("typed lines readable");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "1", "keypad 1 types a digit from the first key of the session: {lines:?}");
+    assert_ne!(lines[1], "1", "a reload must not lock Num Lock again after the user turned it off: {lines:?}");
+}
+
+/// A switch binding runs its command when its own device toggles, and
+/// while the session is locked only a `bindl` one does. Omarchy locks on
+/// lid close through exactly this path, and marks its lid handlers
+/// locked so they still answer on the lock screen.
+///
+/// The switch is named `ChonkStep Test Lid`, never `Lid Switch`: a
+/// session that also read a real Omarchy install must not run its
+/// lock-on-close handler from a test.
+#[test]
+#[ignore = "needs a live Wayland session to nest inside"]
+fn a_lid_switch_runs_its_bindings_and_only_locked_ones_while_locked() {
+    const LID: &str = "ChonkStep Test Lid";
+    let dir = session_dir("commands-lid-switch");
+    let append = |name: &str| format!("echo ran >> {}", dir.join(name).display());
+    let lines = |name: &str| std::fs::read_to_string(dir.join(name)).map(|text| text.lines().count()).unwrap_or(0);
+    let hyprland = format!(
+        "bind = , switch:on:{LID}, exec, {}\nbindl = , switch:off:{LID}, exec, {}\nbind = , switch:on:chonkstep test lid, exec, {}\n",
+        append("closed"),
+        append("opened"),
+        append("misnamed"),
+    );
+    let mut session = Session::boot(
+        "commands-lid-switch",
+        SessionOptions {
+            config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into(),
+            config_root_files: vec![("hypr/hyprland.conf".into(), hyprland)],
+            ..Default::default()
+        },
+    )
+    .expect("session boots with switch bindings");
+
+    session.door().switch("lid", true, LID).expect("the lid closes");
+    poll_until(SPAWNED, "the lid-close command", || (lines("closed") == 1).then_some(()))
+        .expect("closing the lid should run its switch binding");
+
+    let probe = profile_binary("chonk-lock-probe").expect("cargo build -p chonk-testkit builds the probe");
+    session.launch(probe.to_str().unwrap(), &["--hold"]).expect("the lock probe launches");
+    poll_until(Duration::from_secs(15), "the probe to hold the lock", || {
+        session.client_log("chonk-lock-probe").contains("holding the lock").then_some(())
+    })
+    .expect("the session locks");
+
+    // The compositor reports each resolution in the pass that makes it,
+    // so an unlocked binding that did not run is observed, not waited for.
+    session.door().switch("lid", true, LID).expect("the lid closes while locked");
+    poll_until(SPAWNED, "the locked lid-close toggle to resolve", || {
+        session
+            .log()
+            .lines()
+            .any(|line| line.contains("switch toggle resolved") && line.contains("locked=true") && line.contains("actions=0"))
+            .then_some(())
+    })
+    .expect("a lid close on the lock screen resolves to no unlocked binding");
+    session.door().switch("lid", false, LID).expect("the lid opens while locked");
+    poll_until(SPAWNED, "the locked lid-open command", || (lines("opened") == 1).then_some(()))
+        .expect("a locked switch binding runs on the lock screen");
+
+    assert_eq!(lines("closed"), 1, "the unlocked binding must not run while locked");
+    assert_eq!(lines("misnamed"), 0, "a switch binding matches its device name exactly");
+    assert!(session.compositor_alive());
 }
 
 /// Autostart runs on a genuinely new session, in file order.

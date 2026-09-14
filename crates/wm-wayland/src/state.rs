@@ -685,6 +685,9 @@ pub struct WaylandBackend {
     pub(crate) pending_keyboard: Option<wm_core::KeyboardConfig>,
     pub(crate) pending_pointer: Option<wm_core::PointerConfig>,
     pub(crate) pointer_config: wm_core::PointerConfig,
+    /// Which input devices are switched off by name, from the configuration
+    /// and from live `hl.device` requests.
+    pub(crate) input_device_states: crate::input::devices::DeviceStates,
     /// Post-libinput axis multipliers, also used by the nested backend:
     /// one for wheel, tilt and button scrolling, one for finger scrolling.
     pub(crate) pointer_scroll_factor: f64,
@@ -765,6 +768,10 @@ pub struct WaylandBackend {
     pub(crate) release_combos: Vec<KeyCombo>,
     pub(crate) locked_combos: Vec<KeyCombo>,
     pub(crate) repeating_combos: Vec<KeyCombo>,
+    /// Switch toggles, as device name and new state, waiting for
+    /// `dispatch_pending` to resolve them against the switch bindings.
+    /// Bounded where they are staged.
+    pub(crate) pending_switches: Vec<(String, bool)>,
     pub(crate) repeat_rate: u32,
     pub(crate) repeat_delay: std::time::Duration,
     /// The modal exclusive grab (`Backend::grab_keyboard`, the Alt-Tab
@@ -845,6 +852,10 @@ pub struct WaylandBackend {
     /// cannot strand the rest of the session without a pointer.
     pub(crate) cursor_hidden: bool,
     pub(crate) cursor_hidden_owner: Option<WlSurface>,
+    /// The compositor's own reason to hide the pointer (typing, touch or
+    /// idleness), kept apart from the IPC flag above; see
+    /// [`crate::input::cursor_visibility`].
+    pub(crate) cursor_visibility: crate::input::cursor_visibility::CursorVisibility,
     /// Selected graphics stack and hardware identity for live system
     /// information (`nested-winit` or the KMS/driver/render-node set).
     pub(crate) graphics_diagnostics: String,
@@ -1070,6 +1081,7 @@ impl WaylandBackend {
             release_combos: Vec::new(),
             locked_combos: Vec::new(),
             repeating_combos: Vec::new(),
+            pending_switches: Vec::new(),
             repeat_rate: 25,
             repeat_delay: std::time::Duration::from_millis(200),
             pending_quit: Vec::new(),
@@ -1085,6 +1097,7 @@ impl WaylandBackend {
             pending_keyboard: None,
             pending_pointer: None,
             pointer_config: wm_core::PointerConfig::default(),
+            input_device_states: Default::default(),
             pointer_scroll_factor: 1.0,
             touchpad_scroll_factor: 1.0,
             keyboard_layout: String::new(),
@@ -1099,6 +1112,7 @@ impl WaylandBackend {
             last_damage_source: None,
             cursor_hidden: false,
             cursor_hidden_owner: None,
+            cursor_visibility: Default::default(),
             graphics_diagnostics: "backend=uninitialized".to_string(),
             gpu_timings: Default::default(),
             native_frame_stats: Vec::new(),
@@ -1506,8 +1520,15 @@ pub(crate) fn client_is_confined(client: &smithay::reexports::wayland_server::Cl
 
 /// Capabilities that affect other clients belong to ordinary desktop helpers,
 /// not clients explicitly admitted through a sandbox security context. Keep
-/// this gate shared so capture, input injection, clipboard monitoring and
-/// output/session management enforce the same boundary.
+/// this gate shared so capture, input injection, clipboard monitoring,
+/// window lists, workspace control and output/session management enforce the
+/// same boundary.
+///
+/// Deliberately left visible to confined clients: the ordinary application
+/// protocols, `ext_idle_notifier_v1` (a presence app's "away" status reveals
+/// only that the user is idle, which any focused window can already infer),
+/// and `zwp_keyboard_shortcuts_inhibit_manager_v1`, whose grants are gated
+/// separately. Classify each new global here rather than let it default.
 pub(crate) fn privileged_global_visible(
     client: &smithay::reexports::wayland_server::Client,
 ) -> bool {
@@ -2554,17 +2575,24 @@ pub struct Compositor {
     /// What the cursor should look like, per the focused client's
     /// `wl_pointer.set_cursor` (maintained by `input.rs`'s
     /// `SeatHandler::cursor_image`). Honored only while the pointer is
-    /// over client content; the renderer falls back to
-    /// `Compositor::cursors` for `Named` shapes and everywhere else
-    /// (see `push_cursor_elements`).
+    /// over client content, where a `Named` shape is drawn from the
+    /// Xcursor theme; everywhere else the renderer draws
+    /// `Compositor::cursors`' own set (see `push_cursor_elements`).
     pub cursor_status: CursorImageStatus,
+    /// The worker that loads named cursor shapes from the Xcursor theme,
+    /// or `None` when it could not be started (see `cursor_theme`).
+    pub(crate) cursor_theme: Option<crate::cursor_theme::ThemeLoader>,
+    /// Tablet tools in proximity, with their positions and requested
+    /// images, drawn like the pointer (see `input::TabletCursor`).
+    pub(crate) tablet_cursors: Vec<crate::input::TabletCursor>,
     /// The compositor's own pointer images — the arrow, and the resize
     /// double-arrows shown over frame edges — drawn whenever no client
     /// cursor surface applies: a compositor draws its own cursor, there
-    /// is no server to inherit one from. Which member is drawn is the
-    /// renderer's per-frame decision (see `push_cursor_elements`), fed
-    /// by what the pointer is over and what `Backend::set_frame_cursor`
-    /// recorded on the ledger.
+    /// is no server to inherit one from. Also holds the theme images
+    /// drawn for a client's named shapes (`CursorSet::themed`). Which
+    /// member is drawn is the renderer's per-frame decision (see
+    /// `push_cursor_elements`), fed by what the pointer is over and what
+    /// `Backend::set_frame_cursor` recorded on the ledger.
     pub(crate) cursors: CursorSet,
 
     /// Monotonic session clock for frame-callback timestamps.
@@ -2602,6 +2630,25 @@ fn retain_wanted_sources<T>(
 }
 
 impl Compositor {
+    /// Installs a pointer configuration: the scroll factors, the pointer's
+    /// hide policy, and every libinput device, with live `hl.device`
+    /// requests folded into its device rules. Whatever a device this
+    /// switches off was holding is released before libinput stops it.
+    pub(crate) fn apply_pointer_config(&mut self, mut config: wm_core::PointerConfig, now: Instant) {
+        let backend = self.wm.backend_mut();
+        config.devices = backend.input_device_states.rules();
+        backend.pointer_config.devices.clone_from(&config.devices);
+        backend.pointer_scroll_factor = config.pointer.scroll_factor.unwrap_or(1.0);
+        backend.touchpad_scroll_factor = config.touchpad.scroll_factor.unwrap_or(1.0);
+        if backend.cursor_visibility.configure(&config.cursor, now) {
+            backend.mark_damaged();
+        }
+        crate::input::devices::release_newly_disabled(self);
+        crate::session::apply_pointer_config(&mut self.graphics, &config, self.touchpad_pointer_captured);
+    }
+}
+
+impl Compositor {
     /// Drains everything the protocol handlers queued since the last
     /// pass, in exactly the X11 binary loop's order — keymap
     /// interception before dispatch, motion coalescing, notification
@@ -2626,17 +2673,28 @@ impl Compositor {
         crate::gesture_scene::tick(self);
         crate::layout_scene::tick(self);
         self.apply_pending_keyboard();
+        if self.wm.backend_mut().cursor_visibility.tick(dispatch_started) {
+            self.wm.backend_mut().mark_damaged();
+        }
         if let Some(config) = self.wm.backend_mut().pending_pointer.take() {
-            let backend = self.wm.backend_mut();
-            backend.pointer_scroll_factor = config.pointer.scroll_factor.unwrap_or(1.0);
-            backend.touchpad_scroll_factor = config.touchpad.scroll_factor.unwrap_or(1.0);
-            crate::session::apply_pointer_config(&mut self.graphics, &config, self.touchpad_pointer_captured);
+            self.apply_pointer_config(config, dispatch_started);
         }
         tracing::debug_span!("dispatch_phase", phase = "connector_hotplug")
             .in_scope(|| crate::session::service_connector_hotplug(self));
         let phase_started = Instant::now();
         tracing::debug_span!("dispatch_phase", phase = "input")
             .in_scope(|| crate::input::tick_repeating_binding(self));
+        // Switch toggles resolve beside key bindings and run through the
+        // same `run_action`; on the lock screen only `locked` ones answer.
+        for (device, on) in std::mem::take(&mut self.wm.backend_mut().pending_switches) {
+            let locked = self.wm.backend().locked;
+            let actions = self.shell.switch_actions(&device, on, locked);
+            tracing::info!(?device, on, locked, actions = actions.len(), "switch toggle resolved");
+            for action in actions {
+                let outcome = self.shell.run_action(&mut self.wm, &action);
+                self.note_outcome(outcome);
+            }
+        }
         // Consecutive `PointerMotion` events coalesce to the most
         // recent one — same rationale as the X11 loop: during a fast
         // drag every intermediate position is stale by the time it
@@ -2901,7 +2959,13 @@ impl Compositor {
         if let Some(scale) = self.wm.backend_mut().pending_cursor_scale.take() {
             tracing::info!(scale, "rebuilding the compositor's own pointer for the new UI scale");
             self.ui_scale = scale;
+            // The theme's named shapes are sized per output rather than
+            // by the UI scale, so they survive the rebuild;
+            // `cursor_theme::reconcile` below retires any size no output
+            // needs any more and requests the new ones.
+            let themed = std::mem::take(&mut self.cursors.themed);
             self.cursors = CursorSet::build(scale);
+            self.cursors.themed = themed;
             self.wm.backend_mut().mark_damaged();
             self.republish_xsettings();
             // Native Wayland clients ride the same drain, through the
@@ -2945,6 +3009,11 @@ impl Compositor {
                 });
             }
         }
+
+        // After the scale drain, so a rescale requests its cursor sizes in
+        // the same pass. Every other route to a new output scale (IPC,
+        // output management, hotplug) lands in `monitor_scales` too.
+        crate::cursor_theme::reconcile(self);
 
         // Lock upkeep comes after the scale drain so a lock surface is
         // reconfigured to a newly advertised scale in this same pass,
@@ -3764,7 +3833,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         options: config.input.options.clone(),
         repeat_rate: config.input.repeat_rate,
         repeat_delay: config.input.repeat_delay,
+        numlock_by_default: config.input.numlock_by_default,
     });
+    let numlock_by_default = resolved.numlock_by_default;
     let repeat_delay = resolved.repeat_delay;
     let repeat_rate = resolved.repeat_rate;
     let keyboard_config = if let Err(error) = seat.add_keyboard(resolved.xkb_config(), repeat_delay, repeat_rate) {
@@ -3787,6 +3858,14 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     } else {
         Some(resolved)
     };
+    // The first keymap install, and so the one start-of-session moment
+    // `numlock_by_default` names. Nothing has keyboard focus yet: the
+    // first client to receive it reads the lock in its `enter`.
+    if numlock_by_default {
+        if let Some(keyboard) = seat.get_keyboard() {
+            crate::input::keyboard::lock_num_lock(&keyboard);
+        }
+    }
     seat.add_pointer();
     // wl_touch is a seat capability, not a per-device global. Keeping
     // it present lets hot-plugged touchscreens work without changing
@@ -4259,11 +4338,18 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         pointer_location: (0.0, 0.0).into(),
         touchpad_pointer_captured: false,
         cursor_status: CursorImageStatus::default_named(),
+        cursor_theme: None,
+        tablet_cursors: Vec::new(),
         cursors: CursorSet::build(scale),
         start_time: Instant::now(),
         running: true,
         restart: false,
     };
+    // Named cursor shapes load on their own thread from here on. The
+    // environment the theme resolves through (`XCURSOR_THEME`,
+    // `XCURSOR_PATH`, the pinned `XCURSOR_SIZE`) is final by now.
+    crate::cursor_theme::set_base_size(&mut comp, chonk_shell::startup::xcursor_base_size());
+    comp.cursor_theme = crate::cursor_theme::init(&comp.loop_handle.clone());
     crate::hyprland_ipc::refresh_keyboard_layout(&mut comp);
 
     // Cross into the lock domain before the first dispatch. Clients
@@ -4395,6 +4481,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         if let Some(deadline) = crate::session::next_hotplug_deadline(&comp.graphics) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
+        if let Some(deadline) = comp.wm.backend().cursor_visibility.deadline() {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
         if let Some(pacing) = comp.next_surface_pacing_in() {
             wait = wait.min(pacing);
         }
@@ -4472,8 +4561,9 @@ fn restart_in_place(nested: bool, host_display: &crate::restart::HostDisplay) ->
 /// matching the scaled cursor the X11 backend draws for the root
 /// window. Hand-authored rather than loaded from an Xcursor theme —
 /// the compositor must have a cursor before any theme machinery could
-/// run, and clients that care set their own via `wl_pointer.set_cursor`
-/// anyway.
+/// run. Only a client's named shapes come from the theme, once the
+/// worker in `cursor_theme` has loaded them; this arrow is what they
+/// draw until then, and what `default` always draws.
 ///
 /// `scale` is the session's UI scale, and it has to be baked into the
 /// pixels here because nothing downstream will apply it: the buffer is
@@ -4516,6 +4606,9 @@ pub(crate) struct CursorSet {
     resize_horizontal: CursorSprite,
     resize_southeast: CursorSprite,
     resize_southwest: CursorSprite,
+    /// Client-named shapes from the Xcursor theme, filled in by the
+    /// theme worker's deliveries. Carried across a UI-scale rebuild.
+    pub(crate) themed: crate::cursor_theme::ThemedCursors,
 }
 
 impl CursorSet {
@@ -4537,6 +4630,7 @@ impl CursorSet {
             resize_horizontal: build_resize_cursor(scale, right_angle),
             resize_southeast: build_resize_cursor(scale, -right_angle / 2.0),
             resize_southwest: build_resize_cursor(scale, right_angle / 2.0),
+            themed: Default::default(),
         }
     }
 

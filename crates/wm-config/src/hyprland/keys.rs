@@ -69,6 +69,22 @@ impl KeyTrouble {
     }
 }
 
+/// The device and edge of a Hyprland switch binding: `switch:on:NAME`,
+/// `switch:off:NAME`, or `switch:NAME` for either edge. `None` for
+/// anything that is not one. The name comes back as written, because it
+/// is matched exactly against the name libinput reports; bounding it is
+/// the caller's.
+pub fn switch_for(keys: &str) -> Option<(&str, crate::SwitchEdge)> {
+    let keys = keys.trim();
+    let rest = keys.get(..7).filter(|prefix| prefix.eq_ignore_ascii_case("switch:")).map(|_| &keys[7..])?;
+    let (edge, name) = match rest.split_once(':') {
+        Some((edge, name)) if edge.eq_ignore_ascii_case("on") => (crate::SwitchEdge::On, name),
+        Some((edge, name)) if edge.eq_ignore_ascii_case("off") => (crate::SwitchEdge::Off, name),
+        _ => (crate::SwitchEdge::Any, rest),
+    };
+    Some((name.trim(), edge))
+}
+
 /// Rewrites Hyprland's spelling of a chord into a [`crate::parse_key`]
 /// spec, or says why it cannot.
 ///
