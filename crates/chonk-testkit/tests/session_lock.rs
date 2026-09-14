@@ -197,6 +197,174 @@ fn a_second_output_resource_cannot_cover_one_physical_output_twice() {
     assert!(session.compositor_alive(), "the compositor survives the refused duplicate");
 }
 
+/// The fill `chonk-lock-probe --stale-output` gives the lock surface it
+/// requests for an output that is already gone (`STALE_MAGENTA`, B, G, R,
+/// A in the probe).
+const STALE_MAGENTA_RGB: [u8; 3] = [0xC0, 0x20, 0xC0];
+
+/// The last `limit` lines of the compositor log, where a panic lands.
+fn log_tail(session: &Session, limit: usize) -> String {
+    let log = session.log();
+    let lines: Vec<&str> = log.lines().collect();
+    lines[lines.len().saturating_sub(limit)..].join("\n")
+}
+
+/// The newest line of the probe's log that starts with `prefix`.
+fn last_report(session: &Session, prefix: &str) -> Option<String> {
+    probe_log(session).lines().rev().find(|line| line.starts_with(prefix)).map(str::to_owned)
+}
+
+/// Launches `chonk-lock-probe --stale-output CONNECTOR`, waits until it
+/// holds a lock on every output and is parked before its stale request,
+/// and returns the marker file that releases that request.
+fn launch_stale_output_locker(session: &mut Session, connector: &str, outputs: &str) -> std::path::PathBuf {
+    let marker = session.dir.join("stale-output-request");
+    let probe = profile_binary("chonk-lock-probe").expect("cargo build -p chonk-testkit builds the probe");
+    session
+        .launch(probe.to_str().unwrap(), &["--stale-output", connector, marker.to_str().unwrap()])
+        .expect("the stale-output locker launches");
+    checkpoint(session, &format!("locked on every output: {outputs}\n"));
+    checkpoint(session, "ready for stale output request");
+    marker
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn a_lock_surface_for_the_last_output_to_leave_keeps_an_empty_desk_locked() {
+    // The race of a lone monitor unplugged, or dropping hotplug detect as
+    // it sleeps, while a locker sets up: the locker bound the output,
+    // the output left, and the locker's `get_lock_surface` for it was
+    // already on its way when the `global_remove` went out. The request
+    // used to fall back to output index 0 and index an empty output list
+    // inside Wayland dispatch, which killed the compositor on the path
+    // that sets up a lock.
+    let mut session =
+        Session::boot("session-lock-stale-output-empty-desk", SessionOptions { scale: Some(1.0), ..Default::default() })
+            .unwrap();
+    let marker = launch_stale_output_locker(&mut session, "chonkstep", "chonkstep");
+
+    // -- the last output leaves under a parked request ----------------------
+    session.door().set_virtual_outputs("none").unwrap();
+    assert_eq!(
+        session.door().protocol_ledgers().unwrap().lock,
+        1,
+        "the unplugged output's lock surface stays its client's"
+    );
+    std::fs::write(&marker, "").unwrap();
+    poll_until(Duration::from_secs(15), "the stale lock request to be answered", || {
+        let log = probe_log(&session);
+        (log.contains("stale lock surface configured") || log.contains("connection broke")).then_some(())
+    })
+    .unwrap_or_else(|timeout| panic!("{timeout}\n-- chonk-lock-probe log --\n{}", probe_log(&session)));
+    assert!(
+        !probe_log(&session).contains("connection broke"),
+        "the locker lost its connection over a lock surface for a vanished output:\n{}\n-- compositor log tail --\n{}",
+        probe_log(&session),
+        log_tail(&session, 40)
+    );
+    assert!(
+        session.compositor_alive(),
+        "a lock surface naming a vanished output must not take the compositor down:\n{}",
+        log_tail(&session, 40)
+    );
+
+    // -- still the locker's session, still locked ---------------------------
+    // The stale surface got its mandatory first configure (the probe
+    // printed it) and is on the ledger beside the unplugged one.
+    assert_eq!(session.door().protocol_ledgers().unwrap().lock, 2);
+    assert!(
+        !session.log().contains("session unlocked"),
+        "an unresolvable lock surface must leave the session locked"
+    );
+
+    // A connector coming back is a new wl_output the locker has not
+    // covered yet: the locked scene's black, not the desktop and not
+    // either of the surfaces that name no output.
+    session.door().set_virtual_outputs("single").unwrap();
+    let returned = session.screenshot("stale-output-connector-returns").expect("grim captures the returned output");
+    for y in (5..returned.height).step_by(97) {
+        for x in (5..returned.width).step_by(89) {
+            assert_eq!(
+                returned.pixel(x, y)[..3],
+                [0, 0, 0],
+                "the returned output should show the uncovered locked scene at ({x}, {y}) in {}",
+                returned.path.display()
+            );
+        }
+    }
+    assert!(!session.log().contains("session unlocked"), "the session must still be locked after the reconnect");
+    assert!(session.compositor_alive(), "the compositor must outlive the reconnect");
+    session.kill_client("chonk-lock-probe");
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn a_lock_surface_for_an_unplugged_output_never_covers_the_remaining_one() {
+    // The same race with a monitor left over: one of two outputs leaves
+    // while the locker's request for it is in flight. That request used
+    // to be filed under the primary, beside the primary's own lock
+    // surface and past the one-surface-per-output guard, so which of the
+    // two was drawn on top and which took the pointer came down to list
+    // order rather than to the locker.
+    let mut session =
+        Session::boot("session-lock-stale-output-split", SessionOptions { scale: Some(1.0), ..Default::default() })
+            .unwrap();
+    session.door().set_virtual_outputs("split").unwrap();
+    let marker = launch_stale_output_locker(&mut session, "chonkstep-right", "chonkstep, chonkstep-right");
+    assert_eq!(session.door().protocol_ledgers().unwrap().lock, 2, "one lock surface per output");
+
+    // -- the right-hand output leaves under a parked request ----------------
+    session.door().set_virtual_outputs("single").unwrap();
+    assert_eq!(
+        session.door().protocol_ledgers().unwrap().lock,
+        2,
+        "the unplugged output's lock surface stays its client's"
+    );
+    std::fs::write(&marker, "").unwrap();
+    checkpoint(&session, "stale lock surface configured");
+    assert_eq!(session.door().protocol_ledgers().unwrap().lock, 3);
+
+    // -- drawn: the primary's own surface, edge to edge ---------------------
+    // The primary grew to the whole desk, so its surface is reconfigured
+    // and redrawn. The stale surface was configured to the same size and
+    // painted magenta; no pixel of it may show, over or beside the navy.
+    let shot = poll_until(Duration::from_secs(15), "the primary's lock surface to cover the whole output", || {
+        session.door().barrier().ok()?;
+        let shot = session.screenshot("stale-output-primary").ok()?;
+        let navy = (5..shot.height).step_by(61).all(|y| {
+            (5..shot.width).step_by(67).all(|x| shot.pixel(x, y)[..3] == LOCK_NAVY_RGB)
+        });
+        navy.then_some(shot)
+    })
+    .unwrap_or_else(|timeout| panic!("{timeout}\n-- chonk-lock-probe log --\n{}", probe_log(&session)));
+    assert_ne!(shot.pixel(shot.width - 1, shot.height - 1)[..3], STALE_MAGENTA_RGB);
+
+    // -- hit-tested: the pointer reaches the primary's surface --------------
+    // Both over what was the right-hand output, where the stale surface
+    // was requested, and over the left.
+    for (x, y) in [(shot.width * 3 / 4, shot.height / 2), (shot.width / 4, shot.height / 3)] {
+        assert_eq!(session.door().hit(x as i32, y as i32).unwrap(), "lock");
+        session.door().motion(f64::from(x), f64::from(y)).unwrap();
+        session.door().barrier().unwrap();
+        poll_until(Duration::from_secs(15), "the pointer to land on the primary's lock surface", || {
+            (last_report(&session, "pointer on ").as_deref() == Some("pointer on the chonkstep lock surface"))
+                .then_some(())
+        })
+        .unwrap_or_else(|timeout| panic!("{timeout} at ({x}, {y})\n-- chonk-lock-probe log --\n{}", probe_log(&session)));
+    }
+
+    // -- and the keyboard stays on the surface the user can see -------------
+    session.door().tap_key(keys::SPACE).unwrap();
+    checkpoint(&session, "key on the chonkstep lock surface");
+
+    let log = probe_log(&session);
+    assert!(!log.contains("on the stale lock surface"), "the stale lock surface received input:\n{log}");
+    assert!(!log.contains("connection broke"), "the locker's connection was broken:\n{log}");
+    assert!(!session.log().contains("session unlocked"), "the session must stay locked throughout");
+    assert!(session.compositor_alive(), "the compositor must outlive the unplug");
+    session.kill_client("chonk-lock-probe");
+}
+
 /// The lock screen's fill, as `chonk-lock-probe` paints it —
 /// `LOCK_NAVY` in the probe is premultiplied ARGB8888 little-endian
 /// (B, G, R, A), so the RGB a screenshot reads back is its middle

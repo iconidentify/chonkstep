@@ -74,16 +74,33 @@
 //! requests the lock immediately, as a locker launched into the
 //! compositor's already-blank crash-recovery domain must.
 //!
+//! `--stale-output CONNECTOR MARKER` is the lock-setup race of a monitor
+//! leaving: lock every output it bound (**`locked on every output: NAMES`**),
+//! report **`ready for stale output request`**, then wait for the harness
+//! to create the file `MARKER` without reading the connection at all. By
+//! then the harness has unplugged `CONNECTOR`, and the probe asks for a
+//! lock surface on a second, retained binding of that output before it has
+//! dispatched the `global_remove`, as a locker still working through its
+//! queue does. It reports that surface's first configure
+//! (**`stale lock surface configured WxH`**), paints it magenta, keeps every
+//! surface drawn at its configured size, and reports which of its surfaces
+//! the pointer is on and each pressed key lands on (**`pointer on ...`**,
+//! **`key on ...`**). The go-ahead is a file because with its output gone
+//! the probe may hold no keyboard focus a key could reach.
+//!
 //! Then it sits in its dispatch loop like any shell process would. A
 //! broken connection at any step prints `connection broke: ...` (with
 //! the protocol error, if one was posted) and exits 2.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::fd::AsFd;
+use std::time::{Duration, Instant};
 
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback, wl_compositor::WlCompositor, wl_keyboard::{self, WlKeyboard},
-    wl_output::WlOutput, wl_registry, wl_seat::{self, WlSeat}, wl_shm, wl_shm_pool, wl_surface::WlSurface,
+    wl_output::{self, WlOutput}, wl_pointer::{self, WlPointer}, wl_registry, wl_seat::{self, WlSeat}, wl_shm,
+    wl_shm_pool, wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::ext::session_lock::v1::client::{
@@ -102,6 +119,9 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 const BAR_ORANGE: [u8; 4] = [0x10, 0x70, 0xE0, 0xFF];
 /// The lock screen's fill: a navy no wallpaper in the harness wears.
 const LOCK_NAVY: [u8; 4] = [0x40, 0x18, 0x08, 0xFF];
+/// The fill of a lock surface requested for an output that was already
+/// gone: a magenta that shows at once wherever it is wrongly drawn.
+const STALE_MAGENTA: [u8; 4] = [0xC0, 0x20, 0xC0, 0xFF];
 
 /// The bar's thickness, matching nothing else on the desk.
 const BAR_HEIGHT: u32 = 24;
@@ -142,6 +162,23 @@ struct Probe {
     /// Any pressed key advances the duplicate-output test after the
     /// harness has inspected the one-surface ledger.
     duplicate_requested: bool,
+    /// `--stale-output`: also take the pointer, to report which lock
+    /// surface it is on.
+    stale_output: bool,
+    /// Every `wl_output` global, bound twice: the binding a lock surface
+    /// is first requested on, and a spare that stays usable for a later
+    /// request (smithay refuses a second lock surface on one `wl_output`
+    /// resource before ChonkStep's handler runs).
+    outputs: Vec<(WlOutput, WlOutput)>,
+    /// Connector names from `wl_output.name`, by binding.
+    output_names: HashMap<u32, String>,
+    /// The latest configure of every lock surface, by role object.
+    lock_configures: HashMap<u32, (u32, u32)>,
+    /// The `wl_surface` the pointer last entered, while it is there.
+    pointer_on: Option<u32>,
+    /// The surface holding the keyboard at each key press not yet
+    /// reported.
+    pressed_on: Vec<Option<u32>>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
@@ -157,10 +194,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             match interface.as_str() {
                 "wl_compositor" => probe.compositor = Some(registry.bind(name, version.min(4), qh, ())),
                 "wl_shm" => probe.shm = Some(registry.bind(name, 1, qh, ())),
-                // The first output is the nested session's only one.
-                "wl_output" if probe.output.is_none() => {
-                    probe.output = Some(registry.bind(name, version.min(4), qh, ()));
-                    probe.duplicate_output = Some(registry.bind(name, version.min(4), qh, ()))
+                // The first output is the nested session's primary, and
+                // the only one unless a test split the desk first.
+                "wl_output" => {
+                    let output: WlOutput = registry.bind(name, version.min(4), qh, ());
+                    let spare: WlOutput = registry.bind(name, version.min(4), qh, ());
+                    if probe.output.is_none() {
+                        probe.output = Some(output.clone());
+                        probe.duplicate_output = Some(spare.clone());
+                    }
+                    probe.outputs.push((output, spare));
                 }
                 "wl_seat" if probe.seat.is_none() => {
                     probe.seat = Some(registry.bind(name, version.min(5), qh, ()))
@@ -228,13 +271,14 @@ impl Dispatch<ExtSessionLockSurfaceV1, ()> for Probe {
             // wants ack before commit, and the buffer must match.
             surface.ack_configure(serial);
             probe.lock_configured = Some((width, height));
+            probe.lock_configures.insert(surface.id().protocol_id(), (width, height));
         }
     }
 }
 
 impl Dispatch<WlSeat, ()> for Probe {
     fn event(
-        _: &mut Self,
+        probe: &mut Self,
         seat: &WlSeat,
         event: wl_seat::Event,
         _: &(),
@@ -249,6 +293,45 @@ impl Dispatch<WlSeat, ()> for Probe {
             if caps.contains(wl_seat::Capability::Keyboard) {
                 seat.get_keyboard(qh, ());
             }
+            if probe.stale_output && caps.contains(wl_seat::Capability::Pointer) {
+                seat.get_pointer(qh, ());
+            }
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        _: &WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter { surface, .. } => probe.pointer_on = Some(surface.id().protocol_id()),
+            wl_pointer::Event::Leave { surface, .. } if probe.pointer_on == Some(surface.id().protocol_id()) => {
+                probe.pointer_on = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlOutput, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        output: &WlOutput,
+        event: wl_output::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The connector name is how `--stale-output` finds the output
+        // the harness is about to unplug.
+        if let wl_output::Event::Name { name } = event {
+            probe.output_names.insert(output.id().protocol_id(), name);
         }
     }
 }
@@ -271,6 +354,7 @@ impl Dispatch<WlKeyboard, ()> for Probe {
             }
             wl_keyboard::Event::Key { state: wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed), .. } => {
                 probe.duplicate_requested = true;
+                probe.pressed_on.push(probe.keyboard_on);
             }
             // The keymap arrives as a file descriptor this probe has no
             // use for; letting it drop closes it.
@@ -308,7 +392,6 @@ ignore_events!(
     wl_shm_pool::WlShmPool,
     WlBuffer,
     WlSurface,
-    WlOutput,
     ZwlrLayerShellV1,
     ExtSessionLockManagerV1
 );
@@ -479,6 +562,140 @@ fn unlock_and_teardown(
     }
 }
 
+/// Commits a frame to every lock surface in `surfaces` whose latest
+/// configure it has not yet drawn, at that size and in that surface's
+/// fill. Returns whether anything was committed.
+fn draw_configured(
+    shm: &wl_shm::WlShm,
+    qh: &QueueHandle<Probe>,
+    probe: &Probe,
+    surfaces: &[(WlSurface, ExtSessionLockSurfaceV1, [u8; 4])],
+    drawn: &mut HashMap<u32, (u32, u32)>,
+) -> bool {
+    let mut committed = false;
+    for (surface, role, pixel) in surfaces {
+        let id = role.id().protocol_id();
+        let Some(&size) = probe.lock_configures.get(&id) else { continue };
+        if drawn.get(&id) == Some(&size) {
+            continue;
+        }
+        commit_frame(shm, qh, surface, size.0.max(1), size.1.max(1), *pixel);
+        drawn.insert(id, size);
+        committed = true;
+    }
+    committed
+}
+
+/// How the `--stale-output` reports name a `wl_surface`.
+fn surface_label(labels: &[(u32, String)], surface: Option<u32>) -> String {
+    let Some(surface) = surface else { return "nothing".into() };
+    labels
+        .iter()
+        .find(|(known, _)| *known == surface)
+        .map_or_else(|| format!("unknown surface {surface}"), |(_, label)| label.clone())
+}
+
+/// `--stale-output CONNECTOR MARKER`, described in the module docs.
+fn stale_output_lock(
+    conn: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+    qh: &QueueHandle<Probe>,
+    compositor: &WlCompositor,
+    connector: &str,
+    marker: &std::path::Path,
+) -> ! {
+    let manager = probe.lock_manager.clone().unwrap();
+    let shm = probe.shm.clone().unwrap();
+    // Each binding's name event answers the bind, one roundtrip after
+    // the registry's.
+    if let Err(error) = queue.roundtrip(probe) {
+        broken(conn, "reading the output names", &error);
+    }
+    let name_of = |probe: &Probe, output: &WlOutput| {
+        probe.output_names.get(&output.id().protocol_id()).cloned().unwrap_or_default()
+    };
+    let Some(stale_output) =
+        probe.outputs.iter().find(|(output, _)| name_of(probe, output) == connector).map(|(_, spare)| spare.clone())
+    else {
+        fatal(&format!("no wl_output is named {connector:?}"));
+    };
+
+    // -- one lock surface per output, as a multi-monitor locker draws -----
+    let lock = manager.lock(qh, ());
+    let mut surfaces = Vec::new();
+    let mut labels = Vec::new();
+    for (output, _) in &probe.outputs {
+        let surface = compositor.create_surface(qh, ());
+        let role = lock.get_lock_surface(&surface, output, qh, ());
+        labels.push((surface.id().protocol_id(), format!("the {} lock surface", name_of(probe, output))));
+        surfaces.push((surface, role, LOCK_NAVY));
+    }
+    let roles: Vec<u32> = surfaces.iter().map(|(_, role, _)| role.id().protocol_id()).collect();
+    dispatch_until(conn, queue, probe, "every output's first lock configure", |p| {
+        roles.iter().all(|role| p.lock_configures.contains_key(role))
+    });
+    let mut drawn = HashMap::new();
+    draw_configured(&shm, qh, probe, &surfaces, &mut drawn);
+    dispatch_until(conn, queue, probe, "the locked event", |p| p.locked);
+    let names: Vec<String> = probe.outputs.iter().map(|(output, _)| name_of(probe, output)).collect();
+    println!("locked on every output: {}", names.join(", "));
+    println!("ready for stale output request");
+    let _ = std::io::stdout().flush();
+
+    // -- the race ----------------------------------------------------------
+    // The harness unplugs the output now. Reading the connection before
+    // the request would dispatch the `global_remove` first, so the wait
+    // touches nothing but the file system.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() {
+        if Instant::now() >= deadline {
+            fatal("the harness never signalled the stale output request");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let stale_surface = compositor.create_surface(qh, ());
+    let stale_role = lock.get_lock_surface(&stale_surface, &stale_output, qh, ());
+    let stale_id = stale_role.id().protocol_id();
+    labels.push((stale_surface.id().protocol_id(), "the stale lock surface".into()));
+    println!("stale output request sent");
+    let _ = std::io::stdout().flush();
+    dispatch_until(conn, queue, probe, "the stale lock surface's first configure", |p| {
+        p.lock_configures.contains_key(&stale_id)
+    });
+    let (width, height) = probe.lock_configures[&stale_id];
+    println!("stale lock surface configured {width}x{height}");
+    let _ = std::io::stdout().flush();
+    surfaces.push((stale_surface, stale_role, STALE_MAGENTA));
+
+    // -- hold, drawn, reporting where input lands --------------------------
+    let mut reported_pointer = None;
+    loop {
+        if draw_configured(&shm, qh, probe, &surfaces, &mut drawn) {
+            if let Err(error) = queue.roundtrip(probe) {
+                broken(conn, "drawing the lock surfaces", &error);
+            }
+            let sizes: Vec<String> = surfaces
+                .iter()
+                .filter_map(|(_, role, _)| drawn.get(&role.id().protocol_id()))
+                .map(|(w, h)| format!("{w}x{h}"))
+                .collect();
+            println!("lock surfaces drawn {}", sizes.join(" "));
+        }
+        if reported_pointer != Some(probe.pointer_on) {
+            println!("pointer on {}", surface_label(&labels, probe.pointer_on));
+            reported_pointer = Some(probe.pointer_on);
+        }
+        for surface in std::mem::take(&mut probe.pressed_on) {
+            println!("key on {}", surface_label(&labels, surface));
+        }
+        let _ = std::io::stdout().flush();
+        if let Err(error) = queue.blocking_dispatch(probe) {
+            broken(conn, "the stale-output hold loop", &error);
+        }
+    }
+}
+
 fn main() {
     // `--hold` stops the script after the first lock and keeps it, for
     // the bypass e2e; without it the full seven-step teardown script
@@ -487,10 +704,15 @@ fn main() {
     let hold = std::env::args().any(|arg| arg == "--hold");
     let recovery_hold = std::env::args().any(|arg| arg == "--recovery-hold");
     let duplicate_output_test = std::env::args().any(|arg| arg == "--duplicate-output");
+    let stale_output: Vec<String> =
+        std::env::args().skip_while(|arg| arg != "--stale-output").skip(1).take(2).collect();
+    if std::env::args().any(|arg| arg == "--stale-output") && stale_output.len() != 2 {
+        fatal("--stale-output wants CONNECTOR MARKER");
+    }
     let conn = Connection::connect_to_env().unwrap_or_else(|e| fatal(&format!("no compositor: {e}")));
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
-    let mut probe = Probe::default();
+    let mut probe = Probe { stale_output: !stale_output.is_empty(), ..Probe::default() };
     conn.display().get_registry(&qh, ());
     queue.roundtrip(&mut probe).unwrap_or_else(|e| fatal(&format!("registry roundtrip failed: {e}")));
     if probe.compositor.is_none()
@@ -506,6 +728,10 @@ fn main() {
     let compositor = probe.compositor.clone().unwrap();
     let shm = probe.shm.clone().unwrap();
     let layer_shell = probe.layer_shell.clone().unwrap();
+
+    if let [connector, marker] = stale_output.as_slice() {
+        stale_output_lock(&conn, &mut queue, &mut probe, &qh, &compositor, connector, std::path::Path::new(marker));
+    }
 
     // A crash-recovery locker starts behind an already-enforced lock
     // boundary, so it cannot first map an ordinary layer surface and
