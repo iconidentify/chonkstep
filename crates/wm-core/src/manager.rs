@@ -12,7 +12,7 @@ use crate::backend::Backend;
 use crate::client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorInfo};
 use crate::focus::{FocusDirection, FocusPolicy};
 use crate::hittest::{hit_test, HitTarget};
-use crate::placement::{self, FloatPolicy, PlacementPolicy};
+use crate::placement::{self, FloatPolicy, IdleInhibitRule, PlacementPolicy};
 use crate::resize;
 use crate::snap;
 mod mac;
@@ -172,11 +172,11 @@ pub struct WindowManager<B: Backend> {
     clients: SlotMap<ClientId, Client<B>>,
     window_index: HashMap<B::WindowId, ClientId>,
     frame_index: HashMap<B::FrameId, ClientId>,
-    /// The sparse subset carrying an `idle_inhibit` window rule.
-    /// Idle protocol reconciliation walks this set rather than every
-    /// managed client on every Wayland dispatch pass; most desktops
-    /// keep it empty for the entire session.
-    idle_inhibit_clients: HashSet<ClientId>,
+    /// The sparse subset carrying an `idle_inhibit` window rule, with the
+    /// mode each one asked for. Idle protocol reconciliation walks this
+    /// map rather than every managed client on every Wayland dispatch
+    /// pass; most desktops keep it empty for the entire session.
+    idle_inhibit_clients: HashMap<ClientId, IdleInhibitRule>,
     focused: Option<ClientId>,
     /// Every client that has ever held focus and still exists, oldest
     /// first, each appearing exactly once.
@@ -386,7 +386,7 @@ impl<B: Backend> WindowManager<B> {
             clients: SlotMap::with_key(),
             window_index: HashMap::new(),
             frame_index: HashMap::new(),
-            idle_inhibit_clients: HashSet::new(),
+            idle_inhibit_clients: HashMap::new(),
             focused: None,
             active_move: None,
             drag_grab: None,
@@ -950,20 +950,38 @@ impl<B: Backend> WindowManager<B> {
         self.clients.iter()
     }
 
-    /// Whether a visible mapped window carries an `idle_inhibit` rule.
+    /// Whether any window's `idle_inhibit` rule currently holds.
     ///
-    /// Chonkstep chooses the mapped/visible interpretation of
-    /// Hyprland's rule: it remains active while the game or stream is
-    /// showing, without requiring it to hold keyboard focus. The query
-    /// walks a sparse index populated only by matching windows, rather
-    /// than revisiting the entire client table every dispatch pass.
+    /// The query walks a sparse index populated only by matching windows,
+    /// rather than revisiting the entire client table every dispatch pass.
     pub fn rule_idle_inhibited(&self) -> bool {
-        self.idle_inhibit_clients.iter().any(|id| {
-            self.clients.get(*id).is_some_and(|client| {
-                client.lifecycle == Lifecycle::Normal
-                    && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
-            })
-        })
+        self.idle_inhibit_clients.keys().any(|&id| self.client_inhibits_idle(id))
+    }
+
+    /// Whether this window's `idle_inhibit` rule currently holds.
+    ///
+    /// Every mode needs the window mapped and showing (visible workspace,
+    /// or pinned), without requiring keyboard focus: a game or stream stays
+    /// awake while it is on screen. `Focus` and `Fullscreen` then add the
+    /// one condition their names say, so a launcher's windowed library is
+    /// not mistaken for its game. Whoever reconciles idle must re-ask after
+    /// a focus or fullscreen change, not only after a visibility change.
+    pub fn client_inhibits_idle(&self, id: ClientId) -> bool {
+        let Some(&mode) = self.idle_inhibit_clients.get(&id) else {
+            return false;
+        };
+        let Some(client) = self.clients.get(id) else {
+            return false;
+        };
+        let showing = client.lifecycle == Lifecycle::Normal
+            && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY));
+        showing
+            && match mode {
+                IdleInhibitRule::None => false,
+                IdleInhibitRule::Always => true,
+                IdleInhibitRule::Focus => self.focused == Some(id),
+                IdleInhibitRule::Fullscreen => client.flags.contains(ClientFlags::FULLSCREEN),
+            }
     }
 
     /// Sets a client's attention state (xdg-system-bell/EWMH urgency).
@@ -1763,7 +1781,7 @@ impl<B: Backend> WindowManager<B> {
         if window_rule.pin {
             client.flags.insert(ClientFlags::STICKY);
         }
-        if window_rule.idle_inhibit {
+        if window_rule.idle_inhibit != IdleInhibitRule::None {
             client.flags.insert(ClientFlags::IDLE_INHIBIT);
         }
         if window_rule.no_focus {
@@ -1948,8 +1966,8 @@ impl<B: Backend> WindowManager<B> {
         let id = self.clients.insert(client);
         self.publish_space_output(id);
         self.bump_protocol_state_revision();
-        if self.clients[id].flags.contains(ClientFlags::IDLE_INHIBIT) {
-            self.idle_inhibit_clients.insert(id);
+        if window_rule.idle_inhibit != IdleInhibitRule::None {
+            self.idle_inhibit_clients.insert(id, window_rule.idle_inhibit);
         }
         self.window_index.insert(window, id);
         if self.spaces_mode() && self.mac_hidden.iter().any(|other| self.same_application(*other, id)) {
@@ -4822,7 +4840,21 @@ mod tests {
         }
 
         fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
-            crate::placement::WindowRuleDecision { idle_inhibit: true, ..Default::default() }
+            crate::placement::WindowRuleDecision { idle_inhibit: IdleInhibitRule::Always, ..Default::default() }
+        }
+    }
+
+    /// An idle rule in one of its conditional modes.
+    #[derive(Debug)]
+    struct InhibitsIdleWhen(IdleInhibitRule);
+
+    impl FloatPolicy for InhibitsIdleWhen {
+        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+            None
+        }
+
+        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+            crate::placement::WindowRuleDecision { idle_inhibit: self.0, ..Default::default() }
         }
     }
 
@@ -8434,6 +8466,50 @@ mod tests {
 
         wm.dispatch(BackendEvent::Destroyed(window));
         assert!(!wm.rule_idle_inhibited(), "destroying it removes the sparse index entry");
+    }
+
+    #[test]
+    fn a_fullscreen_mode_idle_rule_inhibits_only_while_its_window_is_fullscreen() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(InhibitsIdleWhen(IdleInhibitRule::Fullscreen))));
+
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert!(!wm.rule_idle_inhibited(), "a visible windowed launcher does not hold the session awake");
+        assert!(!wm.client_inhibits_idle(id));
+
+        wm.fullscreen(id);
+        assert!(wm.rule_idle_inhibited(), "the same window inhibits once fullscreen");
+        assert!(wm.client_inhibits_idle(id));
+
+        wm.miniaturize(id);
+        assert!(!wm.rule_idle_inhibited(), "a hidden fullscreen window does not inhibit");
+        wm.deminiaturize(id);
+        wm.unfullscreen(id);
+        assert!(!wm.rule_idle_inhibited(), "leaving fullscreen ends inhibition");
+    }
+
+    #[test]
+    fn a_focus_mode_idle_rule_inhibits_only_while_its_window_holds_focus() {
+        let mut backend = FakeBackend::new();
+        let first = backend.create_window();
+        let second = backend.create_window();
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(InhibitsIdleWhen(IdleInhibitRule::Focus))));
+
+        wm.dispatch(BackendEvent::MapRequest(first));
+        let first = wm.client_for_window(first).unwrap();
+        wm.dispatch(BackendEvent::MapRequest(second));
+        let second = wm.client_for_window(second).unwrap();
+        wm.focus_client(second);
+        assert!(!wm.client_inhibits_idle(first), "a visible but unfocused window does not inhibit");
+        assert!(wm.client_inhibits_idle(second));
+
+        wm.focus_client(first);
+        assert!(wm.client_inhibits_idle(first), "focus moves inhibition with it");
+        assert!(!wm.client_inhibits_idle(second));
     }
 
     #[test]

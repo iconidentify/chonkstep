@@ -273,7 +273,10 @@ fn build_snapshot(
             hidden: client.lifecycle == Lifecycle::Miniaturized,
             urgent: client.flags.contains(wm_core::ClientFlags::URGENT),
             pinned: client.flags.contains(wm_core::ClientFlags::STICKY),
-            inhibiting_idle: client.flags.contains(wm_core::ClientFlags::IDLE_INHIBIT),
+            // The rule's evaluated answer, not whether one matched:
+            // `omarchy-debug-idle` reads this to explain why a machine
+            // stays awake, and a windowed Steam library does not.
+            inhibiting_idle: wm.client_inhibits_idle(id),
             tags: client.tags.clone(),
             xdg_tag: String::new(),
             xdg_description: String::new(),

@@ -1065,6 +1065,52 @@ fn every_window_rule_syntax_hyprland_has_shipped_is_read() {
 }
 
 #[test]
+fn idle_inhibit_modes_are_read_by_name_and_unknown_values_are_reported() {
+    use wm_core::IdleInhibitRule::{Always, Focus, Fullscreen, None as Never};
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = idle_inhibit always, match:class ^always$\n",
+            "windowrule = idle_inhibit on, match:class ^on$\n",
+            "windowrule = idle_inhibit focus, match:class ^focus$\n",
+            "windowrule = idle_inhibit fullscreen, match:class ^steam$\n",
+            "windowrule = idle_inhibit none, match:class ^none$\n",
+            "windowrule = idle_inhibit off, match:class ^off$\n",
+            "windowrule = idle_inhibit always, match:class ^cleared$\n",
+            "windowrule = idle_inhibit none, match:class ^cleared$\n",
+            "windowrule = idle_inhibit sometimes, match:class ^odd$\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    for (class, mode) in [
+        ("always", Always),
+        ("on", Always),
+        ("focus", Focus),
+        ("steam", Fullscreen),
+        ("none", Never),
+        ("off", Never),
+        ("cleared", Never),
+        ("odd", Never),
+    ] {
+        assert_eq!(rules.window_decision_for(class, "").idle_inhibit, mode, "{class}");
+    }
+    assert!(
+        notes.iter().any(|note| note.contains("\"sometimes\"")),
+        "an unknown mode is reported, not read as on: {notes:?}"
+    );
+}
+
+#[test]
 fn non_geometric_window_rules_are_combined_property_by_property() {
     let mut vars = BTreeMap::new();
     let mut out = Vec::new();
@@ -1096,7 +1142,8 @@ fn non_geometric_window_rules_are_combined_property_by_property() {
     );
 
     let decision = rules.window_decision_for("player", "Cinema");
-    assert!(decision.pin && decision.idle_inhibit);
+    assert!(decision.pin);
+    assert_eq!(decision.idle_inhibit, wm_core::IdleInhibitRule::Always);
     assert!(
         !decision.no_focus,
         "the later property overrides only no_focus"

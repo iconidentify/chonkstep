@@ -42,7 +42,9 @@
 //! `animate-inhibit-idle` for a self-timed producer which also binds the idle
 //! inhibitor and notification protocols. `animate-duplicate-inhibit-idle`
 //! creates two inhibitors on that surface and destroys exactly one, exercising
-//! per-object removal. `absurd-geometry` instead declares
+//! per-object removal. `animate-watch-idle` is the self-timed producer with an
+//! idle notification but no inhibitor, for testing compositor-side idle rules.
+//! `absurd-geometry` instead declares
 //! a hostile 600-million-pixel-wide xdg window geometry while committing the
 //! ordinary 400x300 buffer; the compositor-survival E2E uses that mode:
 //!
@@ -623,8 +625,9 @@ fn main() {
     let ime_popup_flood = animation.as_deref() == Some("ime-popup-flood");
     let self_timed = matches!(
         animation.as_deref(),
-        Some("animate" | "animate-inhibit-idle" | "animate-duplicate-inhibit-idle")
+        Some("animate" | "animate-inhibit-idle" | "animate-duplicate-inhibit-idle" | "animate-watch-idle")
     );
+    let watch_idle = animation.as_deref() == Some("animate-watch-idle");
     let frame_driven = animation.as_deref() == Some("animate-frame");
     let inhibit_idle = matches!(
         animation.as_deref(),
@@ -773,6 +776,12 @@ fn main() {
                 }
                 probe.idle_notification = Some(notifier.get_idle_notification(250, seat, &qh, ()));
                 say("idle inhibition armed");
+            }
+            if watch_idle && probe.idle_notification.is_none() {
+                let notifier = probe.idle_notifier.as_ref().unwrap_or_else(|| fatal("no ext_idle_notifier_v1"));
+                let seat = probe.seat.as_ref().unwrap_or_else(|| fatal("no wl_seat"));
+                probe.idle_notification = Some(notifier.get_idle_notification(250, seat, &qh, ()));
+                say("idle watch armed");
             }
             attached = probe.size;
             probe.dirty = false;

@@ -1746,6 +1746,9 @@ impl Backend for WaylandBackend {
 
     fn publish_active_window(&mut self, window: Option<Self::WindowId>) {
         self.ewmh.note_active_window(window);
+        // A focus-mode `idle_inhibit` rule answers differently once focus
+        // moves; the idle refresh is otherwise a two-boolean early return.
+        self.idle_policy_dirty = true;
         // `None` is `wm-core` saying "no window is focused any more"
         // (miniaturize, the focused window closing, a workspace switch
         // away) with no `set_input_focus` to follow — every one of its
@@ -1937,6 +1940,9 @@ impl Backend for WaylandBackend {
             // own damage edge keeps a same-sized fullscreen transition
             // (and its inverse) from waiting for unrelated damage.
             self.mark_damaged();
+            // A fullscreen-mode `idle_inhibit` rule starts or stops holding
+            // on exactly this edge, with no visibility change beside it.
+            self.idle_policy_dirty = true;
         }
     }
 

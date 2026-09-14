@@ -115,9 +115,15 @@ expressions, matched against the entire class or title, as in Hyprland's
 `RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
 
-`idle_inhibit` follows the mapped/visible interpretation: a matching
-window inhibits idle while it is visible on the current workspace (or
-pinned), without requiring keyboard focus. `pin` makes the client
+`idle_inhibit` reads four modes. `always` (also `on`, `true`, `1`, `yes`)
+inhibits idle while a matching window is visible on the current workspace
+or pinned, without requiring keyboard focus. `focus` additionally requires
+the window to hold keyboard focus, and `fullscreen` additionally requires
+it to be fullscreen, which is how Omarchy keeps a game or stream awake
+without letting a launcher's windowed library do the same. `none` (also
+`off`, `false`, `0`, `no`) explicitly clears an earlier matching rule. Any
+other value is reported and ignored. A minimized, parked or locked-away
+window never inhibits, whatever its mode. `pin` makes the client
 sticky across workspaces. Focus exclusions affect initial focus and
 later activation requests separately. Fullscreen and maximize are
 applied after initial placement, with maximize underneath fullscreen so
