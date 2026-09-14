@@ -1,6 +1,6 @@
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 pub use wm_theme::Appearance;
 
@@ -78,12 +78,30 @@ pub fn publish(mode: Appearance) {
 /// removed once observed, so a request is honored exactly once. An
 /// unparsable request is still consumed (leaving it would warn on
 /// every housekeeping pass forever) and answered with a warning naming the text.
+/// A freshly emptied file is not consumed yet: see [`EMPTY_REQUEST_GRACE`].
 pub fn take_request() -> Option<Request> {
     take_request_from(&state_dir().join(REQUEST_FILE))
 }
 
+/// How long an empty request file counts as a write still in progress.
+/// `echo light > appearance-request` truncates the file before it writes
+/// the word; a poll that lands between the two reads nothing, and
+/// consuming the file then deletes the request its writer is finishing.
+const EMPTY_REQUEST_GRACE: Duration = Duration::from_secs(1);
+
 fn take_request_from(path: &Path) -> Option<Request> {
+    take_request_at(path, SystemTime::now())
+}
+
+fn take_request_at(path: &Path, now: SystemTime) -> Option<Request> {
     let text = std::fs::read_to_string(path).ok()?;
+    if text.trim().is_empty() {
+        let modified = std::fs::metadata(path).and_then(|metadata| metadata.modified());
+        // A modification time ahead of `now` is as fresh as it gets.
+        if modified.is_ok_and(|modified| now.duration_since(modified).unwrap_or_default() < EMPTY_REQUEST_GRACE) {
+            return None;
+        }
+    }
     let _ = std::fs::remove_file(path);
     let parsed = Request::parse(&text);
     if parsed.is_none() {
@@ -296,6 +314,31 @@ mod tests {
         assert!(path.exists(), "an early check leaves the request for its deadline");
         assert_eq!(poller.take(start + SESSION_REQUEST_POLL_INTERVAL), Some(Request::Toggle));
         assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_request_file_is_a_write_in_progress_not_a_dropped_request() {
+        let dir = std::env::temp_dir().join(format!("chonk-appearance-empty-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(REQUEST_FILE);
+
+        // A poll between a shell redirect's truncate and its write.
+        std::fs::write(&path, "").unwrap();
+        let truncated = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(take_request_at(&path, truncated), None);
+        assert!(path.exists(), "the writer's file is left for it to finish");
+        std::fs::write(&path, "light\n").unwrap();
+        assert_eq!(take_request_at(&path, SystemTime::now()), Some(Request::Set(Appearance::Light)));
+        assert!(!path.exists());
+
+        // A writer that never finished does not leave the file forever.
+        std::fs::write(&path, "").unwrap();
+        let abandoned = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(take_request_at(&path, abandoned + EMPTY_REQUEST_GRACE), None);
+        assert!(!path.exists(), "an abandoned empty request is consumed");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -187,9 +187,11 @@ written at session startup and again on every switch. It doubles as
 the persisted choice the next session starts from.
 
 `appearance-request` is consumed the way the `reload`/`restart`
-markers are: the shell polls once per housekeeping tick (~16 ms),
-reads the file, deletes it, then acts -- so a request is honored
-exactly once. Values are trimmed and case-insensitive; an unparsable
+markers are: the shell checks for it at most every 100 ms, reads the
+file, deletes it, then acts -- so a request is honored exactly once.
+An empty file less than a second old is left alone, because that is
+a shell redirect caught between truncating the file and writing the
+word. Values are trimmed and case-insensitive; an unparsable
 request is consumed and warned about in the session log, never
 guessed at. A request naming the mode the session is already in is
 consumed and does nothing.
