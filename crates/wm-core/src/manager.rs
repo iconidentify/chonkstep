@@ -3626,13 +3626,26 @@ impl<B: Backend> WindowManager<B> {
 
     /// A pager, launcher, taskbar or application asked for this window
     /// to be activated: `_NET_ACTIVE_WINDOW`, xdg-activation,
-    /// foreign-toplevel `activate`, IPC `focuswindow`, the Overview.
+    /// foreign-toplevel `activate`, IPC `focuswindow`.
     /// Restored out of miniaturized/shaded and brought onto a visible
     /// workspace first — "activate" means "show me this window", and
     /// focusing one that's unmapped, rolled up or parked elsewhere would
     /// visibly do nothing — then focused (which raises). Same
     /// restore-before-focus order the Alt-Tab commit path uses.
     fn handle_activate_request(&mut self, window: B::WindowId) {
+        self.activate_window(window, true);
+    }
+
+    /// Overview's commit. Activates the picked window exactly as
+    /// [`Self::handle_activate_request`] does, except that a shaded window
+    /// stays rolled up: Overview shows it as its titlebar strip, and
+    /// picking that strip focuses and raises it without unrolling it.
+    /// Unrolling remains the user's own shade gesture.
+    pub fn activate_from_overview(&mut self, window: B::WindowId) {
+        self.activate_window(window, false);
+    }
+
+    fn activate_window(&mut self, window: B::WindowId, unroll: bool) {
         let Some(&id) = self.window_index.get(&window) else {
             return;
         };
@@ -3653,7 +3666,7 @@ impl<B: Backend> WindowManager<B> {
         if self.clients.get(id).is_some_and(|c| c.lifecycle == Lifecycle::Miniaturized) {
             self.deminiaturize(id);
         }
-        if self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::SHADED)) {
+        if unroll && self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::SHADED)) {
             self.unshade(id);
         }
         self.bring_workspace_into_view(id);
@@ -9012,6 +9025,34 @@ mod tests {
         let client = wm.client(id).unwrap();
         assert!(client.flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
         assert!(!client.flags.contains(ClientFlags::SHADED));
+    }
+
+    /// Picking a shaded window in Overview focuses its strip without
+    /// unrolling it; an application's activation still shows the whole
+    /// window.
+    #[test]
+    fn an_overview_pick_keeps_a_shaded_window_rolled_up() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let other = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_geometry(other, Rect { pos: Point::new(300, 50), size: Size::new(100, 100) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        wm.dispatch(BackendEvent::MapRequest(other));
+        let id = wm.client_for_window(window).unwrap();
+        let other_id = wm.client_for_window(other).unwrap();
+        wm.shade(id);
+        wm.focus_client(other_id);
+
+        wm.activate_from_overview(window);
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::SHADED), "an Overview pick must not unroll");
+        assert_eq!(wm.focused_client(), Some(id), "the picked strip takes focus");
+        assert_eq!(wm.backend().client_mapped.get(&window), Some(&false), "its content stays hidden");
+
+        wm.focus_client(other_id);
+        wm.dispatch(BackendEvent::ActivateRequested(window));
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::SHADED), "an application's activation still unrolls");
     }
 
     #[test]

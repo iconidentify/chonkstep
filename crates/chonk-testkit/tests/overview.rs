@@ -11,7 +11,7 @@
 //! in, so `#[ignore]`d; run with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
 
-use chonk_testkit::{keys, poll_until, profile_binary, Screenshot, Session, SessionOptions, ShellInfo, World};
+use chonk_testkit::{keys, near, poll_until, profile_binary, Screenshot, Session, SessionOptions, ShellInfo, World};
 use std::time::Duration;
 
 /// The Overview's surface in the ledger: mapped, above, and exactly
@@ -675,5 +675,90 @@ fn desktop_close_controls_remove_empty_and_occupied_desktops_without_losing_wind
             let window = world.window_matching(title).unwrap();
             assert!(world.frame_of(window.id).unwrap().mapped, "{title} survives and is visible");
         }
+    }
+}
+
+/// Alt+Shift+S, the default shade binding, on the focused window.
+fn toggle_shade(session: &mut Session) {
+    let door = session.door();
+    door.key(keys::LEFTALT, true).unwrap();
+    door.key(keys::LEFTSHIFT, true).unwrap();
+    door.tap_key(31).unwrap();
+    door.key(keys::LEFTSHIFT, false).unwrap();
+    door.key(keys::LEFTALT, false).unwrap();
+    door.barrier().unwrap();
+}
+
+/// A shaded window stays rolled up through Overview, in both styles. Its
+/// card is the titlebar strip with no content drawn under it, Escape
+/// leaves it shaded, and picking its card focuses it without unrolling.
+/// The grid used to draw every window's live content, so a shaded window
+/// appeared at full size.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh --headless --test overview"]
+fn a_shaded_window_stays_shaded_through_overview() {
+    /// The probe's content colour.
+    const PROBE_RGB: [u8; 3] = [0x20, 0x40, 0x80];
+    let probe = profile_binary("chonk-fullscreen-probe").expect("cargo build -p chonk-testkit builds the probe");
+    for style in ["classic", "cards"] {
+        let mut session = Session::boot(&format!("overview-shaded-{style}"), SessionOptions {
+            scale: Some(1.0),
+            config_extra: format!("hyprland_config=false\nshow_dock=false\noverview_style='{style}'\n"),
+            ..Default::default()
+        }).unwrap();
+        for (title, app) in [("OpenProbe", "open-probe"), ("ShadedProbe", "shaded-probe")] {
+            session.launch(probe.to_str().unwrap(), &[title, app]).unwrap();
+            session.wait_for_window(app).unwrap();
+        }
+        let world = session.world().unwrap();
+        let open = world.window_matching("open-probe").unwrap().id;
+        let shaded = world.window_matching("shaded-probe").unwrap().clone();
+        let full_h = world.frame_of(shaded.id).unwrap().h;
+        // The last probe to map holds focus, so the binding shades it.
+        toggle_shade(&mut session);
+        let shaded_h = poll_until(Duration::from_secs(10), "the probe to roll up", || {
+            let world = session.world().ok()?;
+            world.frame_of(shaded.id).map(|f| f.h).filter(|h| *h < full_h)
+        }).unwrap();
+
+        open_overview(&mut session);
+        let world = session.world().unwrap();
+        let card = |id: u64| world.overview_windows.iter().find(|w| w.id == id).cloned()
+            .unwrap_or_else(|| panic!("{style}: no Overview card for window {id}"));
+        let (open_card, shaded_card) = (card(open), card(shaded.id));
+        assert!(open_card.draw_content, "{style}: an unshaded window shows its content");
+        assert!(!shaded_card.draw_content, "{style}: a shaded window must stay rolled up in Overview");
+        assert!(shaded_card.source.h < full_h, "{style}: the card is laid out from the shaded strip");
+
+        let shot = session.screenshot(&format!("overview-shaded-{style}")).unwrap();
+        let shows_probe = |x: i32, y: i32, w: u32, h: u32| {
+            let (x0, y0) = (x.max(0) as u32, y.max(0) as u32);
+            let (x1, y1) = ((x0 + w).min(shot.width), (y0 + h).min(shot.height));
+            (y0..y1).step_by(3).any(|py| (x0..x1).step_by(3)
+                .any(|px| near(shot.mean_rgb(px, py, 3, 3), PROBE_RGB)))
+        };
+        let r = open_card.rect;
+        assert!(shows_probe(r.pos.x, r.pos.y, r.size.w, r.size.h),
+            "{style}: the control card must show the probe colour, or the sampler proves nothing ({})", shot.path.display());
+        // Where unrolled content would land: under the strip, as deep as
+        // the full content scaled like the card.
+        let r = shaded_card.rect;
+        let depth = (f64::from(shaded.h) * f64::from(r.size.w) / f64::from(shaded_card.source.w.max(1))).ceil() as u32;
+        assert!(!shows_probe(r.pos.x, r.pos.y, r.size.w, r.size.h + depth),
+            "{style}: content of the shaded window is visible in Overview ({})", shot.path.display());
+
+        session.door().tap_key(keys::ESC).unwrap();
+        assert_overview_closed(&mut session, "Escape");
+        let world = session.world().unwrap();
+        assert_eq!(world.frame_of(shaded.id).unwrap().h, shaded_h, "{style}: Escape leaves the window shaded");
+
+        // Selection follows focus, which is still the shaded window.
+        open_overview(&mut session);
+        session.door().tap_key(keys::ENTER).unwrap();
+        assert_overview_closed(&mut session, "picking the shaded card");
+        let world = session.world().unwrap();
+        assert_eq!(world.frame_of(shaded.id).unwrap().h, shaded_h, "{style}: picking a shaded card keeps it shaded");
+        assert!(!world.windows.iter().any(|w| w.id == shaded.id && w.mapped), "{style}: its content stays hidden");
+        assert!(session.compositor_alive());
     }
 }

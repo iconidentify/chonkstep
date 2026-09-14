@@ -1084,14 +1084,15 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 for window in &overview.windows {
                     let r = window.destination;
                     reply.push_str(&format!(
-                        "overview-window id={} x={} y={} w={} h={} source_w={} source_h={}\n",
+                        "overview-window id={} x={} y={} w={} h={} source_w={} source_h={} draw_content={}\n",
                         window.window.0,
                         r.pos.x,
                         r.pos.y,
                         r.size.w,
                         r.size.h,
                         window.source.size.w,
-                        window.source.size.h
+                        window.source.size.h,
+                        window.draw_content
                     ));
                 }
                 for (index, space) in overview.spaces.iter().enumerate() {

@@ -69,6 +69,8 @@ pub struct OverviewItem<B: Backend> {
     pub title: String,
     pub preview: Option<DecorationBuffer>,
     pub managed: bool,
+    /// False for a shaded window, which stays rolled up in Overview.
+    pub draw_content: bool,
 }
 
 /// What a panel-local point lands on — the shell resolves clicks and
@@ -213,7 +215,7 @@ impl<B: Backend> OverviewPanel<B> {
             && self.items.iter().zip(&items).all(|(old, new)|
                 old.client == new.client && old.window == new.window
                     && old.frame == new.frame && old.geometry == new.geometry
-                    && old.managed == new.managed);
+                    && old.managed == new.managed && old.draw_content == new.draw_content);
         if !preserve_pointer {
             self.invalidate_pointer(backend);
         }
@@ -293,6 +295,7 @@ impl<B: Backend> OverviewPanel<B> {
                         frame: item.frame,
                         source: item.geometry,
                         destination: *cell,
+                        draw_content: item.draw_content,
                         label: if self.cards {DecorationBuffer {width:0,height:0,pixels:Vec::new()}} else {styled_label(self.chrome.as_ref(), true,
                             theme,
                             font_system,

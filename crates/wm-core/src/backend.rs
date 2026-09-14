@@ -14,6 +14,9 @@ pub struct OverviewWindow<W, F> {
     pub frame: Option<F>,
     pub source: Rect,
     pub destination: Rect,
+    /// False for a shaded window: Overview shows only its rolled-up
+    /// titlebar strip, never the content hidden under the shade.
+    pub draw_content: bool,
     pub label: DecorationBuffer,
 }
 

@@ -1212,6 +1212,8 @@ pub struct OverviewWindowInfo {
     pub id: u64,
     pub rect: wm_theme_api::Rect,
     pub source: wm_theme_api::Size,
+    /// False when the card shows only a shaded window's titlebar strip.
+    pub draw_content: bool,
 }
 
 impl World {
@@ -1989,6 +1991,7 @@ impl Door {
                         field(&line, "source_w=").unwrap_or_default(),
                         field(&line, "source_h=").unwrap_or_default(),
                     ),
+                    draw_content: line.contains(" draw_content=true"),
                 });
             } else if line.starts_with("err ") {
                 return Err(format!("door reported: {line}"));
