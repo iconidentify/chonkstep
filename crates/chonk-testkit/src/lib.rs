@@ -1815,6 +1815,17 @@ impl Door {
         MemoryStatistics::parse(&self.read_line()?)
     }
 
+    /// Bytes the compositor's glibc allocator has handed out and not taken
+    /// back (`mallinfo2` in-use plus mmapped chunks), in every build. Unlike
+    /// resident pages, this falls when a transient is freed.
+    pub fn heap_in_use(&mut self) -> Result<usize, String> {
+        self.send("heap-in-use")?;
+        let line = self.read_line()?;
+        line.strip_prefix("heap-in-use bytes=")
+            .and_then(|bytes| bytes.parse().ok())
+            .ok_or_else(|| format!("unexpected heap-in-use reply: {line}"))
+    }
+
     /// Whether active pointer capture is suspending touchpad typing suppression.
     pub fn touchpad_captured(&mut self) -> Result<bool, String> {
         self.send("touchpad-capture")?;

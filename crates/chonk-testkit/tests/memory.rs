@@ -140,13 +140,14 @@ fn overview_theme_and_screenshot_transients_do_not_raise_the_heap_high_water() {
     // The first workload may fault already-reserved heap pages for renderer
     // initialization without growing the arena (observed on CI llvmpipe:
     // +0.48 MiB extent, +9.45 MiB RSS). Keep the original cold arena-growth
-    // guard, and check resident growth against an exercised baseline below.
+    // guard, and check live allocations against an exercised baseline below.
     assert!(
         extent_growth <= MAX_HEAP_GROWTH_BYTES && size_growth <= MAX_HEAP_GROWTH_BYTES,
         "cold transient workload raised the heap extent by more than 4 MiB: before={before:?}, after={after:?}; artifacts: {}",
         session.dir.display()
     );
     let warm = after;
+    let warm_in_use = session.door().heap_in_use().expect("read warm glibc live allocations");
     for iteration in 1..=3 {
         let label = format!("repeat-{iteration}");
         exercise_transients(&mut session, &label);
@@ -155,13 +156,28 @@ fn overview_theme_and_screenshot_transients_do_not_raise_the_heap_high_water() {
         eprintln!("repeated glibc heap sample {iteration}: warm={warm:?} current={current:?}");
         // Compare every repeat to the same baseline, not the previous sample:
         // a leak smaller than the budget per iteration must still accumulate.
+        // Resident pages are no leak signal inside a bounded extent: glibc
+        // keeps freed arena pages mapped, so RSS only ratchets up as a later
+        // transient first touches pages the cold pass reserved. Live
+        // allocations fall back when a transient is freed, so they carry the
+        // repeat check, polled because a released buffer may be freed a
+        // frame after the transient closes.
         assert!(
             current.extent_bytes.saturating_sub(warm.extent_bytes) <= MAX_HEAP_GROWTH_BYTES
-                && current.size_bytes.saturating_sub(warm.size_bytes) <= MAX_HEAP_GROWTH_BYTES
-                && current.rss_bytes.saturating_sub(warm.rss_bytes) <= MAX_HEAP_GROWTH_BYTES,
+                && current.size_bytes.saturating_sub(warm.size_bytes) <= MAX_HEAP_GROWTH_BYTES,
             "repeated transient workload raised the heap by more than 4 MiB: warm={warm:?}, current={current:?}; artifacts: {}",
             session.dir.display()
         );
+        let door = session.door();
+        let mut in_use = 0;
+        let settled = poll_until(SETTLE, "glibc live allocations to return within 4 MiB of the warm baseline", || {
+            in_use = door.heap_in_use().ok()?;
+            (in_use.saturating_sub(warm_in_use) <= MAX_HEAP_GROWTH_BYTES).then_some(())
+        });
+        eprintln!("repeated glibc live allocations {iteration}: warm={warm_in_use} current={in_use}");
+        settled.unwrap_or_else(|error| {
+            panic!("{error}: warm={warm_in_use} current={in_use} bytes in use; artifacts: {}", session.dir.display())
+        });
     }
 }
 
