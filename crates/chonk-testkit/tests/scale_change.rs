@@ -54,6 +54,83 @@ fn change_density(marker: &Path, stage: &str) {
 
 #[test]
 #[ignore = "requires nested Wayland"]
+fn older_gpu_buffer_during_resize_cannot_change_window_density() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut s = Session::boot(
+            &format!("resize-stretch-{scale}"),
+            SessionOptions {
+                scale: Some(scale),
+                config_extra: "show_dock = false\nomarchy_menu = false\nhyprland_config = false\n".into(),
+                env: vec![("RUST_LOG".into(), "info,wm_wayland::xdg=trace".into())],
+                ..Default::default()
+            },
+        ).unwrap();
+        s.door().set_virtual_outputs("aligned").unwrap();
+        let act = s.dir.join("resize-stage");
+        let binary = profile_binary("chonk-scale-change-probe").unwrap();
+        s.launch_isolated(binary.to_str().unwrap(), &[act.to_str().unwrap(), "viewport-resize"]).unwrap();
+        s.wait_for_window("scale-change-probe").unwrap();
+        s.door().barrier().unwrap();
+        change_density(&act, "old");
+        for (w, h) in [(780, 570), (600, 450), (900, 600), (660, 480)] {
+            resize(&mut s, w, h);
+            // Fence the rendered commit as well as the IPC reply. Both the
+            // decorated bounds and the pixels must remain at the requested
+            // size even though buffer and destination have different ratios.
+            assert_pixels(&mut s, w, h);
+        }
+        change_density(&act, "settled");
+        assert_pixels(&mut s, 660, 480);
+    }
+}
+
+#[test]
+#[ignore = "requires nested Wayland"]
+fn a_matching_frame_mid_drag_does_not_release_the_resize_density() {
+    let mut s = Session::boot("resize-density-through-drag", SessionOptions {
+        scale: Some(1.5),
+        config_extra: "show_dock=false\nomarchy_menu=false\nhyprland_config=false\ntheme='nextstep-classic'\ndecoration_style='auto'\n".into(),
+        ..Default::default()
+    }).unwrap();
+    s.door().set_virtual_outputs("aligned").unwrap();
+    let act = s.dir.join("resize-stage");
+    let binary = profile_binary("chonk-scale-change-probe").unwrap();
+    s.launch_isolated(binary.to_str().unwrap(), &[act.to_str().unwrap(), "viewport-resize"]).unwrap();
+    let window = s.wait_for_window("scale-change-probe").unwrap();
+    s.door().barrier().unwrap();
+    let world = s.world().unwrap();
+    let frame = world.frames.iter().find(|frame| frame.window == window.id).unwrap();
+    let corner = (frame.x + frame.w as i32 - 2, frame.y + frame.h as i32 - 2);
+    s.door().motion(corner.0 as f64, corner.1 as f64).unwrap();
+    s.door().button("left", true).unwrap();
+    s.door().motion((corner.0 + 120) as f64, (corner.1 + 90) as f64).unwrap();
+    let size = poll_until(Duration::from_secs(10), "matching frame during the held drag", || {
+        let world = s.world().ok()?;
+        let c = world.window_matching("scale-change-probe")?;
+        (c.w > window.w + 80 && c.h > window.h + 60
+            && c.w == c.presented_w && c.h == c.presented_h).then_some((c.w, c.h))
+    }).unwrap();
+    // A correct-sized frame does not finish the user's gesture. Replay a
+    // late allocation before the next motion, while the resize grab is held.
+    change_density(&act, "old");
+    assert_pixels(&mut s, size.0, size.1);
+    s.door().button("left", false).unwrap();
+    change_density(&act, "settled");
+    assert_pixels(&mut s, size.0, size.1);
+    // Once release has settled, a deliberate application density change is
+    // accepted again. This catches a scale retained indefinitely after a drag.
+    change_density(&act, "density-one");
+    let expected = ((size.0 as f64 / 1.5).round() as u32, (size.1 as f64 / 1.5).round() as u32);
+    poll_until(Duration::from_secs(10), "density change after releasing the drag", || {
+        let world = s.world().ok()?;
+        let c = world.window_matching("scale-change-probe")?;
+        ((c.w, c.h) == expected).then_some(())
+    }).unwrap();
+    assert_pixels(&mut s, expected.0, expected.1);
+}
+
+#[test]
+#[ignore = "requires nested Wayland"]
 fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
     for style in wm_theme::SUPPORTED_DECORATION_STYLES {
     for scale in [1.0, 1.5, 2.0] {

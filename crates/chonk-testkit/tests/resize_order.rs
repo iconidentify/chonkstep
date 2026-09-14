@@ -82,6 +82,42 @@ fn a_terminal_cell_snap_must_not_leave_an_oversized_frame() {
 
 #[test]
 #[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
+fn an_old_frame_after_a_resize_burst_cannot_erase_the_final_request() {
+    let mut session = Session::boot("resize-render-backlog", SessionOptions {
+        env: vec![("CHONKSTEP_HYPRLAND_IPC".into(), "1".into())],
+        ..Default::default()
+    }).unwrap();
+    let act = session.dir.join("resize-act");
+    let binary = profile_binary("chonk-resize-order-probe").unwrap();
+    session.launch_isolated(binary.to_str().unwrap(), &[act.to_str().unwrap(), "lagged"]).unwrap();
+    session.wait_for_window("resize-order-probe").unwrap();
+    std::fs::write(act, b"resize").unwrap();
+    poll_until(Duration::from_secs(10), "the lagged rendered commit", || {
+        session.client_log("chonk-resize-order-probe").contains("old rendered commit crossed resize request").then_some(())
+    }).unwrap();
+    session.door().barrier().unwrap();
+    let world = session.world().unwrap();
+    let window = world.window_matching("resize-order-probe").unwrap();
+    assert_eq!((window.w, window.h), (582, 442));
+}
+
+#[test]
+#[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
+fn mapped_client_size_is_acknowledged_before_the_first_drag() {
+    let mut session = Session::boot("initial-resize-ack", SessionOptions::default()).unwrap();
+    let act = session.dir.join("resize-act");
+    let binary = profile_binary("chonk-resize-order-probe").unwrap();
+    session.launch_isolated(binary.to_str().unwrap(), &[act.to_str().unwrap()]).unwrap();
+    session.wait_for_window("resize-order-probe").unwrap();
+    poll_until(Duration::from_secs(10), "initial client size acknowledgment", || {
+        session.client_log("chonk-resize-order-probe").lines()
+            .any(|line| line == "configure 400 300 requested=false")
+            .then_some(())
+    }).unwrap();
+}
+
+#[test]
+#[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
 fn an_old_rendered_commit_cannot_erase_a_staged_ipc_resize() {
     const PROBE: &str = "chonk-resize-order-probe";
     const EVENT: Duration = Duration::from_secs(10);

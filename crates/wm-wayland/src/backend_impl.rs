@@ -1254,10 +1254,16 @@ impl Backend for WaylandBackend {
         // The factor is read before the mutable borrow below — it needs
         // the whole ledger (`window_surface_scale` consults the monitor
         // list), and the answer cannot change between these two lines.
-        let factor = match self.windows.get(&window) {
-            Some(record) => self.window_surface_scale(record),
+        let (factor, unlatched_factor, output_scale) = match self.windows.get(&window) {
+            Some(record) => (
+                self.window_surface_scale(record),
+                self.unlatched_window_surface_scale(record),
+                self.window_output_scale(record),
+            ),
             None => return,
         };
+        let screen = self.output_size;
+        let dragging = self.pointer_grab.is_some();
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
@@ -1313,7 +1319,31 @@ impl Backend for WaylandBackend {
                     // fullscreen-sized window still labelled windowed is
                     // what taught us — see `xdg::flush_configures`).
                     configure_owed = true;
-
+                    // What the client will commit if it obeys: the
+                    // logical ask times its own factor — NOT `size`,
+                    // which the round trip through logical units may
+                    // have moved by a pixel (a certainty at fractional
+                    // factors).
+                    let expected = Size::new(
+                        crate::xdg::scale_length(logical.0, factor) as u32,
+                        crate::xdg::scale_length(logical.1, factor) as u32,
+                    );
+                    // Adopting a client-initiated size can already have its
+                    // matching buffer committed. There is no resize to wait
+                    // for in that case; keeping the latch would suppress the
+                    // client's next legitimate density change indefinitely.
+                    if !dragging && unlatched_factor == factor
+                        && crate::xdg::committed_content_size(toplevel.wl_surface(), factor, screen)
+                            == Some(expected)
+                    {
+                        record.resize_scale = None;
+                    } else if resized || record.resize_scale.is_some() {
+                        record.resize_scale = Some(crate::state::ResizeScale {
+                            factor,
+                            output_scale,
+                            expected,
+                        });
+                    }
                 }
             }
             ManagedSurface::X11(surface) => {
@@ -1344,6 +1374,8 @@ impl Backend for WaylandBackend {
             self.resize_client(window, size);
             return;
         };
+        let density_settled = self.unlatched_window_surface_scale(record) == factor;
+        let dragging = self.pointer_grab.is_some();
         let root = toplevel.wl_surface().clone();
         if crate::xdg::committed_content_size(&root, factor, self.output_size) != Some(size) {
             // The WM may retain a maximized axis or clamp a hostile size.
@@ -1354,7 +1386,20 @@ impl Backend for WaylandBackend {
             state.size = Some((crate::xdg::physical_to_logical(size.w as i32, factor),
                 crate::xdg::physical_to_logical(size.h as i32, factor)).into());
         });
-        self.windows.get_mut(&window).unwrap().content.size = size;
+        let record = self.windows.get_mut(&window).unwrap();
+        record.content.size = size;
+        // A caught-up terminal can answer with its nearest cell grid instead
+        // of the exact requested size. Once its density agrees, let subsequent
+        // client-initiated density changes start a fresh negotiation.
+        if density_settled {
+            if dragging {
+                if let Some(resize) = record.resize_scale.as_mut() {
+                    resize.expected = size;
+                }
+            } else {
+                record.resize_scale = None;
+            }
+        }
         // Do not send a configure back for pixels the client already owns.
         // Echoing them creates feedback with queued buffers; rejecting sizes
         // from historical configures breaks legitimate terminal cell snaps.

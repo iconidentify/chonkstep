@@ -451,6 +451,17 @@ pub(crate) struct WindowRecord {
     /// Zero for surfaces that declare no geometry, which is the
     /// overwhelming majority.
     pub content_offset: Point,
+    /// Density used for an outstanding compositor resize. A client can commit
+    /// the new viewport destination with an older GPU buffer; that temporary
+    /// stretch must not change the frame, renderer or input coordinate scale.
+    pub resize_scale: Option<ResizeScale>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResizeScale {
+    pub factor: f64,
+    pub output_scale: f64,
+    pub expected: Size,
 }
 
 impl WindowRecord {
@@ -477,6 +488,7 @@ impl WindowRecord {
             snapshot_attempted_at: None,
             decoration: crate::decoration::DecorationNegotiation::default(),
             content_offset: Point::new(0, 0),
+            resize_scale: None,
         }
     }
 }
@@ -1275,6 +1287,19 @@ impl WaylandBackend {
     pub(crate) fn end_pointer_grab(&mut self) {
         if self.pointer_grab.take().is_some() {
             self.pending_pointer_grab = Some(PointerGrabChange::Released);
+            // A matching frame during a drag is only a temporary catch-up;
+            // retain its density until release. Replies still in flight keep
+            // their latch and will release it in the normal commit path.
+            let settled: Vec<_> = self.windows.iter().filter_map(|(&id, record)| {
+                let resize = record.resize_scale?;
+                let root = record.surface.wl_surface()?;
+                (self.unlatched_window_surface_scale(record) == resize.factor
+                    && crate::xdg::committed_content_size(&root, resize.factor, self.output_size)
+                        == Some(resize.expected)).then_some(id)
+            }).collect();
+            for id in settled {
+                self.windows.get_mut(&id).unwrap().resize_scale = None;
+            }
         }
     }
 
@@ -1309,6 +1334,15 @@ impl WaylandBackend {
     /// ledger measurement and the configure path all call — four sites
     /// describing one rectangle must multiply by one number.
     pub(crate) fn window_surface_scale(&self, record: &WindowRecord) -> f64 {
+        if let Some(resize) = record.resize_scale {
+            if resize.output_scale == self.window_output_scale(record) {
+                return resize.factor;
+            }
+        }
+        self.unlatched_window_surface_scale(record)
+    }
+
+    pub(crate) fn unlatched_window_surface_scale(&self, record: &WindowRecord) -> f64 {
         let Some(surface) = record.surface.wl_surface() else {
             return 1.0;
         };

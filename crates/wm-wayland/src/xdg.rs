@@ -1224,6 +1224,28 @@ impl Compositor {
         // corrected for the integral-fallback case on this window's
         // output — one number, shared with the renderer and the
         // hit-test through `window_surface_scale`.
+        // JBR's Vulkan path can attach an older buffer after updating the
+        // viewport destination. Until a buffer at the requested size and the
+        // original density arrives, keep the resize's coordinate system.
+        // Otherwise a transient stretch becomes a new monitor scale and
+        // feeds a much larger/smaller configure back to the client. A drag
+        // retains this factor between individual replies too: another old
+        // buffer can arrive before the next pointer motion. Output changes
+        // still establish a new scale.
+        let resize_complete = backend.windows.get(&id).is_some_and(|record| {
+            record.resize_scale.is_some_and(|resize| {
+                resize.output_scale != backend.window_output_scale(record)
+                    || (backend.pointer_grab.is_none()
+                        && backend.unlatched_window_surface_scale(record) == resize.factor
+                        && committed_content_size(&root, resize.factor, backend.output_size)
+                            == Some(resize.expected))
+            })
+        });
+        if resize_complete {
+            if let Some(record) = backend.windows.get_mut(&id) {
+                record.resize_scale = None;
+            }
+        }
         let surface_scale = backend
             .windows
             .get(&id)
@@ -1248,6 +1270,19 @@ impl Compositor {
                 if let Some(record) = backend.windows.get_mut(&id) {
                     record.content.size = size;
                 }
+                // Complete the initial client-chosen size negotiation. JBR
+                // keeps its programmatic startup resize pending until a
+                // configure acknowledges that size; only sending 0x0 leaves
+                // it ignoring the first user drag while its frame moves on.
+                // The map/reflow pass can still replace this with a policy
+                // size before the single deferred configure is flushed.
+                toplevel.with_pending_state(|state| {
+                    state.size = Some((
+                        physical_to_logical(size.w as i32, surface_scale),
+                        physical_to_logical(size.h as i32, surface_scale),
+                    ).into());
+                });
+                backend.note_configure(id);
             }
             let offset = committed_content_offset(&root, surface_scale, screen);
             if let Some(record) = backend.windows.get_mut(&id) {
@@ -1284,6 +1319,7 @@ impl Compositor {
             // the decoration but never touches this flag.
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.mapped = false;
+                record.resize_scale = None;
             }
             backend.scene_index.mark_hidden(id);
             backend.queue(WmEvent::Unmapped(id));
