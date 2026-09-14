@@ -1234,10 +1234,33 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
             detail: "hl.config input table is unreadable".into(),
         });
     }
-    if root.iter().any(|(key, _)| key.as_deref() != Some("input")) {
+    match root.iter().find(|(key, _)| key.as_deref() == Some("cursor")).map(|(_, value)| value) {
+        Some(Value::Table(fields)) => {
+            for (key, value) in fields {
+                let Some(key) = key else { continue };
+                out.push(match (value, property_text(value)) {
+                    (Value::Table(_), _) => Directive::Ignored {
+                        kind: "cursor",
+                        detail: format!("nested cursor setting {key} is not implemented"),
+                    },
+                    (_, Some(value)) => Directive::Cursor { name: key.clone(), value },
+                    (_, None) => Directive::Ignored {
+                        kind: "cursor",
+                        detail: format!("{key} = {}: computed at runtime, not carried over", describe(value)),
+                    },
+                });
+            }
+        }
+        Some(_) => out.push(Directive::Ignored {
+            kind: "cursor",
+            detail: "hl.config cursor table is unreadable".into(),
+        }),
+        None => {}
+    }
+    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor"))) {
         out.push(Directive::Ignored {
             kind: "config",
-            detail: "hl.config settings outside input are not carried over".into(),
+            detail: "hl.config settings outside input and cursor are not carried over".into(),
         });
     }
 }

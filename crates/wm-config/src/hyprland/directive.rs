@@ -49,6 +49,8 @@ pub enum Directive {
     Env { name: String, value: String },
     /// One supported key from Hyprland's `input {}` table.
     Input { name: String, value: String },
+    /// One key from Hyprland's `cursor {}` table.
+    Cursor { name: String, value: String },
     /// `exec-once = cmd` / `hl.exec_cmd(cmd)` inside an
     /// `hl.on("hyprland.start", …)` block / `o.launch_on_start(cmd)`.
     ExecOnce { command: String },

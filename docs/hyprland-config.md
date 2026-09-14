@@ -361,6 +361,18 @@ rounding it away. A `scroll_touchpad` window rule replaces the touchpad
 factor while the pointer is over a matching window. Unsupported capabilities
 are named per device without rejecting the rest of the configuration.
 
+The `cursor {}` block and Omarchy's `cursor` table carry the settings that
+decide when the pointer hides. `hide_on_key_press`, which Omarchy turns on,
+hides it while you type into a window; a bare modifier or a key a binding
+consumes does not. `hide_on_touch` hides it on a touch, and
+`inactive_timeout` hides it after that many seconds without pointer input
+(zero never does; the compositor honours one second through an hour). Any
+pointer motion, click, scroll or tablet input shows it again. The warp keys
+(`warp_on_change_workspace`, `no_warps` and the rest) are declined by name:
+chonkstep moves the pointer only when you do or a script asks with
+`cursor.move`. The zoom keys are not implemented. A `[cursor]` table in
+`config.toml` takes the same three keys and wins over both.
+
 Active pointer locks and confinement temporarily suspend `disable_while_typing`
 so games can receive keyboard and touchpad motion together. This includes
 XWayland pointer grabs. Releasing capture, changing focus, or opening the
@@ -577,7 +589,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=179 commands=119 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=172
+      float_rules=47 monitors=1 skipped=173
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

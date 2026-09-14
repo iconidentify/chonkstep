@@ -72,7 +72,7 @@ pub fn read(
         if let Some(name) = line.strip_suffix('{') {
             let name = name.trim();
             if block.is_empty() {
-                if !name.eq_ignore_ascii_case("input") {
+                if !name.eq_ignore_ascii_case("input") && !name.eq_ignore_ascii_case("cursor") {
                     out.push(Directive::Ignored {
                         kind: "block",
                         detail: format!("{name} {{ … }}: a Hyprland subsystem this desktop has its own answer for"),
@@ -87,12 +87,28 @@ pub fn read(
                     kind: "input",
                     detail: format!("nested input block {name} {{ … }} is not implemented"),
                 });
+            } else if block.first().is_some_and(|root| root.eq_ignore_ascii_case("cursor")) {
+                out.push(Directive::Ignored {
+                    kind: "cursor",
+                    detail: format!("nested cursor block {name} {{ … }} is not implemented"),
+                });
             }
             block.push(name.to_string());
             continue;
         }
         if !block.is_empty() {
-            if !block.is_empty() && block[0].eq_ignore_ascii_case("input") {
+            if block.len() == 1 && block[0].eq_ignore_ascii_case("cursor") {
+                match line.split_once('=') {
+                    Some((name, value)) => out.push(Directive::Cursor {
+                        name: name.trim().to_ascii_lowercase(),
+                        value: substitute(value.trim(), vars),
+                    }),
+                    None => out.push(Directive::Ignored {
+                        kind: "cursor",
+                        detail: truncate(line),
+                    }),
+                }
+            } else if block[0].eq_ignore_ascii_case("input") {
                 match line.split_once('=') {
                     Some((name, value)) => out.push(Directive::Input {
                         name: if block.len() == 2 && block[1].eq_ignore_ascii_case("touchpad") {

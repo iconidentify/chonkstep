@@ -629,6 +629,95 @@ o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
     }
 }
 
+/// Omarchy's look turns on `cursor:hide_on_key_press`. The keys that
+/// decide when the pointer hides arrive from either syntax, the warp key
+/// Omarchy sets beside it is declined by name, and the rest of the
+/// section is still reported rather than dropped.
+#[test]
+fn the_cursor_table_carries_when_the_pointer_hides_and_declines_warps() {
+    let lua = scratch("cursor-table-lua");
+    write(
+        &lua.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.config({
+  general = { gaps_in = 5 },
+  cursor = {
+    hide_on_key_press = true, hide_on_touch = true, inactive_timeout = 2.5,
+    warp_on_change_workspace = 1, zoom_factor = 2,
+  },
+})
+"#,
+    );
+    let conf = scratch("cursor-table-conf");
+    write(
+        &conf.join(".config/hypr/hyprland.conf"),
+        concat!(
+            "cursor {\n",
+            "    hide_on_key_press = true\n",
+            "    hide_on_touch = yes\n",
+            "    inactive_timeout = 2.5\n",
+            "    warp_on_change_workspace = 1\n",
+            "    zoom_factor = 2\n",
+            "}\n",
+            "general {\n",
+            "    gaps_in = 5\n",
+            "}\n",
+        ),
+    );
+    for root in [lua, conf] {
+        let reading = read(&Roots::under(&root));
+        assert_eq!(
+            reading.input.cursor,
+            wm_core::CursorBehaviour {
+                hide_on_key_press: Some(true),
+                hide_on_touch: Some(true),
+                inactive_timeout: Some(2.5),
+            },
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(
+            skipped_why(&reading, "warp_on_change_workspace").is_some_and(|why| why.contains("never warps")),
+            "{root:?}: a warp key must be declined by name: {:?}",
+            reading.skipped
+        );
+        assert!(
+            skipped_why(&reading, "zoom_factor").is_some_and(|why| why.contains("not implemented")),
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(
+            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input and cursor")),
+            "{root:?}: the rest of the configuration is still reported: {:?}",
+            reading.skipped
+        );
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+        assert_eq!(config.input.cursor.hide_on_key_press, Some(true), "{root:?}");
+    }
+}
+
+#[test]
+fn cursor_values_are_validated_before_they_are_carried() {
+    for (name, value) in [
+        ("hide_on_key_press", "maybe"),
+        ("inactive_timeout", "-1"),
+        ("inactive_timeout", "NaN"),
+        ("inactive_timeout", "inf"),
+        ("inactive_timeout", "soon"),
+    ] {
+        let mut reading = Reading::default();
+        cursor(&mut reading, name, value);
+        assert_eq!(reading.input.cursor, wm_core::CursorBehaviour::default(), "{name} = {value}");
+        assert_eq!(reading.skipped.len(), 1, "{name} = {value}");
+    }
+    let mut reading = Reading::default();
+    cursor(&mut reading, "INACTIVE_TIMEOUT", "0");
+    cursor(&mut reading, "hide_on_touch", "off");
+    assert_eq!(reading.input.cursor.inactive_timeout, Some(0.0), "zero is a valid never");
+    assert_eq!(reading.input.cursor.hide_on_touch, Some(false));
+    assert!(reading.skipped.is_empty(), "{:?}", reading.skipped);
+}
+
 #[test]
 fn keyboard_repeat_accepts_zero_and_rejects_out_of_range_values() {
     for value in [0, 1, 1000] {
@@ -676,7 +765,7 @@ fn keyboard_only_configuration_is_usable_without_replacing_default_bindings() {
 fn a_value_computed_at_runtime_is_refused_rather_than_rendered() {
     let out = lua_out(&[concat!(
         "x = y or \"z\"\n",
-        "hl.config({ input = { kb_layout = x, touchpad = { natural_scroll = x } } })\n",
+        "hl.config({ input = { kb_layout = x, touchpad = { natural_scroll = x } }, cursor = { hide_on_key_press = x } })\n",
         "o.window(\"foot\", { size = x })\n",
         "o.window(x, { float = true })\n",
         "hl.window_rule({ match = { class = x }, float = true })\n",
@@ -687,12 +776,12 @@ fn a_value_computed_at_runtime_is_refused_rather_than_rendered() {
         assert!(
             !matches!(
                 directive,
-                Directive::Input { .. } | Directive::WindowRule(_) | Directive::Monitor(_)
+                Directive::Input { .. } | Directive::Cursor { .. } | Directive::WindowRule(_) | Directive::Monitor(_)
             ),
             "built from a value only running code could give: {directive:?}"
         );
     }
-    for name in ["kb_layout", "natural_scroll", "size", "class", "mode", "transform"] {
+    for name in ["kb_layout", "natural_scroll", "hide_on_key_press", "size", "class", "mode", "transform"] {
         assert!(
             out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains(name))),
             "{name} was not refused by name: {out:?}"
@@ -2798,7 +2887,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        172,
+        173,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -2808,7 +2897,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=179 commands=119 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=172"),
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=173"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

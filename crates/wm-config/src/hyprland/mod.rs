@@ -889,6 +889,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
                 env.push((name, value));
             }
             Directive::Input { name, value } => input(&mut reading, &name, &value),
+            Directive::Cursor { name, value } => cursor(&mut reading, &name, &value),
             Directive::ExecOnce { command } => autostart(&mut reading, &command),
             Directive::WindowRule(rule) => window_rules.push(rule),
             Directive::Monitor(line) => reading.monitors.lines.push(line),
@@ -1104,12 +1105,7 @@ fn parse_input_bool(
     value: &str,
     assign: impl FnOnce(&mut crate::InputConfig, bool),
 ) {
-    let enabled = match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    };
-    match enabled {
+    match toggle(value) {
         Some(enabled) => assign(&mut reading.input, enabled),
         None => reading.skipped.push(Skipped {
             kind: "input".into(),
@@ -1117,6 +1113,52 @@ fn parse_input_bool(
             why: "input toggle must be true or false".into(),
         }),
     }
+}
+
+/// A Hyprland boolean, in any of the spellings its config accepts.
+fn toggle(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// One key of Hyprland's `cursor` table. The keys that decide when the
+/// pointer hides are carried. The warp keys are declined by name: this
+/// desktop moves the pointer only when the user, or a script's
+/// `cursor.move`, asks it to.
+fn cursor(reading: &mut Reading, name: &str, value: &str) {
+    let value = value.trim().trim_matches(['\"', '\'']);
+    let name = name.trim().to_ascii_lowercase();
+    let why = match name.as_str() {
+        "hide_on_key_press" | "hide_on_touch" => match toggle(value) {
+            Some(enabled) if name == "hide_on_key_press" => {
+                reading.input.cursor.hide_on_key_press = Some(enabled);
+                return;
+            }
+            Some(enabled) => {
+                reading.input.cursor.hide_on_touch = Some(enabled);
+                return;
+            }
+            None => "cursor toggle must be true or false",
+        },
+        "inactive_timeout" => match value.parse::<f64>() {
+            Ok(seconds) if seconds.is_finite() && seconds >= 0.0 => {
+                reading.input.cursor.inactive_timeout = Some(seconds);
+                return;
+            }
+            _ => "inactive_timeout must be a non-negative number of seconds (0 never hides)",
+        },
+        "warp_on_change_workspace" | "warp_on_toggle_special" | "warp_back_after_non_mouse_input" | "no_warps"
+        | "persistent_warps" => "chonkstep never warps the pointer on its own; only an explicit cursor.move moves it",
+        _ => "cursor setting is not implemented",
+    };
+    reading.skipped.push(Skipped {
+        kind: "cursor".into(),
+        what: format!("{name} = {value}"),
+        why: why.into(),
+    });
 }
 
 /// One `exec-once` line, filtered.
