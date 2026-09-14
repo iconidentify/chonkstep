@@ -158,6 +158,9 @@ pub struct Roots {
     pub module_path: Vec<PathBuf>,
     /// What the branch conditions in Omarchy's Lua are answered from.
     pub facts: lua::Facts,
+    /// The system's keyboard configuration, `/etc/vconsole.conf`, which
+    /// fills any xkb setting a read leaves unset. See [`read`].
+    pub vconsole: PathBuf,
 }
 
 impl Roots {
@@ -181,6 +184,7 @@ impl Roots {
             defaults: omarchy.join("default/hypr"),
             module_path: vec![state, config, omarchy],
             facts: lua::Facts::of_this_machine(),
+            vconsole: PathBuf::from("/etc/vconsole.conf"),
         })
     }
 
@@ -212,6 +216,7 @@ impl Roots {
                 home: Some(root.to_path_buf()),
                 state_home: Some(root.join(".local/state")),
             },
+            vconsole: root.join("etc/vconsole.conf"),
         }
     }
 
@@ -412,7 +417,39 @@ pub fn read(roots: &Roots) -> Reading {
         // would have required anyway.
         loader.directory(&roots.defaults.join("bindings"), &mut stream, 0);
     }
-    lower(stream, loader.finish())
+    let mut reading = lower(stream, loader.finish());
+    // Any xkb setting the configuration leaves unset — including one it
+    // computes at runtime, which the Lua reader refuses to render — is
+    // taken from the system's own keyboard configuration, the file
+    // Omarchy's `input.lua` reads its layout from. Here rather than in
+    // `load`, because the live re-read calls `read` directly and must
+    // resolve the keymap the way startup did. And only for a reading
+    // that found something: the system file alone must not turn a desk
+    // with nothing to read into one whose keymap the read replaces.
+    if !reading.is_empty() {
+        let system = crate::system_keyboard(&system_file(&roots.vconsole));
+        let filled = reading.input.fill_keyboard_from(&system);
+        if !filled.is_empty() {
+            reading.skipped.push(Skipped {
+                kind: "input".into(),
+                what: format!("{} taken from {}", filled.join(", "), roots.vconsole.display()),
+                why: "the Hyprland configuration leaves it unset or computes it at runtime; Omarchy's `us,` prefix for a layout with no Latin letters is not applied".into(),
+            });
+        }
+    }
+    reading
+}
+
+/// A small system file's text, or nothing: a missing or unreadable file
+/// reads as empty, never as an error, and an oversized one is cut at the
+/// per-file budget.
+fn system_file(path: &Path) -> String {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(MAX_FILE_BYTES).read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 // ---- activation and layering ------------------------------------------

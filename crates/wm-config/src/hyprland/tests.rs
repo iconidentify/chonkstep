@@ -600,6 +600,151 @@ fn keyboard_only_configuration_is_usable_without_replacing_default_bindings() {
     assert_eq!(config.input.repeat_delay, Some(0));
 }
 
+/// A value only running code could give is not a value this reader has,
+/// and it must never reach xkb, a window rule or a monitor line as the
+/// source text of the expression. Omarchy 4 computes its layout as
+/// `vconsole.XKBLAYOUT or "us"`, and handing libxkbcommon those words
+/// cost every stock session its keymap and its options.
+#[test]
+fn a_value_computed_at_runtime_is_refused_rather_than_rendered() {
+    let out = lua_out(&[concat!(
+        "x = y or \"z\"\n",
+        "hl.config({ input = { kb_layout = x, touchpad = { natural_scroll = x } } })\n",
+        "o.window(\"foot\", { size = x })\n",
+        "o.window(x, { float = true })\n",
+        "hl.window_rule({ match = { class = x }, float = true })\n",
+        "hl.monitor({ output = \"DP-1\", mode = x })\n",
+        "hl.monitor({ output = \"DP-2\", mode = \"preferred\", transform = x })\n",
+    )]);
+    for directive in &out {
+        assert!(
+            !matches!(
+                directive,
+                Directive::Input { .. } | Directive::WindowRule(_) | Directive::Monitor(_)
+            ),
+            "built from a value only running code could give: {directive:?}"
+        );
+    }
+    for name in ["kb_layout", "natural_scroll", "size", "class", "mode", "transform"] {
+        assert!(
+            out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains(name))),
+            "{name} was not refused by name: {out:?}"
+        );
+    }
+}
+
+/// Omarchy 4's stock `input.lua`, off the captured machine: the layout
+/// and variant are computed at runtime, so they are left unset and the
+/// read says why, while the literal model and options still arrive.
+#[test]
+fn omarchys_runtime_keyboard_layout_is_left_unset_rather_than_named_as_text() {
+    let reading = read(&machine());
+    assert_eq!(reading.input.layout, None, "{:?}", reading.input);
+    assert_eq!(reading.input.variant, None);
+    assert_eq!(reading.input.model.as_deref(), Some(""));
+    assert_eq!(
+        reading.input.options.as_deref(),
+        Some("compose:caps,shift:both_capslock_cancel")
+    );
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what.contains("kb_layout")),
+        "the unset layout must be explained: {:?}",
+        reading.skipped
+    );
+}
+
+/// ...and the system's own keyboard configuration stands in for what
+/// the read leaves unset. `/etc/vconsole.conf` is the file `localectl`
+/// writes and the one Omarchy's `input.lua` reads. The Lua is Omarchy
+/// 4's `default/hypr/input.lua`, the lines that compute the keyboard,
+/// verbatim.
+#[test]
+fn the_systems_keyboard_configuration_fills_what_the_read_leaves_unset() {
+    const INPUT_LUA: &str = r##"
+local function read_vconsole()
+  local values = {}
+  local file = io.open("/etc/vconsole.conf", "r")
+  if not file then
+    return values
+  end
+
+  for line in file:lines() do
+    local key, value = line:match("^%s*([%w_]+)%s*=%s*(.-)%s*$")
+    if key and value then
+      value = value:gsub("%s+#.*$", "")
+      value = value:gsub('^"(.*)"$', "%1")
+      value = value:gsub("^'(.*)'$", "%1")
+      values[key] = value
+    end
+  end
+
+  file:close()
+  return values
+end
+
+local non_latin_layouts =
+  " af am ara bd bg by et ge gr il in iq ir kg kh kz la lk mk mm mn mv np rs ru sy th tj ua "
+
+local vconsole = read_vconsole()
+
+local kb_layout = vconsole.XKBLAYOUT or "us"
+local kb_variant = vconsole.XKBVARIANT or ""
+local kb_options = "compose:caps,shift:both_capslock_cancel"
+
+if non_latin_layouts:find(" " .. kb_layout:match("^[^,]*") .. " ", 1, true) then
+  kb_layout = "us," .. kb_layout
+  kb_variant = "," .. kb_variant
+  -- Reach the original layout with Left Alt + Right Alt.
+  kb_options = kb_options .. ",grp:alts_toggle"
+end
+
+hl.config({
+  input = {
+    kb_layout = kb_layout,
+    kb_variant = kb_variant,
+    kb_model = "",
+    kb_options = kb_options,
+    kb_rules = "",
+  },
+})
+"##;
+    let root = scratch("vconsole");
+    write(&root.join(".config/hypr/hyprland.lua"), INPUT_LUA);
+    write(
+        &root.join("etc/vconsole.conf"),
+        "# Written by systemd-localed(8)\nKEYMAP=de\nXKBLAYOUT=\"de\"\nXKBVARIANT='nodeadkeys'\nXKBMODEL=pc105\nXKBOPTIONS=\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.input.layout.as_deref(), Some("de"), "{:?}", reading.input);
+    assert_eq!(reading.input.variant.as_deref(), Some("nodeadkeys"));
+    // Omarchy's own literals win over the system's values.
+    assert_eq!(reading.input.model.as_deref(), Some(""));
+    assert_eq!(
+        reading.input.options.as_deref(),
+        Some("compose:caps,shift:both_capslock_cancel")
+    );
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what.contains("vconsole.conf")),
+        "the substitution must be said: {:?}",
+        reading.skipped
+    );
+
+    // A layout the configuration names outright wins too.
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        &format!("{INPUT_LUA}\nhl.config({{ input = {{ kb_layout = \"fr\" }} }})\n"),
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.input.layout.as_deref(), Some("fr"));
+    assert_eq!(reading.input.variant.as_deref(), Some("nodeadkeys"));
+
+    // The system file alone does not make a desk with nothing to read
+    // into one that replaces its keymap.
+    let _ = std::fs::remove_file(root.join(".config/hypr/hyprland.lua"));
+    assert!(read(&Roots::under(&root)).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn metadata_only_is_empty_but_release_bindings_and_monitors_are_not() {
     let mut reading = Reading::default();
@@ -2586,7 +2731,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        182,
+        184,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -2596,7 +2741,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=167 commands=119 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=182"),
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=184"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

@@ -202,6 +202,87 @@ pub struct InputConfig {
     pub accel_profile: Option<String>,
 }
 
+/// The system's own keyboard configuration: the `XKB*` keys of
+/// `/etc/vconsole.conf`, the file `systemd-localed` and `localectl`
+/// maintain. Each is `None` when the file does not set it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SystemKeyboard {
+    pub layout: Option<String>,
+    pub model: Option<String>,
+    pub variant: Option<String>,
+    pub options: Option<String>,
+}
+
+/// Reads a [`SystemKeyboard`] out of `vconsole.conf` text. Pure, since
+/// the caller reads the file, and total: a line it cannot read is
+/// passed over, so malformed text yields no values rather than an error.
+///
+/// Parsed the way Omarchy's `input.lua` parses the same file, because
+/// its answer is what this stands in for: `KEY=value` with whitespace
+/// allowed around either side, a trailing ` # comment` dropped, then one
+/// layer of double and then single quotes removed. An empty value sets
+/// nothing.
+pub fn system_keyboard(vconsole_conf: &str) -> SystemKeyboard {
+    let mut keyboard = SystemKeyboard::default();
+    for line in vconsole_conf.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let mut value = value.trim();
+        if let Some((hash, _)) = value
+            .char_indices()
+            .find(|&(at, c)| c == '#' && value[..at].ends_with(char::is_whitespace))
+        {
+            value = value[..hash].trim_end();
+        }
+        for quote in ['"', '\''] {
+            if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
+                value = &value[1..value.len() - 1];
+            }
+        }
+        if value.is_empty() {
+            continue;
+        }
+        let slot = match key {
+            "XKBLAYOUT" => &mut keyboard.layout,
+            "XKBMODEL" => &mut keyboard.model,
+            "XKBVARIANT" => &mut keyboard.variant,
+            "XKBOPTIONS" => &mut keyboard.options,
+            _ => continue,
+        };
+        *slot = Some(value.to_string());
+    }
+    keyboard
+}
+
+impl InputConfig {
+    /// Fills each xkb setting still unset from the system's keyboard
+    /// configuration, and names the ones it filled. A value the
+    /// configuration set is kept, even an empty one like Omarchy's
+    /// `kb_model = ""`. Per setting, a non-empty `XKB_DEFAULT_*` in the
+    /// environment wins (the compositor applies it), then the
+    /// configuration, then the system file, then libxkbcommon's default.
+    pub fn fill_keyboard_from(&mut self, system: &SystemKeyboard) -> Vec<&'static str> {
+        let mut filled = Vec::new();
+        for (name, slot, value) in [
+            ("kb_layout", &mut self.layout, &system.layout),
+            ("kb_model", &mut self.model, &system.model),
+            ("kb_variant", &mut self.variant, &system.variant),
+            ("kb_options", &mut self.options, &system.options),
+        ] {
+            if slot.is_none() && value.is_some() {
+                slot.clone_from(value);
+                filled.push(name);
+            }
+        }
+        filled
+    }
+}
+
 /// Maps a kebab-case action name from a config file to its [`Action`].
 /// Case-insensitive for the same reason key specs are: nothing is
 /// gained by making `"Close"` a startup-breaking typo. Returns `None`
@@ -3523,6 +3604,49 @@ mod command_tests {
         assert!(effective_config_report(&mac).contains("keymap = mac"));
         let mut combos = std::collections::HashSet::new();
         for (key, _) in &mac.keybindings { assert!(combos.insert(*key), "duplicate Mac shortcut {key:?}"); }
+    }
+
+    #[test]
+    fn the_system_keyboard_is_read_the_way_omarchy_reads_vconsole_conf() {
+        let text = "# Written by systemd-localed(8)\n\
+                    KEYMAP=de-latin1\n\
+                    XKBLAYOUT=\"de\"\n\
+                    XKBVARIANT = 'nodeadkeys' # the one without dead keys\n\
+                    XKBMODEL=\n\
+                    XKBOPTIONS=\"compose:ralt,terminate:ctrl_alt_bksp\"\n\
+                    not a setting\n\
+                    #XKBMODEL=pc105\n";
+        assert_eq!(
+            system_keyboard(text),
+            SystemKeyboard {
+                layout: Some("de".into()),
+                model: None,
+                variant: Some("nodeadkeys".into()),
+                options: Some("compose:ralt,terminate:ctrl_alt_bksp".into()),
+            }
+        );
+        // A missing or malformed file is no values, never an error.
+        assert_eq!(system_keyboard(""), SystemKeyboard::default());
+        assert_eq!(system_keyboard("\0\u{fffd}==\n=\nXKBLAYOUT\nXKBLAYOUT=\"\"\n"), SystemKeyboard::default());
+        // The last setting of a key wins, as it does in Omarchy's table.
+        assert_eq!(system_keyboard("XKBLAYOUT=us\nXKBLAYOUT=fr\n").layout.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn the_system_keyboard_fills_only_what_the_configuration_left_unset() {
+        let system = system_keyboard("XKBLAYOUT=de\nXKBVARIANT=nodeadkeys\nXKBMODEL=pc105\nXKBOPTIONS=grp:alts_toggle\n");
+        let mut input = InputConfig {
+            layout: Some("fr".into()),
+            model: Some(String::new()),
+            ..InputConfig::default()
+        };
+        assert_eq!(input.fill_keyboard_from(&system), ["kb_variant", "kb_options"]);
+        assert_eq!(input.layout.as_deref(), Some("fr"), "the configuration's own layout wins");
+        assert_eq!(input.model.as_deref(), Some(""), "an explicitly empty value is still a value");
+        assert_eq!(input.variant.as_deref(), Some("nodeadkeys"));
+        assert_eq!(input.options.as_deref(), Some("grp:alts_toggle"));
+        assert!(input.fill_keyboard_from(&SystemKeyboard::default()).is_empty());
+        assert_eq!(input.rules, None, "vconsole.conf carries no rules");
     }
 
 }

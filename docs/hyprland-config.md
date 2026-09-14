@@ -311,7 +311,17 @@ do is not what you are asking for:
 ### Input and binding behavior
 
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
-build the seat's xkb keymap. `repeat_rate` and `repeat_delay` configure
+build the seat's xkb keymap. A value Hyprland would compute as it runs,
+such as Omarchy 4's `kb_layout = vconsole.XKBLAYOUT or "us"`, is logged
+and left unset rather than passed on as the text of the expression, and
+a window rule or `hl.monitor` line with such a value is refused whole.
+Whatever of `kb_layout`, `kb_variant`, `kb_model` and `kb_options` is
+still unset then comes from `/etc/vconsole.conf`, the file `localectl`
+writes and Omarchy's `input.lua` reads. So for each setting, a
+non-empty `XKB_DEFAULT_*` variable wins, then a value the configuration
+spells out (an empty one included), then `/etc/vconsole.conf`, then
+libxkbcommon's default. Omarchy's `us,` prefix for a layout with no
+Latin letters is not applied. `repeat_rate` and `repeat_delay` configure
 both client key repeat and `binde` actions. These hardware-facing values
 transfer; whole-desktop interaction policy does not. In particular,
 Hyprland's `follow_mouse` is logged and ignored—even when it is `1` in
@@ -560,7 +570,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=167 commands=119 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=182
+      float_rules=47 monitors=1 skipped=184
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

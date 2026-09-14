@@ -1099,10 +1099,19 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
             Some(command) => out.push(Directive::ExecOnce { command: format!("uwsm-app -- {command}") }),
             None => out.push(Directive::Ignored { kind: "exec-once", detail: "o.launch_on_start with an unreadable command".into() }),
         },
-        "o.window" => out.push(Directive::WindowRule(window_rule(&arg(0), &arg(1)))),
-        "hl.window_rule" => out.push(Directive::WindowRule(window_rule(&Value::Nil, &arg(0)))),
+        "o.window" => out.push(match window_rule(&arg(0), &arg(1)) {
+            Ok(rule) => Directive::WindowRule(rule),
+            Err(why) => Directive::Ignored { kind: "window-rule", detail: format!("o.window refused whole: {why}") },
+        }),
+        "hl.window_rule" => out.push(match window_rule(&Value::Nil, &arg(0)) {
+            Ok(rule) => Directive::WindowRule(rule),
+            Err(why) => Directive::Ignored { kind: "window-rule", detail: format!("hl.window_rule refused whole: {why}") },
+        }),
         "hl.monitor" => match &arg(0) {
-            Value::Table(fields) => out.push(Directive::Monitor(monitor_from(fields))),
+            Value::Table(fields) => out.push(match monitor_from(fields) {
+                Ok(monitor) => Directive::Monitor(monitor),
+                Err(why) => Directive::Ignored { kind: "monitor", detail: format!("hl.monitor refused whole: {why}") },
+            }),
             other => out.push(Directive::Ignored { kind: "monitor", detail: format!("hl.monitor({})", describe(other)) }),
         },
         // Recognised, deliberately not acted on. Each is named rather
@@ -1206,10 +1215,7 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
                     for (nested_key, nested_value) in nested {
                         let Some(nested_key) = nested_key else { continue };
                         if !matches!(nested_value, Value::Table(_)) {
-                            out.push(Directive::Input {
-                                name: format!("touchpad:{nested_key}"),
-                                value: property_text(nested_value),
-                            });
+                            out.push(input_setting(format!("touchpad:{nested_key}"), nested_value));
                         }
                     }
                 } else {
@@ -1219,10 +1225,7 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
                     });
                 }
             } else {
-                out.push(Directive::Input {
-                    name: key.clone(),
-                    value: property_text(value),
-                });
+                out.push(input_setting(key.clone(), value));
             }
         }
     } else if input.is_some() {
@@ -1236,6 +1239,24 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
             kind: "config",
             detail: "hl.config settings outside input are not carried over".into(),
         });
+    }
+}
+
+/// One scalar `input` setting, or a named skip when its value is only
+/// known at runtime. Omarchy 4's `kb_layout = vconsole.XKBLAYOUT or
+/// "us"` is exactly that, and the text of the expression is not a
+/// layout: libxkbcommon rejects it, and the session loses every option
+/// that came with the keymap.
+fn input_setting(name: String, value: &Value) -> Directive {
+    match property_text(value) {
+        Some(value) => Directive::Input { name, value },
+        None => Directive::Ignored {
+            kind: "input",
+            detail: format!(
+                "{name} = {}: computed at runtime, not carried over",
+                describe(value)
+            ),
+        },
     }
 }
 
@@ -1388,10 +1409,17 @@ fn dsp(path: &str, args: &[Value]) -> Dispatcher {
 /// `helpers.lua`'s `o.window` folds its first argument into the rule
 /// table's `match` field — a bare string becomes `match.class` — so
 /// this reproduces that fold and then reads one shape.
-fn window_rule(match_arg: &Value, rules: &Value) -> WindowRule {
+///
+/// A matcher or property whose value is only known at runtime refuses
+/// the whole rule. A rule missing its class matcher would match every
+/// window, and one missing a property is some other rule.
+fn window_rule(match_arg: &Value, rules: &Value) -> Result<WindowRule, String> {
+    let runtime = |key: &str, value: &Value| {
+        format!("{key} = {} is computed at runtime", describe(value))
+    };
     let mut rule = WindowRule::default();
     let mut push_match = |key: &str, value: &Value| {
-        let Some(text) = as_string(value) else { return };
+        let text = as_string(value).ok_or_else(|| runtime(&format!("match {key}"), value))?;
         rule.matchers.push(match key {
             "class" => Matcher::Class(text),
             "title" => Matcher::Title(text),
@@ -1401,62 +1429,75 @@ fn window_rule(match_arg: &Value, rules: &Value) -> WindowRule {
                 value: text,
             },
         });
+        Ok::<(), String>(())
     };
     match match_arg {
-        Value::Str(class) => push_match("class", &Value::Str(class.clone())),
+        Value::Str(class) => push_match("class", &Value::Str(class.clone()))?,
         Value::Table(fields) => {
             for (key, value) in fields {
                 if let Some(key) = key {
-                    push_match(key, value);
+                    push_match(key, value)?;
                 }
             }
         }
-        _ => {}
+        // `hl.window_rule` has no match argument of its own.
+        Value::Nil => {}
+        other => return Err(runtime("match", other)),
     }
     if let Value::Table(fields) = rules {
         for (key, value) in fields {
             let Some(key) = key else { continue };
             if key == "match" {
-                if let Value::Table(inner) = value {
-                    for (key, value) in inner {
-                        if let Some(key) = key {
-                            push_match(key, value);
-                        }
+                let Value::Table(inner) = value else {
+                    return Err(runtime("match", value));
+                };
+                for (key, value) in inner {
+                    if let Some(key) = key {
+                        push_match(key, value)?;
                     }
                 }
                 continue;
             }
-            rule.props.push((key.clone(), property_text(value)));
+            let text = property_text(value).ok_or_else(|| runtime(key, value))?;
+            rule.props.push((key.clone(), text));
         }
     }
-    rule
+    Ok(rule)
 }
 
 /// A rule property's value as the conf syntax would spell it, so the
 /// two front ends hand `super::rules` the same strings: `size = { 875,
 /// 600 }` and `size 875 600` both become `"875 600"`.
-fn property_text(value: &Value) -> String {
+///
+/// `None` for anything that is not yet a value — a name, a call, an
+/// unresolved expression. Its source text is not a setting, and a
+/// plausible-looking string is worse than a refusal.
+fn property_text(value: &Value) -> Option<String> {
     match value {
-        Value::Str(text) => text.clone(),
-        Value::Num(n) => format_number(*n),
-        Value::Bool(true) => "on".into(),
-        Value::Bool(false) => "off".into(),
+        Value::Str(text) => Some(text.clone()),
+        Value::Num(n) => Some(format_number(*n)),
+        Value::Bool(true) => Some("on".into()),
+        Value::Bool(false) => Some("off".into()),
         Value::Table(items) => items
             .iter()
             .map(|(_, v)| property_text(v))
-            .collect::<Vec<_>>()
-            .join(" "),
-        other => describe(other),
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.join(" ")),
+        _ => None,
     }
 }
 
-fn monitor_from(fields: &[(Option<String>, Value)]) -> Monitor {
-    let field = |name: &str| {
-        fields
-            .iter()
-            .find(|(k, _)| k.as_deref() == Some(name))
-            .map(|(_, v)| property_text(v))
-            .unwrap_or_default()
+/// An `hl.monitor` table as a [`Monitor`]. A field that is present but
+/// only known at runtime refuses the whole line, the way the lowering
+/// already refuses a line it only half understands.
+fn monitor_from(fields: &[(Option<String>, Value)]) -> Result<Monitor, String> {
+    let text = |key: &str, value: &Value| {
+        property_text(value)
+            .ok_or_else(|| format!("{key} = {} is computed at runtime", describe(value)))
+    };
+    let field = |name: &str| match fields.iter().find(|(k, _)| k.as_deref() == Some(name)) {
+        Some((_, value)) => text(name, value),
+        None => Ok(String::new()),
     };
     let mut extra = Vec::new();
     for (key, value) in fields {
@@ -1470,16 +1511,16 @@ fn monitor_from(fields: &[(Option<String>, Value)]) -> Monitor {
             // silently refused every Lua-configured rotation as an
             // unsupported field.
             extra.push(key.clone());
-            extra.push(property_text(value));
+            extra.push(text(key, value)?);
         }
     }
-    Monitor {
-        output: field("output"),
-        mode: field("mode"),
-        position: field("position"),
-        scale: field("scale"),
+    Ok(Monitor {
+        output: field("output")?,
+        mode: field("mode")?,
+        position: field("position")?,
+        scale: field("scale")?,
         extra,
-    }
+    })
 }
 
 // ---- budgets ----------------------------------------------------------
