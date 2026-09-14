@@ -35,13 +35,20 @@ pub use backend::{Backend, LayoutDrag, OverviewDrag, OverviewChrome, OverviewCar
 pub use client::{
     Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo,
 };
-pub use focus::{FocusDirection, FocusPolicy};
+pub use focus::{FocusDirection, FocusPolicy, OutputTarget};
 pub use gestures::{physics as gesture_physics, DesktopGesture, GestureConfig, SwipeAxis, SwipeMotion, SwipeTracker};
 pub use hittest::{hit_test, HitTarget};
 pub use interaction::{AppProfile, InteractionConfig, InteractionMode, KeyboardMode};
-pub use manager::{DisplaySpace, DisplaySpacesSnapshot, Space, SpaceHomeGeometry, Notification, WindowManager, DEFAULT_DRAG_MODIFIER, MAX_WORKSPACES};
+pub use manager::{
+    normalize_special_name, DisplaySpace, DisplaySpacesSnapshot, Notification, Space, SpaceHomeGeometry, WindowManager,
+    DEFAULT_DRAG_MODIFIER, DEFAULT_SPECIAL_NAME, FULLSCREEN_SPACE_STAYS_HOME, MAX_SPECIAL_NAME, MAX_SPECIAL_WORKSPACES,
+    MAX_WORKSPACES, SHARED_DESKTOP_SPANS_DISPLAYS,
+};
 pub use motif::{hints_say_client_decorates, MIN_HINT_WORDS};
-pub use placement::{place_frame, FloatDecision, FloatPolicy, IdleInhibitRule, PlacementPolicy, WindowRuleDecision};
+pub use placement::{
+    place_frame, FloatDecision, FloatPolicy, IdleInhibitRule, PlacementPolicy, RuleMetrics, RulePlacement, RuleWorkspace,
+    RuleWorkspaceTarget, WindowRuleDecision,
+};
 // `FloatDecision` carries a `Size`, so a crate that implements
 // `FloatPolicy` needs the type to name it. Re-exported here rather
 // than making every such crate depend on `wm-theme-api` directly: the
@@ -50,7 +57,7 @@ pub use placement::{place_frame, FloatDecision, FloatPolicy, IdleInhibitRule, Pl
 pub use snap::snap_position;
 pub use spatial::{LayoutMode, LayoutStatistics, WindowPlacement};
 pub use types::{
-    BackendEvent, ClientChrome, DecorationRules, DragHandle, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetState,
+    BackendEvent, ClientChrome, DecorationRules, DragHandle, FullscreenMode, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetState,
     CursorBehaviour, DeviceRule, MultiFingerDrag, PointerConfig, ScrollClass, ScrollMethod, TapButtonMap, MAX_SCROLL_BUTTON,
     NetStateAction, NetStateSnapshot, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };

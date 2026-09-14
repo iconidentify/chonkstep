@@ -21,3 +21,21 @@ pub enum FocusDirection {
     Up,
     Down,
 }
+
+/// Which output a monitor-targeted verb names: the argument of
+/// Hyprland's `focusmonitor` and `movecurrentworkspacetomonitor`.
+///
+/// Kept symbolic rather than resolved to an index at parse time, because
+/// hotplug can remove an output between a binding being read and a key
+/// being pressed; [`crate::WindowManager::resolve_output_target`] answers
+/// against the live monitor list at the moment the verb applies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutputTarget {
+    /// `+N` / `-N`: N outputs along the monitor list from the focused
+    /// one, wrapping at either end.
+    Relative(i32),
+    /// `l` / `r` / `u` / `d`: the nearest output in that direction.
+    Direction(FocusDirection),
+    /// A connector name, as `Backend::monitors` reports it.
+    Name(String),
+}

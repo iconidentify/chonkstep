@@ -589,3 +589,108 @@ fn fullscreen_entered_while_borrowed_keeps_its_home_and_return_geometry() {
     wm.unfullscreen(right);
     assert_eq!(wm.clients[right].geometry, original);
 }
+
+/// Omarchy's SUPER+SHIFT+ALT+arrows: the active Space goes to the display
+/// in that direction and its windows go with it, keeping their position
+/// relative to the display. The display it left keeps a Space of its own.
+#[test]
+fn moving_a_numbered_space_does_not_carry_its_special_members() {
+    let mut wm = dual_mac();
+    let ordinary = window_on(&mut wm, 0);
+    let special = window_on(&mut wm, 0);
+    wm.move_client_to_special(special, "scratchpad", true);
+    wm.focus_client(ordinary);
+    let before = wm.client(special).unwrap().geometry;
+    assert_eq!(wm.special_shown_on_output(0), Some(0));
+
+    assert_eq!(wm.move_workspace_to_output(1), Ok(()));
+
+    assert_eq!(wm.special_shown_on_output(0), Some(0));
+    assert_eq!(wm.client(special).unwrap().geometry, before, "the overlay stays on its own display");
+    assert_eq!(wm.client_output_index(special), 0);
+    assert!(visible(&wm, special));
+    assert_eq!(wm.client_output_index(ordinary), 1);
+}
+
+#[test]
+fn a_special_can_move_between_displays_independently_of_its_numbered_home() {
+    let mut wm = dual_mac();
+    let member = window_on(&mut wm, 0);
+    let home = wm.client(member).unwrap().workspace;
+    let before = wm.client(member).unwrap().geometry;
+    wm.move_client_to_special(member, "scratchpad", true);
+    wm.select_output(1);
+    wm.toggle_special("scratchpad");
+    assert_eq!(wm.special_shown_on_output(1), Some(0));
+    assert_eq!(wm.client_output_index(member), 1);
+    let moved = wm.client(member).unwrap().geometry;
+    assert!(moved.pos.x > before.pos.x);
+    wm.reconcile_display_spaces();
+    assert_eq!(wm.client(member).unwrap().geometry, moved);
+    assert_eq!(wm.client_output_index(member), 1);
+
+    wm.move_client_to_workspace(member, home);
+    assert_eq!(wm.client(member).unwrap().special, None);
+    assert_eq!(wm.client_output_index(member), 0);
+    assert_eq!(wm.client(member).unwrap().geometry, before);
+}
+
+#[test]
+fn moving_a_space_to_another_display_carries_its_windows_with_relative_geometry() {
+    let mut wm = dual_mac();
+    let left = window_on(&mut wm, 0);
+    let right = window_on(&mut wm, 1);
+    let right_space = wm.client(right).unwrap().workspace;
+    wm.select_output(0);
+    let space = wm.current_workspace();
+    assert_eq!(wm.client(left).unwrap().workspace, space);
+    assert_eq!(wm.workspace_output_index(space), Some(0));
+    let before = wm.client(left).unwrap().geometry;
+    let (from, to) = (wm.monitors_ref()[0].geometry, wm.monitors_ref()[1].geometry);
+
+    assert_eq!(wm.move_workspace_to_output(1), Ok(()));
+
+    assert_eq!(wm.workspace_output_index(space), Some(1), "the Space now belongs to the right display");
+    assert_eq!(wm.current_workspace(), space, "and stays the current workspace");
+    assert!(wm.workspace_visible(space), "it is the active Space on its new display");
+    assert!(!wm.workspace_visible(right_space), "the display's old Space is behind it");
+    let after = wm.client(left).unwrap().geometry;
+    assert_eq!(after.size, before.size);
+    assert_eq!(after.pos, Point::new(before.pos.x - from.pos.x + to.pos.x, before.pos.y - from.pos.y + to.pos.y));
+    assert!(visible(&wm, left));
+    assert_eq!(wm.client_output_index(left), 1);
+    assert!(!wm.workspace_row_on_output(0).is_empty(), "the left display keeps a Space");
+    assert!(wm.workspace_row_on_output(0).iter().all(|&s| !wm.workspace_has_windows(s)));
+    assert_eq!(wm.focused_client(), Some(left));
+
+    // Already there: nothing to do, and not an error.
+    assert_eq!(wm.move_workspace_to_output(1), Ok(()));
+    // Gone since the verb was read: refused by name.
+    assert!(wm.move_workspace_to_output(2).is_err());
+}
+
+#[test]
+fn a_fullscreen_space_stays_on_the_display_of_its_window() {
+    let mut wm = dual_mac();
+    let left = window_on(&mut wm, 0);
+    wm.fullscreen(left);
+    let space = wm.client(left).unwrap().workspace;
+    assert_eq!(wm.current_workspace(), space);
+    assert_eq!(wm.move_workspace_to_output(1), Err(FULLSCREEN_SPACE_STAYS_HOME));
+    assert_eq!(wm.workspace_output_index(space), Some(0));
+}
+
+/// On the shared desktop the workspace already spans every display, so
+/// there is nothing to move: the refusal names the setting that would
+/// give each display its own row, and is never an `ok`.
+#[test]
+fn the_shared_desktop_refuses_a_workspace_move_by_name() {
+    let mut backend = FakeBackend::new();
+    backend.set_monitors(dual_monitors());
+    let mut wm = wm(backend);
+    let _ = window_on(&mut wm, 0);
+    assert!(!wm.separate_spaces());
+    let refusal = wm.move_workspace_to_output(1);
+    assert_eq!(refusal, Err(SHARED_DESKTOP_SPANS_DISPLAYS));
+    assert!(refusal.unwrap_err().contains("separate_spaces"), "the refusal names the setting");
+}

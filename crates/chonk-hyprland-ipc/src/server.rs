@@ -102,7 +102,7 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
                 (
                     snapshot
                         .focused_window()
-                        .map(plain_client)
+                        .map(|window| plain_client(snapshot, window))
                         .unwrap_or_default(),
                     None,
                 )
@@ -274,6 +274,16 @@ fn plain_workspaces(snapshot: &Snapshot) -> String {
     for workspace in &snapshot.workspaces {
         out.push_str(&plain_workspace(snapshot, workspace));
     }
+    for special in &snapshot.specials {
+        let last = snapshot.focused_window().filter(|window| window.special.as_deref() == Some(special.name.as_str()));
+        out.push_str(&format!(
+            "workspace ID {} ({}) on monitor {}:\n\tmonitorID: {}\n\twindows: {}\n\thasfullscreen: {}\n\tlastwindow: {}\n\tlastwindowtitle: {}\n\n",
+            special.hypr_id(), special.hypr_name(), special.monitor.clone().unwrap_or_default(), special.monitor_id,
+            special.windows, special.has_fullscreen,
+            last.map(crate::state::Window::address).unwrap_or_else(|| "0x0".to_string()),
+            last.map(|window| window.title.as_str()).unwrap_or_default(),
+        ));
+    }
     out
 }
 
@@ -291,19 +301,23 @@ fn plain_workspace(snapshot: &Snapshot, workspace: &crate::state::Workspace) -> 
 fn plain_clients(snapshot: &Snapshot) -> String {
     let mut out = String::new();
     for window in &snapshot.windows {
-        out.push_str(&plain_client(window));
+        out.push_str(&plain_client(snapshot, window));
         out.push('\n');
     }
     out
 }
 
-fn plain_client(window: &crate::state::Window) -> String {
+fn plain_client(snapshot: &Snapshot, window: &crate::state::Window) -> String {
+    let (workspace_id, workspace_name) = match window.special.as_deref().and_then(|name| snapshot.special_named(name)) {
+        Some(special) => (special.hypr_id(), special.hypr_name()),
+        None => (window.workspace as i32 + 1, (window.workspace + 1).to_string()),
+    };
     format!(
-        "Window {} -> {}:\n\tmapped: {}\n\thidden: {}\n\tat: {},{}\n\tsize: {},{}\n\tworkspace: {} ({})\n\tfloating: {}\n\tpseudo: 0\n\tmonitor: {}\n\tclass: {}\n\ttitle: {}\n\tinitialClass: {}\n\tinitialTitle: {}\n\tpid: {}\n\txwayland: {}\n\tpinned: {}\n\tfullscreen: {}\n",
+        "Window {} -> {}:\n\tmapped: {}\n\thidden: {}\n\tat: {},{}\n\tsize: {},{}\n\tworkspace: {} ({})\n\tfloating: {}\n\tpseudo: 0\n\tmonitor: {}\n\tclass: {}\n\ttitle: {}\n\tinitialClass: {}\n\tinitialTitle: {}\n\tpid: {}\n\txwayland: {}\n\tpinned: {}\n\tfullscreen: {}\n\tfullscreenClient: {}\n",
         window.address(), window.title, !window.hidden, window.hidden, window.x, window.y,
-        window.width, window.height, window.workspace + 1, window.workspace + 1,
+        window.width, window.height, workspace_id, workspace_name,
         i32::from(window.floating), window.monitor, window.class, window.title, window.class, window.title, window.pid,
-        window.xwayland, window.pinned, i32::from(window.fullscreen),
+        window.xwayland, window.pinned, window.fullscreen_mode(), window.fullscreen_client_mode(),
     )
 }
 

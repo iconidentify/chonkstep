@@ -148,15 +148,28 @@ Three kinds of Omarchy binding get three different answers:
    imitation of it.
 3. **Workspace styles are native.** Super+T floats/rejoins a window,
    Super+L toggles Mosaic/Flow, and Super+Shift+L returns to Freeform.
-   Tree-only messages are quiet no-ops; grouping remains unsupported.
+   The style a workspace *starts* in comes from your configuration:
+   Omarchy's `general.layout = "dwindle"` makes every workspace
+   Mosaic from the first login, and the per-workspace files Omarchy's
+   own Super+L saves under `~/.local/state/omarchy/workspace-layouts/`
+   are honoured too — see
+   [hyprland-config.md](hyprland-config.md#workspace-layout). Tree-only
+   messages are quiet no-ops; grouping remains unsupported.
 
-### Three chords we do differently
+### Two chords we do differently
 
 | Chord | Omarchy | Here | The difference |
 |---|---|---|---|
-| `super+f` / `super+alt+f` | fullscreen / "full width" (Hyprland's `maximized`) | `toggle-fullscreen` / `toggle-maximize` | The pair keeps its shape: the plain chord takes the whole output with no chrome, the modified one fills the workarea and keeps the titlebar. |
-| `super+alt+s` | move the window to the scratchpad workspace | `miniaturize` | Both mean "send this window away, recoverably". Omarchy's goes to a hidden workspace and comes back with the same chord; ChonkStep hides the window until it is selected with Alt-Tab. `super+s` (toggle scratchpad) is unbound. |
+| `super+f` / `super+alt+f` | fullscreen / "full width" (Hyprland's `maximized`) | `toggle-fullscreen` / `toggle-maximize` | The pair keeps its shape: the plain chord takes the whole output with no chrome, the modified one fills the workarea and keeps the titlebar. `super+ctrl+f`, "tiled full screen", is the same here as there: the application is told it is fullscreen and drops its own toolbars while its tile and the bar stay (`toggle-tiled-fullscreen`; with Omarchy's files, its own script). |
 | `control+escape` | nothing | `window-menu` | The window menu is a chonkstep verb Omarchy has no vocabulary for. It keeps its own chord, which Omarchy leaves free. |
+
+The scratchpad is the same on both: `super+s` (`toggle-special
+scratchpad`) drops the `scratchpad` special workspace over the active
+output and takes it away again, and `super+alt+s` (`special-send
+scratchpad`) sends the focused window there without following. A
+window sent away comes back with the toggle chord, on top of whatever
+is on the workspace and above pinned windows. `miniaturize` keeps its
+own chord, `alt+shift+m`, and its place in the window menu.
 
 Binding firing semantics are preserved too. Omarchy's media and brightness
 keys marked `locked = true` work over the lock screen, ramps marked
@@ -184,8 +197,8 @@ between "chonkstep knows what Omarchy's chords were in August" and
 "Omarchy's menu still configures your machine": rebind a key through
 their UI and the running session follows it within a second.
 
-On the machine this was developed on the live read produced **179
-bindings over 120 commands**, against the baked table's 154 over 86 —
+On the machine this was developed on the live read produced **188
+bindings over 121 commands**, against the baked table's 162 over 86 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
 file test that only a live read can make, and Omarchy's twelve keyboard
@@ -206,7 +219,7 @@ what the live read falls back to.
 
 Both tables live in the keybinding card, beside chonkstep's own:
 **[keybindings.md](keybindings.md), under "The Omarchy keymap"**
-— 154 bindings over 86 declared commands, then the 24 groups of Omarchy
+— 162 bindings over 86 declared commands, then the 20 groups of Omarchy
 chords that remain unbound and why. Both are transcribed
 from `crates/wm-config/src/preset.rs`, which is the authoritative list;
 `crates/wm-config/tests/preset_doc.rs` fails if the card and the table

@@ -119,12 +119,55 @@ pub enum NetState {
 /// from being transposed at backend boundaries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NetStateSnapshot {
+    /// Compositor fullscreen: the window covers its output and
+    /// occludes the shell's bands.
     pub fullscreen: bool,
+    /// The client is told it is fullscreen without the compositor
+    /// changing anything else about it (`ClientFlags::CLIENT_FULLSCREEN`).
+    /// A backend sends the protocol's fullscreen state for
+    /// `fullscreen || client_fullscreen` and keeps every visible
+    /// consequence, band occlusion included, on `fullscreen` alone.
+    pub client_fullscreen: bool,
     pub maximized_horizontally: bool,
     pub maximized_vertically: bool,
     pub shaded: bool,
     pub hidden: bool,
     pub modal: bool,
+}
+
+/// One axis of Hyprland's two-axis fullscreen state, in its numbering:
+/// `fullscreenstate <internal> <client>` gives the compositor's own mode
+/// and the one the client is told, each 0 (none), 1 (maximized) or 2
+/// (fullscreen). `WindowManager::set_fullscreen_state` takes the pair
+/// and `fullscreen_state` reads it back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FullscreenMode {
+    #[default]
+    None,
+    Maximized,
+    Fullscreen,
+}
+
+impl FullscreenMode {
+    /// The mode Hyprland numbers `level`, or `None` for anything outside
+    /// 0..=2 — the caller names the refused value, never rounds it.
+    pub fn from_level(level: u8) -> Option<Self> {
+        match level {
+            0 => Some(Self::None),
+            1 => Some(Self::Maximized),
+            2 => Some(Self::Fullscreen),
+            _ => None,
+        }
+    }
+
+    /// Hyprland's number for this mode.
+    pub fn level(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Maximized => 1,
+            Self::Fullscreen => 2,
+        }
+    }
 }
 
 /// Coarse EWMH `_NET_WM_WINDOW_TYPE` classification — just enough to

@@ -57,6 +57,8 @@ pub struct Monitor {
     pub focused: bool,
     /// The 0-based chonkstep workspace index active on this output.
     pub active_workspace: usize,
+    /// The name of the special workspace shown on this output, if one is.
+    pub special_workspace: Option<String>,
     /// EDID make and model as the matching `wl_output` advertises them,
     /// so the two protocols cannot describe the same panel differently.
     /// `serial` has no source on this compositor and stays empty rather
@@ -143,14 +145,72 @@ impl Workspace {
 
 /// Convert a workspace id as a client sent it back into a chonkstep index.
 ///
-/// Returns `None` for ids chonkstep cannot represent — zero, negatives
-/// (Hyprland's special workspaces, which chonkstep does not have) — so
-/// the caller reports an error instead of guessing at workspace 0.
+/// Returns `None` for ids that are not numbered workspaces — zero, and
+/// the negative ids special workspaces carry — so the caller reports an
+/// error instead of guessing at workspace 0. Special ids have their own
+/// resolver, [`special_index_from_hypr_id`], and the two never overlap.
 pub fn workspace_index_from_hypr_id(id: i32) -> Option<usize> {
     if id <= 0 {
         return None;
     }
     usize::try_from(id - 1).ok()
+}
+
+/// The id of the first special workspace, counting down from there:
+/// Hyprland's `SPECIAL_WORKSPACE_START`. A special's id is stable for
+/// the session because the core never destroys one, so the index it
+/// was created at names it for as long as the compositor runs.
+pub const SPECIAL_WORKSPACE_START: i32 = -99;
+
+/// The most special workspaces a session may hold, and the longest name
+/// one may carry. Mirrors `wm_core::MAX_SPECIAL_WORKSPACES` and
+/// `MAX_SPECIAL_NAME` by value, as [`crate::dispatch`]'s workspace
+/// ceiling mirrors the core's; the Wayland adapter checks the pair
+/// against the core at compile time.
+pub const MAX_SPECIAL_WORKSPACES: usize = 16;
+pub const MAX_SPECIAL_NAME: usize = 64;
+
+/// The wire id of the special workspace at `index`.
+pub fn special_hypr_id(index: usize) -> i32 {
+    SPECIAL_WORKSPACE_START.saturating_sub(i32::try_from(index).unwrap_or(i32::MAX))
+}
+
+/// Convert a special workspace id back into the core's index, or
+/// `None` for an id no special workspace could carry.
+pub fn special_index_from_hypr_id(id: i32) -> Option<usize> {
+    if id > SPECIAL_WORKSPACE_START {
+        return None;
+    }
+    usize::try_from(SPECIAL_WORKSPACE_START - id).ok()
+}
+
+/// One special workspace — Omarchy's scratchpad — as the wire lists it
+/// among the workspaces, with the negative id and `special:NAME` name
+/// Hyprland gives one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpecialWorkspace {
+    /// The core's stable index; the wire id comes from it.
+    pub index: usize,
+    pub name: String,
+    pub layout: String,
+    /// The monitor it is shown on, when it is.
+    pub monitor: Option<String>,
+    pub monitor_id: i32,
+    pub windows: u32,
+    pub has_fullscreen: bool,
+}
+
+impl SpecialWorkspace {
+    pub fn hypr_id(&self) -> i32 {
+        special_hypr_id(self.index)
+    }
+
+    /// Hyprland names a special workspace `special:NAME`, and both
+    /// Quickshell and Omarchy tell one from a numbered workspace by that
+    /// prefix as often as by the sign of its id.
+    pub fn hypr_name(&self) -> String {
+        format!("special:{}", self.name)
+    }
 }
 
 /// One managed window.
@@ -166,14 +226,25 @@ pub struct Window {
     pub y: i32,
     pub width: i32,
     pub height: i32,
-    /// 0-based chonkstep workspace index.
+    /// 0-based chonkstep workspace index: the numbered home, which a
+    /// special member keeps while `special` says where it really is.
     pub workspace: usize,
+    /// The name of the special workspace this window is a member of.
+    pub special: Option<String>,
     /// Resolved geometrically by the caller; see the module doc.
     pub monitor: i32,
     pub pid: i32,
     /// True for an X11 window managed through XWayland.
     pub xwayland: bool,
+    /// Compositor fullscreen: the window covers its output. This is
+    /// the only fullscreen `hasfullscreen` and the `fullscreen` event
+    /// follow.
     pub fullscreen: bool,
+    /// Maximized along both axes, Hyprland's fullscreen mode 1.
+    pub maximized: bool,
+    /// Told it is fullscreen while keeping its tile (`fullscreenstate 0
+    /// 2`). Reported on `fullscreenClient` only.
+    pub client_fullscreen: bool,
     /// Miniaturised. Hyprland's nearest concept is `hidden`, which
     /// `omarchy-capture-region` filters on (`select(.hidden != true)`)
     /// to keep iconified windows out of its rectangle list.
@@ -190,6 +261,32 @@ pub struct Window {
 }
 
 impl Window {
+    /// Hyprland's `fullscreen` field: the compositor's own mode — 2
+    /// fullscreen, 1 maximized, 0 neither.
+    pub fn fullscreen_mode(&self) -> i32 {
+        if self.fullscreen {
+            2
+        } else if self.maximized {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Hyprland's `fullscreenClient` field: what the window is told —
+    /// 2 for compositor or client-only fullscreen, 1 maximized, 0
+    /// neither. Omarchy's tiled-fullscreen toggle branches on this, so
+    /// it has to read 2 exactly while the window is told so.
+    pub fn fullscreen_client_mode(&self) -> i32 {
+        if self.fullscreen || self.client_fullscreen {
+            2
+        } else if self.maximized {
+            1
+        } else {
+            0
+        }
+    }
+
     /// The window's Hyprland address: `0x` followed by lowercase hex.
     ///
     /// Quickshell parses this with `toULongLong(&ok, 16)`, which accepts
@@ -208,6 +305,9 @@ impl Window {
 pub struct Snapshot {
     pub monitors: Vec<Monitor>,
     pub workspaces: Vec<Workspace>,
+    /// The special workspaces the session has created, in core index
+    /// order.
+    pub specials: Vec<SpecialWorkspace>,
     pub windows: Vec<Window>,
     /// `ClientId::as_u64()` of the focused window, if any.
     pub focused: Option<u64>,
@@ -226,6 +326,14 @@ pub struct Snapshot {
     /// Human-readable live compositor/build summary served by
     /// `hyprctl systeminfo`.
     pub system_info: String,
+    /// Whether each display has its own row of Spaces. On the shared
+    /// desktop a workspace spans every display, so
+    /// `movecurrentworkspacetomonitor` has nothing to move and `e+1`
+    /// steps the whole row rather than one display's.
+    pub separate_spaces: bool,
+    /// The 0-based workspace the desktop was on before the last switch:
+    /// what `workspace previous` names, absent before the first switch.
+    pub previous_workspace: Option<usize>,
 }
 
 /// One keybinding in the subset `hyprctl binds` exposes to menus.
@@ -293,6 +401,25 @@ impl Snapshot {
 
     fn monitor_name(&self, id: i32) -> String {
         self.monitors.iter().find(|monitor| monitor.id == id).map(|monitor| monitor.name.clone()).unwrap_or_default()
+    }
+
+    /// The special workspace called `name`, if the session has one.
+    pub fn special_named(&self, name: &str) -> Option<&SpecialWorkspace> {
+        self.specials.iter().find(|special| special.name == name)
+    }
+
+    /// The `{ id, name }` the wire reports for where `window` lives:
+    /// its special workspace while it is a member, its numbered
+    /// workspace otherwise.
+    fn window_workspace_ref(&self, window: &Window) -> WorkspaceRef {
+        if let Some(special) = window.special.as_deref().and_then(|name| self.special_named(name)) {
+            return WorkspaceRef { id: special.hypr_id(), name: special.hypr_name() };
+        }
+        let workspace = self.workspaces.iter().find(|w| w.index == window.workspace);
+        WorkspaceRef {
+            id: workspace.map_or(1, Workspace::hypr_id),
+            name: workspace.map_or_else(|| "1".to_string(), Workspace::hypr_name),
+        }
     }
 }
 
@@ -463,11 +590,17 @@ impl Snapshot {
                         id: workspace.map_or(1, Workspace::hypr_id),
                         name: workspace.map_or_else(|| "1".to_string(), Workspace::hypr_name),
                     },
-                    // chonkstep has no scratchpad, so there is never a
-                    // special workspace. Hyprland spells "none" as id 0
-                    // with an empty name, and Quickshell's
+                    // Hyprland spells "no special workspace shown" as
+                    // id 0 with an empty name, and Quickshell's
                     // `findWorkspaceByName` is never called with it.
-                    special_workspace: WorkspaceRef { id: 0, name: String::new() },
+                    special_workspace: monitor
+                        .special_workspace
+                        .as_deref()
+                        .and_then(|name| self.special_named(name))
+                        .map_or(WorkspaceRef { id: 0, name: String::new() }, |special| WorkspaceRef {
+                            id: special.hypr_id(),
+                            name: special.hypr_name(),
+                        }),
                     reserved: [0, 0, 0, 0],
                     scale: monitor.scale,
                     transform: monitor.transform,
@@ -486,9 +619,30 @@ impl Snapshot {
             .collect()
     }
 
-    /// `j/workspaces`.
+    /// `j/workspaces`: the numbered workspaces, then every special
+    /// workspace the session has created, as Hyprland lists them.
     pub fn workspaces_json(&self) -> Vec<WorkspaceJson> {
-        self.workspaces.iter().map(|workspace| self.workspace_json(workspace)).collect()
+        self.workspaces
+            .iter()
+            .map(|workspace| self.workspace_json(workspace))
+            .chain(self.specials.iter().map(|special| self.special_json(special)))
+            .collect()
+    }
+
+    fn special_json(&self, special: &SpecialWorkspace) -> WorkspaceJson {
+        let last = self.focused_window().filter(|window| window.special.as_deref() == Some(special.name.as_str()));
+        WorkspaceJson {
+            id: special.hypr_id(),
+            name: special.hypr_name(),
+            monitor: special.monitor.clone().unwrap_or_default(),
+            monitor_id: special.monitor_id,
+            windows: special.windows,
+            hasfullscreen: special.has_fullscreen,
+            tiled_layout: special.layout.clone(),
+            lastwindow: last.map(Window::address).unwrap_or_else(|| "0x0".to_string()),
+            lastwindowtitle: last.map(|window| window.title.clone()).unwrap_or_default(),
+            ispersistent: false,
+        }
     }
 
     fn workspace_json(&self, workspace: &Workspace) -> WorkspaceJson {
@@ -518,17 +672,13 @@ impl Snapshot {
     }
 
     fn client_json(&self, window: &Window) -> ClientJson {
-        let workspace = self.workspaces.iter().find(|w| w.index == window.workspace);
         ClientJson {
             address: window.address(),
             mapped: !window.hidden,
             hidden: window.hidden,
             at: [window.x, window.y],
             size: [window.width, window.height],
-            workspace: WorkspaceRef {
-                id: workspace.map_or(1, Workspace::hypr_id),
-                name: workspace.map_or_else(|| "1".to_string(), Workspace::hypr_name),
-            },
+            workspace: self.window_workspace_ref(window),
             floating: window.floating,
             pseudo: false,
             monitor: window.monitor,
@@ -545,8 +695,8 @@ impl Snapshot {
             pid: window.pid,
             xwayland: window.xwayland,
             pinned: window.pinned,
-            fullscreen: i32::from(window.fullscreen),
-            fullscreen_client: 0,
+            fullscreen: window.fullscreen_mode(),
+            fullscreen_client: window.fullscreen_client_mode(),
             grouped: Vec::new(),
             tags: window.tags.clone(),
             swallowing: "0x0".to_string(),

@@ -1,8 +1,15 @@
 
 use smithay::input::keyboard::{xkb, Keysym, Layout};
 
-use chonk_hyprland_ipc::dispatch::{Action, Fullscreen, LayoutTarget};
-use chonk_hyprland_ipc::state::{Binding, Devices, Keyboard, Monitor, PointerDevice, Snapshot, Window, Workspace};
+use chonk_hyprland_ipc::dispatch::{Action, Fullscreen, LayoutTarget, MonitorTarget};
+use chonk_hyprland_ipc::state::{
+    Binding, Devices, Keyboard, Monitor, PointerDevice, Snapshot, SpecialWorkspace, Window, Workspace,
+};
+
+// The wire crate restates the core's special-workspace bounds by value
+// so it stays free of `wm-core`; this is where the two are held equal.
+const _: () = assert!(chonk_hyprland_ipc::state::MAX_SPECIAL_WORKSPACES == wm_core::MAX_SPECIAL_WORKSPACES);
+const _: () = assert!(chonk_hyprland_ipc::state::MAX_SPECIAL_NAME == wm_core::MAX_SPECIAL_NAME);
 use chonk_hyprland_ipc::Server;
 use wm_core::{Backend, BackendEvent, Lifecycle, WindowManager};
 use wm_theme_api::{Point, Rect, Size};
@@ -171,6 +178,7 @@ fn build_snapshot(
             // Mac Spaces expose independently active display rows.
             focused: index == if wm.separate_spaces() { wm.active_output_index() } else { focused_monitor_index(wm, &monitors_info) },
             active_workspace: wm.active_workspace_on_output(index),
+            special_workspace: wm.special_shown_on_output(index).and_then(|special| wm.special_name(special)).map(str::to_string),
             // The connector's own account of itself, mirrored onto the
             // backend from the same `Output` that answers `wl_output`
             // and `zwlr_output_management` (see
@@ -193,6 +201,9 @@ fn build_snapshot(
     let mut workspace_monitors: Vec<Option<i32>> = (0..workspace_count)
         .map(|index| wm.workspace_output_index(index).map(|i| i as i32)).collect();
     let mut workspace_fullscreen = vec![false; workspace_count];
+    let special_count = wm.special_workspaces().count();
+    let mut special_counts = vec![0u32; special_count];
+    let mut special_fullscreen = vec![false; special_count];
     let mut windows = Vec::new();
     let focused = wm.focused_client();
     // The real focus history: `wm.focus_history()` is oldest-first, so
@@ -239,15 +250,28 @@ fn build_snapshot(
             workspace_monitors.push(None);
             workspace_fullscreen.push(false);
         }
-        counts[client.workspace] += 1;
+        let fullscreen = client.flags.contains(wm_core::ClientFlags::FULLSCREEN);
+        // A special member is counted on its special workspace, not on
+        // the numbered home it keeps for the way back.
+        let special = client.special.filter(|&special| special < special_count);
+        match special {
+            Some(special) => {
+                special_counts[special] += 1;
+                special_fullscreen[special] |= fullscreen;
+            }
+            None => {
+                counts[client.workspace] += 1;
+                workspace_fullscreen[client.workspace] |= fullscreen;
+            }
+        }
 
         let output_index = wm.client_output_index(id);
         let coordinates = OutputCoordinates::for_output(wm.backend(), output_index);
         let geometry = Rect::new(coordinates.logical_position(client.geometry.pos), coordinates.logical_size(client.geometry.size));
         let monitor = i32::try_from(output_index).unwrap_or(0);
-        workspace_monitors[client.workspace].get_or_insert(monitor);
-        workspace_fullscreen[client.workspace] |=
-            client.flags.contains(wm_core::ClientFlags::FULLSCREEN);
+        if special.is_none() {
+            workspace_monitors[client.workspace].get_or_insert(monitor);
+        }
         windows.push(Window {
             id: id.as_u64(),
             title: client.title.clone(),
@@ -257,6 +281,7 @@ fn build_snapshot(
             width: i32::try_from(geometry.size.w).unwrap_or(0),
             height: i32::try_from(geometry.size.h).unwrap_or(0),
             workspace: client.workspace,
+            special: special.and_then(|special| wm.special_name(special)).map(str::to_string),
             // `Client::monitor` is an unset slotmap key: multi-monitor
             // policy resolves a window's output geometrically. Reading
             // the field would report every window on monitor zero.
@@ -269,7 +294,11 @@ fn build_snapshot(
             floating: !wm.is_layout_managed(id),
             xwayland: wm.backend().windows.get(&client.window)
                 .is_some_and(|record| matches!(record.surface, ManagedSurface::X11(_))),
-            fullscreen: client.flags.contains(wm_core::ClientFlags::FULLSCREEN),
+            fullscreen,
+            maximized: client
+                .flags
+                .contains(wm_core::ClientFlags::MAXIMIZED_H | wm_core::ClientFlags::MAXIMIZED_V),
+            client_fullscreen: client.flags.contains(wm_core::ClientFlags::CLIENT_FULLSCREEN),
             hidden: client.lifecycle == Lifecycle::Miniaturized,
             urgent: client.flags.contains(wm_core::ClientFlags::URGENT),
             pinned: client.flags.contains(wm_core::ClientFlags::STICKY),
@@ -299,6 +328,25 @@ fn build_snapshot(
                 monitor_id,
                 windows: *count,
                 has_fullscreen: workspace_fullscreen[index],
+            }
+        })
+        .collect();
+    // Special workspaces, with the output each is shown on. One not
+    // shown anywhere belongs, for the wire, to the output a toggle would
+    // show it on.
+    let specials: Vec<SpecialWorkspace> = wm
+        .special_workspaces()
+        .map(|(index, name)| {
+            let shown_on = (0..monitors.len()).find(|&output| wm.special_shown_on_output(output) == Some(index));
+            let output = shown_on.unwrap_or_else(|| wm.active_output_index());
+            SpecialWorkspace {
+                index,
+                name: name.to_string(),
+                layout: wm.special_layout_mode(index).compatible_name().into(),
+                monitor: shown_on.and_then(|output| monitors.get(output)).map(|monitor| monitor.name.clone()),
+                monitor_id: monitors.get(output).map_or(0, |monitor| monitor.id),
+                windows: special_counts.get(index).copied().unwrap_or(0),
+                has_fullscreen: special_fullscreen.get(index).copied().unwrap_or(false),
             }
         })
         .collect();
@@ -366,6 +414,7 @@ fn build_snapshot(
     Snapshot {
         monitors,
         workspaces,
+        specials,
         windows,
         focused: focused.map(wm_core::ClientId::as_u64),
         locked,
@@ -396,6 +445,8 @@ fn build_snapshot(
             // off ordinary state publication.
             String::new()
         },
+        separate_spaces: wm.separate_spaces(),
+        previous_workspace: wm.previous_workspace(),
     }
 }
 
@@ -425,6 +476,9 @@ fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::Ses
         A::Close => verb("killactive", ""),
         A::ToggleFullscreen => verb("fullscreen", "0"),
         A::ToggleMaximize => verb("fullscreen", "1"),
+        A::FullscreenState { internal, client } => {
+            ("fullscreenstate".to_string(), format!("{} {}", internal.level(), client.level()))
+        }
         A::Focus(direction) => ("movefocus".to_string(), letter(direction)),
         A::Move(direction) => ("movewindow".to_string(), letter(direction)),
         A::Floating(None) => verb("togglefloating", ""),
@@ -435,17 +489,51 @@ fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::Ses
         A::LayoutNoop => verb("layoutmsg", ""),
         A::WorkspaceNext => verb("workspace", "+1"),
         A::WorkspacePrev => verb("workspace", "-1"),
+        A::WorkspaceNextOccupied => verb("workspace", "e+1"),
+        A::WorkspacePrevOccupied => verb("workspace", "e-1"),
+        A::WorkspacePrevious => verb("workspace", "previous"),
+        A::FocusMonitor(target) => ("focusmonitor".to_string(), output_target_argument(target)),
+        A::MoveWorkspaceToMonitor(target) => ("movecurrentworkspacetomonitor".to_string(), output_target_argument(target)),
         A::WorkspaceCarryNext => verb("movetoworkspace", "+1"),
         A::WorkspaceCarryPrev => verb("movetoworkspace", "-1"),
         A::Workspace(index) => ("workspace".to_string(), (index + 1).to_string()),
         A::WorkspaceSend(index) => ("movetoworkspacesilent".to_string(), (index + 1).to_string()),
         A::WorkspaceCarry(index) => ("movetoworkspace".to_string(), (index + 1).to_string()),
+        A::ToggleSpecial(name) => ("togglespecialworkspace".to_string(), name.clone()),
+        A::SendToSpecial { name, follow: false } => ("movetoworkspacesilent".to_string(), format!("special:{name}")),
+        A::SendToSpecial { name, follow: true } => ("movetoworkspace".to_string(), format!("special:{name}")),
         other => ("chonkstep".to_string(), chonkstep_label(other)),
     };
     Binding {
         modifiers: hypr_modmask(binding.combo.modifiers), key: keysym_name(binding.combo.keysym),
         description: binding.description.clone().unwrap_or_default(), dispatcher, argument,
         locked: binding.locked, repeating: binding.repeating, release: binding.release,
+    }
+}
+
+/// A monitor verb's argument as Hyprland spells it, which `dispatch`
+/// reads back to the same target.
+fn output_target_argument(target: &wm_core::OutputTarget) -> String {
+    match target {
+        wm_core::OutputTarget::Relative(step) => format!("{step:+}"),
+        wm_core::OutputTarget::Direction(wm_core::FocusDirection::Left) => "l".into(),
+        wm_core::OutputTarget::Direction(wm_core::FocusDirection::Right) => "r".into(),
+        wm_core::OutputTarget::Direction(wm_core::FocusDirection::Up) => "u".into(),
+        wm_core::OutputTarget::Direction(wm_core::FocusDirection::Down) => "d".into(),
+        wm_core::OutputTarget::Name(name) => name.clone(),
+    }
+}
+
+/// The window manager's spelling of a monitor selector the socket read.
+fn output_target(target: MonitorTarget) -> wm_core::OutputTarget {
+    use chonk_hyprland_ipc::dispatch::Direction;
+    match target {
+        MonitorTarget::Relative(step) => wm_core::OutputTarget::Relative(step),
+        MonitorTarget::Direction(Direction::Left) => wm_core::OutputTarget::Direction(wm_core::FocusDirection::Left),
+        MonitorTarget::Direction(Direction::Right) => wm_core::OutputTarget::Direction(wm_core::FocusDirection::Right),
+        MonitorTarget::Direction(Direction::Up) => wm_core::OutputTarget::Direction(wm_core::FocusDirection::Up),
+        MonitorTarget::Direction(Direction::Down) => wm_core::OutputTarget::Direction(wm_core::FocusDirection::Down),
+        MonitorTarget::Name(name) => wm_core::OutputTarget::Name(name),
     }
 }
 
@@ -630,6 +718,14 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
                 (None, _, _) => false,
             }
         }
+        Action::ToggleSpecialWorkspace(name) => wm.toggle_special(&name),
+        Action::MoveToSpecial { window, name, follow } => {
+            let client = match window {
+                Some(id) => client_of(wm, id),
+                None => wm.focused_client(),
+            };
+            client.is_some_and(|client| wm.move_client_to_special(client, &name, follow))
+        }
         Action::ToggleMaximize => {
             if let Some(id) = wm.focused_client() {
                 wm.toggle_maximize(id, wm_core::MaximizeDirections::FULL);
@@ -647,6 +743,22 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             }
             None => false,
         },
+        Action::FullscreenState { window, internal, client } => {
+            let target = match window {
+                Some(id) => client_of(wm, id),
+                None => wm.focused_client(),
+            };
+            // Parsing already refused anything outside 0..=2; a value
+            // that still fails here is answered as not applied rather
+            // than rounded.
+            match (target, wm_core::FullscreenMode::from_level(internal), wm_core::FullscreenMode::from_level(client)) {
+                (Some(target), Some(internal), Some(client)) => {
+                    wm.toggle_fullscreen_state(target, internal, client);
+                    true
+                }
+                _ => false,
+            }
+        }
         Action::CycleFocus { forward } => wm.focus_adjacent_client(forward),
         Action::FocusDirection(direction) => {
             wm.focus_direction(match direction {
@@ -833,6 +945,38 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             let index = logical_monitor_index(comp.wm.backend(), logical);
             let physical = OutputCoordinates::for_output(comp.wm.backend(), index).physical_position(logical);
             crate::input::warp_pointer(comp, physical)
+        }
+        Action::FocusMonitor(target) => {
+            // Parsing refused this against the snapshot's lock; the lock
+            // can have landed since, and a script must never move focus
+            // or the pointer behind the lock surface.
+            if comp.wm.backend().locked {
+                return false;
+            }
+            let Some(index) = comp.wm.resolve_output_target(&output_target(target)) else {
+                return false;
+            };
+            let focused = comp.wm.focus_output(index);
+            // The warp the window manager asked for, applied now rather
+            // than at the next drain, so a script that reads `cursorpos`
+            // straight after sees the pointer where it asked for it.
+            crate::input::flush_pointer_warp(comp);
+            focused
+        }
+        Action::MoveWorkspaceToMonitor(target) => {
+            if comp.wm.backend().locked {
+                return false;
+            }
+            let Some(index) = comp.wm.resolve_output_target(&output_target(target)) else {
+                return false;
+            };
+            match comp.wm.move_workspace_to_output(index) {
+                Ok(()) => true,
+                Err(why) => {
+                    tracing::warn!(why, "movecurrentworkspacetomonitor refused at apply");
+                    false
+                }
+            }
         }
         Action::ReloadConfig => {
             comp.shell.reload_config(&mut comp.wm);
@@ -1082,6 +1226,7 @@ mod binding_replay_tests {
                 vrr_enabled: false,
                 focused: true,
                 active_workspace: 1,
+                special_workspace: None,
                 make: String::new(),
                 model: String::new(),
                 serial: String::new(),
@@ -1109,10 +1254,13 @@ mod binding_replay_tests {
                 width: 800,
                 height: 600,
                 workspace: 1,
+                special: None,
                 monitor: 0,
                 pid: 4242,
                 xwayland: false,
                 fullscreen: false,
+                maximized: false,
+                client_fullscreen: false,
                 hidden: false,
                 urgent: false,
                 pinned: false,
@@ -1124,6 +1272,10 @@ mod binding_replay_tests {
             }],
             focused: Some(FOCUSED),
             bindings,
+            // Omarchy binds `workspace previous` and the workspace-to-
+            // monitor moves; both need a desk where they mean something.
+            separate_spaces: true,
+            previous_workspace: Some(0),
             ..Snapshot::default()
         }
     }
@@ -1189,7 +1341,23 @@ mod binding_replay_tests {
                     wm_config::Action::Move(wm_core::FocusDirection::Left) => Some(Action::MoveDirection(Direction::Left)),
                     wm_config::Action::WorkspaceNext => Some(Action::FocusWorkspace(2)),
                     wm_config::Action::WorkspacePrev => Some(Action::FocusWorkspace(0)),
+                    // Only workspace 1 (index 1) has a window: `e+1` and
+                    // `e-1` both stay on it rather than growing the row.
+                    wm_config::Action::WorkspaceNextOccupied | wm_config::Action::WorkspacePrevOccupied => {
+                        Some(Action::FocusWorkspace(1))
+                    }
+                    wm_config::Action::WorkspacePrevious => Some(Action::FocusWorkspace(0)),
+                    wm_config::Action::FocusMonitor(wm_core::OutputTarget::Relative(step)) => {
+                        Some(Action::FocusMonitor(chonk_hyprland_ipc::dispatch::MonitorTarget::Relative(*step)))
+                    }
+                    wm_config::Action::MoveWorkspaceToMonitor(wm_core::OutputTarget::Direction(wm_core::FocusDirection::Left)) => {
+                        Some(Action::MoveWorkspaceToMonitor(chonk_hyprland_ipc::dispatch::MonitorTarget::Direction(Direction::Left)))
+                    }
                     wm_config::Action::Workspace(index) => Some(Action::FocusWorkspace(*index)),
+                    wm_config::Action::ToggleSpecial(name) => Some(Action::ToggleSpecialWorkspace(name.clone())),
+                    wm_config::Action::SendToSpecial { name, follow } => {
+                        Some(Action::MoveToSpecial { window: None, name: name.clone(), follow: *follow })
+                    }
                     wm_config::Action::Run(_) | wm_config::Action::SpawnTerminal => Some(Action::ExecShell(row.argument.clone())),
                     _ if row.dispatcher == "chonkstep" => Some(Action::Binding(row.argument.clone())),
                     _ => None,

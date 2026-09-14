@@ -58,6 +58,16 @@ fn action_label(action: &Action) -> (&'static str, String, bool) {
         Close => ("WINDOWS", "Close the focused window".into(), true),
         ToggleMaximize => ("WINDOWS", "Maximize / restore".into(), true),
         ToggleFullscreen => ("WINDOWS", "Enter / leave fullscreen".into(), true),
+        FullscreenState { internal: wm_core::FullscreenMode::None, client: wm_core::FullscreenMode::Fullscreen } => (
+            "WINDOWS",
+            "Tiled fullscreen: the app hides its chrome in place".into(),
+            false,
+        ),
+        FullscreenState { internal, client } => (
+            "WINDOWS",
+            format!("Set fullscreen state {} {}", internal.level(), client.level()),
+            false,
+        ),
         Miniaturize => ("WINDOWS", "Minimize the focused window".into(), true),
         WindowMenu => ("WINDOWS", "Open window commands".into(), true),
         ToggleShade => ("WINDOWS", "Roll up / unroll the window".into(), false),
@@ -117,6 +127,41 @@ fn action_label(action: &Action) -> (&'static str, String, bool) {
             "Go to the previous desktop".into(),
             true,
         ),
+        WorkspaceNextOccupied => (
+            "SPACES & WORKSPACES",
+            "Go to the next desktop with windows".into(),
+            true,
+        ),
+        WorkspacePrevOccupied => (
+            "SPACES & WORKSPACES",
+            "Go to the previous desktop with windows".into(),
+            true,
+        ),
+        WorkspacePrevious => (
+            "SPACES & WORKSPACES",
+            "Go back to the desktop you were on".into(),
+            true,
+        ),
+        FocusMonitor(target) => (
+            "SPACES & WORKSPACES",
+            match target {
+                wm_core::OutputTarget::Relative(step) if *step < 0 => "Focus the previous display".into(),
+                wm_core::OutputTarget::Relative(_) => "Focus the next display".into(),
+                wm_core::OutputTarget::Direction(d) => format!("Focus the display to the {}", direction(*d)),
+                wm_core::OutputTarget::Name(name) => format!("Focus display {name}"),
+            },
+            false,
+        ),
+        MoveWorkspaceToMonitor(target) => (
+            "SPACES & WORKSPACES",
+            match target {
+                wm_core::OutputTarget::Relative(step) if *step < 0 => "Move the desktop to the previous display".into(),
+                wm_core::OutputTarget::Relative(_) => "Move the desktop to the next display".into(),
+                wm_core::OutputTarget::Direction(d) => format!("Move the desktop to the display to the {}", direction(*d)),
+                wm_core::OutputTarget::Name(name) => format!("Move the desktop to display {name}"),
+            },
+            false,
+        ),
         WorkspaceCarryNext => (
             "SPACES & WORKSPACES",
             "Move window to next desktop and follow".into(),
@@ -141,6 +186,19 @@ fn action_label(action: &Action) -> (&'static str, String, bool) {
             "SPACES & WORKSPACES",
             format!("Move window to desktop {} and follow", n + 1),
             *n == 0,
+        ),
+        ToggleSpecial(name) => (
+            "SPACES & WORKSPACES",
+            format!("Show / hide the {name} scratchpad"),
+            true,
+        ),
+        SendToSpecial { name, follow } => (
+            "SPACES & WORKSPACES",
+            format!(
+                "Send window to the {name} scratchpad{}",
+                if *follow { " and follow" } else { "" }
+            ),
+            true,
         ),
         Capture(mode) => (
             "CAPTURE",

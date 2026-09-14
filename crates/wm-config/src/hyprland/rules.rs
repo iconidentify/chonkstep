@@ -52,9 +52,13 @@
 use std::sync::Arc;
 
 use regex::{Regex, RegexBuilder};
-use wm_core::{FloatDecision, FloatPolicy, Size, WindowRuleDecision};
+use wm_core::{
+    FloatDecision, FloatPolicy, Point, RuleMetrics, RulePlacement, RuleWorkspace, RuleWorkspaceTarget, Size,
+    WindowRuleDecision,
+};
 
 use super::directive::{Matcher, WindowRule};
+use super::expr::{Expr, Values};
 
 /// A compiled pattern with the text it came from, kept for log lines.
 #[derive(Clone, Debug)]
@@ -93,6 +97,54 @@ impl Pattern {
     }
 }
 
+/// A pair of layout expressions — a `size` or a `move` — with the
+/// text it came from, kept for the log and the docs.
+#[derive(Clone, Debug)]
+struct Extent {
+    x: Expr,
+    y: Expr,
+    source: String,
+}
+
+impl Extent {
+    /// `size 875 600`, `move (monitor_w-window_w-40) (monitor_h*0.04)`:
+    /// two space-separated expressions, each of which may be a plain
+    /// number. Split on whitespace exactly as Hyprland splits the
+    /// arguments, so an expression cannot contain a space there either.
+    fn parse(value: &str) -> Result<Self, String> {
+        let mut parts = value.split_whitespace();
+        let (Some(x), Some(y), None) = (parts.next(), parts.next(), parts.next()) else {
+            return Err("needs exactly two values".into());
+        };
+        let x = Expr::parse(x).map_err(|why| format!("{x:?} {why}"))?;
+        let y = Expr::parse(y).map_err(|why| format!("{y:?} {why}"))?;
+        Ok(Self { x, y, source: value.trim().to_string() })
+    }
+
+    /// Both halves as a size, when neither needs a monitor to
+    /// evaluate: what the fixed rules Omarchy writes most (`875 600`)
+    /// compile to.
+    fn constant_size(&self) -> Option<Size> {
+        to_size(self.x.constant()?, self.y.constant()?)
+    }
+
+    /// Whether neither half needs a monitor.
+    fn is_constant(&self) -> bool {
+        self.x.constant().is_some() && self.y.constant().is_some()
+    }
+
+    fn eval(&self, values: &Values) -> Option<(f64, f64)> {
+        Some((self.x.eval(values)?, self.y.eval(values)?))
+    }
+}
+
+/// A rounded, strictly positive size, or `None`: a zero- or
+/// negative-sized window is not a smaller window, it is an absent one.
+fn to_size(w: f64, h: f64) -> Option<Size> {
+    let (w, h) = (w.round(), h.round());
+    (w >= 1.0 && h >= 1.0 && w <= u32::MAX as f64 && h <= u32::MAX as f64).then(|| Size::new(w as u32, h as u32))
+}
+
 /// One resolved float rule: who it matches and what it says.
 #[derive(Clone, Debug)]
 struct Rule {
@@ -102,7 +154,12 @@ struct Rule {
     center: Option<bool>,
     /// Logical pixels, as Omarchy writes them. Scaled at the point of
     /// use, exactly as the hardcoded 875×600 always was.
-    size: Option<Size>,
+    size: Option<Extent>,
+    /// The frame's position relative to the monitor it maps on, in the
+    /// same logical pixels. Evaluated after `size`, with the resolved
+    /// size as `window_w`/`window_h`, which is how Omarchy's `move`
+    /// expressions are written.
+    position: Option<Extent>,
     idle_inhibit: Option<wm_core::IdleInhibitRule>,
     pin: Option<bool>,
     no_focus: Option<bool>,
@@ -114,6 +171,8 @@ struct Rule {
     suppress_fullscreen: Option<bool>,
     /// The touchpad scroll factor over this window.
     scroll_touchpad: Option<f64>,
+    /// The workspace to map onto.
+    workspace: Option<RuleWorkspace>,
 }
 
 impl Rule {
@@ -173,8 +232,14 @@ impl FloatRules {
                     Some(false) => what.push("do not float".to_string()),
                     None => {}
                 }
-                if let Some(size) = rule.size {
-                    what.push(format!("{}x{}", size.w, size.h));
+                if let Some(size) = &rule.size {
+                    match size.constant_size() {
+                        Some(size) => what.push(format!("{}x{}", size.w, size.h)),
+                        None => what.push(format!("size {}", size.source)),
+                    }
+                }
+                if let Some(position) = &rule.position {
+                    what.push(format!("at {}", position.source));
                 }
                 if rule.center == Some(true) {
                     what.push("centered".to_string());
@@ -189,6 +254,13 @@ impl FloatRules {
                 }
                 if let Some(factor) = rule.scroll_touchpad {
                     what.push(format!("touchpad scroll x{factor}"));
+                }
+                if let Some(rule) = &rule.workspace {
+                    let target = match &rule.target {
+                        RuleWorkspaceTarget::Special(name) => format!("special:{name}"),
+                        RuleWorkspaceTarget::Numbered(index) => (index + 1).to_string(),
+                    };
+                    what.push(format!("workspace {target}{}", if rule.silent { " silently" } else { "" }));
                 }
                 for (enabled, label) in [
                     (rule.pin, "pinned"),
@@ -238,7 +310,7 @@ impl FloatPolicy for FloatRules {
             }
             float = rule.float.or(float);
             center = rule.center.or(center);
-            size = rule.size.or(size);
+            size = rule.size.as_ref().or(size);
         }
         // A rule that only *sizes* a window still floats it here:
         // every window on this desktop already floats, so "size" and
@@ -251,9 +323,69 @@ impl FloatPolicy for FloatRules {
             return None;
         }
         Some(FloatDecision {
-            size,
+            // A size that needs a monitor is answered by
+            // `placement_for`, which has one.
+            size: size.and_then(Extent::constant_size),
             center: center.unwrap_or(true),
         })
+    }
+
+    /// The same last-wins walk as [`Self::decision_for`], with a
+    /// monitor to evaluate against. Size first, then position with the
+    /// resolved size as the window's — so `(monitor_w-window_w-40)`
+    /// means "40 from the right edge of the window this rule just
+    /// sized", which is what Omarchy wrote.
+    fn placement_for(&self, class: &str, title: &str, metrics: &RuleMetrics) -> Option<RulePlacement> {
+        let mut float = None;
+        let mut center = None;
+        let mut size = None;
+        let mut position = None;
+        for rule in &self.rules {
+            if !rule.matches(class, title) {
+                continue;
+            }
+            float = rule.float.or(float);
+            center = rule.center.or(center);
+            size = rule.size.as_ref().or(size);
+            position = rule.position.as_ref().or(position);
+        }
+        if float == Some(false) || (float.is_none() && size.is_none()) {
+            return None;
+        }
+        let visual = |content: Size| Values {
+            monitor_w: f64::from(metrics.monitor.w),
+            monitor_h: f64::from(metrics.monitor.h),
+            window_w: f64::from(content.w) + f64::from(metrics.chrome.w),
+            window_h: f64::from(content.h) + f64::from(metrics.chrome.h),
+        };
+        let size = size.and_then(|extent| {
+            let resolved = extent.eval(&visual(metrics.window)).and_then(|(w, h)| to_size(w, h));
+            if resolved.is_none() {
+                tracing::debug!(
+                    rule = %extent.source,
+                    ?metrics,
+                    "window rule size did not evaluate to a usable size on this monitor: size ignored"
+                );
+            }
+            resolved
+        });
+        // An explicit `center` is the stronger statement about where
+        // the window goes; the default center (a float rule with no
+        // position at all) is what `move` replaces.
+        let position = position.filter(|_| center != Some(true)).and_then(|extent| {
+            let resolved = extent
+                .eval(&visual(size.unwrap_or(metrics.window)))
+                .map(|(x, y)| Point::new(x.round() as i32, y.round() as i32));
+            if resolved.is_none() {
+                tracing::debug!(
+                    rule = %extent.source,
+                    ?metrics,
+                    "window rule move did not evaluate to a position on this monitor: move ignored"
+                );
+            }
+            resolved
+        });
+        Some(RulePlacement { size, position })
     }
 
     fn window_decision_for(&self, class: &str, title: &str) -> WindowRuleDecision {
@@ -291,6 +423,9 @@ impl FloatPolicy for FloatRules {
             }
             if let Some(value) = rule.suppress_fullscreen {
                 decision.suppress_fullscreen = value;
+            }
+            if let Some(value) = &rule.workspace {
+                decision.workspace = Some(value.clone());
             }
         }
         decision
@@ -413,35 +548,37 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                 spec.center = Some(truthy(value));
                 any = true;
             }
-            "size" => {
-                // `size 875 600`. A size given as an expression —
-                // Omarchy's picture-in-picture uses
-                // `(monitor_w-window_w-40)` for its *position* and
-                // plain numbers for its size, but the webcam overlay
-                // sizes itself off the monitor — is not evaluated: this
-                // reader has no monitor to evaluate it against, and a
-                // guessed size is a window in the wrong place.
-                let mut parts = value.split_whitespace();
-                match (
-                    parts.next().and_then(|w| w.parse().ok()),
-                    parts.next().and_then(|h| h.parse().ok()),
-                ) {
-                    (Some(w), Some(h)) if w > 0 && h > 0 => {
-                        spec.size = Some(Size::new(w, h));
-                        any = true;
-                    }
-                    _ => {
-                        // Still "any": a size this reader cannot
-                        // evaluate is a rule it has to *report*, and a
-                        // spec that came back `None` would be dropped
-                        // silently. It contributes no float and no
-                        // size, so the rule ends up saying nothing —
-                        // out loud.
-                        spec.unreadable_size = Some(value.clone());
-                        any = true;
-                    }
+            // `size 875 600`, or `size (monitor_h*4/25) (monitor_h*9/50)`:
+            // the webcam overlay sizes itself off the monitor, which is
+            // compiled here and evaluated when the window maps.
+            "size" => match Extent::parse(value) {
+                Ok(extent) if !extent.is_constant() || extent.constant_size().is_some() => {
+                    spec.size = Some(extent);
+                    any = true;
                 }
-            }
+                Ok(_) => notes.push(format!(
+                    "window rule size {value:?} on {} is not a positive size: property skipped",
+                    describe_matchers(rule)
+                )),
+                Err(why) => notes.push(format!(
+                    "window rule size {value:?} on {}: {why}: property skipped",
+                    describe_matchers(rule)
+                )),
+            },
+            // `move (monitor_w-window_w-40) (monitor_h*0.04)`: the
+            // frame's position on the monitor, relative to its origin.
+            // Hyprland's other spellings — `cursor`, percentages,
+            // `onscreen` — are not read, and say so.
+            "move" => match Extent::parse(value) {
+                Ok(extent) => {
+                    spec.position = Some(extent);
+                    any = true;
+                }
+                Err(why) => notes.push(format!(
+                    "window rule move {value:?} on {}: {why}: property skipped",
+                    describe_matchers(rule)
+                )),
+            },
             "idle_inhibit" | "idleinhibit" => match idle_inhibit_mode(value) {
                 Some(mode) => {
                     spec.idle_inhibit = Some(mode);
@@ -495,6 +632,22 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                     any = true;
                 }
             }
+            // `workspace N`, `workspace special`, `workspace
+            // special:NAME`, each with an optional `silent`. Named
+            // workspaces (`name:…`) and the relative forms are refused
+            // by name: this desktop's workspaces are numbered, and a
+            // rule is read long before the row it would be relative to
+            // exists.
+            "workspace" => match workspace_rule(value) {
+                Ok(rule) => {
+                    spec.workspace = Some(rule);
+                    any = true;
+                }
+                Err(why) => notes.push(format!(
+                    "window rule workspace {value:?} on {} {why}: property skipped",
+                    describe_matchers(rule)
+                )),
+            },
             "scroll_touchpad" | "scrolltouchpad" => match value.trim().parse::<f64>() {
                 Ok(factor) if factor.is_finite() && (0.01..=10.0).contains(&factor) => {
                     spec.scroll_touchpad = Some(factor);
@@ -522,8 +675,8 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
 struct Spec {
     float: Option<bool>,
     center: Option<bool>,
-    size: Option<Size>,
-    unreadable_size: Option<String>,
+    size: Option<Extent>,
+    position: Option<Extent>,
     idle_inhibit: Option<wm_core::IdleInhibitRule>,
     pin: Option<bool>,
     no_focus: Option<bool>,
@@ -534,6 +687,40 @@ struct Spec {
     suppress_maximize: Option<bool>,
     suppress_fullscreen: Option<bool>,
     scroll_touchpad: Option<f64>,
+    workspace: Option<RuleWorkspace>,
+}
+
+/// Reads a `workspace` rule's value.
+fn workspace_rule(value: &str) -> Result<RuleWorkspace, String> {
+    let mut words = value.split_whitespace();
+    let target = words.next().ok_or_else(|| "names no workspace".to_string())?;
+    let mut silent = false;
+    for word in words {
+        if word.eq_ignore_ascii_case("silent") {
+            silent = true;
+        } else {
+            return Err(format!("carries {word:?}, which this reader does not implement"));
+        }
+    }
+    let target = if target == "special" || target.starts_with("special:") {
+        let name = wm_core::normalize_special_name(target)
+            .ok_or_else(|| "names a special workspace this desktop will not create".to_string())?;
+        RuleWorkspaceTarget::Special(name)
+    } else if let Some(name) = target.strip_prefix("name:") {
+        return Err(format!("names workspace {name:?}, and chonkstep workspaces are numbered, not named"));
+    } else {
+        // Digits only: `+1`, `-1` and `e+1` are relative to a row that
+        // does not exist when a rule is read.
+        let index = target
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| target.parse::<usize>().ok())
+            .flatten()
+            .filter(|index| (1..=crate::MAX_WORKSPACE).contains(index))
+            .ok_or_else(|| format!("must be 1 to {}, special or special:NAME", crate::MAX_WORKSPACE))?;
+        RuleWorkspaceTarget::Numbered(index - 1)
+    };
+    Ok(RuleWorkspace { target, silent })
 }
 
 fn push(
@@ -543,11 +730,6 @@ fn push(
     title: Option<String>,
     spec: &Spec,
 ) {
-    if let Some(text) = &spec.unreadable_size {
-        notes.push(format!(
-            "float rule sizes a window with the expression {text:?}, which needs a monitor to evaluate: size ignored"
-        ));
-    }
     let class = match class {
         Some(text) => match Pattern::compile(&text) {
             Some(pattern) => Some(pattern),
@@ -577,7 +759,8 @@ fn push(
         title,
         float: spec.float,
         center: spec.center,
-        size: spec.size,
+        size: spec.size.clone(),
+        position: spec.position.clone(),
         idle_inhibit: spec.idle_inhibit,
         pin: spec.pin,
         no_focus: spec.no_focus,
@@ -588,6 +771,7 @@ fn push(
         suppress_maximize: spec.suppress_maximize,
         suppress_fullscreen: spec.suppress_fullscreen,
         scroll_touchpad: spec.scroll_touchpad,
+        workspace: spec.workspace.clone(),
     });
 }
 

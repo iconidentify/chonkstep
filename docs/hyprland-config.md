@@ -63,9 +63,16 @@ Each binding gets one of three answers:
 
 1. **A verb chonkstep also has** becomes that verb. `killactive` →
    `close`, `fullscreen 0` → `toggle-fullscreen`, `fullscreen 1` →
-   `toggle-maximize`, `workspace 4` → `workspace 4`, `workspace e+1` →
-   `workspace-next`, `movefocus l/r/u/d` → geometry-ranked directional
-   focus.
+   `toggle-maximize`, `fullscreenstate 0 2` → `toggle-tiled-fullscreen`
+   (any other `fullscreenstate <internal> <client>` pair with each axis
+   0, 1 or 2 binds too), `workspace 4` → `workspace 4`, `workspace e+1` →
+   `workspace-next-occupied` (the next workspace that has windows,
+   wrapping; the bare `+1` is `workspace-next`, which steps by index),
+   `workspace previous` → `workspace-previous`, `focusmonitor +1|l|NAME`
+   → `focus-monitor …`, `movecurrentworkspacetomonitor l|NAME` →
+   `move-workspace-to-monitor …` (a Space move under separate Spaces;
+   refused with a reason on the shared desktop), `movefocus l/r/u/d` →
+   geometry-ranked directional focus.
 2. **A command** becomes a `run` binding naming that command, declared
    automatically in `[commands]` under a generated `hypr:…` name. This
    is the whole "install chonkstep, keep your Omarchy" claim made
@@ -145,12 +152,48 @@ windowrulev2 = float, class:^(steam)$, title:^(Steam)$   # v2
 windowrule   = float on, match:class steam               # 0.53+
 ```
 
-The supported properties are `float`, `size`, `center`, `idle_inhibit`,
-`pin`, `no_focus`, `no_initial_focus`, `focus_on_activate`,
-`fullscreen`, `maximize`, `suppress_event`, and `scroll_touchpad`. They match `class` and `title` as regular
+The supported properties are `float`, `size`, `move`, `center`,
+`idle_inhibit`, `pin`, `no_focus`, `no_initial_focus`,
+`focus_on_activate`, `fullscreen`, `maximize`, `suppress_event`,
+`scroll_touchpad`, and `workspace`. They match `class` and `title` as regular
 expressions, matched against the entire class or title, as in Hyprland's
 `RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
+
+`size` and `move` take two values, each a number or one of Hyprland's
+layout expressions — arithmetic over `monitor_w`, `monitor_h`,
+`window_w` and `window_h` with `+ - * /`, unary minus and parentheses,
+in logical pixels:
+
+```lua
+o.window({ tag = "pip" }, {
+  float = true, size = { 600, 338 },
+  move = { "(monitor_w-window_w-40)", "(monitor_h*0.04)" },
+})
+o.window("^WebcamOverlay-small$", {
+  size = { "(monitor_h*4/25)", "(monitor_h*9/50)" },
+  move = { "(monitor_w-monitor_h*4/25-40)", "(monitor_h-monitor_h*9/50-40)" },
+})
+```
+
+The expressions are compiled when the file is read and evaluated when
+the window maps, against the monitor it maps on — the whole monitor,
+not its workarea, which is what Omarchy's rules are written against.
+`size` is evaluated first; `move` then sees the resolved size as
+`window_w`/`window_h`, so `(monitor_w-window_w-40)` means "40 in from
+the right edge of the window this rule just sized". `window_w` and
+`window_h` are the frame's visual size, chrome included. The position is
+relative to the monitor's own origin and is converted with that
+output's scale, so a mixed-DPI desk places the window where the rule
+says on whichever head it opens on. The frame is then pulled inside the
+workarea: a rule can never put a window under a reserved bar or off the
+edge of the screen. An expression longer than 128 bytes or nested more
+than 16 levels deep is refused when the file is read; one that does not
+come out finite (a division by zero) drops that property when the
+window maps, and the rule's `float` still applies. `move` is replaced
+by an explicit `center`; Hyprland's other `move` spellings (`cursor`,
+`onscreen`, percentages) and `keep_aspect_ratio` are reported and not
+read.
 
 `idle_inhibit` reads four modes. `always` (also `on`, `true`, `1`, `yes`)
 inhibits idle while a matching window is visible on the current workspace
@@ -176,6 +219,19 @@ for. `activate` and `activatefocus` stop activation requests from
 focusing the window, like `focus_on_activate = false`. Any other event is
 reported by name.
 
+`workspace` maps the window somewhere other than the current
+workspace: a number (`workspace = "3"`), `special` for the default
+special workspace, or `special:NAME`. Adding `silent` (`"special
+silent"`, `"3 silent"`) sends it there without following — no switch,
+no shown overlay and no initial focus — which is how Omarchy's
+`apps/browser.lua` keeps Chromium's "is sharing your screen" bar off
+the desk, and out of the tiling, for the length of a call. Without
+`silent` a numbered target is switched to and a special one shown.
+`name:…` and the relative forms are refused by name: chonkstep
+workspaces are numbered. `hl.workspace_rule` for a special workspace
+(`gaps_out`, `on_created_empty` and `dim_special`, which Omarchy's
+agent console sets for `special:scratchpad`) is not read yet.
+
 Every unsupported property produces its own `Skipped` line naming both
 the property and matcher. A rule with an unsupported matcher is refused
 whole, so a partially understood condition can never broaden the rule.
@@ -197,6 +253,61 @@ number was a transcription of one of Omarchy's lines, and it got every
 600×338, the About box 920×480. Reading the real rules gets all
 thirty-eight of them right. The hardcoded rule stays behind this one as
 the answer for a machine with nothing to read.
+
+### Workspace layout
+
+The one layout setting that is not a look. `general.layout` decides
+whether windows tile at all, and chonkstep already answers to
+Hyprland's names for the two styles it has — `dwindle` is **Mosaic**,
+`scrolling` is **Flow** — so the name is read and nothing about
+Hyprland's drawing comes with it.
+
+```lua
+hl.config({ general = { layout = "dwindle" } })          -- Omarchy's looknfeel.lua
+hl.workspace_rule({ workspace = "2", layout = "scrolling" })
+```
+
+```ini
+general {
+    layout = dwindle
+}
+workspace = 2, layout:scrolling
+```
+
+- **`general.layout`** is the style every workspace *starts* in —
+  including one first reached with `SUPER+7`. Omarchy ships `dwindle`,
+  which is why an Omarchy desktop tiles from the first login rather
+  than after a `SUPER+L` on every workspace.
+- **A workspace rule's `layout`** is that one workspace's starting
+  style, ranked above the default. Omarchy's own
+  `omarchy-hyprland-workspace-layout-toggle` saves one of these per
+  workspace under `~/.local/state/omarchy/workspace-layouts/`, which
+  its `toggles.lua` reads back at login, and so does this. Workspace
+  `N` is chonkstep's index `N−1`, exactly as the IPC path resolves
+  `hyprctl eval 'hl.workspace_rule(…)'`. Only numbered workspaces from
+  1 to 99 are read: a `special:` workspace, a `name:`, a range and
+  every other key in the rule (`gapsin`, `monitor`, …) each earn their
+  own logged line.
+- **An unknown layout name** (`master`, `hy3`) is logged with its
+  name and changes nothing; the workspace keeps the style it would
+  have had.
+
+Precedence, highest first: a restored session's own workspace modes
+(`restore_session = true`, so an existing opt-in sees no change), then
+the workspace rule, then `general.layout`, then Freeform.
+
+**A live re-read never undoes a choice you made.** The watch fires on
+any file in the tree, so it applies only what changed: a rule whose
+value differs from the last read, and a changed default only on
+workspaces that never had a style chosen for them — by `SUPER+L`, by
+IPC, by a restored session or by a rule. A workspace you switched to
+Flow stays in Flow through an unrelated edit, while Omarchy's toggle
+script saving a *different* layout for a workspace still lands.
+
+A native `SUPER+L` changes the live workspace and is not written back
+to Omarchy's `workspace-layouts/` files; chonkstep's own session
+store records the modes, and reads them back when `restore_session`
+is on.
 
 ### `exec-once` → autostart
 
@@ -257,15 +368,16 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Not read | Why |
 |---|---|
 | Hyprland requests chonkstep does not serve — `hyprctl`, and `omarchy-hyprland-*` scripts outside [the list below](#omarchys-hyprland-scripts) | Chonkstep answers Hyprland's IPC, but only with the requests it can apply, and `hyprctl` exits zero on a refusal, so a binding whose request is refused would be a key that silently does nothing. A script therefore runs only when every request it sends is proven served. The same rule filters chonkstep's Omarchy menu rows and `exec-once` lines. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
-| Gaps, borders, rounding, blur, shadows, animations, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. |
+| Gaps, borders, rounding, blur, shadows, animations (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. `general.layout` is the exception, [read above](#workspace-layout); the per-layout tables (`dwindle { … }`, `master { … }`, `scrolling { … }`) are not. |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
 | Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use `focus_follows_mouse` and native [`[input.gestures]`](gestures.md). Arbitrary Hyprland gesture bindings remain declined. Device properties listed below are applied; remaining declined values are logged. |
-| Unsupported window-rule properties | `opacity`, `no_blur`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
+| Unsupported window-rule properties | `opacity`, `no_blur`, `workspace`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
-| A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
+| A `size` or `move` written in a form other than a number or a layout expression (`move cursor 0 0`, `size 50% 50%`, `move onscreen`) | Only the arithmetic Omarchy's rules use is read — see [window rules](#window-rules). The property is skipped with its text; the rule's other properties still apply. |
 | Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
-| `submap`, workspace rules, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| `submap`, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| Workspace rules other than `layout`, and rules for `special:`, `name:` and range selectors | Only [the layout of a numbered workspace](#workspace-layout) is read. Every other rule and every other selector is logged by name. |
 | Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (such as `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
 | Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |
@@ -274,7 +386,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 
 Omarchy implements several window and display chords as
 `omarchy-hyprland-*` scripts that drive the compositor through `hyprctl`.
-These five send only requests chonkstep's Hyprland IPC applies, so their
+These six send only requests chonkstep's Hyprland IPC applies, so their
 bindings, menu rows and autostart lines run as written. The list lives in
 `crates/wm-config/src/hyprland/dispatch.rs`, and
 `crates/chonk-hyprland-ipc/tests/protocol.rs` feeds every request each
@@ -288,6 +400,7 @@ script reads is missing. A script cannot join the list without that proof.
 | `omarchy-hyprland-window-close-all` | `CTRL + ALT + DELETE`: close every window, then show workspace 1 |
 | `omarchy-hyprland-monitor-scaling` | `SUPER + SLASH` / `SUPER + ALT + SLASH`: step the focused monitor's scale |
 | `omarchy-hyprland-workspace-layout-toggle` | The menu's Workspace Layout row. Its `SUPER + L` binding takes chonkstep's own `toggle-layout`. |
+| `omarchy-hyprland-window-tiled-fullscreen-toggle` | `SUPER + CTRL + F`: tell the window it is fullscreen in its tile, or stop. It reads `fullscreenClient` back to decide which. |
 
 On a Freeform workspace the pop-out's float toggle does nothing, because
 Freeform has no layout to float a window out of; the window is still
@@ -300,7 +413,6 @@ starts are refused with the piece they need:
 
 | Script | Why not here |
 |---|---|
-| `omarchy-hyprland-window-tiled-fullscreen-toggle` | needs client-only fullscreen, which ChonkStep does not model |
 | `omarchy-hyprland-window-transparency-toggle` | needs per-window opacity, which ChonkStep does not model |
 | `omarchy-hyprland-window-gaps-toggle` | toggles Hyprland's gaps, which ChonkStep does not read |
 | `omarchy-hyprland-window-single-square-aspect-toggle` | toggles a Hyprland layout option, which ChonkStep does not read |
@@ -334,9 +446,19 @@ the workarea. Floating windows retain traditional movement and resizing.
 
 Silent workspace sends (`movetoworkspacesilent 1..99`) are native too:
 the active window moves without changing the current workspace, and an
-exposed window receives focus. The scratchpad form remains mapped to
-`miniaturize`, because Chonkstep models recoverable desktop icons rather
-than a special scratchpad workspace.
+exposed window receives focus. So is the scratchpad.
+`togglespecialworkspace [NAME]` (Lua
+`hl.dsp.workspace.toggle_special("NAME")`) shows the named special
+workspace as an overlay on the active output, above pinned windows, or
+hides it again when it is the one shown there; `movetoworkspacesilent
+special:NAME` (Lua `hl.dsp.window.move({ workspace = "special:NAME",
+follow = false })`) sends the focused window there without following;
+and the following form, `movetoworkspace special:NAME`, shows the
+special and keeps the keyboard on the window. A bare `special` is the
+default special workspace. Omarchy's `SUPER + S` and `SUPER + ALT + S`
+are the first two, and a window sent away comes back with the chord
+that hid it. `miniaturize` keeps its own chord and its place in the
+window menu. Named workspaces (`name:…`) remain unbound.
 
 A last group is refused for a different reason — *declined on purpose*,
 meaning chonkstep could bind them and does not, because what it would
@@ -352,6 +474,12 @@ do is not what you are asking for:
   and a cheatsheet that lies is worse than none.
 
 ### Input and binding behavior
+
+`binds.hide_special_on_workspace_change`, which Omarchy turns on, makes
+a workspace switch hide the special workspace shown on the output the
+switch lands on. Off — Hyprland's own default — the scratchpad stays
+shown across the switch. The rest of the `binds` table is Hyprland's
+own binding behaviour and is reported rather than carried.
 
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
 build the seat's xkb keymap. A value Hyprland would compute as it runs,
@@ -539,8 +667,8 @@ shape this reader cannot follow. There is never a moment where both are
 in effect.
 
 The preset's *judgements* are carried over rather than re-argued: the
-same `Unbound` reasons, the same deliberate handling of unsupported operations, the same
-scratchpad-to-`miniaturize` call. `docs/keybindings.md` still documents
+same `Unbound` reasons and the same deliberate handling of unsupported
+operations. `docs/keybindings.md` still documents
 that table, and it remains accurate for a machine with no Hyprland
 configuration on it.
 
@@ -658,8 +786,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=179 commands=120 env=8 autostart=4
-      float_rules=48 monitors=1 skipped=168
+      files=42 bindings=188 commands=121 env=8 autostart=4
+      float_rules=49 monitors=1 skipped=150
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

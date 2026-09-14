@@ -3,7 +3,39 @@ use super::*;
 use crate::spatial::{self, Item, WorkspaceLayout};
 use crate::{LayoutMode, WindowPlacement};
 
+/// One layout to reflow: a numbered workspace's, or a special
+/// workspace's. Both are a [`WorkspaceLayout`]; only where it lives
+/// differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LayoutSlot {
+    Workspace(usize),
+    Special(usize),
+}
+
 impl<B: Backend> WindowManager<B> {
+    fn slot_layout(&self, slot: LayoutSlot) -> Option<&WorkspaceLayout> {
+        match slot {
+            LayoutSlot::Workspace(workspace) => self.layouts.get(workspace),
+            LayoutSlot::Special(index) => self.specials.get(index).map(|special| &special.layout),
+        }
+    }
+
+    fn slot_layout_mut(&mut self, slot: LayoutSlot) -> Option<&mut WorkspaceLayout> {
+        match slot {
+            LayoutSlot::Workspace(workspace) => self.layouts.get_mut(workspace),
+            LayoutSlot::Special(index) => self.specials.get_mut(index).map(|special| &mut special.layout),
+        }
+    }
+
+    /// The layout mode governing `c`: its special workspace's while it
+    /// is a member, its numbered workspace's otherwise.
+    pub(super) fn client_layout_mode(&self, c: &Client<B>) -> LayoutMode {
+        match c.special {
+            Some(index) => self.special_layout_mode(index),
+            None => self.workspace_layout(c.workspace),
+        }
+    }
+
     /// A membership/presentation change invalidates a managed drag's targets
     /// and resize rollback. Finish cancellation before changing that model.
     pub(super) fn cancel_client_layout_interaction(&mut self, id: ClientId) {
@@ -40,18 +72,65 @@ impl<B: Backend> WindowManager<B> {
             .map_or(&[], |l| l.order.as_slice())
     }
 
+    /// The style a workspace starts in when nothing chose one for it.
+    pub fn default_workspace_layout(&self) -> LayoutMode {
+        self.default_layout
+    }
+
+    /// Changes the style new workspaces start in, and moves every
+    /// existing workspace that never had a style chosen for it — by a
+    /// toggle, an IPC request, a restored session or a per-workspace
+    /// rule — onto the new default. A workspace whose style was chosen
+    /// keeps it, so a configuration re-read can never undo a live
+    /// choice.
+    pub fn set_default_workspace_layout(&mut self, mode: LayoutMode) {
+        self.default_layout = mode;
+        self.grow_layouts();
+        for workspace in 0..self.workspace_count.min(self.layouts.len()) {
+            if !self.layouts[workspace].explicit && self.layouts[workspace].mode != mode {
+                self.apply_workspace_layout(workspace, mode, false);
+            }
+        }
+    }
+
+    /// A row for a workspace nothing has configured yet.
+    fn new_workspace_layout(&self) -> WorkspaceLayout {
+        WorkspaceLayout { mode: self.default_layout, ..Default::default() }
+    }
+
+    /// Grows the layout row to `workspace_count`, seeding every new
+    /// workspace with the default style. The one place the row grows,
+    /// so a workspace first reached by a switch, a move, a created
+    /// Space or a restored one all start the same way.
+    pub(super) fn grow_layouts(&mut self) {
+        let seed = self.new_workspace_layout();
+        self.layouts.resize_with(self.workspace_count, || seed.clone());
+    }
+
+    /// Chooses a workspace's style. The choice is remembered as the
+    /// workspace's own, so a later change of the default leaves it
+    /// alone — see [`Self::set_default_workspace_layout`].
     pub fn set_workspace_layout(&mut self, workspace: usize, mode: LayoutMode) {
-        if workspace >= MAX_WORKSPACES
-            || (workspace < self.workspace_count && self.workspace_layout(workspace) == mode)
-        {
+        self.apply_workspace_layout(workspace, mode, true);
+    }
+
+    fn apply_workspace_layout(&mut self, workspace: usize, mode: LayoutMode, explicit: bool) {
+        if workspace >= MAX_WORKSPACES {
+            return;
+        }
+        if workspace < self.workspace_count && self.workspace_layout(workspace) == mode {
+            if explicit {
+                self.grow_layouts();
+                self.layouts[workspace].explicit = true;
+            }
             return;
         }
         self.end_active_drag();
         if !self.ensure_display_space_slots(workspace + 1) { return; }
         self.workspace_count = self.workspace_count.max(workspace + 1);
-        self.layouts
-            .resize_with(self.workspace_count, WorkspaceLayout::default);
+        self.grow_layouts();
         self.layouts[workspace].mode = mode;
+        self.layouts[workspace].explicit |= explicit;
         if mode == LayoutMode::Freeform {
             let order = self.layouts[workspace].order.clone();
             for id in order {
@@ -109,9 +188,11 @@ impl<B: Backend> WindowManager<B> {
         self.set_workspace_layout(self.current_workspace, mode);
     }
 
+    /// `CLIENT_FULLSCREEN` is deliberately not in the excluded set: a
+    /// window told it is fullscreen keeps its cell.
     pub(super) fn layout_candidate(&self, id: ClientId) -> bool {
         self.clients.get(id).is_some_and(|c| {
-            self.workspace_layout(c.workspace) != LayoutMode::Freeform
+            self.client_layout_mode(c) != LayoutMode::Freeform
                 && !c.placement.floating
                 && c.parent.is_none()
                 && c.lifecycle == Lifecycle::Normal
@@ -137,7 +218,7 @@ impl<B: Backend> WindowManager<B> {
         };
         // Every window already floats in Freeform. Do not invisibly change
         // its membership in a future style when this shortcut has no effect.
-        if self.workspace_layout(c.workspace) == LayoutMode::Freeform {
+        if self.client_layout_mode(c) == LayoutMode::Freeform {
             return;
         }
         self.set_floating(id, !c.placement.floating);
@@ -155,7 +236,6 @@ impl<B: Backend> WindowManager<B> {
         }
         let c = &mut self.clients[id];
         c.placement.floating = floating;
-        let workspace = c.workspace;
         let saved = c.placement.freeform;
         if floating {
             if let Some(saved) = saved {
@@ -165,7 +245,7 @@ impl<B: Backend> WindowManager<B> {
         } else {
             self.unshade(id);
         }
-        self.reflow_workspace(workspace);
+        self.reflow_client_workspace(id);
         self.bump_protocol_state_revision();
     }
 
@@ -183,8 +263,7 @@ impl<B: Backend> WindowManager<B> {
         c.placement = placement;
         c.layout_restore_order = Some(index);
         let workspace = c.workspace;
-        self.layouts
-            .resize_with(self.workspace_count, WorkspaceLayout::default);
+        self.grow_layouts();
         let order = &mut self.layouts[workspace].order;
         order.retain(|&other| other != id);
         order.push(id);
@@ -195,8 +274,7 @@ impl<B: Backend> WindowManager<B> {
 
     pub(super) fn register_layout_client(&mut self, id: ClientId) {
         let workspace = self.clients[id].workspace;
-        self.layouts
-            .resize_with(self.workspace_count, WorkspaceLayout::default);
+        self.grow_layouts();
         let order = &mut self.layouts[workspace].order;
         if order.contains(&id) {
             return;
@@ -228,11 +306,16 @@ impl<B: Backend> WindowManager<B> {
     /// Flow positions may be outside every output: never infer ownership from
     /// its current frame center once an output affinity has been recorded.
     pub fn client_output_index(&self, id: ClientId) -> usize {
+        if let Some(special) = self.clients.get(id).and_then(|c| c.special) {
+            return self.special_output_index(special).unwrap_or_else(|| {
+                self.monitor_index_at(self.client_frame_center(id).unwrap_or(self.clients[id].geometry.pos))
+            });
+        }
         if let Some(output) = self.clients.get(id).and_then(|c| self.workspace_output_index(c.workspace)) { return output; }
         let Some(c) = self.clients.get(id) else {
             return self.primary_monitor_index();
         };
-        if self.workspace_layout(c.workspace) != LayoutMode::Freeform
+        if self.client_layout_mode(c) != LayoutMode::Freeform
             && !c.placement.floating
             && !c.flags.contains(ClientFlags::STICKY)
         {
@@ -250,7 +333,7 @@ impl<B: Backend> WindowManager<B> {
 
     pub(super) fn client_decoration_scale(&self, id: ClientId) -> f32 {
         let c = &self.clients[id];
-        let rect = if self.workspace_layout(c.workspace) != LayoutMode::Freeform
+        let rect = if self.client_layout_mode(c) != LayoutMode::Freeform
             && !c.placement.floating
         {
             self.backend
@@ -422,8 +505,10 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub(super) fn reflow_client_workspace(&mut self, id: ClientId) {
-        if let Some(workspace) = self.clients.get(id).map(|c| c.workspace) {
-            self.reflow_workspace(workspace);
+        match self.clients.get(id).map(|c| (c.special, c.workspace)) {
+            Some((Some(index), _)) => self.reflow_special(index),
+            Some((None, workspace)) => self.reflow_workspace(workspace),
+            None => {}
         }
     }
 
@@ -438,12 +523,19 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub(super) fn reflow_workspace_with_force(&mut self, workspace: usize, force_reflow: bool) {
-        let mode = self.workspace_layout(workspace);
+        self.reflow_slot_with_force(LayoutSlot::Workspace(workspace), force_reflow);
+    }
+
+    pub(super) fn reflow_slot_with_force(&mut self, slot: LayoutSlot, force_reflow: bool) {
+        let Some(layout) = self.slot_layout(slot) else {
+            return;
+        };
+        let mode = layout.mode;
         if mode == LayoutMode::Freeform {
             return;
         }
         let started = std::time::Instant::now();
-        let order = self.layouts[workspace].order.clone();
+        let order = layout.order.clone();
         for &id in &order {
             if self.layout_candidate(id) {
                 self.remember_freeform(id);
@@ -509,10 +601,11 @@ impl<B: Backend> WindowManager<B> {
             let rects = match mode {
                 LayoutMode::Mosaic => spatial::mosaic(logical, &items),
                 LayoutMode::Flow => {
-                    let viewport = self.layouts[workspace]
-                        .viewports
-                        .entry(Self::layout_output_key(monitor).to_string())
-                        .or_default();
+                    let key = Self::layout_output_key(monitor).to_string();
+                    let Some(layout) = self.slot_layout_mut(slot) else {
+                        return;
+                    };
+                    let viewport = layout.viewports.entry(key).or_default();
                     spatial::flow(logical, &items, focused, viewport)
                 }
                 LayoutMode::Freeform => unreachable!(),

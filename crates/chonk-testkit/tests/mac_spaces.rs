@@ -102,9 +102,12 @@ fn omarchy_keys_keep_independent_spaces_and_dedicated_fullscreen() {
     s.door().motion(250.0, 200.0).unwrap();
     dispatch(&mut s, "workspace 3");
     assert_eq!(heads(&s), (3, 2));
-    chord(&mut s, &[125, 42], 15); // Super-Shift-Tab: previous Space on this display.
+    // Omarchy's Super-Tab is `e+1`, the next Space with windows on it,
+    // so Space 3 needs one before the chords can reach it.
+    probe(&mut s, "Omarchy Left Three", 0);
+    chord(&mut s, &[125, 42], 15); // Super-Shift-Tab: previous occupied Space on this display.
     assert_eq!(heads(&s), (1, 2));
-    chord(&mut s, &[125], 15); // Super-Tab: next Space, other display stays put.
+    chord(&mut s, &[125], 15); // Super-Tab: next occupied Space, other display stays put.
     assert_eq!(heads(&s), (3, 2));
     assert_eq!(pixel(&mut s, "Omarchy Right", "other-display-unchanged"), [32, 64, 128, 255]);
     chord(&mut s, &[125, 42], 15);
@@ -1024,4 +1027,65 @@ fn desktop_thumbnails_update_parked_xwayland_windows_and_clip_to_their_desktop()
     poll_until(WAIT, "destroyed X11 client leaves no thumbnail", || {
         (!s.world().ok()?.overview_space_windows.iter().any(|(_,id)| *id == client.id)).then_some(())
     }).unwrap();
+}
+
+/// Omarchy's screensaver focuses each monitor by the name `monitors -j`
+/// reports and opens one fullscreen terminal on it, waiting for the window
+/// before moving on. `focusmonitor` therefore has to move where the next
+/// window opens — on the shared desktop, where placement follows the
+/// pointer, and under separate Spaces, where it follows the selected
+/// display. `omarchy-launch-screensaver` itself needs `ttfx`, a real
+/// terminal and `omarchy-hyprland-monitor-focused`, none of which the
+/// headless host has, so a stand-in client carrying its
+/// `org.omarchy.screensaver` app id opens where the terminal would.
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn focusing_each_monitor_by_name_puts_one_screensaver_window_on_every_output() {
+    for (label, profile) in [
+        ("desktop", "interaction_mode = 'desktop'\n"),
+        ("spaces", "interaction_mode = 'spaces'\nkeyboard_mode = 'desktop'\n"),
+    ] {
+        let mut s = boot_with_config(&format!("screensaver-{label}"), profile);
+        let names: Vec<String> = json(&s, "monitors")
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|monitor| monitor["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names.len(), 2, "{label}");
+        let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(
+                request(&s, &format!("/dispatch hl.dsp.focus({{ monitor = \"{name}\" }})")).trim(),
+                "ok",
+                "{label}: focus {name}"
+            );
+            s.door().barrier().unwrap();
+            let title = format!("Screensaver {index}");
+            s.launch(probe.to_str().unwrap(), &[&title, "org.omarchy.screensaver"]).unwrap();
+            s.wait_for_window(&title).unwrap();
+            s.door().barrier().unwrap();
+        }
+        let clients = json(&s, "clients");
+        let screensavers: Vec<&Value> = clients
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|client| client["class"] == "org.omarchy.screensaver")
+            .collect();
+        let mut monitors: Vec<i64> = screensavers.iter().map(|client| client["monitor"].as_i64().unwrap()).collect();
+        monitors.sort_unstable();
+        assert_eq!(monitors, vec![0, 1], "{label}: one screensaver window per output: {clients}");
+        assert!(
+            screensavers.iter().all(|client| client["fullscreen"].as_i64().unwrap_or(0) != 0),
+            "{label}: the screensaver class is fullscreen by rule: {clients}"
+        );
+        // The script's last step re-focuses the monitor it started from,
+        // by the name it read; a name no output carries is refused by name.
+        assert_eq!(request(&s, &format!("/dispatch focusmonitor {}", names[0])).trim(), "ok", "{label}");
+        s.door().barrier().unwrap();
+        assert_eq!(json(&s, "monitors")[0]["focused"], true, "{label}: focus returned to the first output");
+        let refused = request(&s, "/dispatch focusmonitor DP-9");
+        assert!(refused.starts_with("Invalid dispatcher") && refused.contains("DP-9"), "{label}: {refused}");
+    }
 }

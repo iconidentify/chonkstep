@@ -9,10 +9,13 @@
 //! becomes a silent wrong answer downstream, which is the exact failure
 //! this whole crate is built to prevent.
 
-use chonk_hyprland_ipc::dispatch::{self, Action, Fullscreen, LayoutTarget};
+use chonk_hyprland_ipc::dispatch::{self, Action, Direction, Fullscreen, LayoutTarget, MonitorTarget};
 use chonk_hyprland_ipc::request::Request;
 use chonk_hyprland_ipc::server::answer_payload;
-use chonk_hyprland_ipc::state::{Devices, Keyboard, Monitor, MonitorMode, Snapshot, Window, Workspace};
+use chonk_hyprland_ipc::state::{
+    special_index_from_hypr_id, workspace_index_from_hypr_id, Devices, Keyboard, Monitor, MonitorMode, Snapshot,
+    SpecialWorkspace, Window, Workspace, MAX_SPECIAL_NAME, MAX_SPECIAL_WORKSPACES,
+};
 use chonk_hyprland_ipc::{Differ, Outcome};
 use wm_config::hyprland::dispatch::SERVED_OMARCHY_SCRIPTS;
 
@@ -31,6 +34,7 @@ fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monit
         vrr_enabled: false,
         focused,
         active_workspace,
+        special_workspace: None,
         make: "Sharp".to_string(),
         model: name.to_string(),
         serial: "0x01020304".to_string(),
@@ -68,10 +72,13 @@ fn window(id: u64, title: &str, class: &str, workspace: usize) -> Window {
         width: 800,
         height: 600,
         workspace,
+        special: None,
         monitor: 0,
         pid: 4242,
         xwayland: false,
         fullscreen: false,
+        maximized: false,
+        client_fullscreen: false,
         hidden: false,
         urgent: false,
         pinned: false,
@@ -87,6 +94,7 @@ fn desktop() -> Snapshot {
     Snapshot {
         monitors: vec![monitor(0, "eDP-1", true, 0)],
         workspaces: vec![workspace(0, 1), workspace(1, 0), workspace(2, 0)],
+        specials: Vec::new(),
         windows: vec![window(4_294_967_297, "~ — foot", "foot", 0)],
         focused: Some(4_294_967_297),
         locked: false,
@@ -95,12 +103,47 @@ fn desktop() -> Snapshot {
         config_errors: Vec::new(),
         devices: Devices::default(),
         system_info: "test system".into(),
+        separate_spaces: false,
+        previous_workspace: None,
     }
+}
+
+/// The same desk with a second head to the right, as `monitors` reports
+/// it.
+fn two_heads() -> Snapshot {
+    let mut snapshot = desktop();
+    let mut second = monitor(1, "DP-1", false, 1);
+    second.x = 1280;
+    snapshot.monitors.push(second);
+    snapshot
 }
 
 /// The same desk with a session lock in force.
 fn locked_desktop() -> Snapshot {
     Snapshot { locked: true, ..desktop() }
+}
+
+fn special(index: usize, name: &str, windows: u32) -> SpecialWorkspace {
+    SpecialWorkspace {
+        index,
+        name: name.to_string(),
+        layout: "freeform".into(),
+        monitor: None,
+        monitor_id: 0,
+        windows,
+        has_fullscreen: false,
+    }
+}
+
+/// The desk with a scratchpad holding one window and a second, empty
+/// special workspace created after it.
+fn desktop_with_specials() -> Snapshot {
+    let mut snapshot = desktop();
+    snapshot.specials = vec![special(0, "scratchpad", 1), special(1, "notes", 0)];
+    let mut parked = window(4_294_967_298, "console", "foot", 0);
+    parked.special = Some("scratchpad".into());
+    snapshot.windows.push(parked);
+    snapshot
 }
 
 fn ask(wire: &str, snapshot: &Snapshot) -> String {
@@ -192,6 +235,181 @@ fn a_pointer_warp_parses_in_both_spellings_and_refuses_anything_else() {
 /// must report it rather than invent a focused window to fill the gap.
 /// The shape for "nothing focused" is an empty object, which is what
 /// the real `hyprctl activewindow -j` prints on a Hyprland box.
+/// Omarchy's screensaver focuses each monitor by the name `monitors -j`
+/// reports, its bindings by step (`CTRL+ALT+TAB`) and direction. Every
+/// spelling is an action; a name no output carries is refused by name;
+/// and behind a session lock the whole verb is refused, since it moves
+/// the pointer and the keyboard.
+#[test]
+fn monitor_focus_parses_every_spelling_and_refuses_an_unknown_output_by_name() {
+    let snapshot = two_heads();
+    for (wire, target) in [
+        ("/dispatch focusmonitor +1", MonitorTarget::Relative(1)),
+        ("/dispatch focusmonitor -1", MonitorTarget::Relative(-1)),
+        ("/dispatch focusmonitor current", MonitorTarget::Relative(0)),
+        ("/dispatch focusmonitor l", MonitorTarget::Direction(Direction::Left)),
+        ("/dispatch focusmonitor right", MonitorTarget::Direction(Direction::Right)),
+        ("/dispatch focusmonitor u", MonitorTarget::Direction(Direction::Up)),
+        ("/dispatch focusmonitor d", MonitorTarget::Direction(Direction::Down)),
+        ("/dispatch focusmonitor DP-1", MonitorTarget::Name("DP-1".into())),
+        ("/dispatch focusmonitor 1", MonitorTarget::Name("DP-1".into())),
+        ("/dispatch hl.dsp.focus({ monitor = \"DP-1\" })", MonitorTarget::Name("DP-1".into())),
+        ("/dispatch hl.dsp.focus({ monitor = \"+1\" })", MonitorTarget::Relative(1)),
+        ("/eval hl.dispatch(hl.dsp.focus({ monitor = \"eDP-1\" }))", MonitorTarget::Name("eDP-1".into())),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions, vec![Action::FocusMonitor(target)], "{wire}");
+    }
+    for wire in [
+        "/dispatch focusmonitor",
+        "/dispatch focusmonitor DP-9",
+        "/dispatch focusmonitor 7",
+        "/dispatch focusmonitor +",
+        "/dispatch hl.dsp.focus({ monitor = \"HDMI-A-2\" })",
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert!(actions.is_empty(), "{wire} must not act");
+        assert!(response.starts_with("Invalid dispatcher"), "{wire}: got {response:?}");
+    }
+    assert!(ask("/dispatch focusmonitor DP-9", &snapshot).contains("DP-9"), "refused by name");
+    // Something that has never been a focus target remains distinguishable
+    // from a monitor field.
+    assert!(ask("/dispatch hl.dsp.focus({ })", &snapshot).starts_with("Invalid dispatcher"));
+
+    let locked = Snapshot { locked: true, ..snapshot };
+    for wire in ["/dispatch focusmonitor +1", "/dispatch hl.dsp.focus({ monitor = \"DP-1\" })"] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &locked);
+        assert!(actions.is_empty(), "{wire} must not act behind the lock");
+        assert!(response.contains("locked"), "{wire}: got {response:?}");
+    }
+}
+
+/// Omarchy's SUPER+SHIFT+ALT+arrows. On the shared desktop the workspace
+/// already spans every display, so the request is refused with the
+/// setting that would change that — never answered `ok` and left undone.
+#[test]
+fn moving_the_workspace_to_a_monitor_needs_separate_spaces_and_is_refused_by_name_otherwise() {
+    let shared = two_heads();
+    let (response, actions) = answer_payload(b"/dispatch movecurrentworkspacetomonitor r", &shared);
+    assert!(actions.is_empty(), "the shared desktop must not act");
+    assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
+    assert!(response.contains("separate_spaces"), "the refusal names the setting: {response:?}");
+
+    let spaces = Snapshot { separate_spaces: true, ..two_heads() };
+    for (wire, target) in [
+        ("/dispatch movecurrentworkspacetomonitor r", MonitorTarget::Direction(Direction::Right)),
+        ("/dispatch movecurrentworkspacetomonitor -1", MonitorTarget::Relative(-1)),
+        ("/dispatch movecurrentworkspacetomonitor DP-1", MonitorTarget::Name("DP-1".into())),
+        ("/dispatch hl.dsp.workspace.move({ monitor = \"l\" })", MonitorTarget::Direction(Direction::Left)),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &spaces);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions, vec![Action::MoveWorkspaceToMonitor(target)], "{wire}");
+    }
+    let (response, actions) = answer_payload(b"/dispatch movecurrentworkspacetomonitor DP-9", &spaces);
+    assert!(actions.is_empty());
+    assert!(response.contains("DP-9"), "refused by name: {response:?}");
+
+    // A fullscreen Space is bound to the display of its window.
+    let mut fullscreen = spaces.clone();
+    fullscreen.workspaces[0].has_fullscreen = true;
+    let (response, actions) = answer_payload(b"/dispatch movecurrentworkspacetomonitor r", &fullscreen);
+    assert!(actions.is_empty());
+    assert!(response.contains("fullscreen"), "got {response:?}");
+
+    let locked = Snapshot { locked: true, ..spaces };
+    let (response, actions) = answer_payload(b"/dispatch movecurrentworkspacetomonitor r", &locked);
+    assert!(actions.is_empty());
+    assert!(response.contains("locked"), "got {response:?}");
+}
+
+/// `workspace previous` is the workspace before this one, which only the
+/// compositor knows; `e+1` / `e-1` walk the workspaces that have windows
+/// on them, plus the current one, and wrap rather than grow the row.
+/// The plain `+1` keeps stepping by index.
+#[test]
+fn extreme_existing_workspace_steps_wrap_without_overflow() {
+    let mut snapshot = desktop();
+    snapshot.workspaces = (0..3).map(|index| workspace(index, 1)).collect();
+    snapshot.monitors[0].active_workspace = 1;
+    for (selector, expected) in [
+        ("e+9223372036854775807", 2),
+        ("e-9223372036854775808", 2),
+        ("e-9223372036854775807", 0),
+    ] {
+        let wire = format!("/dispatch workspace {selector}");
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response.trim(), "ok", "{selector}");
+        assert_eq!(actions, vec![Action::FocusWorkspace(expected)], "{selector}");
+    }
+}
+
+#[test]
+fn doubled_signs_in_relative_selectors_are_refused() {
+    for selector in ["e--9223372036854775808", "e+-1", "e++1", "e-+1"] {
+        let wire = format!("/dispatch workspace {selector}");
+        let (response, actions) = answer_payload(wire.as_bytes(), &desktop());
+        assert!(actions.is_empty(), "{selector}");
+        assert!(response.starts_with("Invalid dispatcher"), "{response}");
+    }
+    for selector in ["+-2147483648", "--1", "++1", "-+1"] {
+        let wire = format!("/dispatch focusmonitor {selector}");
+        let (response, actions) = answer_payload(wire.as_bytes(), &desktop());
+        assert!(actions.is_empty(), "{selector}");
+        assert!(response.starts_with("Invalid dispatcher"), "{response}");
+    }
+}
+
+#[test]
+fn workspace_previous_and_existing_steps_resolve_against_the_snapshot() {
+    let mut snapshot = desktop();
+    let (response, actions) = answer_payload(b"/dispatch workspace previous", &snapshot);
+    assert!(actions.is_empty(), "nothing to go back to yet");
+    assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
+    snapshot.previous_workspace = Some(2);
+    for wire in ["/dispatch workspace previous", "/dispatch hl.dsp.focus({ workspace = \"previous\" })"] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions, vec![Action::FocusWorkspace(2)], "{wire}");
+    }
+
+    // Windows on workspaces 1 and 3 (indices 0 and 2), on 1: e+1 goes
+    // to 3, and from 3 wraps back to 1, never to the empty 2 and never
+    // to a new 4.
+    snapshot.workspaces[2].windows = 1;
+    let step = |wire: &str, snapshot: &Snapshot| {
+        let (response, actions) = answer_payload(wire.as_bytes(), snapshot);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        actions
+    };
+    assert_eq!(step("/dispatch workspace e+1", &snapshot), vec![Action::FocusWorkspace(2)]);
+    assert_eq!(step("/dispatch workspace e-1", &snapshot), vec![Action::FocusWorkspace(2)]);
+    assert_eq!(step("/dispatch workspace +1", &snapshot), vec![Action::FocusWorkspace(1)], "by index, as before");
+    snapshot.monitors[0].active_workspace = 2;
+    assert_eq!(step("/dispatch workspace e+1", &snapshot), vec![Action::FocusWorkspace(0)], "wraps");
+    assert_eq!(step("/dispatch hl.dsp.focus({ workspace = \"e-1\" })", &snapshot), vec![Action::FocusWorkspace(0)]);
+    assert_eq!(step("/dispatch workspace +1", &snapshot), vec![Action::FocusWorkspace(3)], "past the end, growing");
+    // An empty current workspace is a stop on the way round.
+    snapshot.monitors[0].active_workspace = 1;
+    assert_eq!(step("/dispatch workspace e+1", &snapshot), vec![Action::FocusWorkspace(2)]);
+    assert_eq!(step("/dispatch workspace e-1", &snapshot), vec![Action::FocusWorkspace(0)]);
+    // Nothing else occupied: the answer is where the desktop already is.
+    snapshot.workspaces[0].windows = 0;
+    snapshot.workspaces[2].windows = 0;
+    assert_eq!(step("/dispatch workspace e+1", &snapshot), vec![Action::FocusWorkspace(1)]);
+
+    // Under separate Spaces only the focused display's row counts.
+    let mut spaces = Snapshot { separate_spaces: true, ..two_heads() };
+    spaces.workspaces[2].windows = 1;
+    spaces.workspaces[2].monitor = "DP-1".into();
+    spaces.workspaces[2].monitor_id = 1;
+    assert_eq!(step("/dispatch workspace e+1", &spaces), vec![Action::FocusWorkspace(0)], "the other display's row is not walked");
+    let (response, actions) = answer_payload(b"/dispatch workspace e+x", &spaces);
+    assert!(actions.is_empty());
+    assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
+}
+
 #[test]
 fn nothing_focused_is_reported_as_nothing_not_papered_over() {
     let mut snapshot = desktop();
@@ -264,6 +482,13 @@ fn an_ok_answer_always_comes_with_an_action() {
         "movetoworkspace 4",
         "focuswindow class:^(foot)$",
         "focuswindow class:^(absent)$",
+        "workspace previous",
+        "workspace e+1",
+        "workspace e-1",
+        "focusmonitor +1",
+        "focusmonitor eDP-1",
+        "focusmonitor DP-9",
+        "movecurrentworkspacetomonitor r",
     ] {
         let (response, actions) = answer_payload(format!("/dispatch {verb}").as_bytes(), &snapshot);
         let claimed = response.trim() == "ok";
@@ -449,18 +674,221 @@ fn live_diagnostic_commands_have_truthful_wire_shapes() {
 /// and each must produce an error a caller can branch on rather than
 /// an `ok` it will believe.
 #[test]
-fn unsupported_group_and_special_workspace_dispatchers_fail_cleanly() {
+fn unsupported_group_and_workspace_option_dispatchers_fail_cleanly() {
     let snapshot = desktop();
     for verb in [
         "togglegroup",
-        "togglespecialworkspace magic",
         "workspaceopt allfloat",
+        "movetoworkspacesilent name:notes",
+        "workspace name:notes",
     ] {
         let (response, actions) = answer_payload(format!("/dispatch {verb}").as_bytes(), &snapshot);
         assert!(actions.is_empty(), "{verb} must not act, got {actions:?}");
         assert!(response.starts_with("Invalid dispatcher"), "{verb} must fail like Hyprland does, got {response:?}");
         assert_ne!(response.trim(), "ok", "{verb} must never claim success");
     }
+}
+
+// ---------------------------------------------------------------------
+// Special workspaces: Omarchy's scratchpad and the agent console.
+// ---------------------------------------------------------------------
+
+/// `togglespecialworkspace [NAME]`, `movetoworkspace[silent]
+/// special[:NAME][,window]` and the Lua forms Omarchy's `tiling.lua`
+/// binds all lower to the two special-workspace actions. A bare
+/// `special` is the default special workspace; a numbered verb keeps
+/// its numbered action.
+#[test]
+fn special_workspace_dispatchers_parse_in_both_dialects() {
+    let snapshot = desktop();
+    let toggle = |name: &str| Outcome::Run(Action::ToggleSpecialWorkspace(name.to_string()));
+    let send = |name: &str, follow: bool| {
+        Outcome::Run(Action::MoveToSpecial { window: None, name: name.to_string(), follow })
+    };
+    for (wire, expected) in [
+        ("togglespecialworkspace scratchpad", toggle("scratchpad")),
+        ("togglespecialworkspace", toggle("special")),
+        ("togglespecialworkspace special:notes", toggle("notes")),
+        ("workspace special:scratchpad", toggle("scratchpad")),
+        ("workspace special", toggle("special")),
+        ("movetoworkspacesilent special:scratchpad", send("scratchpad", false)),
+        ("movetoworkspacesilent special", send("special", false)),
+        ("movetoworkspace special:scratchpad", send("scratchpad", true)),
+        (
+            "movetoworkspacesilent special:scratchpad,address:0x100000001",
+            Outcome::Run(Action::MoveToSpecial { window: Some(4_294_967_297), name: "scratchpad".into(), follow: false }),
+        ),
+        (r#"hl.dsp.workspace.toggle_special("scratchpad")"#, toggle("scratchpad")),
+        ("hl.dsp.workspace.toggle_special()", toggle("special")),
+        (r#"hl.dsp.focus({ workspace = "special:scratchpad" })"#, toggle("scratchpad")),
+        (r#"hl.dsp.window.move({ workspace = "special:scratchpad", follow = false })"#, send("scratchpad", false)),
+        (r#"hl.dsp.window.move({ workspace = "special:scratchpad" })"#, send("scratchpad", true)),
+        (
+            r#"hl.dsp.window.move({ workspace = "special:scratchpad", window = "address:0x100000001", follow = false })"#,
+            Outcome::Run(Action::MoveToSpecial { window: Some(4_294_967_297), name: "scratchpad".into(), follow: false }),
+        ),
+        (
+            r#"hl.dsp.window.move({ workspace = "3", follow = false })"#,
+            Outcome::Run(Action::MoveToWorkspace { window: None, workspace: 2, follow: false }),
+        ),
+        ("movetoworkspacesilent 2", Outcome::Run(Action::MoveToWorkspace { window: None, workspace: 1, follow: false })),
+    ] {
+        assert_eq!(dispatch::parse(wire, &snapshot), expected, "{wire}");
+        let (response, actions) = answer_payload(format!("/dispatch {wire}").as_bytes(), &snapshot);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions.len(), 1, "{wire}");
+    }
+    assert!(matches!(
+        dispatch::parse(r#"hl.dsp.window.move({ into_group = "l" })"#, &snapshot),
+        Outcome::Unsupported(why) if why.contains("groups")
+    ));
+}
+
+/// Names come off an unauthenticated socket and are published back out
+/// through `workspaces` and the event stream, so they are bounded
+/// before anything is asked to create them, and the session's count of
+/// specials cannot be grown past the compositor's limit.
+#[test]
+fn special_workspace_names_and_count_are_bounded_before_creation() {
+    let snapshot = desktop();
+    let long = "n".repeat(MAX_SPECIAL_NAME);
+    assert!(matches!(
+        dispatch::parse(&format!("togglespecialworkspace {long}"), &snapshot),
+        Outcome::Run(Action::ToggleSpecialWorkspace(name)) if name == long
+    ));
+    let (response, actions) = answer_payload(format!("/dispatch togglespecialworkspace {long}n").as_bytes(), &snapshot);
+    assert!(response.starts_with("Invalid dispatcher"), "{response:?}");
+    assert!(actions.is_empty());
+    assert!(matches!(
+        dispatch::parse("movetoworkspacesilent special:bad\u{7}name", &snapshot),
+        Outcome::Unsupported(why) if why.contains("control")
+    ));
+
+    let mut full = desktop();
+    full.specials = (0..MAX_SPECIAL_WORKSPACES).map(|index| special(index, &format!("s{index}"), 0)).collect();
+    assert!(matches!(
+        dispatch::parse("togglespecialworkspace one-too-many", &full),
+        Outcome::Unsupported(why) if why.contains("will not create")
+    ));
+    assert!(matches!(
+        dispatch::parse("movetoworkspacesilent special:one-too-many", &full),
+        Outcome::Unsupported(_)
+    ));
+    assert_eq!(
+        dispatch::parse("togglespecialworkspace s3", &full),
+        Outcome::Run(Action::ToggleSpecialWorkspace("s3".into())),
+        "an existing special still toggles at the cap"
+    );
+}
+
+/// `workspaces` lists each special after the numbered ones, with the
+/// negative id Hyprland gives one — stable for the session, since the
+/// core never destroys a special — and the `special:NAME` name both
+/// Quickshell and Omarchy match on. The numbered resolver stays strict
+/// and the special resolver is its own function; no id is both.
+#[test]
+fn workspaces_list_specials_with_stable_negative_ids_and_names() {
+    let snapshot = desktop_with_specials();
+    let listed = ask_json("j/workspaces", &snapshot);
+    let listed = listed.as_array().expect("array");
+    assert_eq!(listed.len(), 5, "{listed:?}");
+    let scratchpad = &listed[3];
+    assert_eq!(scratchpad["id"], serde_json::json!(-99));
+    assert_eq!(scratchpad["name"], "special:scratchpad");
+    assert_eq!(scratchpad["windows"], serde_json::json!(1));
+    assert_eq!(scratchpad["tiledLayout"], "freeform");
+    assert_eq!(listed[4]["id"], serde_json::json!(-100));
+    assert_eq!(listed[4]["name"], "special:notes");
+    assert_eq!(listed[4]["windows"], serde_json::json!(0));
+    assert!(listed[..3].iter().all(|workspace| workspace["id"].as_i64().unwrap() > 0));
+
+    let plain = ask("workspaces", &snapshot);
+    assert!(plain.contains("workspace ID -99 (special:scratchpad)"), "{plain}");
+    assert!(plain.contains("workspace ID -100 (special:notes)"), "{plain}");
+
+    assert_eq!(special_index_from_hypr_id(-99), Some(0));
+    assert_eq!(special_index_from_hypr_id(-100), Some(1));
+    assert_eq!(special_index_from_hypr_id(-1), None, "ids above the special range are not specials");
+    assert_eq!(special_index_from_hypr_id(1), None);
+    assert_eq!(workspace_index_from_hypr_id(-99), None, "the numbered resolver stays strict");
+    assert_eq!(workspace_index_from_hypr_id(1), Some(0));
+    for special in &snapshot.specials {
+        assert_eq!(special_index_from_hypr_id(special.hypr_id()), Some(special.index));
+        assert!(special.hypr_id() < 0);
+    }
+}
+
+/// `monitors[].specialWorkspace` names the special shown on that
+/// output, and Hyprland's `{ 0, "" }` when none is; a member window's
+/// `workspace` is its special, in JSON and in the plain form.
+#[test]
+fn monitors_and_clients_report_special_workspace_membership() {
+    let mut snapshot = desktop_with_specials();
+    let none = ask_json("j/monitors", &snapshot);
+    assert_eq!(none[0]["specialWorkspace"], serde_json::json!({ "id": 0, "name": "" }));
+
+    snapshot.monitors[0].special_workspace = Some("scratchpad".into());
+    let shown = ask_json("j/monitors", &snapshot);
+    assert_eq!(shown[0]["specialWorkspace"], serde_json::json!({ "id": -99, "name": "special:scratchpad" }));
+
+    let clients = ask_json("j/clients", &snapshot);
+    let console = clients.as_array().unwrap().iter().find(|client| client["title"] == "console").expect("listed");
+    assert_eq!(console["workspace"], serde_json::json!({ "id": -99, "name": "special:scratchpad" }));
+    let ordinary = clients.as_array().unwrap().iter().find(|client| client["title"] == "~ — foot").expect("listed");
+    assert_eq!(ordinary["workspace"]["id"], serde_json::json!(1));
+    let plain = ask("clients", &snapshot);
+    assert!(plain.contains("workspace: -99 (special:scratchpad)"), "{plain}");
+
+    snapshot.focused = Some(4_294_967_298);
+    assert_eq!(ask_json("j/activewindow", &snapshot)["workspace"]["name"], "special:scratchpad");
+}
+
+/// Showing a special on an output emits `activespecial>>NAME,MONITOR`
+/// and `activespecialv2>>ID,NAME,MONITOR`; hiding it emits both with an
+/// empty name (and id), which is how Hyprland spells "none". A special
+/// coming into existence is announced like any workspace, and a window
+/// joining one moves there.
+#[test]
+fn showing_and_hiding_a_special_emits_activespecial_events() {
+    let mut differ = Differ::new();
+    let before = desktop();
+    differ.diff(&before);
+
+    let mut created = before.clone();
+    created.specials.push(special(0, "scratchpad", 0));
+    let events = differ.diff(&created);
+    let create = events.iter().find(|e| e.name() == "createworkspacev2").expect("createworkspacev2");
+    assert_eq!(create.data(), "-99,special:scratchpad");
+    assert!(events.iter().all(|e| e.name() != "activespecial"), "creating is not showing: {events:?}");
+
+    let mut joined = created.clone();
+    joined.windows[0].special = Some("scratchpad".into());
+    let events = differ.diff(&joined);
+    let moved = events.iter().find(|e| e.name() == "movewindowv2").expect("movewindowv2");
+    assert_eq!(moved.data(), "100000001,-99,special:scratchpad");
+
+    let mut shown = joined.clone();
+    shown.monitors[0].special_workspace = Some("scratchpad".into());
+    let events = differ.diff(&shown);
+    let legacy = events.iter().find(|e| e.name() == "activespecial").expect("activespecial");
+    assert_eq!(legacy.line(), "activespecial>>special:scratchpad,eDP-1\n");
+    let v2 = events.iter().find(|e| e.name() == "activespecialv2").expect("activespecialv2");
+    assert_eq!(v2.line(), "activespecialv2>>-99,special:scratchpad,eDP-1\n");
+    assert!(events.iter().all(|e| e.name() != "workspacev2"), "the numbered workspace did not change: {events:?}");
+
+    let mut hidden = shown.clone();
+    hidden.monitors[0].special_workspace = None;
+    let events = differ.diff(&hidden);
+    let legacy = events.iter().find(|e| e.name() == "activespecial").expect("activespecial on hide");
+    assert_eq!(legacy.line(), "activespecial>>,eDP-1\n");
+    let v2 = events.iter().find(|e| e.name() == "activespecialv2").expect("activespecialv2 on hide");
+    assert_eq!(v2.line(), "activespecialv2>>,,eDP-1\n");
+
+    let mut left = hidden.clone();
+    left.windows[0].special = None;
+    let events = differ.diff(&left);
+    let moved = events.iter().find(|e| e.name() == "movewindowv2").expect("movewindowv2 back");
+    assert_eq!(moved.data(), "100000001,1,1");
 }
 
 /// A refusal should say what chonkstep *is*, not merely that something
@@ -663,6 +1091,19 @@ fn served_script_requests(snapshot: &Snapshot) -> Vec<(&'static str, Vec<ScriptR
                 Mutation(r#"/eval hl.workspace_rule({ workspace = "1", layout = "dwindle" })"#.to_string()),
             ],
         ),
+        (
+            "omarchy-hyprland-window-tiled-fullscreen-toggle",
+            vec![
+                Query("j/activewindow", &["fullscreenClient"]),
+                // Off when `fullscreenClient` reads 2, on otherwise, each
+                // with the classic fallback the script keeps for an older
+                // Hyprland.
+                dispatch("hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })"),
+                dispatch("hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })"),
+                dispatch("fullscreenstate 0 0"),
+                dispatch("fullscreenstate 0 2"),
+            ],
+        ),
     ]
 }
 
@@ -739,6 +1180,107 @@ fn fullscreen_arguments_map() {
     assert_eq!(actions, vec![Action::ToggleMaximize]);
     let (_, actions) = answer_payload(b"/dispatch fullscreen 2", &snapshot);
     assert_eq!(actions, vec![Action::Fullscreen(Fullscreen::On)]);
+}
+
+/// `fullscreenstate` carries two axes, and both reach the action in
+/// either spelling; the Lua form also takes a window selector.
+#[test]
+fn fullscreen_state_parses_both_axes_in_both_spellings() {
+    let snapshot = desktop();
+    let focused = snapshot.windows[0].id;
+    for (wire, internal, client) in [
+        ("/dispatch fullscreenstate 0 2", 0, 2),
+        ("/dispatch fullscreenstate 0 0", 0, 0),
+        ("/dispatch fullscreenstate 2 1", 2, 1),
+        ("/dispatch fullscreenstate  1   2 ", 1, 2),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response, "ok", "{wire}");
+        assert_eq!(actions, vec![Action::FullscreenState { window: None, internal, client }], "{wire}");
+    }
+    for (wire, internal, client) in [
+        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })", 0, 2),
+        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })", 0, 0),
+        ("/dispatch hl.dsp.window.fullscreen_state({ client = 1, internal = 2 })", 2, 1),
+        (
+            "/dispatch hl.dsp.window.fullscreen_state({ window = \"address:0x100000001\", internal = 1, client = 1 })",
+            1,
+            1,
+        ),
+    ] {
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response, "ok", "{wire}");
+        assert_eq!(actions, vec![Action::FullscreenState { window: Some(focused), internal, client }], "{wire}");
+    }
+}
+
+/// A mode outside 0..=2, a missing axis, or a non-number is refused by
+/// the name of the field, never rounded to a state the window did not
+/// ask for. `hyprctl` exits zero whatever the reply, so the reply text
+/// is the only thing that tells a script author what was wrong.
+#[test]
+fn fullscreen_state_refuses_out_of_range_and_missing_axes_by_name() {
+    let snapshot = desktop();
+    for (wire, field, value) in [
+        ("fullscreenstate 3 2", "internal", "\"3\""),
+        ("fullscreenstate 0 -1", "client", "\"-1\""),
+        ("fullscreenstate 0 on", "client", "\"on\""),
+        ("hl.dsp.window.fullscreen_state({ internal = 0, client = 7 })", "client", "\"7\""),
+        ("hl.dsp.window.fullscreen_state({ internal = 256, client = 2 })", "internal", "\"256\""),
+    ] {
+        let outcome = dispatch::parse(wire, &snapshot);
+        let Outcome::Unsupported(why) = outcome else {
+            panic!("{wire:?} must be refused, got {outcome:?}");
+        };
+        assert!(why.contains(field) && why.contains(value), "{wire:?} names the bad field and value: {why}");
+        let (response, actions) = answer_payload(format!("/dispatch {wire}").as_bytes(), &snapshot);
+        assert_ne!(response, "ok", "{wire}");
+        assert!(actions.is_empty(), "{wire}: nothing applied");
+    }
+    for wire in [
+        "fullscreenstate",
+        "fullscreenstate 0",
+        "hl.dsp.window.fullscreen_state({ client = 2 })",
+        "hl.dsp.window.fullscreen_state()",
+    ] {
+        let outcome = dispatch::parse(wire, &snapshot);
+        let Outcome::Unsupported(why) = outcome else {
+            panic!("{wire:?} must be refused, got {outcome:?}");
+        };
+        assert!(why.contains("both internal and client"), "{wire:?}: {why}");
+    }
+}
+
+/// `fullscreen` is the compositor's mode and `fullscreenClient` what the
+/// window is told, in Hyprland's numbering: a maximized window reads 1
+/// on both, one told it is fullscreen in its tile reads 0 and 2, and a
+/// real fullscreen reads 2 and 2. `hasfullscreen` follows only the last.
+#[test]
+fn clients_report_fullscreen_and_fullscreen_client_modes_honestly() {
+    let mut snapshot = desktop();
+    let read = |snapshot: &Snapshot| {
+        let active = ask_json("j/activewindow", snapshot);
+        let clients = ask_json("j/clients", snapshot);
+        let client = &clients.as_array().unwrap()[0];
+        assert_eq!(client["fullscreen"], active["fullscreen"]);
+        assert_eq!(client["fullscreenClient"], active["fullscreenClient"]);
+        (active["fullscreen"].as_i64().unwrap(), active["fullscreenClient"].as_i64().unwrap())
+    };
+    assert_eq!(read(&snapshot), (0, 0));
+
+    snapshot.windows[0].maximized = true;
+    assert_eq!(read(&snapshot), (1, 1), "SUPER+ALT+F's maximize is Hyprland's mode 1");
+    snapshot.windows[0].maximized = false;
+
+    snapshot.windows[0].client_fullscreen = true;
+    assert_eq!(read(&snapshot), (0, 2), "tiled fullscreen is told, not done");
+    let plain = ask("activewindow", &snapshot);
+    assert!(plain.contains("\tfullscreen: 0\n\tfullscreenClient: 2\n"), "{plain}");
+    assert_eq!(ask_json("j/workspaces", &snapshot)[0]["hasfullscreen"], false, "hasfullscreen stays compositor-only");
+    snapshot.windows[0].client_fullscreen = false;
+
+    snapshot.windows[0].fullscreen = true;
+    assert_eq!(read(&snapshot), (2, 2));
 }
 
 #[test]
@@ -1404,21 +1946,27 @@ fn a_reported_chonkstep_binding_replays_and_nothing_else_does() {
     assert_eq!(dispatch::parse("chonkstep reload", &locked), Outcome::Run(Action::Binding("reload".into())));
 }
 
-/// Omarchy's next and previous workspace steps, and the report of a
-/// ChonkStep next/previous binding, are signed steps. Read as integers,
-/// `+1` named workspace 1 and `-1` a special workspace.
+/// The report of a ChonkStep next/previous binding is a signed step by
+/// index. Read as integers, `+1` named workspace 1 and `-1` a special
+/// workspace. Omarchy's `e+1` / `e-1` are a different selector: the
+/// next workspace that has windows, so from an empty workspace 2 with
+/// only workspace 1 occupied both go to 1, and with 3 occupied as well
+/// `e+1` goes on to 3.
 #[test]
 fn signed_workspace_selectors_are_relative_steps() {
-    let desk = Snapshot { monitors: vec![monitor(0, "eDP-1", true, 1)], ..desktop() };
+    let mut desk = Snapshot { monitors: vec![monitor(0, "eDP-1", true, 1)], ..desktop() };
     for (wire, index) in [
         ("workspace +1", 2),
         ("workspace -1", 0),
-        ("workspace e+1", 2),
+        ("workspace e+1", 0),
         ("workspace e-1", 0),
         ("workspace 3", 2),
     ] {
         assert_eq!(dispatch::parse(wire, &desk), Outcome::Run(Action::FocusWorkspace(index)), "{wire}");
     }
+    desk.workspaces[2].windows = 1;
+    assert_eq!(dispatch::parse("workspace e+1", &desk), Outcome::Run(Action::FocusWorkspace(2)));
+    assert_eq!(dispatch::parse("workspace e-1", &desk), Outcome::Run(Action::FocusWorkspace(0)));
 }
 
 #[test]

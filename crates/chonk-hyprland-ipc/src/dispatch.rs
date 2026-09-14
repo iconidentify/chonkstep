@@ -24,7 +24,9 @@
 //! beginning with `Invalid dispatcher`. The server logs and counts each
 //! one because most non-interactive callers will otherwise hide it.
 
-use crate::state::{workspace_index_from_hypr_id, Snapshot, Window, NESTED_DEVICES};
+use crate::state::{
+    workspace_index_from_hypr_id, Snapshot, Window, MAX_SPECIAL_NAME, MAX_SPECIAL_WORKSPACES, NESTED_DEVICES,
+};
 
 /// What a dispatch request asks chonkstep to do.
 ///
@@ -46,6 +48,13 @@ pub enum Action {
     /// Move a window (or the focused one) to a 0-based workspace index.
     /// `follow` distinguishes Hyprland's ordinary and `silent` verbs.
     MoveToWorkspace { window: Option<u64>, workspace: usize, follow: bool },
+    /// Show the named special workspace on the active output, or hide it
+    /// if it is the one shown there — `togglespecialworkspace [NAME]`.
+    ToggleSpecialWorkspace(String),
+    /// Move a window (or the focused one) onto the named special
+    /// workspace — `movetoworkspace[silent] special[:NAME][,window]`.
+    /// With `follow` the special is shown and the window focused.
+    MoveToSpecial { window: Option<u64>, name: String, follow: bool },
     /// Run a command line through the user's POSIX shell. This is the
     /// spelling used by Lua's `hl.dsp.exec_cmd`, whose single string is
     /// explicitly shell source.
@@ -57,6 +66,13 @@ pub enum Action {
     ExecArgv(Vec<String>),
     /// Set or toggle fullscreen on the focused window.
     Fullscreen(Fullscreen),
+    /// Hyprland's `fullscreenstate <internal> <client>`: the compositor's
+    /// own mode and the one the window is told, each 0 (none), 1
+    /// (maximized) or 2 (fullscreen), already checked to be in range.
+    /// `0 2` is Omarchy's tiled fullscreen — the client drops its chrome
+    /// inside a tile that does not move. The host applies Hyprland's
+    /// rule that asking for the state a window already has clears both.
+    FullscreenState { window: Option<u64>, internal: u8, client: u8 },
     ToggleMaximize,
     /// Focus the next/previous window.
     CycleFocus { forward: bool },
@@ -93,6 +109,15 @@ pub enum Action {
     /// units `cursorpos` and `clients` report. The host refuses it while
     /// the session is locked or a client holds a pointer constraint.
     WarpPointer { x: i32, y: i32 },
+    /// Focus an output: warp the pointer to it and hand the keyboard to
+    /// its most recent window. Parsing has already refused it while the
+    /// session is locked; the host refuses it again against the live
+    /// lock, and resolves the target against the live output list
+    /// because an output can go between the answer and the apply.
+    FocusMonitor(MonitorTarget),
+    /// Re-home the active Space to another output, under separate Spaces
+    /// only: parsing refuses it by name on the shared desktop.
+    MoveWorkspaceToMonitor(MonitorTarget),
     ReloadConfig,
     SetDiagnostic { name: String, enabled: bool },
     SetLogFilter(String),
@@ -128,6 +153,19 @@ pub enum Direction {
     Right,
     Up,
     Down,
+}
+
+/// The output a `focusmonitor` / `movecurrentworkspacetomonitor`
+/// argument names, kept symbolic: a name is checked against the snapshot
+/// here and resolved again by the host, a step or direction only there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorTarget {
+    /// `+N` / `-N`, wrapping along the monitor list; `current` is `+0`.
+    Relative(i32),
+    /// `l` / `r` / `u` / `d`: the nearest output that way.
+    Direction(Direction),
+    /// A connector name exactly as `monitors` reports it.
+    Name(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,7 +220,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("moveintogroup", "chonkstep has no window groups"),
     ("moveoutofgroup", "chonkstep has no window groups"),
     ("lockgroups", "chonkstep has no window groups"),
-    ("togglespecialworkspace", "chonkstep has no special (scratchpad) workspaces"),
     ("workspaceopt", "chonkstep has no per-workspace layout options"),
     ("submap", "chonkstep's keybindings do not have submaps"),
 ];
@@ -246,8 +283,15 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             "d" | "down" => Outcome::Run(Action::MoveDirection(Direction::Down)),
             _ => Outcome::Unsupported("window movement requires a direction".into()),
         },
-        "workspace" => match workspace_target(rest, snapshot) {
-            Ok(index) => Outcome::Run(Action::FocusWorkspace(index)),
+        "workspace" => match workspace_selector(rest, snapshot) {
+            Ok(WorkspaceSelector::Numbered(index)) => Outcome::Run(Action::FocusWorkspace(index)),
+            // `workspace special:NAME` shows the special: the overlay
+            // `togglespecialworkspace` drops down, reached by name.
+            Ok(WorkspaceSelector::Special(name)) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
+            Err(why) => Outcome::Unsupported(why),
+        },
+        "togglespecialworkspace" => match special_name(rest, snapshot) {
+            Ok(name) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
             Err(why) => Outcome::Unsupported(why),
         },
         "focuswindow" => match resolve_window(rest, snapshot) {
@@ -274,8 +318,8 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                 Some((target, window)) => (target.trim(), Some(window.trim())),
                 None => (rest, None),
             };
-            let workspace = match workspace_target(target, snapshot) {
-                Ok(index) => index,
+            let selector = match workspace_selector(target, snapshot) {
+                Ok(selector) => selector,
                 Err(why) => return Outcome::Unsupported(why),
             };
             let window = match window {
@@ -285,7 +329,7 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                     None => return Outcome::Unsupported(format!("no window matches {selector:?}")),
                 },
             };
-            Outcome::Run(Action::MoveToWorkspace { window, workspace, follow })
+            Outcome::Run(move_action(selector, window, follow))
         }
         "exec" => classic_exec(rest),
         "fullscreen" => {
@@ -298,8 +342,13 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             }
         }
         "fullscreenstate" => {
-            let client = rest.split_whitespace().nth(1).unwrap_or("0");
-            Outcome::Run(Action::Fullscreen(if client == "0" { Fullscreen::Off } else { Fullscreen::On }))
+            let mut words = rest.split_whitespace();
+            let (internal, client) = (words.next(), words.next());
+            let level = |name: &str, value: Option<&str>| fullscreen_level("fullscreenstate", name, value);
+            match (level("internal", internal), level("client", client)) {
+                (Ok(internal), Ok(client)) => Outcome::Run(Action::FullscreenState { window: None, internal, client }),
+                (Err(why), _) | (_, Err(why)) => Outcome::Unsupported(why),
+            }
         }
         "cyclenext" => Outcome::Run(Action::CycleFocus { forward: !rest.contains("prev") }),
         "resizeactive" => classic_geometry(rest, snapshot, true, true),
@@ -364,9 +413,9 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             }
         }
         "dpms" => parse_dpms(rest, snapshot),
-        "focusmonitor" | "movecurrentworkspacetomonitor" | "focuswindowbyclass" => {
-            Outcome::Unsupported(format!("{verb} is not implemented yet"))
-        }
+        "focusmonitor" => focus_monitor(rest, snapshot),
+        "movecurrentworkspacetomonitor" => move_workspace_to_monitor(rest, snapshot),
+        "focuswindowbyclass" => Outcome::Unsupported(format!("{verb} is not implemented yet")),
         other => Outcome::Unknown(format!("unknown dispatcher {other:?}")),
     }
 }
@@ -397,8 +446,9 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
     match path {
         "focus" => {
             if let Some(value) = lua_field(&args, "workspace") {
-                return match workspace_target(&value, snapshot) {
-                    Ok(index) => Outcome::Run(Action::FocusWorkspace(index)),
+                return match workspace_selector(&value, snapshot) {
+                    Ok(WorkspaceSelector::Numbered(index)) => Outcome::Run(Action::FocusWorkspace(index)),
+                    Ok(WorkspaceSelector::Special(name)) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
                     Err(why) => Outcome::Unsupported(why),
                 };
             }
@@ -408,8 +458,18 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
                     None => Outcome::Unsupported(format!("no window matches {value:?}")),
                 };
             }
-            Outcome::Unknown("hl.dsp.focus with no workspace or window".to_string())
+            if let Some(value) = lua_field(&args, "monitor") {
+                return focus_monitor(&value, snapshot);
+            }
+            if let Some(value) = lua_field(&args, "direction") {
+                return parse_classic("movefocus", &value, snapshot);
+            }
+            Outcome::Unknown("hl.dsp.focus with no workspace, window, monitor or direction".to_string())
         }
+        "workspace.move" => match lua_field(&args, "monitor") {
+            Some(value) => move_workspace_to_monitor(&value, snapshot),
+            None => Outcome::Unsupported("hl.dsp.workspace.move requires a monitor".to_string()),
+        },
         "window.close" => match lua_field(&args, "window") {
             Some(value) => match resolve_window(&value, snapshot) {
                 Some(window) => Outcome::Run(Action::CloseWindow(window.id)),
@@ -432,7 +492,42 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
         "layout" => Outcome::Run(Action::LayoutNoop),
         "window.pin" => lua_window(&args, snapshot, |window| Action::SetPinned { window: window.id, pinned: None }),
         "window.resize" => lua_geometry(&args, snapshot, true),
-        "window.move" => lua_geometry(&args, snapshot, false),
+        // `hl.dsp.window.move` is a move to a workspace when it names
+        // one — Omarchy's `{ workspace = "special:scratchpad", follow =
+        // false }` — and a geometry move otherwise. Groups are refused
+        // by the name Omarchy gives them.
+        "window.move" => {
+            if lua_field(&args, "into_group").is_some() || lua_field(&args, "out_of_group").is_some() {
+                return Outcome::Unsupported("chonkstep has no window groups".to_string());
+            }
+            match lua_field(&args, "workspace") {
+                Some(target) => {
+                    let selector = match workspace_selector(&target, snapshot) {
+                        Ok(selector) => selector,
+                        Err(why) => return Outcome::Unsupported(why),
+                    };
+                    let follow = lua_field(&args, "follow").is_none_or(|value| value != "false");
+                    let window = match lua_field(&args, "window") {
+                        None => None,
+                        Some(value) => match resolve_window(&value, snapshot) {
+                            Some(window) => Some(window.id),
+                            None => return Outcome::Unsupported(format!("no window matches {value:?}")),
+                        },
+                    };
+                    Outcome::Run(move_action(selector, window, follow))
+                }
+                None => lua_geometry(&args, snapshot, false),
+            }
+        }
+        // `hl.dsp.workspace.toggle_special("scratchpad")`, or with no
+        // argument the default special workspace.
+        "workspace.toggle_special" => {
+            let name = lua_field(&args, "name").or_else(|| lua_string(&args)).unwrap_or_default();
+            match special_name(&name, snapshot) {
+                Ok(name) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
+                Err(why) => Outcome::Unsupported(why),
+            }
+        }
         "window.center" => lua_window(&args, snapshot, |window| Action::CenterWindow(window.id)),
         "window.alter_zorder" => {
             if lua_field(&args, "mode").as_deref() != Some("top") {
@@ -452,8 +547,17 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
             lua_window(&args, snapshot, |window| Action::SetTag { window: window.id, tag, present })
         }
         "window.fullscreen_state" => {
-            let client = lua_field(&args, "client").and_then(|value| value.parse::<i32>().ok()).unwrap_or(0);
-            Outcome::Run(Action::Fullscreen(if client == 0 { Fullscreen::Off } else { Fullscreen::On }))
+            let level = |name: &str| {
+                fullscreen_level("hl.dsp.window.fullscreen_state", name, lua_field(&args, name).as_deref())
+            };
+            match (level("internal"), level("client")) {
+                (Ok(internal), Ok(client)) => lua_window(&args, snapshot, |window| Action::FullscreenState {
+                    window: Some(window.id),
+                    internal,
+                    client,
+                }),
+                (Err(why), _) | (_, Err(why)) => Outcome::Unsupported(why),
+            }
         }
         "window.set_prop" => Outcome::Unsupported("window opacity and other dynamic properties are not modeled".to_string()),
         "cursor.move" => {
@@ -758,6 +862,22 @@ fn parse_dpms_lua(args: &[Literal], snapshot: &Snapshot) -> Outcome {
     };
     let output = lua_field(args, "output").or_else(|| lua_field(args, "monitor"));
     parse_dpms(&format!("{}{}", state, output.map_or_else(String::new, |name| format!(" {name}"))), snapshot)
+}
+
+/// One axis of `fullscreenstate`, refused by name for anything but the
+/// three modes Hyprland numbers. A missing field is refused too rather
+/// than defaulted: Hyprland reads a missing axis as "keep the current
+/// one", and a request this cannot honour exactly is not answered `ok`.
+fn fullscreen_level(spelling: &str, name: &str, value: Option<&str>) -> Result<u8, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(format!(
+            "{spelling} needs both internal and client, each 0 (none), 1 (maximized) or 2 (fullscreen)"
+        ));
+    };
+    match value.parse::<u8>() {
+        Ok(level @ 0..=2) => Ok(level),
+        _ => Err(format!("{spelling}: {name} must be 0 (none), 1 (maximized) or 2 (fullscreen), not {value:?}")),
+    }
 }
 
 fn selected_window<'a>(selector: &str, snapshot: &'a Snapshot) -> Option<&'a Window> {
@@ -1370,36 +1490,225 @@ fn in_range(index: usize) -> Result<usize, String> {
     Err(format!("chonkstep has workspaces 1 to {MAX_WORKSPACE}; {} is past the end", index + 1))
 }
 
-/// Resolve a workspace selector to a 0-based chonkstep index.
+/// What a workspace selector named: a numbered workspace by 0-based
+/// index, or a special workspace by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceSelector {
+    Numbered(usize),
+    Special(String),
+}
+
+/// The move a resolved selector asks for.
+fn move_action(selector: WorkspaceSelector, window: Option<u64>, follow: bool) -> Action {
+    match selector {
+        WorkspaceSelector::Numbered(workspace) => Action::MoveToWorkspace { window, workspace, follow },
+        WorkspaceSelector::Special(name) => Action::MoveToSpecial { window, name, follow },
+    }
+}
+
+/// The name a special workspace selector means, checked against what
+/// the compositor will create.
+///
+/// Accepts `special`, `special:NAME`, a bare `NAME`, and nothing at all
+/// for the default special workspace. The name is untrusted socket
+/// input and is published back out through `workspaces` and the event
+/// stream, so it is bounded and printable before anything is asked to
+/// create it; and a name the session does not have yet is refused once
+/// the session holds [`MAX_SPECIAL_WORKSPACES`] of them, so a script
+/// cannot grow the table without limit.
+fn special_name(selector: &str, snapshot: &Snapshot) -> Result<String, String> {
+    let selector = selector.trim();
+    let name = selector.strip_prefix("special:").map_or(selector, str::trim);
+    let name = if name.is_empty() || name == "special" { "special" } else { name };
+    if name.len() > MAX_SPECIAL_NAME {
+        return Err(format!("a special workspace name is at most {MAX_SPECIAL_NAME} bytes"));
+    }
+    if name.chars().any(char::is_control) {
+        return Err("a special workspace name cannot contain control characters".to_string());
+    }
+    if snapshot.special_named(name).is_none() && snapshot.specials.len() >= MAX_SPECIAL_WORKSPACES {
+        return Err(format!(
+            "chonkstep has {MAX_SPECIAL_WORKSPACES} special workspaces already and will not create {name:?}"
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Resolve a workspace selector to a numbered workspace's 0-based
+/// index or a special workspace's name.
+fn workspace_selector(target: &str, snapshot: &Snapshot) -> Result<WorkspaceSelector, String> {
+    let target = target.trim();
+    if target == "special" || target.starts_with("special:") {
+        return special_name(target, snapshot).map(WorkspaceSelector::Special);
+    }
+    workspace_target(target, snapshot).map(WorkspaceSelector::Numbered)
+}
+
+/// Resolve a numbered workspace selector to a 0-based chonkstep index.
+/// Special workspaces are named, not numbered, and are resolved by
+/// [`workspace_selector`]; here they are refused, as is any negative
+/// id, which is how Hyprland numbers them on the wire.
 fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> {
     let target = target.trim();
     if target.is_empty() {
         return Err("workspace with no argument".to_string());
     }
-    // Relative selectors first. `e+1`/`e-1` and `+1`/`-1` are what
-    // Omarchy's keybindings send for next/previous workspace, and read as
-    // integers `+1` is workspace 1 and `-1` a special workspace id.
-    let relative = target.strip_prefix('e').unwrap_or(target);
-    if let Some(delta) = relative.strip_prefix('+').and_then(|d| d.parse::<usize>().ok()) {
+    // Relative selectors first. `+1`/`-1` step by index, which grows the
+    // row past its end exactly as the keyboard's `workspace-next` does;
+    // read as integers `+1` would be workspace 1 and `-1` a special
+    // workspace id. `e+1`/`e-1`, what Omarchy binds to SUPER+TAB, are
+    // "the next workspace that exists": only workspaces with windows on
+    // them, plus the current one, wrapping and never creating a new one.
+    if let Some(existing) = target.strip_prefix('e') {
+        let step = (existing.starts_with('+') || existing.starts_with('-'))
+            .then(|| existing.parse::<i64>().ok())
+            .flatten();
+        return match step {
+            Some(step) => occupied_workspace_step(step, snapshot),
+            None => Err(format!("unrecognised workspace selector {target:?}")),
+        };
+    }
+    if let Some(delta) = target.strip_prefix('+').and_then(|d| d.parse::<usize>().ok()) {
         let current = snapshot.active_workspace().map_or(0, |w| w.index);
         return in_range(current.saturating_add(delta));
     }
-    if let Some(delta) = relative.strip_prefix('-').and_then(|d| d.parse::<usize>().ok()) {
+    if let Some(delta) = target.strip_prefix('-').and_then(|d| d.parse::<usize>().ok()) {
         let current = snapshot.active_workspace().map_or(0, |w| w.index);
         return in_range(current.saturating_sub(delta));
+    }
+    if target == "previous" {
+        return snapshot
+            .previous_workspace
+            .filter(|&index| Some(index) != snapshot.active_workspace().map(|w| w.index))
+            .ok_or_else(|| "no workspace before this one yet".to_string());
     }
     if let Ok(id) = target.parse::<i32>() {
         let index = workspace_index_from_hypr_id(id).ok_or_else(|| format!("chonkstep has no workspace {id}"))?;
         return in_range(index);
     }
     // Named selectors.
-    if target.starts_with("special") {
-        return Err("chonkstep has no special (scratchpad) workspaces".to_string());
+    if target == "special" || target.starts_with("special:") {
+        return Err(format!("{target:?} names a special workspace, which this verb does not take"));
     }
     if let Some(name) = target.strip_prefix("name:") {
         return Err(format!("chonkstep workspaces are numbered, not named ({name:?})"));
     }
     Err(format!("unrecognised workspace selector {target:?}"))
+}
+
+/// `e+N` / `e-N`: `step` workspaces along the occupied ones, plus the
+/// current, wrapping. Under separate Spaces only the focused display's
+/// row counts, which is the row the keyboard's own stepping walks. The
+/// current workspace when nothing else is occupied, so the answer is a
+/// switch to where the desktop already is rather than a refusal: the
+/// keyboard stays put in the same case.
+fn occupied_workspace_step(step: i64, snapshot: &Snapshot) -> Result<usize, String> {
+    let current = snapshot.active_workspace().map_or(0, |w| w.index);
+    let row: Vec<usize> = snapshot
+        .workspaces
+        .iter()
+        .filter(|workspace| {
+            !snapshot.separate_spaces
+                || snapshot.focused_monitor().is_none_or(|monitor| workspace.monitor == monitor.name)
+        })
+        .filter(|workspace| workspace.index == current || workspace.windows > 0)
+        .map(|workspace| workspace.index)
+        .collect();
+    let Some(at) = row.iter().position(|&index| index == current) else {
+        return in_range(current);
+    };
+    let count = row.len() as i64;
+    // Reduce before adding: a valid i64 step can overflow when the
+    // current workspace is not the first stop in the row.
+    in_range(row[(at as i64 + step.rem_euclid(count)).rem_euclid(count) as usize])
+}
+
+/// Parse a `focusmonitor` argument, refusing the whole request while the
+/// session is locked: a script must not move focus or the pointer behind
+/// the lock surface, and the host refuses again against its live lock.
+fn focus_monitor(rest: &str, snapshot: &Snapshot) -> Outcome {
+    if snapshot.locked {
+        return Outcome::Unsupported("focusmonitor is refused while the session is locked".to_string());
+    }
+    match monitor_target(rest, snapshot) {
+        Ok(target) => Outcome::Run(Action::FocusMonitor(target)),
+        Err(why) => Outcome::Unsupported(why),
+    }
+}
+
+/// Parse a `movecurrentworkspacetomonitor` argument. On the shared
+/// desktop there is no Space to move, and a fullscreen Space is bound to
+/// its window's display; both are refused by name here rather than
+/// answered `ok` and left undone. The host re-checks both at apply.
+fn move_workspace_to_monitor(rest: &str, snapshot: &Snapshot) -> Outcome {
+    if snapshot.locked {
+        return Outcome::Unsupported("movecurrentworkspacetomonitor is refused while the session is locked".to_string());
+    }
+    if !snapshot.separate_spaces {
+        return Outcome::Unsupported(format!("movecurrentworkspacetomonitor: {SHARED_DESKTOP_SPANS_DISPLAYS}"));
+    }
+    if snapshot.active_workspace().is_some_and(|workspace| workspace.has_fullscreen) {
+        return Outcome::Unsupported(
+            "movecurrentworkspacetomonitor: a fullscreen Space is bound to the display of the window it came from"
+                .to_string(),
+        );
+    }
+    match monitor_target(rest, snapshot) {
+        Ok(target) => Outcome::Run(Action::MoveWorkspaceToMonitor(target)),
+        Err(why) => Outcome::Unsupported(why),
+    }
+}
+
+/// The refusal for a workspace move on the shared desktop, spelled to
+/// match `wm_core::SHARED_DESKTOP_SPANS_DISPLAYS` without depending on it.
+const SHARED_DESKTOP_SPANS_DISPLAYS: &str =
+    "the workspace already spans every display; `interaction_mode = \"spaces\"` with \
+     `[mac] separate_spaces = true` gives each display its own row of Spaces to move";
+
+/// The longest output name a monitor selector may carry: connector names
+/// are a dozen bytes, and the input is a socket's.
+const MAX_MONITOR_NAME: usize = 256;
+
+/// Resolve a monitor selector: `+N` / `-N`, `current`, a direction, a
+/// monitor id, or a name `monitors` reports. Only the name and id are
+/// checked here, because only they can be wrong on their own; a step
+/// wraps and a direction is answered by the host's live geometry.
+fn monitor_target(rest: &str, snapshot: &Snapshot) -> Result<MonitorTarget, String> {
+    let target = rest.trim();
+    if target.is_empty() {
+        return Err("monitor selector with no argument".to_string());
+    }
+    if target.len() > MAX_MONITOR_NAME || target.chars().any(char::is_control) {
+        return Err("monitor selector is not an output name".to_string());
+    }
+    if target.eq_ignore_ascii_case("current") {
+        return Ok(MonitorTarget::Relative(0));
+    }
+    if target.starts_with('+') || target.starts_with('-') {
+        return target.parse::<i32>().map(MonitorTarget::Relative)
+            .map_err(|_| format!("invalid relative monitor selector {target:?}"));
+    }
+    match target.to_ascii_lowercase().as_str() {
+        "l" | "left" => return Ok(MonitorTarget::Direction(Direction::Left)),
+        "r" | "right" => return Ok(MonitorTarget::Direction(Direction::Right)),
+        "u" | "up" => return Ok(MonitorTarget::Direction(Direction::Up)),
+        "d" | "down" => return Ok(MonitorTarget::Direction(Direction::Down)),
+        _ => {}
+    }
+    if let Ok(id) = target.parse::<i32>() {
+        return snapshot
+            .monitors
+            .iter()
+            .find(|monitor| monitor.id == id)
+            .map(|monitor| MonitorTarget::Name(monitor.name.clone()))
+            .ok_or_else(|| format!("no output has id {id}"));
+    }
+    snapshot
+        .monitors
+        .iter()
+        .find(|monitor| monitor.name == target)
+        .map(|monitor| MonitorTarget::Name(monitor.name.clone()))
+        .ok_or_else(|| format!("no output named {target:?}"))
 }
 
 /// Resolve one of Hyprland's window selectors against the snapshot.

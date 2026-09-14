@@ -978,6 +978,16 @@ pub struct WaylandBackend {
     /// recording at all rather than acting on where the reload was
     /// noticed — see the drain in `dispatch_pending`.
     pub(crate) pending_cursor_scale: Option<f32>,
+    /// A pointer warp the window manager asked for through
+    /// `Backend::warp_pointer` (`focusmonitor`), in ledger pixels,
+    /// waiting for [`Compositor::dispatch_pending`] to apply it through
+    /// `input::warp_pointer` — the same detour as
+    /// [`WaylandBackend::pending_cursor_scale`], for the same reason:
+    /// moving the pointer needs the `Compositor`, which a `Backend`
+    /// verb cannot reach. Applied through the script warp's own gate,
+    /// so a binding cannot move the pointer behind the lock surface or
+    /// out of a client's pointer constraint either.
+    pub(crate) pending_pointer_warp: Option<Point>,
     /// The interactive drag currently holding the pointer, if any.
     ///
     /// This *is* `Backend::grab_pointer_for_drag` — there is no server
@@ -1192,6 +1202,7 @@ impl WaylandBackend {
             preview_edge: None,
             preview_generation: 0,
             pending_cursor_scale: None,
+            pending_pointer_warp: None,
             pointer_grab: None,
             pending_pointer_grab: None,
             pointer: None,
@@ -2798,6 +2809,7 @@ impl Compositor {
         if let Some(config) = self.wm.backend_mut().pending_pointer.take() {
             self.apply_pointer_config(config, dispatch_started);
         }
+        crate::input::flush_pointer_warp(self);
         tracing::debug_span!("dispatch_phase", phase = "connector_hotplug")
             .in_scope(|| crate::session::service_connector_hotplug(self));
         let phase_started = Instant::now();

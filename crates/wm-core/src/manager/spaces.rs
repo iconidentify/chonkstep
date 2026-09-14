@@ -99,6 +99,18 @@ impl SpaceHomeGeometry {
     }
 }
 
+/// Why a workspace cannot be moved between displays on the shared
+/// desktop. Names the setting that gives each display its own row, so
+/// the refusal tells the user what to change rather than only what
+/// failed.
+pub const SHARED_DESKTOP_SPANS_DISPLAYS: &str =
+    "the workspace already spans every display; `interaction_mode = \"spaces\"` with \
+     `[mac] separate_spaces = true` gives each display its own row of Spaces to move";
+
+/// Why a fullscreen Space stays where it is.
+pub const FULLSCREEN_SPACE_STAYS_HOME: &str =
+    "a fullscreen Space is bound to the display of the window it came from";
+
 pub(super) struct DisplaySpaces {
     pub snapshot: DisplaySpacesSnapshot,
     pub reconciling: bool,
@@ -126,10 +138,7 @@ impl<B: Backend> WindowManager<B> {
             return false;
         }
         self.workspace_count = snapshot.spaces.len();
-        self.layouts.resize_with(
-            self.workspace_count,
-            crate::spatial::WorkspaceLayout::default,
-        );
+        self.grow_layouts();
         self.display_spaces = Some(DisplaySpaces {
             snapshot,
             reconciling: false,
@@ -479,10 +488,7 @@ impl<B: Backend> WindowManager<B> {
             output_display: key.into(),
         });
         self.workspace_count += 1;
-        self.layouts.resize_with(
-            self.workspace_count,
-            crate::spatial::WorkspaceLayout::default,
-        );
+        self.grow_layouts();
         Some(index)
     }
 
@@ -496,10 +502,7 @@ impl<B: Backend> WindowManager<B> {
         } else {
             let space = self.workspace_count;
             self.workspace_count += 1;
-            self.layouts.resize_with(
-                self.workspace_count,
-                crate::spatial::WorkspaceLayout::default,
-            );
+            self.grow_layouts();
             space
         };
         self.bump_protocol_state_revision();
@@ -530,6 +533,7 @@ impl<B: Backend> WindowManager<B> {
 
     /// Called at topology/configuration boundaries, never at frame cadence.
     pub fn reconcile_display_spaces(&mut self) {
+        self.prune_special_shown();
         if !self.spaces_mode() || !self.interaction.separate_spaces {
             return;
         }
@@ -709,6 +713,7 @@ impl<B: Backend> WindowManager<B> {
             }
             let clients: Vec<_> = self.clients.keys().collect();
             for id in clients {
+                if self.clients[id].special.is_some() { continue; }
                 let mut root = id;
                 for _ in 0..8 {
                     match self.clients.get(root).and_then(|c| c.parent) {
@@ -743,6 +748,12 @@ impl<B: Backend> WindowManager<B> {
         }
         let clients: Vec<_> = self.clients.keys().collect();
         for id in clients {
+            // An overlay has its own output; its numbered home is only
+            // bookkeeping and must not translate or clip its members.
+            if self.clients[id].special.is_some() {
+                self.publish_space_output(id);
+                continue;
+            }
             let workspace = self.clients[id].workspace;
             let Some(output) = self.workspace_output_index(workspace) else {
                 continue;
@@ -789,11 +800,75 @@ impl<B: Backend> WindowManager<B> {
         self.publish_workarea_union();
     }
 
+    /// Re-homes the active Space to the display at `output`, carrying
+    /// its windows across with their geometry relative to the display:
+    /// Hyprland's `movecurrentworkspacetomonitor`. The Space becomes the
+    /// active one on its new display and stays the current workspace;
+    /// the display it left keeps at least one Space, appended if it has
+    /// no other.
+    ///
+    /// Refused with a reason, never silently, when there is no Space to
+    /// move: on the shared desktop the workspace already spans every
+    /// display, and a fullscreen Space is bound to the display of the
+    /// window it came from. `output` is re-checked here, because the
+    /// verb was read before this call and an output can have gone since.
+    pub fn move_workspace_to_output(&mut self, output: usize) -> Result<(), &'static str> {
+        if !self.separate_spaces() {
+            return Err(SHARED_DESKTOP_SPANS_DISPLAYS);
+        }
+        let monitors = self.monitors();
+        if output >= monitors.len() {
+            return Err("that display is no longer connected");
+        }
+        let space = self.current_workspace;
+        if self.mac_fullscreen.values().any(|(_, full)| *full == space) {
+            return Err(FULLSCREEN_SPACE_STAYS_HOME);
+        }
+        let Some(from) = self.workspace_output_index(space) else {
+            return Err("the current Space is not on a connected display");
+        };
+        if from == output {
+            return Ok(());
+        }
+        let key = self.space_display_key(&monitors, output);
+        let members: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(_, client)| client.workspace == space && client.special.is_none())
+            .map(|(id, _)| id)
+            .collect();
+        let state = self.display_spaces.as_mut().unwrap();
+        let Some(entry) = state.snapshot.spaces.get_mut(space) else {
+            return Err("the current Space is not on a connected display");
+        };
+        let id = entry.id;
+        entry.home_display.clone_from(&key);
+        entry.output_display.clone_from(&key);
+        if let Some(display) = state.snapshot.displays.iter_mut().find(|d| d.connected && d.key == key) {
+            display.active = id;
+        }
+        state.snapshot.selected = key;
+        // Reconciliation reads the Space as already owned by its new
+        // display, so the windows are carried here, once, and it only
+        // reflows, shows and publishes them.
+        let (from, to) = (monitors[from].geometry, monitors[output].geometry);
+        for member in members {
+            self.translate_client_between_displays(member, from, to);
+        }
+        self.reconcile_display_spaces();
+        Ok(())
+    }
+
     pub(super) fn translate_space_move(&mut self, id: ClientId, workspace: usize) {
-        let Some(old) = self
+        let special_output = self.clients.get(id).filter(|client| client.special.is_some()).map(|_| self.client_output_index(id));
+        self.translate_space_move_from_output(id, workspace, special_output);
+    }
+
+    pub(super) fn translate_space_move_from_output(&mut self, id: ClientId, workspace: usize, special_output: Option<usize>) {
+        let Some(old) = special_output.or_else(|| self
             .clients
             .get(id)
-            .and_then(|c| self.workspace_output_index(c.workspace))
+            .and_then(|c| self.workspace_output_index(c.workspace)))
         else {
             return;
         };
@@ -852,14 +927,18 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get(id) else {
             return;
         };
-        let name = self
-            .workspace_output_index(client.workspace)
+        let output = if client.special.is_some() {
+            Some(self.client_output_index(id))
+        } else {
+            self.workspace_output_index(client.workspace)
+        };
+        let name = output
             .and_then(|i| self.monitors_ref().get(i))
             .map(|m| m.name.clone());
         self.backend
             .set_window_space_output(client.window, name.as_deref());
         if let Some(state) = self.display_spaces.as_mut() {
-            if state.home_geometry.get(&id).is_some_and(|saved| {
+            if client.special.is_some() || state.home_geometry.get(&id).is_some_and(|saved| {
                 state
                     .snapshot
                     .spaces
@@ -1026,8 +1105,7 @@ impl<B: Backend> WindowManager<B> {
                 continue;
             }
             if !self.monitors_ref().is_empty() && !self.mac_client_hidden(id)
-                && (self.workspace_visible(client.workspace)
-                    || client.flags.contains(ClientFlags::STICKY))
+                && self.client_placed_on_screen(client)
             {
                 self.show_client_surface(id);
                 self.repaint_decoration(id);
@@ -1042,10 +1120,7 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         self.workspace_count = self.workspace_count.max(workspace + 1);
-        self.layouts.resize_with(
-            self.workspace_count,
-            crate::spatial::WorkspaceLayout::default,
-        );
+        self.grow_layouts();
         let state = self.display_spaces.as_mut().unwrap();
         let space = &state.snapshot.spaces[workspace];
         let Some(display) = state
@@ -1061,8 +1136,11 @@ impl<B: Backend> WindowManager<B> {
         }
         display.active = space.id;
         state.snapshot.selected.clone_from(&display.key);
+        self.previous_workspace = Some(self.current_workspace);
         self.current_workspace = workspace;
+        self.hide_special_for_workspace_switch(workspace);
         self.refresh_space_visibility();
+        self.raise_shown_specials();
         let next = self
             .focus_history
             .iter()
@@ -1136,6 +1214,7 @@ impl<B: Backend> WindowManager<B> {
         }
         self.workspace_count -= 1;
         self.current_workspace = remap(self.current_workspace);
+        self.previous_workspace = self.previous_workspace.filter(|&p| p != workspace).map(remap);
         self.refresh_space_visibility();
         self.repair_space_focus();
         self.reflow_layouts();

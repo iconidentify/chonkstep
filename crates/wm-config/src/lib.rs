@@ -39,6 +39,14 @@ pub enum Action {
     ToggleShade,
     Miniaturize,
     ToggleFullscreen,
+    /// Hyprland's `fullscreenstate <internal> <client>`: what the
+    /// compositor does with the focused window and what the window is
+    /// told, set independently. `toggle-tiled-fullscreen` is the one
+    /// pair with a name of its own, `(None, Fullscreen)`: Omarchy's
+    /// tiled fullscreen, where the client drops its own chrome inside a
+    /// tile that stays put. Asking for the state the window already has
+    /// clears both axes, so a bound pair is a toggle.
+    FullscreenState { internal: wm_core::FullscreenMode, client: wm_core::FullscreenMode },
     Layout(wm_core::LayoutMode),
     ToggleLayout,
     Floating(Option<bool>),
@@ -50,8 +58,30 @@ pub enum Action {
     Focus(FocusDirection),
     WorkspaceNext,
     WorkspacePrev,
+    /// Step to the next / previous workspace that has windows on it,
+    /// wrapping, and counting the current one as a stop — Hyprland's
+    /// `workspace e+1` / `e-1`, which Omarchy binds to `SUPER + TAB`.
+    /// A distinct verb from [`Self::WorkspaceNext`] on purpose: that
+    /// one steps by index and grows the row past its end, which is
+    /// this desktop's own semantics and stays so; this one never lands
+    /// on an empty workspace and never creates one.
+    WorkspaceNextOccupied,
+    WorkspacePrevOccupied,
+    /// Go back to the workspace the desktop was on before the last
+    /// switch — Hyprland's `workspace previous`, a two-workspace flip.
+    WorkspacePrevious,
     WorkspaceCarryNext,
     WorkspaceCarryPrev,
+    /// Focus an output — Hyprland's `focusmonitor`: the pointer warps
+    /// to it, the keyboard goes to its most recent window, and the
+    /// next window opens there. `"focus-monitor +1"`, `"focus-monitor
+    /// left"`, `"focus-monitor DP-1"`.
+    FocusMonitor(wm_core::OutputTarget),
+    /// Move the active Space to another display under separate Spaces
+    /// — Hyprland's `movecurrentworkspacetomonitor`. Refused with a
+    /// reason on the shared desktop, where a workspace spans every
+    /// display. `"move-workspace-to-monitor right"`.
+    MoveWorkspaceToMonitor(wm_core::OutputTarget),
     /// Switch to a workspace by number — `"workspace 4"`.
     ///
     /// The payload is the **0-based** index `wm_core` speaks, already
@@ -86,6 +116,16 @@ pub enum Action {
     /// semantics exactly as [`Self::Workspace`]; a silent no-op when
     /// nothing is focused, like every other window-targeted verb.
     WorkspaceCarry(usize),
+    /// Show the named special workspace — Omarchy's scratchpad — as an
+    /// overlay on the active output, or hide it if it is the one shown
+    /// there: `"toggle-special scratchpad"`. The name alone selects the
+    /// default special workspace, `special`.
+    ToggleSpecial(String),
+    /// Send the focused window to the named special workspace.
+    /// `"special-send NAME"` leaves it hidden until that special is
+    /// shown; `"special-carry NAME"` (`follow`) shows the special and
+    /// keeps the keyboard on the window.
+    SendToSpecial { name: String, follow: bool },
     /// Toggle the modal Overview: every window on the current
     /// workspace as a grid of live thumbnails plus a workspace strip,
     /// drawn and driven by the desktop shell. One verb on purpose —
@@ -186,6 +226,11 @@ impl Action {
             Action::ToggleShade => "toggle-shade",
             Action::Miniaturize => "miniaturize",
             Action::ToggleFullscreen => "toggle-fullscreen",
+            Action::FullscreenState {
+                internal: wm_core::FullscreenMode::None,
+                client: wm_core::FullscreenMode::Fullscreen,
+            } => "toggle-tiled-fullscreen",
+            Action::FullscreenState { .. } => return None,
             Action::Layout(LayoutMode::Freeform) => "layout-freeform",
             Action::Layout(LayoutMode::Mosaic) => "layout-mosaic",
             Action::Layout(LayoutMode::Flow) => "layout-flow",
@@ -204,11 +249,21 @@ impl Action {
             Action::Focus(to) => return Some(format!("focus-{}", direction(to))),
             Action::WorkspaceNext => "workspace-next",
             Action::WorkspacePrev => "workspace-prev",
+            Action::WorkspaceNextOccupied => "workspace-next-occupied",
+            Action::WorkspacePrevOccupied => "workspace-prev-occupied",
+            Action::WorkspacePrevious => "workspace-previous",
+            Action::FocusMonitor(target) => return Some(format!("focus-monitor {}", output_target_name(target))),
+            Action::MoveWorkspaceToMonitor(target) => {
+                return Some(format!("move-workspace-to-monitor {}", output_target_name(target)))
+            }
             Action::WorkspaceCarryNext => "workspace-carry-next",
             Action::WorkspaceCarryPrev => "workspace-carry-prev",
             Action::Workspace(index) => return Some(format!("workspace {}", index + 1)),
             Action::WorkspaceSend(index) => return Some(format!("workspace-send {}", index + 1)),
             Action::WorkspaceCarry(index) => return Some(format!("workspace-carry {}", index + 1)),
+            Action::ToggleSpecial(name) => return Some(format!("toggle-special {name}")),
+            Action::SendToSpecial { name, follow: false } => return Some(format!("special-send {name}")),
+            Action::SendToSpecial { name, follow: true } => return Some(format!("special-carry {name}")),
             Action::Overview => "overview",
             Action::RootMenu => "root-menu",
             Action::Help => "help",
@@ -220,6 +275,56 @@ impl Action {
         };
         Some(name.to_string())
     }
+}
+
+/// The argument `focus-monitor` and `move-workspace-to-monitor` spell an
+/// output target with: `+N` / `-N`, `left` / `right` / `up` / `down`,
+/// or an output name as `chonkstep-ctl outputs` and `hyprctl monitors`
+/// report it. The inverse of [`output_target`].
+fn output_target_name(target: &wm_core::OutputTarget) -> String {
+    use wm_core::OutputTarget;
+    match target {
+        OutputTarget::Relative(step) => format!("{step:+}"),
+        OutputTarget::Direction(FocusDirection::Left) => "left".into(),
+        OutputTarget::Direction(FocusDirection::Right) => "right".into(),
+        OutputTarget::Direction(FocusDirection::Up) => "up".into(),
+        OutputTarget::Direction(FocusDirection::Down) => "down".into(),
+        OutputTarget::Name(name) => name.clone(),
+    }
+}
+
+/// Reads an output target as a binding spells it. A step is bounded to
+/// a small number because it wraps anyway; a name keeps its case, since
+/// connector names (`eDP-1`, `HDMI-A-1`) are case-sensitive, and is
+/// bounded the way every name in this file is.
+fn output_target(argument: &str) -> Option<wm_core::OutputTarget> {
+    use wm_core::OutputTarget;
+    let argument = argument.trim();
+    if argument.is_empty() || argument.len() > 256 || argument.chars().any(char::is_control) {
+        return None;
+    }
+    if let Some(step) = argument.strip_prefix('+').and_then(|digits| digits.parse::<i32>().ok()) {
+        return (step.abs() <= 64).then_some(OutputTarget::Relative(step));
+    }
+    if let Some(step) = argument.strip_prefix('-').and_then(|digits| digits.parse::<i32>().ok()) {
+        return (step.abs() <= 64).then_some(OutputTarget::Relative(step.saturating_neg()));
+    }
+    // A sign that did not read as a step is a malformed step, not an
+    // output called `+`.
+    if argument_starts_with_sign(argument) {
+        return None;
+    }
+    Some(match argument.to_ascii_lowercase().as_str() {
+        "l" | "left" => OutputTarget::Direction(FocusDirection::Left),
+        "r" | "right" => OutputTarget::Direction(FocusDirection::Right),
+        "u" | "up" => OutputTarget::Direction(FocusDirection::Up),
+        "d" | "down" => OutputTarget::Direction(FocusDirection::Down),
+        _ => OutputTarget::Name(argument.to_string()),
+    })
+}
+
+fn argument_starts_with_sign(argument: &str) -> bool {
+    argument.starts_with('+') || argument.starts_with('-')
 }
 
 /// Entry points to the native Wayland capture tool.
@@ -440,6 +545,14 @@ fn action_from_name(name: &str) -> Option<Action> {
         return (!app_id.is_empty() && !id.is_empty())
             .then(|| Action::GlobalShortcut(target.to_string()));
     }
+    // The two monitor verbs carry an output name, whose case matters,
+    // so their argument is read from the name as written.
+    if normalized.starts_with("focus-monitor ") {
+        return output_target(name.get("focus-monitor ".len()..)?).map(Action::FocusMonitor);
+    }
+    if normalized.starts_with("move-workspace-to-monitor ") {
+        return output_target(name.get("move-workspace-to-monitor ".len()..)?).map(Action::MoveWorkspaceToMonitor);
+    }
     match normalized.as_str() {
         "application-next" => Some(Action::CycleApplications(1)),
         "application-prev" => Some(Action::CycleApplications(-1)),
@@ -472,12 +585,19 @@ fn action_from_name(name: &str) -> Option<Action> {
         "toggle-shade" => Some(Action::ToggleShade),
         "miniaturize" => Some(Action::Miniaturize),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
+        "toggle-tiled-fullscreen" => Some(Action::FullscreenState {
+            internal: wm_core::FullscreenMode::None,
+            client: wm_core::FullscreenMode::Fullscreen,
+        }),
         "focus-left" => Some(Action::Focus(FocusDirection::Left)),
         "focus-right" => Some(Action::Focus(FocusDirection::Right)),
         "focus-up" => Some(Action::Focus(FocusDirection::Up)),
         "focus-down" => Some(Action::Focus(FocusDirection::Down)),
         "workspace-next" => Some(Action::WorkspaceNext),
         "workspace-prev" => Some(Action::WorkspacePrev),
+        "workspace-next-occupied" => Some(Action::WorkspaceNextOccupied),
+        "workspace-prev-occupied" => Some(Action::WorkspacePrevOccupied),
+        "workspace-previous" => Some(Action::WorkspacePrevious),
         "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
         "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
         "capture-screen-clipboard" => Some(Action::Capture(CaptureMode::ScreenClipboard)),
@@ -511,6 +631,23 @@ fn action_from_name(name: &str) -> Option<Action> {
                 "workspace" => Action::Workspace(index),
                 "workspace-send" => Action::WorkspaceSend(index),
                 _ => Action::WorkspaceCarry(index),
+            })
+        }
+        // The special-workspace verbs carry a name. A bare
+        // `toggle-special` is the default special workspace, as a bare
+        // `togglespecialworkspace` is in Hyprland; the name is bounded
+        // and checked by the core's own rule so a config file cannot
+        // name a special the compositor would refuse to create.
+        rest if rest == "toggle-special"
+            || rest.starts_with("toggle-special ")
+            || rest.starts_with("special-send ")
+            || rest.starts_with("special-carry ") => {
+            let (verb, name) = rest.split_once(' ').unwrap_or((rest, ""));
+            let name = wm_core::normalize_special_name(name)?;
+            Some(match verb {
+                "toggle-special" => Action::ToggleSpecial(name),
+                "special-send" => Action::SendToSpecial { name, follow: false },
+                _ => Action::SendToSpecial { name, follow: true },
             })
         }
         // `run <name>` carries an argument like the three workspace
@@ -667,6 +804,12 @@ pub struct Config {
     /// imitates; `drag_modifier = "super"` picks the modern convention,
     /// and `"none"` disables the gesture.
     pub drag_modifier: Option<Modifiers>,
+    /// Whether switching workspace hides the special workspace shown
+    /// on the output the switch lands on — Hyprland's
+    /// `binds:hide_special_on_workspace_change`, which Omarchy sets.
+    /// Off by default, as in Hyprland: the scratchpad stays where it
+    /// was dropped until the same chord takes it away.
+    pub hide_special_on_workspace_change: bool,
     /// Relaunch the previous session's windows at startup, restoring
     /// each one's geometry, workspace and shape flags from the layout
     /// file the shell keeps. Off by default — a session that spawns
@@ -766,6 +909,14 @@ pub struct Config {
     pub session_env: Vec<(String, String)>,
     pub input: InputConfig,
     pub monitor_rules: Vec<hyprland::directive::Monitor>,
+    /// The style every workspace starts in, from the live Hyprland
+    /// read's `general.layout` (`dwindle` is Mosaic, `scrolling` is
+    /// Flow). `None` — the built-in default — is Freeform.
+    pub default_layout: Option<wm_core::LayoutMode>,
+    /// Styles for particular workspaces, by 0-based index, from the
+    /// workspace rules in that same read. Ranked above
+    /// [`Self::default_layout`] for the workspaces they name.
+    pub workspace_layouts: BTreeMap<usize, wm_core::LayoutMode>,
     pub bindings: Vec<Binding>,
     pub layer_bindings: BTreeMap<String, Vec<Binding>>,
     /// Bindings on hardware switches, from the live Hyprland read.
@@ -826,6 +977,7 @@ impl Config {
         let mut config = Config {
             focus_follows_mouse: false,
             autoraise: true,
+            hide_special_on_workspace_change: false,
             scale: None,
             theme: None,
             appearance: None,
@@ -871,6 +1023,8 @@ impl Config {
             session_env: Vec::new(),
             input: InputConfig::default(),
             monitor_rules: Vec::new(),
+            default_layout: None,
+            workspace_layouts: BTreeMap::new(),
             bindings: Vec::new(),
             layer_bindings: BTreeMap::new(),
             switch_bindings: Vec::new(),
@@ -1570,6 +1724,8 @@ pub fn parse_with(
                 "autostart",
                 "input",
                 "monitor_rules",
+                "default_layout",
+                "workspace_layouts",
             ] {
                 config
                     .provenance
@@ -2159,6 +2315,8 @@ pub fn effective_config_report(config: &Config) -> String {
     line("omarchy_bar", format!("{:?}", config.omarchy_bar));
     line("input", format!("{:?}", config.input));
     line("monitor_rules", config.monitor_rules.len().to_string());
+    line("default_layout", format!("{:?}", config.default_layout));
+    line("workspace_layouts", config.workspace_layouts.len().to_string());
     line("keybindings", config.keybindings.len().to_string());
     line("commands", config.commands.len().to_string());
     line("autostart", config.autostart.len().to_string());
@@ -3052,6 +3210,42 @@ numlock_by_default = false
         assert_eq!(workspace_index(&(MAX_WORKSPACE + 1).to_string()), None);
     }
 
+    /// The verbs Omarchy's monitor and workspace chords land on, by the
+    /// names `[keybindings]` spells them, round-tripping through
+    /// `config_name`. An output name keeps its case: `eDP-1` is not
+    /// `edp-1` to the compositor.
+    #[test]
+    fn monitor_and_occupied_workspace_verbs_parse_and_name_themselves() {
+        use wm_core::OutputTarget;
+        let names: &[(&str, Action)] = &[
+            ("workspace-next-occupied", Action::WorkspaceNextOccupied),
+            ("workspace-prev-occupied", Action::WorkspacePrevOccupied),
+            ("workspace-previous", Action::WorkspacePrevious),
+            ("focus-monitor +1", Action::FocusMonitor(OutputTarget::Relative(1))),
+            ("focus-monitor -1", Action::FocusMonitor(OutputTarget::Relative(-1))),
+            ("focus-monitor left", Action::FocusMonitor(OutputTarget::Direction(FocusDirection::Left))),
+            ("focus-monitor eDP-1", Action::FocusMonitor(OutputTarget::Name("eDP-1".into()))),
+            ("move-workspace-to-monitor right", Action::MoveWorkspaceToMonitor(OutputTarget::Direction(FocusDirection::Right))),
+            ("move-workspace-to-monitor up", Action::MoveWorkspaceToMonitor(OutputTarget::Direction(FocusDirection::Up))),
+            ("move-workspace-to-monitor down", Action::MoveWorkspaceToMonitor(OutputTarget::Direction(FocusDirection::Down))),
+            ("move-workspace-to-monitor HDMI-A-1", Action::MoveWorkspaceToMonitor(OutputTarget::Name("HDMI-A-1".into()))),
+        ];
+        let spec_for = |n: usize| format!("super+{}", (b'a' + n as u8) as char);
+        let mut text = String::from("[keybindings]\n");
+        for (n, (name, _)) in names.iter().enumerate() {
+            text.push_str(&format!("\"{}\" = \"{}\"\n", spec_for(n), name));
+        }
+        let config = parse(&text).unwrap();
+        for (n, (name, action)) in names.iter().enumerate() {
+            assert_eq!(action_for(&config, &spec_for(n)).as_ref(), Some(action), "{name}");
+            assert_eq!(action.config_name().as_deref(), Some(*name), "{name} names itself");
+        }
+        for bad in ["focus-monitor", "focus-monitor +", "focus-monitor +999", "move-workspace-to-monitor", "focus-monitor a\tb"] {
+            let config = parse(&format!("[keybindings]\n\"super+a\" = \"{bad}\"")).unwrap();
+            assert_eq!(action_for(&config, "super+a"), None, "{bad:?} must not bind");
+        }
+    }
+
     #[test]
     fn every_action_name_maps_to_its_variant() {
         let names: &[(&str, Action)] = &[
@@ -3061,6 +3255,13 @@ numlock_by_default = false
             ("toggle-shade", Action::ToggleShade),
             ("miniaturize", Action::Miniaturize),
             ("toggle-fullscreen", Action::ToggleFullscreen),
+            (
+                "toggle-tiled-fullscreen",
+                Action::FullscreenState {
+                    internal: wm_core::FullscreenMode::None,
+                    client: wm_core::FullscreenMode::Fullscreen,
+                },
+            ),
             ("focus-left", Action::Focus(FocusDirection::Left)),
             ("focus-right", Action::Focus(FocusDirection::Right)),
             ("focus-up", Action::Focus(FocusDirection::Up)),
@@ -3101,6 +3302,31 @@ numlock_by_default = false
                 "action {name:?}"
             );
         }
+    }
+
+    /// The special-workspace verbs carry a name, bounded by the core's
+    /// own rule, and a bare toggle means the default special.
+    #[test]
+    fn special_workspace_action_names_carry_their_name() {
+        let text = "[keybindings]\n\"super+a\" = \"toggle-special scratchpad\"\n\"super+b\" = \"special-send scratchpad\"\n\"super+c\" = \"special-carry notes\"\n\"super+d\" = \"toggle-special\"\n\"super+e\" = \"toggle-special special:magic\"\n";
+        let config = parse(text).unwrap();
+        assert_eq!(action_for(&config, "super+a"), Some(Action::ToggleSpecial("scratchpad".into())));
+        assert_eq!(
+            action_for(&config, "super+b"),
+            Some(Action::SendToSpecial { name: "scratchpad".into(), follow: false })
+        );
+        assert_eq!(action_for(&config, "super+c"), Some(Action::SendToSpecial { name: "notes".into(), follow: true }));
+        assert_eq!(action_for(&config, "super+d"), Some(Action::ToggleSpecial(wm_core::DEFAULT_SPECIAL_NAME.into())));
+        assert_eq!(action_for(&config, "super+e"), Some(Action::ToggleSpecial("magic".into())));
+        for (name, action) in [
+            ("toggle-special scratchpad", Action::ToggleSpecial("scratchpad".into())),
+            ("special-send scratchpad", Action::SendToSpecial { name: "scratchpad".into(), follow: false }),
+            ("special-carry scratchpad", Action::SendToSpecial { name: "scratchpad".into(), follow: true }),
+        ] {
+            assert_eq!(action.config_name().as_deref(), Some(name), "{name} round-trips");
+        }
+        let overlong = format!("[keybindings]\n\"super+a\" = \"toggle-special {}\"\n", "n".repeat(wm_core::MAX_SPECIAL_NAME + 1));
+        assert_eq!(action_for(&parse(&overlong).unwrap(), "super+a"), None, "an overlong name is dropped like an unknown verb");
     }
 
     #[test]
@@ -3919,7 +4145,7 @@ mod command_tests {
         assert!(config.interaction.clipboard_persistence);
         assert_eq!(config.drag_modifier, Some(Modifiers::SUPER));
         assert_eq!(action_for(&config, "super+w"), Some(Action::Close));
-        assert_eq!(action_for(&config, "super+tab"), Some(Action::WorkspaceNext));
+        assert_eq!(action_for(&config, "super+tab"), Some(Action::WorkspaceNextOccupied));
         assert_eq!(action_for(&config, "super+f"), Some(Action::ToggleFullscreen));
         assert_eq!(action_for(&config, "super+l"), Some(Action::ToggleLayout));
         assert_eq!(action_for(&config, "super+c"), None);

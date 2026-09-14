@@ -87,10 +87,18 @@
 //!
 //! # What is deliberately not read
 //!
-//! - **Gaps, borders, rounding, blur, shadows, animations, layouts.**
-//!   These are Hyprland's look, and this desktop has its own — a
-//!   theme, a titlebar, a decoration policy. Following them would mean
-//!   drawing a NeXTSTEP frame with Hyprland's border colour on it.
+//! - **Gaps, borders, rounding, blur, shadows, animations.** These are
+//!   Hyprland's look, and this desktop has its own — a theme, a
+//!   titlebar, a decoration policy. Following them would mean drawing
+//!   a NeXTSTEP frame with Hyprland's border colour on it. The
+//!   *layout name* is the one exception: `general.layout` and the
+//!   per-workspace `workspace` rules decide whether windows tile at
+//!   all, not how they look, and `dwindle` and `scrolling` are names
+//!   this desktop's own Mosaic and Flow already answer to. They are
+//!   read as [`Reading::default_layout`] and
+//!   [`Reading::workspace_layouts`]; every other layout setting
+//!   (`dwindle { … }`, `master { … }`, `scrolling { … }`) stays
+//!   Hyprland's.
 //! - **Layer rules.** They configure Hyprland's layer-shell
 //!   implementation; this compositor has its own.
 //! - **Unsupported input settings.** Keyboard xkb/repeat values are
@@ -113,6 +121,7 @@
 pub mod conf;
 pub mod directive;
 pub mod dispatch;
+pub(crate) mod expr;
 pub mod keys;
 pub mod lua;
 pub mod rules;
@@ -287,6 +296,17 @@ pub struct Reading {
     /// `monitor =` lines, parsed and reported. See [`Monitors`].
     pub monitors: Monitors,
     pub input: crate::InputConfig,
+    /// `general.layout`, when it names a style this desktop has:
+    /// `dwindle` is Mosaic, `scrolling` is Flow. The style every
+    /// workspace starts in.
+    pub default_layout: Option<wm_core::LayoutMode>,
+    /// Per-workspace styles from workspace rules, keyed by 0-based
+    /// index — Hyprland's workspace N is index N−1, as the IPC path
+    /// resolves it — with a later rule for the same workspace winning.
+    pub workspace_layouts: BTreeMap<usize, wm_core::LayoutMode>,
+    /// `binds:hide_special_on_workspace_change`, when the configuration
+    /// says either way.
+    pub hide_special_on_workspace_change: Option<bool>,
     /// Every file actually read, in order. The [`Watch`]'s signature is
     /// taken over exactly this list.
     pub files: Vec<PathBuf>,
@@ -332,7 +352,7 @@ impl Reading {
         // future category cannot silently disappear at this loading boundary.
         let Self {
             keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
-            float_rules, monitors, input, files: _, skipped: _,
+            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, files: _, skipped: _,
         } = self;
         keybindings.is_empty()
             && explicit_keys.is_empty()
@@ -345,6 +365,9 @@ impl Reading {
             && float_rules.is_empty()
             && monitors.lines.is_empty()
             && *input == crate::InputConfig::default()
+            && default_layout.is_none()
+            && workspace_layouts.is_empty()
+            && hide_special_on_workspace_change.is_none()
     }
 
     /// Logs the read: one summary line, and one line per thing
@@ -367,6 +390,8 @@ impl Reading {
             autostart = self.autostart.len(),
             float_rules = self.float_rules.len(),
             monitors = self.monitors.lines.len(),
+            default_layout = self.default_layout.map_or("none", |mode| mode.name()),
+            workspace_layouts = self.workspace_layouts.len(),
             skipped = self.skipped.len(),
             "hyprland-config: read the desktop's live Hyprland configuration"
         );
@@ -558,9 +583,14 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
     }
     config.session_env = reading.env.clone();
     config.input = reading.input.clone();
+    if let Some(hide) = reading.hide_special_on_workspace_change {
+        config.hide_special_on_workspace_change = hide;
+    }
     config.monitor_rules = reading.monitors.lines.clone();
     config.autostart = reading.autostart.clone();
     config.float_policy = reading.float_rules.clone().policy();
+    config.default_layout = reading.default_layout;
+    config.workspace_layouts = reading.workspace_layouts.clone();
 }
 
 // ---- the file graph ---------------------------------------------------
@@ -941,10 +971,37 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
             }
             Directive::Input { name, value } => input(&mut reading, &name, &value),
             Directive::Cursor { name, value } => cursor(&mut reading, &name, &value),
+            Directive::Binds { name, value } => binds(&mut reading, &name, &value),
             Directive::Device { name, settings } => device(&mut reading, name, settings),
             Directive::ExecOnce { command } => autostart(&mut reading, &command),
             Directive::WindowRule(rule) => window_rules.push(rule),
             Directive::Monitor(line) => reading.monitors.lines.push(line),
+            Directive::DefaultLayout { layout } => match wm_core::LayoutMode::parse(&layout) {
+                Some(mode) => reading.default_layout = Some(mode),
+                None => reading.skipped.push(Skipped {
+                    kind: "layout".into(),
+                    what: format!("general.layout = {}", bounded(&layout)),
+                    why: "not a style this desktop has; dwindle (Mosaic) and scrolling (Flow) are read".into(),
+                }),
+            },
+            Directive::WorkspaceLayout { workspace, layout } => match wm_core::LayoutMode::parse(&layout) {
+                // The front ends already hold `workspace` to 1..=99;
+                // the index bound is kept here anyway, because a row
+                // past `MAX_WORKSPACES` is one the manager would refuse.
+                Some(mode) if (1..=wm_core::MAX_WORKSPACES as u32).contains(&workspace) => {
+                    reading.workspace_layouts.insert(workspace as usize - 1, mode);
+                }
+                Some(_) => reading.skipped.push(Skipped {
+                    kind: "workspace-rule".into(),
+                    what: format!("workspace {workspace}"),
+                    why: "outside the workspaces this desktop has".into(),
+                }),
+                None => reading.skipped.push(Skipped {
+                    kind: "workspace-rule".into(),
+                    what: format!("workspace {workspace}, layout:{}", bounded(&layout)),
+                    why: "not a style this desktop has; dwindle (Mosaic) and scrolling (Flow) are read".into(),
+                }),
+            },
             Directive::Ignored { kind, detail } => reading.skipped.push(Skipped {
                 kind: kind.to_string(),
                 what: detail,
@@ -965,6 +1022,15 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
     }
     reading.env = filter_env(env, &mut reading.skipped);
     reading
+}
+
+/// A value out of a file, cut to a length a log line can carry.
+fn bounded(text: &str) -> String {
+    if text.chars().count() > 80 {
+        text.chars().take(80).collect::<String>() + "…"
+    } else {
+        text.to_string()
+    }
 }
 
 fn layer_bind(
@@ -1305,6 +1371,30 @@ fn cursor(reading: &mut Reading, name: &str, value: &str) {
     };
     reading.skipped.push(Skipped {
         kind: "cursor".into(),
+        what: format!("{name} = {value}"),
+        why: why.into(),
+    });
+}
+
+/// One key of the `binds` table. The one carried is the scratchpad's:
+/// whether a workspace switch takes the shown special down with it.
+/// Everything else in the table is Hyprland's own binding behaviour,
+/// which this desktop answers its own way.
+fn binds(reading: &mut Reading, name: &str, value: &str) {
+    let value = value.trim().trim_matches(['\"', '\'']);
+    let name = name.trim().to_ascii_lowercase();
+    let why = match name.as_str() {
+        "hide_special_on_workspace_change" => match toggle(value) {
+            Some(hide) => {
+                reading.hide_special_on_workspace_change = Some(hide);
+                return;
+            }
+            None => "hide_special_on_workspace_change must be true or false",
+        },
+        _ => "binds setting is not implemented",
+    };
+    reading.skipped.push(Skipped {
+        kind: "binds".into(),
         what: format!("{name} = {value}"),
         why: why.into(),
     });

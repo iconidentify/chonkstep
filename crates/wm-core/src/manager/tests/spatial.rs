@@ -606,6 +606,122 @@ fn spatial_return_to_freeform_while_fullscreen_over_maximize_keeps_both_restores
     assert_eq!(wm.clients[id].geometry, original);
 }
 
+/// Omarchy's tiled fullscreen: the client is told it is fullscreen and
+/// nothing else about the tile changes — not its cell, not its frame,
+/// not its neighbours, not the layout order, and no re-partition of the
+/// workspace. The client's own `unset_fullscreen` leaves the state.
+#[test]
+fn spatial_client_only_fullscreen_keeps_the_tile_and_tells_the_client() {
+    let (mut wm, ids) = spatial_desktop(3);
+    let id = ids[1];
+    let window = wm.clients[id].window;
+    wm.set_workspace_layout(0, crate::LayoutMode::Mosaic);
+    let cells: Vec<Rect> = ids.iter().map(|&other| wm.clients[other].geometry).collect();
+    let frame = client_frame_rect(&wm.clients[id]);
+    let order = wm.layout_order(0).to_vec();
+    let changes = wm.layout_statistics().geometry_changes;
+    let published = wm.backend().published_net_states.len();
+
+    wm.set_fullscreen_state(id, FullscreenMode::None, FullscreenMode::Fullscreen);
+    assert!(wm.is_layout_managed(id), "a window told it is fullscreen keeps its cell");
+    assert!(wm.clients[id].flags.contains(ClientFlags::CLIENT_FULLSCREEN));
+    assert!(!wm.clients[id].flags.contains(ClientFlags::FULLSCREEN));
+    for (&other, cell) in ids.iter().zip(&cells) {
+        assert_eq!(wm.clients[other].geometry, *cell, "no tile moves");
+    }
+    assert_eq!(client_frame_rect(&wm.clients[id]), frame);
+    assert_eq!(wm.layout_order(0), order);
+    assert_eq!(wm.layout_statistics().geometry_changes, changes, "client-only fullscreen re-partitions nothing");
+    assert_eq!(wm.backend().published_net_states.len(), published + 1, "the client is told exactly once");
+    assert_eq!(
+        wm.backend().published_net_states.last(),
+        Some(&(window, false, true, false, false, false, false, false)),
+        "client_fullscreen is published without fullscreen"
+    );
+    assert_eq!(wm.fullscreen_state(id), Some((FullscreenMode::None, FullscreenMode::Fullscreen)));
+
+    // Setting the same state again is silent.
+    wm.set_fullscreen_state(id, FullscreenMode::None, FullscreenMode::Fullscreen);
+    assert_eq!(wm.backend().published_net_states.len(), published + 1);
+
+    // The client's own exit, a browser's Escape.
+    wm.dispatch(BackendEvent::NetStateRequested {
+        window,
+        action: NetStateAction::Remove,
+        first: NetState::Fullscreen,
+        second: None,
+    });
+    assert!(!wm.clients[id].flags.contains(ClientFlags::CLIENT_FULLSCREEN));
+    assert_eq!(
+        wm.backend().published_net_states.last(),
+        Some(&(window, false, false, false, false, false, false, false))
+    );
+    assert_eq!(wm.fullscreen_state(id), Some((FullscreenMode::None, FullscreenMode::None)));
+    assert_eq!(wm.clients[id].geometry, cells[1]);
+    assert!(wm.is_layout_managed(id));
+}
+
+/// The two axes of `fullscreenstate`, and the dispatcher's toggle rule:
+/// the compositor's own fullscreen and maximize read back on the
+/// internal axis, the client axis adds the told-only state, and asking
+/// for the state a window already has clears both.
+#[test]
+fn spatial_fullscreen_state_reads_back_and_toggles_on_repeat() {
+    use FullscreenMode::{Fullscreen, Maximized, None as Off};
+    let (mut wm, ids) = spatial_desktop(2);
+    let id = ids[0];
+    let window = wm.clients[id].window;
+    wm.set_workspace_layout(0, crate::LayoutMode::Mosaic);
+    let cell = wm.clients[id].geometry;
+    assert_eq!(wm.fullscreen_state(id), Some((Off, Off)));
+
+    wm.toggle_fullscreen_state(id, Off, Fullscreen);
+    assert_eq!(wm.fullscreen_state(id), Some((Off, Fullscreen)));
+    wm.toggle_fullscreen_state(id, Off, Fullscreen);
+    assert_eq!(wm.fullscreen_state(id), Some((Off, Off)), "a bound `fullscreenstate 0 2` is a toggle");
+
+    wm.set_fullscreen_state(id, Maximized, Maximized);
+    assert_eq!(wm.fullscreen_state(id), Some((Maximized, Maximized)));
+    assert!(wm.clients[id].flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
+    assert!(!wm.is_layout_managed(id));
+
+    // Omarchy's script on a maximized window: `fullscreenClient` reads 1,
+    // so it asks for `0 2`, which unmaximizes and tells.
+    wm.set_fullscreen_state(id, Off, Fullscreen);
+    assert_eq!(wm.fullscreen_state(id), Some((Off, Fullscreen)));
+    assert!(wm.is_layout_managed(id));
+    assert_eq!(wm.clients[id].geometry, cell);
+
+    // Real fullscreen tells the client by itself; the told-only flag
+    // never stands beside it, and leaving clears both axes.
+    wm.set_fullscreen_state(id, Fullscreen, Fullscreen);
+    assert_eq!(wm.fullscreen_state(id), Some((Fullscreen, Fullscreen)));
+    assert!(wm.clients[id].flags.contains(ClientFlags::FULLSCREEN));
+    assert!(!wm.clients[id].flags.contains(ClientFlags::CLIENT_FULLSCREEN));
+    assert_eq!(
+        wm.backend().published_net_states.last(),
+        Some(&(window, true, false, false, false, false, false, false))
+    );
+    wm.toggle_fullscreen(id);
+    assert_eq!(wm.fullscreen_state(id), Some((Off, Off)));
+    assert_eq!(wm.clients[id].geometry, cell);
+
+    // A client's own `set_fullscreen` from the told-only state still
+    // means real fullscreen.
+    wm.set_fullscreen_state(id, Off, Fullscreen);
+    wm.dispatch(BackendEvent::NetStateRequested {
+        window,
+        action: NetStateAction::Add,
+        first: NetState::Fullscreen,
+        second: None,
+    });
+    assert_eq!(wm.fullscreen_state(id), Some((Fullscreen, Fullscreen)));
+    assert!(!wm.is_layout_managed(id));
+    wm.set_fullscreen_state(id, Off, Off);
+    assert_eq!(wm.fullscreen_state(id), Some((Off, Off)));
+    assert_eq!(wm.clients[id].geometry, cell);
+}
+
 #[test]
 fn spatial_late_metadata_reflows_without_overwriting_freeform_intent() {
     for mode in [crate::LayoutMode::Mosaic, crate::LayoutMode::Flow] {
@@ -780,4 +896,46 @@ fn spatial_keyboard_moves_to_an_empty_neighbor_output_and_focus_returns_spatiall
     wm.set_workspace_layout(0, crate::LayoutMode::Flow);
     assert!(!wm.move_layout_window(ids[0], FocusDirection::Up));
     assert_eq!(wm.client_output_index(ids[0]), 0);
+}
+
+/// A configured default is what every workspace starts in — including
+/// one first reached by a switch — and an explicit choice still wins
+/// over it, both at the time it is made and when the default moves.
+#[test]
+fn spatial_default_layout_seeds_new_workspaces_and_explicit_choices_survive_it() {
+    let (mut wm, ids) = spatial_desktop(2);
+    assert_eq!(wm.default_workspace_layout(), crate::LayoutMode::Freeform);
+    wm.set_default_workspace_layout(crate::LayoutMode::Mosaic);
+    assert_eq!(wm.default_workspace_layout(), crate::LayoutMode::Mosaic);
+    // The workspace that already existed had no chosen style, so it
+    // follows — and its windows tile rather than stay where they were.
+    assert_eq!(wm.workspace_layout(0), crate::LayoutMode::Mosaic);
+    assert!(ids.iter().all(|&id| wm.is_layout_managed(id)));
+
+    // A workspace created by switching to it starts in the default.
+    wm.switch_workspace(5);
+    assert_eq!(wm.workspace_count(), 6);
+    assert_eq!(wm.workspace_layout(5), crate::LayoutMode::Mosaic);
+    assert_eq!(wm.workspace_layout(3), crate::LayoutMode::Mosaic);
+
+    // An explicit choice overrides the default on that workspace only.
+    wm.set_workspace_layout(5, crate::LayoutMode::Flow);
+    assert_eq!(wm.workspace_layout(5), crate::LayoutMode::Flow);
+    assert_eq!(wm.workspace_layout(3), crate::LayoutMode::Mosaic);
+
+    // Choosing the style the default already gives still counts as a
+    // choice: a later default change must not take it away.
+    wm.set_workspace_layout(3, crate::LayoutMode::Mosaic);
+    wm.switch_workspace(0);
+    wm.toggle_workspace_layout();
+    assert_eq!(wm.workspace_layout(0), crate::LayoutMode::Flow);
+
+    wm.set_default_workspace_layout(crate::LayoutMode::Freeform);
+    assert_eq!(wm.workspace_layout(0), crate::LayoutMode::Flow, "a toggled workspace keeps its style");
+    assert_eq!(wm.workspace_layout(3), crate::LayoutMode::Mosaic, "an explicitly chosen style survives a default change");
+    assert_eq!(wm.workspace_layout(5), crate::LayoutMode::Flow);
+    assert_eq!(wm.workspace_layout(1), crate::LayoutMode::Freeform, "a workspace nobody chose for follows the default");
+    assert_eq!(wm.workspace_layout(4), crate::LayoutMode::Freeform);
+    wm.switch_workspace(7);
+    assert_eq!(wm.workspace_layout(7), crate::LayoutMode::Freeform);
 }

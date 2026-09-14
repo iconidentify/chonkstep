@@ -344,6 +344,18 @@ pub trait Backend {
     fn pointer_position(&self) -> Option<Point> {
         None
     }
+    /// Move the pointer to `to`, in root device coordinates, the way
+    /// hardware motion would: pointer focus, hover and everything the
+    /// window manager derives from the pointer follow it. Requested by
+    /// [`crate::WindowManager::focus_output`], whose bindings have no
+    /// pointer of their own to move.
+    ///
+    /// Defaulted to nothing: a backend that cannot move the pointer
+    /// loses only the warp. The Wayland backend queues it and applies
+    /// it through the same path a script's `movecursor` takes, which
+    /// refuses it while the session is locked or a client holds a
+    /// pointer constraint.
+    fn warp_pointer(&mut self, _to: Point) {}
     /// The current screen/output size.
     fn screen_size(&self) -> Size;
     /// Non-blocking. The event-loop driver calls this in a loop on fd

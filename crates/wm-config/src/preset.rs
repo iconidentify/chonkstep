@@ -465,7 +465,10 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     // tiling tree.
     ("super+j", "layout-noop"),
     ("super+p", "layout-noop"),
-    ("super+ctrl+f", "toggle-maximize"),
+    // Omarchy's "Tiled full screen": the application is told it is
+    // fullscreen, drops its own toolbars, and stays in its tile with
+    // the bar visible. Hyprland's `fullscreenstate 0 2`.
+    ("super+ctrl+f", "toggle-tiled-fullscreen"),
     ("super+o", "run omarchy-window-pop"),
     ("super+alt+home", "run omarchy-window-width-save"),
     ("super+home", "run omarchy-window-width-restore"),
@@ -484,8 +487,19 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+right", "focus-right"),
     ("super+up", "focus-up"),
     ("super+down", "focus-down"),
-    ("super+tab", "workspace-next"),
-    ("super+shift+tab", "workspace-prev"),
+    // Omarchy writes these as `e+1` / `e-1`: the next workspace that
+    // has windows on it, wrapping, never one more pill on the bar. The
+    // desktop's own `workspace-next` steps by index and grows the row,
+    // which is not what SUPER+TAB means here.
+    ("super+tab", "workspace-next-occupied"),
+    ("super+shift+tab", "workspace-prev-occupied"),
+    ("super+ctrl+tab", "workspace-previous"),
+    ("super+shift+alt+left", "move-workspace-to-monitor left"),
+    ("super+shift+alt+right", "move-workspace-to-monitor right"),
+    ("super+shift+alt+up", "move-workspace-to-monitor up"),
+    ("super+shift+alt+down", "move-workspace-to-monitor down"),
+    ("ctrl+alt+tab", "focus-monitor +1"),
+    ("ctrl+alt+shift+tab", "focus-monitor -1"),
     // The twenty chords an Omarchy user has in their fingers before
     // they have a mouse in their hand: the workspace row by number,
     // and the same row with the window in tow. `SUPER + 0` is
@@ -527,13 +541,10 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+shift+alt+8", "workspace-send 8"),
     ("super+shift+alt+9", "workspace-send 9"),
     ("super+shift+alt+0", "workspace-send 10"),
-    // "Move window to scratchpad": send this window out of the way and
-    // leave it recoverable. Chonkstep's nearest true verb is
-    // `miniaturize` — the window collapses to an icon tile on the desk
-    // rather than onto a special workspace, and it comes back by
-    // double-clicking that tile rather than by the same chord. See
-    // docs/omarchy-mode.md for the difference spelled out.
-    ("super+alt+s", "miniaturize"),
+    // The scratchpad: a special workspace shown as an overlay on the
+    // active output by the one chord, and sent a window by the other.
+    ("super+s", "toggle-special scratchpad"),
+    ("super+alt+s", "special-send scratchpad"),
     ("super+slash", "run omarchy-monitor-scaling-up"),
     ("super+alt+slash", "run omarchy-monitor-scaling-down"),
     // -- clipboard.lua ------------------------------------------------
@@ -688,9 +699,6 @@ pub enum Unbound {
 }
 
 impl Unbound {
-    /// A window that keeps its tile while its client is told it is
-    /// fullscreen (Omarchy's tiled fullscreen).
-    pub const CLIENT_FULLSCREEN: Self = Self::Unserved("needs client-only fullscreen, which ChonkStep does not model");
     pub const OPACITY: Self = Self::Unserved("needs per-window opacity, which ChonkStep does not model");
     pub const GAPS: Self = Self::Unserved("toggles Hyprland's gaps, which ChonkStep does not read");
     pub const LAYOUT_OPTION: Self = Self::Unserved("toggles a Hyprland layout option, which ChonkStep does not read");
@@ -740,10 +748,6 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+ctrl+left / super+ctrl+right", "move the grouped-window focus", Unbound::TilingOnly),
     ("super+alt+1..5", "focus the nth window of the group", Unbound::TilingOnly),
     ("super+alt/ctrl+minus/equal", "large resize increments", Unbound::NoVerb),
-    ("super+s", "toggle the scratchpad workspace", Unbound::NoVerb),
-    ("super+ctrl+tab", "the workspace before this one", Unbound::NoVerb),
-    ("super+shift+alt+left/right/up/down", "move the workspace to the monitor in that direction", Unbound::NoVerb),
-    ("ctrl+alt+tab / ctrl+alt+shift+tab", "focus the next / previous monitor", Unbound::NoVerb),
     ("super+mouse wheel, super+drag", "scroll through workspaces; move and resize by mouse", Unbound::NotAKey),
     // utilities.lua
     ("super+k", "Omarchy's keybinding cheatsheet", Unbound::Declined),
@@ -928,7 +932,6 @@ mod tests {
         // The intended aliases, as (action, how many chords reach it).
         let expected: BTreeMap<&str, usize> = [
             ("layout-noop", 2),
-            ("toggle-maximize", 2),
             ("run omarchy-browser", 2),
             ("run omarchy-menu", 2),
             ("run omarchy-menu-system", 2),
@@ -972,9 +975,6 @@ mod tests {
             "super+alt+shift+tab",
             "super+ctrl+left",
             "super+ctrl+right",
-            "super+s",
-            "super+ctrl+tab",
-            "ctrl+alt+tab",
             "super+k",
             "super+shift+space",
             "super+ctrl+d",
@@ -1204,9 +1204,20 @@ mod tests {
         assert_eq!(action("super+w"), Some(Action::Close));
         assert_eq!(action("super+f"), Some(Action::ToggleFullscreen));
         assert_eq!(action("super+alt+f"), Some(Action::ToggleMaximize));
-        assert_eq!(action("super+tab"), Some(Action::WorkspaceNext));
-        assert_eq!(action("super+shift+tab"), Some(Action::WorkspacePrev));
-        assert_eq!(action("super+alt+s"), Some(Action::Miniaturize));
+        assert_eq!(action("super+tab"), Some(Action::WorkspaceNextOccupied));
+        assert_eq!(action("super+shift+tab"), Some(Action::WorkspacePrevOccupied));
+        assert_eq!(action("super+ctrl+tab"), Some(Action::WorkspacePrevious));
+        assert_eq!(action("ctrl+alt+tab"), Some(Action::FocusMonitor(wm_core::OutputTarget::Relative(1))));
+        assert_eq!(action("ctrl+alt+shift+tab"), Some(Action::FocusMonitor(wm_core::OutputTarget::Relative(-1))));
+        assert_eq!(
+            action("super+shift+alt+left"),
+            Some(Action::MoveWorkspaceToMonitor(wm_core::OutputTarget::Direction(wm_core::FocusDirection::Left)))
+        );
+        assert_eq!(action("super+s"), Some(Action::ToggleSpecial("scratchpad".into())));
+        assert_eq!(
+            action("super+alt+s"),
+            Some(Action::SendToSpecial { name: "scratchpad".into(), follow: false })
+        );
         assert_eq!(
             action("super+space"),
             Some(Action::Run("omarchy-menu".to_string()))

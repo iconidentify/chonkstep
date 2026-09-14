@@ -10,16 +10,18 @@ use wm_theme_api::{
 
 use crate::backend::Backend;
 use crate::client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorInfo};
-use crate::focus::{FocusDirection, FocusPolicy};
+use crate::focus::{FocusDirection, FocusPolicy, OutputTarget};
 use crate::hittest::{hit_test, HitTarget};
 use crate::placement::{self, FloatPolicy, IdleInhibitRule, PlacementPolicy};
 use crate::resize;
 use crate::snap;
 mod mac;
 mod spaces;
-pub use spaces::{DisplaySpace, DisplaySpacesSnapshot, Space, SpaceHomeGeometry};
+mod special;
+pub use spaces::{DisplaySpace, DisplaySpacesSnapshot, Space, SpaceHomeGeometry, FULLSCREEN_SPACE_STAYS_HOME, SHARED_DESKTOP_SPANS_DISPLAYS};
+pub use special::{normalize_special_name, DEFAULT_SPECIAL_NAME, MAX_SPECIAL_NAME, MAX_SPECIAL_WORKSPACES};
 use crate::types::{
-    BackendEvent, ClientChrome, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
+    BackendEvent, ClientChrome, DragHandle, FullscreenMode, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
     NetStateSnapshot, SurfaceRef, WindowType,
 };
 
@@ -316,8 +318,29 @@ pub struct WindowManager<B: Backend> {
     /// a client onto an index past the current row's end. Removing a
     /// workspace compacts memberships and retains at least one desktop.
     current_workspace: usize,
+    /// The workspace `current_workspace` was before the last switch, for
+    /// Hyprland's `workspace previous`. Written by the two switch paths
+    /// only, never by a display selection, so it reads as "where I was
+    /// before" rather than "where the pointer last crossed". Remapped by
+    /// workspace removal like every other index; `None` until the first
+    /// switch and after the workspace it named is removed.
+    previous_workspace: Option<usize>,
     workspace_count: usize,
     layouts: Vec<crate::spatial::WorkspaceLayout>,
+    /// The style a workspace starts in when nothing chose one for it:
+    /// what every row grown on demand is seeded with, and what a
+    /// workspace never explicitly set follows when the default changes.
+    /// Installed by the shell from the desktop's configuration.
+    default_layout: crate::LayoutMode,
+    /// The special workspaces created so far, in creation order and
+    /// never removed, so an index is a stable identity for the session.
+    /// See `special.rs`.
+    specials: Vec<special::SpecialWorkspace>,
+    /// Output identity key -> index of the special workspace shown there.
+    special_shown: HashMap<String, usize>,
+    /// Whether a workspace switch hides the special shown on the output
+    /// it lands on — Omarchy's `binds.hide_special_on_workspace_change`.
+    hide_special_on_workspace_change: bool,
     layout_drop: Option<(ClientId, ClientId)>,
     layout_resize_snapshot: Option<crate::spatial::ResizeSnapshot>,
     layout_statistics: crate::LayoutStatistics,
@@ -412,8 +435,13 @@ impl<B: Backend> WindowManager<B> {
             focus_policy: FocusPolicy::default(),
             raise_on_focus: true,
             current_workspace: 0,
+            previous_workspace: None,
             workspace_count: 1,
             layouts: vec![crate::spatial::WorkspaceLayout::default()],
+            default_layout: crate::LayoutMode::Freeform,
+            specials: Vec::new(),
+            special_shown: HashMap::new(),
+            hide_special_on_workspace_change: false,
             layout_drop: None,
             layout_resize_snapshot: None,
             layout_statistics: crate::LayoutStatistics::default(),
@@ -816,6 +844,7 @@ impl<B: Backend> WindowManager<B> {
     /// geometry obey the same rules if the X backend grows RandR
     /// hotplug later.
     pub fn rescue_clients_from_removed_monitor(&mut self, departed: Rect) {
+        self.prune_special_shown();
         if self.separate_spaces() { self.reconcile_display_spaces(); return; }
         self.end_active_drag();
         let monitors = self.backend.monitors();
@@ -970,9 +999,7 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get(id) else {
             return false;
         };
-        let showing = client.lifecycle == Lifecycle::Normal
-            && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY));
-        showing
+        self.client_on_screen(client)
             && match mode {
                 IdleInhibitRule::None => false,
                 IdleInhibitRule::Always => true,
@@ -1028,12 +1055,12 @@ impl<B: Backend> WindowManager<B> {
         client.flags.set(ClientFlags::STICKY, pinned);
         self.reflow_client_workspace(id);
         self.bump_protocol_state_revision();
-        if pinned {
-            self.show_client_surface(id);
-            self.raise_client(id);
-        } else if self.clients.get(id).is_some_and(|client| !self.workspace_visible(client.workspace)) {
+        if !self.client_visible(id) {
             self.focus_successor_of(id);
             self.hide_client_surface(id);
+        } else if pinned {
+            self.show_client_surface(id);
+            self.raise_client(id);
         }
         true
     }
@@ -1125,11 +1152,11 @@ impl<B: Backend> WindowManager<B> {
 
     /// Whether `client` is somewhere the user can see it: mapped
     /// (neither miniaturized nor withdrawn) and on a visible workspace,
-    /// or pinned to all of them. The one condition keyboard focus is
-    /// never granted without.
+    /// pinned to all of them, or a member of a special workspace that
+    /// is shown. The one condition keyboard focus is never granted
+    /// without; [`Self::client_visible`] is the by-id form.
     fn client_on_screen(&self, client: &Client<B>) -> bool {
-        client.lifecycle == Lifecycle::Normal
-            && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
+        client.lifecycle == Lifecycle::Normal && self.client_placed_on_screen(client)
     }
 
     /// Every focusable client, most-recently-focused first, with any
@@ -1156,7 +1183,7 @@ impl<B: Backend> WindowManager<B> {
             || (self.separate_spaces() && self.monitors_ref().is_empty()) { return false; }
         self.clients.get(id).is_some_and(|client| {
             matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
-                && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
+                && self.client_placed_on_screen(client)
                 && !client.flags.contains(ClientFlags::NO_FOCUS)
         })
     }
@@ -1302,10 +1329,104 @@ impl<B: Backend> WindowManager<B> {
         self.workspace_count
     }
 
+    /// The output monitor-relative verbs count from: the display whose
+    /// Space is active under separate Spaces, else the one under the
+    /// pointer, which is what the Hyprland IPC reports as focused.
+    pub fn focused_output_index(&self) -> usize {
+        if self.separate_spaces() {
+            return self.active_output_index();
+        }
+        self.backend
+            .pointer_position()
+            .or(self.last_pointer)
+            .map(|point| self.monitor_index_at(point))
+            .or_else(|| self.focused.map(|id| self.client_output_index(id)))
+            .unwrap_or_else(|| self.primary_monitor_index())
+    }
+
+    /// The monitor index an [`OutputTarget`] names right now, or `None`
+    /// when nothing does: an unknown name, no output in that direction,
+    /// or no outputs at all. Resolved against the live list on purpose,
+    /// because the target was read from a config file or a socket some
+    /// time ago and an output can have gone since.
+    pub fn resolve_output_target(&self, target: &OutputTarget) -> Option<usize> {
+        let monitors = self.monitors_ref();
+        if monitors.is_empty() {
+            return None;
+        }
+        match target {
+            OutputTarget::Name(name) => monitors.iter().position(|monitor| monitor.name == *name),
+            OutputTarget::Relative(step) => {
+                let count = monitors.len() as i64;
+                let from = self.focused_output_index().min(monitors.len() - 1) as i64;
+                Some((from + i64::from(*step)).rem_euclid(count) as usize)
+            }
+            OutputTarget::Direction(direction) => {
+                self.output_in_direction(self.focused_output_index(), *direction)
+            }
+        }
+    }
+
+    /// The nearest other output in `direction` from output `from`, by
+    /// the same ranking directional window focus uses over frames.
+    fn output_in_direction(&self, from: usize, direction: FocusDirection) -> Option<usize> {
+        let monitors = self.monitors_ref();
+        let source = monitors.get(from)?.geometry;
+        monitors
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != from)
+            .filter_map(|(index, monitor)| {
+                directional_score(source, monitor.geometry, direction).map(|score| (index, score))
+            })
+            .min_by_key(|(_, score)| *score)
+            .map(|(index, _)| index)
+    }
+
+    /// Focuses the output at `index`: Hyprland's `focusmonitor`.
+    ///
+    /// The pointer is warped to the centre of that output's workarea, so
+    /// everything the desktop derives from the pointer follows — on the
+    /// shared desktop that includes where the next window is placed,
+    /// which is how Omarchy's screensaver puts one fullscreen terminal
+    /// on every display. Under separate Spaces the display is selected
+    /// as well, which moves placement there in that mode. Keyboard focus
+    /// goes to the most recently focused window on that output; when it
+    /// has none, focus stays where it was rather than going nowhere.
+    ///
+    /// `false` when no such output exists, which a hotplug between the
+    /// verb being read and applied can arrange.
+    pub fn focus_output(&mut self, index: usize) -> bool {
+        let Some(monitor) = self.monitors_ref().get(index).map(|monitor| monitor.geometry) else {
+            return false;
+        };
+        let area = self.workareas.get(index).copied().unwrap_or(monitor);
+        let center = Point::new(
+            area.pos.x.saturating_add((area.size.w / 2) as i32),
+            area.pos.y.saturating_add((area.size.h / 2) as i32),
+        );
+        self.backend.warp_pointer(center);
+        // The backend's motion event arrives later, if at all; placement
+        // must follow the verb now, not the next hardware motion.
+        self.last_pointer = Some(center);
+        self.select_output(index);
+        let next = self
+            .focus_history
+            .iter()
+            .rev()
+            .copied()
+            .find(|&id| self.is_focusable(id) && self.client_output_index(id) == index);
+        if let Some(next) = next {
+            self.focus_client(next);
+        }
+        true
+    }
+
     /// Includes minimized windows, but not withdrawn clients awaiting remap.
     pub fn workspace_has_windows(&self, workspace: usize) -> bool {
         self.clients.values().any(|client| {
             client.workspace == workspace
+                && client.special.is_none()
                 && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
         })
     }
@@ -1339,6 +1460,7 @@ impl<B: Backend> WindowManager<B> {
         }
         let previous = self.current_workspace;
         self.current_workspace = remap(previous);
+        self.previous_workspace = self.previous_workspace.filter(|&p| p != workspace).map(remap);
         self.workspace_count -= 1;
         let mut revealed = Vec::new();
         for (id, client) in &mut self.clients {
@@ -1352,6 +1474,7 @@ impl<B: Backend> WindowManager<B> {
             // their lifecycle, and sticky windows were already on screen.
             if client.lifecycle == Lifecycle::Normal
                 && !client.flags.contains(ClientFlags::STICKY)
+                && client.special.is_none()
                 && old != previous
                 && client.workspace == self.current_workspace
             {
@@ -1390,6 +1513,43 @@ impl<B: Backend> WindowManager<B> {
         self.switch_workspace_to_focus(workspace, None);
     }
 
+    /// The workspace the desktop was on before the last switch, if any:
+    /// what Hyprland's `workspace previous` names.
+    pub fn previous_workspace(&self) -> Option<usize> {
+        self.previous_workspace.filter(|&index| index < self.workspace_count && index != self.current_workspace)
+    }
+
+    /// Switches back to [`Self::previous_workspace`]. Two presses flip
+    /// between the same two workspaces, because the switch records the
+    /// one being left. `false`, and nothing changes, when there is no
+    /// workspace to go back to yet.
+    pub fn switch_to_previous_workspace(&mut self) -> bool {
+        let Some(target) = self.previous_workspace() else { return false };
+        self.switch_workspace(target);
+        self.current_workspace == target
+    }
+
+    /// The workspace `delta` steps away along the row, counting only
+    /// workspaces that have windows plus the current one, and wrapping
+    /// at either end: Hyprland's `e+1` / `e-1`, "the next workspace that
+    /// exists". Unlike stepping by index this never lands on an empty
+    /// workspace and never grows the row. `None` when nothing else on
+    /// the row is occupied, so the caller stays put.
+    pub fn occupied_workspace_step(&self, delta: i32) -> Option<usize> {
+        let current = self.current_workspace;
+        let row: Vec<usize> = self
+            .workspace_row()
+            .into_iter()
+            .filter(|&space| space == current || self.workspace_has_windows(space))
+            .collect();
+        let at = row.iter().position(|&space| space == current)?;
+        if row.len() < 2 {
+            return None;
+        }
+        let count = row.len() as i64;
+        row.get((at as i64 + i64::from(delta)).rem_euclid(count) as usize).copied()
+    }
+
     /// [`Self::switch_workspace`], for a caller about to focus
     /// `arriving` on the destination.
     ///
@@ -1410,11 +1570,13 @@ impl<B: Backend> WindowManager<B> {
         if workspace == self.current_workspace {
             return;
         }
+        // Before the switch, so the special's focused member hands the
+        // keyboard to something still on screen and the switch below
+        // then moves it on exactly as it would have.
+        self.hide_special_for_workspace_switch(workspace);
         self.workspace_count = self.workspace_count.max(workspace + 1);
-        self.layouts.resize_with(
-            self.workspace_count,
-            crate::spatial::WorkspaceLayout::default,
-        );
+        self.grow_layouts();
+        self.previous_workspace = Some(self.current_workspace);
         self.current_workspace = workspace;
         self.bump_protocol_state_revision();
         self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
@@ -1429,8 +1591,8 @@ impl<B: Backend> WindowManager<B> {
             }
             // No `frame` guard: a client that draws its own chrome has
             // none and must still follow its workspace on and off the
-            // screen.
-            if client.workspace == workspace || client.flags.contains(ClientFlags::STICKY) {
+            // screen. A special member follows its overlay instead.
+            if self.client_placed_on_screen(client) {
                 self.show_client_surface(id);
                 // Same reasoning as `deminiaturize`: a remapped frame
                 // isn't guaranteed to still hold its old pixel content
@@ -1444,10 +1606,13 @@ impl<B: Backend> WindowManager<B> {
             }
         }
 
+        // Whatever the switch just remapped went on top of a special
+        // still shown; the overlay is reasserted before focus lands.
+        self.raise_shown_specials();
         let still_visible = self
             .focused
             .and_then(|id| self.clients.get(id))
-            .is_some_and(|c| c.workspace == workspace || c.flags.contains(ClientFlags::STICKY));
+            .is_some_and(|c| self.client_placed_on_screen(c));
         if !still_visible {
             if let Some(next) = arriving.filter(|&id| self.is_focusable(id)) {
                 self.focus_client(next);
@@ -1495,10 +1660,15 @@ impl<B: Backend> WindowManager<B> {
             // — a pager showing the workspace row needs to hear it.
             self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
         }
+        // A numbered destination ends any special membership; a member
+        // going back to its own home still has to rejoin that
+        // workspace's layout and come on or off screen with it.
+        let special_output = self.clients.get(id).filter(|client| client.special.is_some()).map(|_| self.client_output_index(id));
+        let left_special = self.leave_special(id);
         let Some(client) = self.clients.get(id) else {
             return;
         };
-        if client.workspace == workspace {
+        if client.workspace == workspace && !left_special {
             return;
         }
         // Sending the active window away should expose a usable
@@ -1517,7 +1687,7 @@ impl<B: Backend> WindowManager<B> {
             self.focus_adjacent_client(true);
         }
         let target_visible = self.workspace_visible(workspace);
-        self.translate_space_move(id, workspace);
+        self.translate_space_move_from_output(id, workspace, special_output);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -1550,8 +1720,15 @@ impl<B: Backend> WindowManager<B> {
                 self.focused = None;
                 self.backend.publish_active_window(None);
             }
-        } else if self.separate_spaces() && !self.mac_client_hidden(id) && self.clients[id].lifecycle == Lifecycle::Normal {
+        } else if (left_special || self.separate_spaces())
+            && !self.mac_client_hidden(id)
+            && self.clients[id].lifecycle == Lifecycle::Normal
+        {
             self.show_client_surface(id);
+            if left_special {
+                self.repaint_decoration(id);
+                self.raise_client(id);
+            }
         }
     }
 
@@ -1853,18 +2030,44 @@ impl<B: Backend> WindowManager<B> {
         // this first layout already added around the client's own
         // content; a titlebar's height does not depend on how wide the
         // window under it is.
-        let floated = placement::float_override_for(
-            self.float_policy.as_deref(),
-            &client.class,
-            &client.title,
-            self.placement_area(),
-            Size::new(
-                layout.visual_bounds().size.w.saturating_sub(content.size.w),
-                layout.visual_bounds().size.h.saturating_sub(content.size.h),
-            ),
-            content.size,
-            self.ui_scale,
+        //
+        // A rule can also be arithmetic on the monitor — Omarchy's
+        // picture-in-picture sits at `(monitor_w-window_w-40)`, its
+        // webcam overlay is `(monitor_h*4/25)` wide — which only makes
+        // sense against the output the window is mapping onto, in that
+        // output's own logical pixels. The core measures monitor,
+        // client and chrome in those pixels and lets the policy do the
+        // arithmetic; whatever it answers is scaled back by the same
+        // output's scale, so a mixed-DPI desk places the window where
+        // the rule says on the head it opens on.
+        let (output, workarea) = self.placement_output();
+        let monitor = self.backend.monitors_ref().get(output).map(|m| m.geometry).unwrap_or(workarea);
+        let output_scale = self.backend.decoration_scale(monitor);
+        let chrome_size = Size::new(
+            layout.visual_bounds().size.w.saturating_sub(content.size.w),
+            layout.visual_bounds().size.h.saturating_sub(content.size.h),
         );
+        let metrics = placement::RuleMetrics {
+            monitor: placement::logical_size(monitor.size, output_scale),
+            window: placement::logical_size(content.size, output_scale),
+            chrome: placement::logical_size(chrome_size, output_scale),
+        };
+        let rule_placement = self
+            .float_policy
+            .as_deref()
+            .and_then(|policy| policy.placement_for(&client.class, &client.title, &metrics));
+        let floated = match rule_placement.and_then(|rule| rule.size) {
+            Some(size) => Some(placement::fit_in(size, workarea, chrome_size, output_scale)),
+            None => placement::float_override_for(
+                self.float_policy.as_deref(),
+                &client.class,
+                &client.title,
+                workarea,
+                chrome_size,
+                content.size,
+                self.ui_scale,
+            ),
+        };
         if let Some(size) = floated {
             tracing::info!(?window, app = %client.class, title = %client.title, ?size, "a window rule places this window at a fixed size");
             client.geometry.size = size;
@@ -1907,19 +2110,27 @@ impl<B: Backend> WindowManager<B> {
                 placement::clamp_to(self.usable_area_at(center), layout.visual_bounds().size, desired)
             })
         });
+        let rule_pos = rule_placement.and_then(|rule| rule.position).map(|logical| {
+            // Monitor-relative, in the output's logical pixels, and
+            // pulled inside the workarea: a rule can never put a frame
+            // where it cannot be reached, so a reserved bar or dock is
+            // never covered whatever the expression says.
+            let device = placement::device_position(monitor.pos, logical, output_scale);
+            let pos = placement::clamp_to(workarea, layout.visual_bounds().size, device);
+            tracing::info!(?window, app = %client.class, title = %client.title, ?logical, ?pos, "a window rule places this window at a position");
+            pos
+        });
         let frame_pos = if let Some(pos) = transient_pos {
+            pos
+        } else if let Some(pos) = rule_pos {
             pos
         } else if floated.is_none() && content.pos != Point::new(0, 0) {
             content.pos
         } else {
-            let workarea = self.placement_area();
             let existing: Vec<Rect> = self
                 .clients
                 .iter()
-                .filter(|(_, c)| {
-                    c.lifecycle == Lifecycle::Normal
-                        && (self.workspace_visible(c.workspace) || c.flags.contains(ClientFlags::STICKY))
-                })
+                .filter(|(_, c)| self.client_on_screen(c))
                 .map(|(_, c)| client_frame_rect(c))
                 .collect();
             let policy = if window_type == WindowType::Dialog || floated.is_some() {
@@ -2060,8 +2271,37 @@ impl<B: Backend> WindowManager<B> {
         }
 
         self.publish_frame_extents(id);
-        self.register_layout_client(id);
-        self.reflow_client_workspace(id);
+        // A `workspace` rule decides where the window lives before it
+        // joins any layout: a special member never enters its numbered
+        // home's order, and a numbered destination is a move made
+        // before the window has been seen anywhere else. `silent` maps
+        // it there without following — no switch, no shown overlay, and
+        // no initial focus below.
+        let silent = window_rule.workspace.as_ref().is_some_and(|rule| rule.silent);
+        match window_rule.workspace.as_ref().map(|rule| &rule.target) {
+            Some(placement::RuleWorkspaceTarget::Special(name)) if self.move_client_to_special(id, name, !silent) => {}
+            Some(placement::RuleWorkspaceTarget::Numbered(workspace)) => {
+                let workspace = *workspace;
+                self.register_layout_client(id);
+                self.reflow_client_workspace(id);
+                self.move_client_to_workspace(id, workspace);
+                if !silent {
+                    self.switch_workspace_to_focus(workspace, Some(id));
+                }
+            }
+            _ => {
+                // Dialogs inherit the parent's overlay as well as its
+                // numbered home. Do not show a hidden overlay merely
+                // because an application opened another toplevel.
+                let special = self.clients[id].parent.and_then(|parent| self.clients.get(parent)?.special);
+                if let Some(special) = special {
+                    self.move_one_client_to_special(id, special);
+                } else {
+                    self.register_layout_client(id);
+                    self.reflow_client_workspace(id);
+                }
+            }
+        }
         self.notifications.push_back(Notification::Mapped(id));
         // Maximize first so a simultaneous fullscreen rule preserves
         // the maximized geometry/state underneath fullscreen.
@@ -2071,7 +2311,7 @@ impl<B: Backend> WindowManager<B> {
         if window_rule.fullscreen {
             self.fullscreen(id);
         }
-        if !window_rule.no_initial_focus && !window_rule.no_focus {
+        if !window_rule.no_initial_focus && !window_rule.no_focus && !silent {
             self.focus_client(id);
         }
     }
@@ -2170,9 +2410,11 @@ impl<B: Backend> WindowManager<B> {
             self.end_active_drag();
         }
         let workspace = self.clients.get(id).map(|c| c.workspace);
+        let special = self.clients.get(id).and_then(|c| c.special);
         for layout in &mut self.layouts {
             layout.order.retain(|&other| other != id);
         }
+        self.forget_special_member(id);
         self.fullscreen_restore.remove(&id);
         self.restore_title_metrics.remove(&(id, RestoreKind::Maximized));
         self.restore_title_metrics.remove(&(id, RestoreKind::Fullscreen));
@@ -2199,7 +2441,12 @@ impl<B: Backend> WindowManager<B> {
         // pointed at nothing until the user clicked something.
         if self.focused == Some(id) {
             self.focused = None;
-            match self.focus_successor(Some(id)) {
+            // A member of a shown overlay hands the keyboard to a
+            // sibling first: the overlay is what the user was working
+            // in, and the ordinary successor would be the window under
+            // it.
+            let sibling = special.and_then(|index| self.special_focus_successor(index, id));
+            match sibling.or_else(|| self.focus_successor(Some(id))) {
                 Some(next) => self.focus_client(next),
                 None => self.backend.publish_active_window(None),
             }
@@ -2278,12 +2525,19 @@ impl<B: Backend> WindowManager<B> {
             return;
         };
         let workspace = parent_client.workspace;
+        let special = parent_client.special;
         let parent_frame = client_frame_rect(parent_client);
         let center = Point::new(
             parent_frame.pos.x + parent_frame.size.w as i32 / 2,
             parent_frame.pos.y + parent_frame.size.h as i32 / 2,
         );
-        self.move_client_to_workspace(id, workspace);
+        if let Some(special) = special {
+            for member in self.transient_family(id) {
+                self.move_one_client_to_special(member, special);
+            }
+        } else {
+            self.move_client_to_workspace(id, workspace);
+        }
         if let Some(child) = self.clients.get(id) {
             let desired = Point::new(
                 center.x - child.layout.frame_size.w as i32 / 2,
@@ -2688,7 +2942,7 @@ impl<B: Backend> WindowManager<B> {
         // Recorded before any drag branch returns: this is the core's
         // only sighting of where the user's attention is, and new-window
         // placement reads it to open on the monitor being looked at
-        // (see `placement_area`). A drag in progress is no reason to
+        // (see `placement_output`). A drag in progress is no reason to
         // stop tracking — it is the most emphatic pointer motion there
         // is.
         self.last_pointer = Some(root);
@@ -2978,20 +3232,24 @@ impl<B: Backend> WindowManager<B> {
     /// head. With no pointer seen yet the focused window's monitor is
     /// the next best guess (a keyboard-spawned window joins its
     /// siblings), and the primary is the last.
-    fn placement_area(&self) -> Rect {
+    ///
+    /// Returned with the index of the monitor the workarea belongs to,
+    /// for the window rules that are arithmetic on the monitor itself
+    /// rather than its workarea.
+    fn placement_output(&self) -> (usize, Rect) {
         if self.separate_spaces() {
             let index = self.active_output_index();
             if let Some(monitor) = self.monitors_ref().get(index) {
-                return self.workareas.get(index).copied().unwrap_or(monitor.geometry);
+                return (index, self.workareas.get(index).copied().unwrap_or(monitor.geometry));
             }
         }
         if let Some(pointer) = self.last_pointer {
-            return self.usable_area_at(pointer);
+            return (self.monitor_index_at(pointer), self.usable_area_at(pointer));
         }
         if let Some(center) = self.focused.and_then(|id| self.client_frame_center(id)) {
-            return self.usable_area_at(center);
+            return (self.monitor_index_at(center), self.usable_area_at(center));
         }
-        self.usable_area()
+        (self.primary_monitor_index(), self.usable_area())
     }
 
     /// Re-derives layout from a client's current `geometry.size`, then
@@ -3517,6 +3775,9 @@ impl<B: Backend> WindowManager<B> {
         self.fullscreen_restore.insert(id, client.geometry);
         self.restore_title_metrics.insert((id, RestoreKind::Fullscreen), TitleMetrics::of(&client.layout));
         client.flags.insert(ClientFlags::FULLSCREEN);
+        // The real state tells the client on its own; the client-only
+        // flag never stands beside it (see `set_fullscreen_state`).
+        client.flags.remove(ClientFlags::CLIENT_FULLSCREEN);
         self.bump_protocol_state_revision();
         self.reflow_frame(id);
         // Raise on entering: fullscreen is a "take over the screen"
@@ -3565,6 +3826,110 @@ impl<B: Backend> WindowManager<B> {
     /// one).
     pub fn toggle_fullscreen(&mut self, id: ClientId) {
         self.apply_fullscreen_action(id, NetStateAction::Toggle);
+    }
+
+    /// Hyprland's two-axis fullscreen state of a client: what the
+    /// compositor does with the window, and what the window is told.
+    /// `None` for an unknown id.
+    ///
+    /// The internal axis is `Fullscreen` for `FULLSCREEN`, `Maximized`
+    /// when both maximize axes are set, else `None`; the client axis is
+    /// `Fullscreen` for `FULLSCREEN` or `CLIENT_FULLSCREEN`, otherwise
+    /// the same as the internal axis. This is the reading the Hyprland
+    /// IPC reports as `fullscreen` and `fullscreenClient`, so a script
+    /// branching on either sees the state the next request acts on.
+    pub fn fullscreen_state(&self, id: ClientId) -> Option<(FullscreenMode, FullscreenMode)> {
+        let client = self.clients.get(id)?;
+        let internal = if client.flags.contains(ClientFlags::FULLSCREEN) {
+            FullscreenMode::Fullscreen
+        } else if client.flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V) {
+            FullscreenMode::Maximized
+        } else {
+            FullscreenMode::None
+        };
+        let told = if client.flags.contains(ClientFlags::CLIENT_FULLSCREEN) {
+            FullscreenMode::Fullscreen
+        } else {
+            internal
+        };
+        Some((internal, told))
+    }
+
+    /// Sets Hyprland's two fullscreen axes independently: `internal` is
+    /// what the compositor does (real fullscreen, a full maximize, or
+    /// neither) and `client` what the window is told. The one
+    /// combination the flags model beyond the compositor's own states
+    /// is `(None | Maximized, Fullscreen)` — the client is told it is
+    /// fullscreen while its geometry, frame, stacking and layout cell
+    /// stay exactly as they are (`ClientFlags::CLIENT_FULLSCREEN`).
+    /// Omarchy's "tiled fullscreen" chord is `(None, Fullscreen)`.
+    ///
+    /// A `Maximized` client axis has nothing of its own to set: the
+    /// protocols' maximized state already follows the two maximize
+    /// flags. `internal == Fullscreen` tells the client by itself, so
+    /// the client-only flag is cleared rather than doubled.
+    ///
+    /// Client-only fullscreen changes no geometry and therefore causes
+    /// no reflow of the workspace, no raise, and no Spaces fullscreen
+    /// Space: only compositor fullscreen does those. A no-op for an
+    /// unknown id.
+    pub fn set_fullscreen_state(&mut self, id: ClientId, internal: FullscreenMode, client: FullscreenMode) {
+        if self.clients.get(id).is_none() {
+            return;
+        }
+        match internal {
+            FullscreenMode::Fullscreen => self.fullscreen(id),
+            FullscreenMode::Maximized => {
+                self.unfullscreen(id);
+                let current = self.clients.get(id).map_or(MaximizeDirections::empty(), Self::maximize_directions);
+                if current != MaximizeDirections::FULL {
+                    if !current.is_empty() {
+                        self.unmaximize(id);
+                    }
+                    self.maximize(id, MaximizeDirections::FULL);
+                }
+            }
+            FullscreenMode::None => {
+                self.unfullscreen(id);
+                self.unmaximize(id);
+            }
+        }
+        let told = client == FullscreenMode::Fullscreen && internal != FullscreenMode::Fullscreen;
+        self.set_client_fullscreen(id, told);
+    }
+
+    /// The `fullscreenstate` dispatcher's rule on top of
+    /// [`Self::set_fullscreen_state`]: asking for exactly the state the
+    /// window already has clears both axes instead. That is how
+    /// Hyprland makes a bound `fullscreenstate 0 2` a toggle, and it is
+    /// what a classic Omarchy binding of that dispatcher relies on;
+    /// Omarchy's own script reads `fullscreenClient` first and sends
+    /// `0 0` explicitly, which this rule leaves alone.
+    pub fn toggle_fullscreen_state(&mut self, id: ClientId, internal: FullscreenMode, client: FullscreenMode) {
+        let Some(current) = self.fullscreen_state(id) else {
+            return;
+        };
+        if current == (internal, client) {
+            self.set_fullscreen_state(id, FullscreenMode::None, FullscreenMode::None);
+        } else {
+            self.set_fullscreen_state(id, internal, client);
+        }
+    }
+
+    /// Flips `CLIENT_FULLSCREEN` and publishes the change, which is the
+    /// whole of its effect: the backend sends the client the protocol's
+    /// fullscreen state and nothing else about the window moves.
+    fn set_client_fullscreen(&mut self, id: ClientId, told: bool) {
+        let Some(client) = self.clients.get_mut(id) else {
+            return;
+        };
+        if client.flags.contains(ClientFlags::CLIENT_FULLSCREEN) == told {
+            return;
+        }
+        client.flags.set(ClientFlags::CLIENT_FULLSCREEN, told);
+        self.bump_protocol_state_revision();
+        self.publish_client_net_state(id);
+        tracing::info!(?id, told, "client-only fullscreen changed");
     }
 
     /// Unmaps a client family and records its minimized state. Alt-Tab or an
@@ -3701,9 +4066,7 @@ impl<B: Backend> WindowManager<B> {
     /// screen.
     fn activation_changes_workspace(&self, id: ClientId) -> bool {
         let target = self.modal_blocker(id).unwrap_or(id);
-        self.clients.get(target).is_some_and(|client| {
-            !client.flags.contains(ClientFlags::STICKY) && !self.workspace_visible(client.workspace)
-        })
+        self.clients.get(target).is_some_and(|client| !self.client_placed_on_screen(client))
     }
 
     /// Switches to the workspace holding the window that focusing `id`
@@ -3719,10 +4082,14 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get(target) else {
             return;
         };
-        if client.lifecycle != Lifecycle::Normal
-            || client.flags.contains(ClientFlags::STICKY)
-            || self.workspace_visible(client.workspace)
-        {
+        if client.lifecycle != Lifecycle::Normal || self.client_placed_on_screen(client) {
+            return;
+        }
+        if let Some(index) = client.special {
+            // A hidden special member is activated by showing its
+            // overlay where the user is, not by switching workspace.
+            let output = self.active_output_index();
+            self.show_special_on_output(index, output);
             return;
         }
         let workspace = client.workspace;
@@ -3892,6 +4259,12 @@ impl<B: Backend> WindowManager<B> {
             self.fullscreen(id);
         } else {
             self.unfullscreen(id);
+            // A window told it is fullscreen in its tile leaves that
+            // state the same way a real one does: its own
+            // `unset_fullscreen` (a browser's Escape) is honoured, and
+            // the answer says so. `unfullscreen` above was a no-op for
+            // it, so the flag is retired here.
+            self.set_client_fullscreen(id, false);
         }
     }
 
@@ -4168,7 +4541,8 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         if self.separate_spaces() {
-            if let Some(client) = self.clients.get(id) {
+            // A special member is shown by its overlay, not by a Space.
+            if let Some(client) = self.clients.get(id).filter(|client| client.special.is_none()) {
                 let workspace = client.workspace;
                 if !client.flags.contains(ClientFlags::STICKY) && !self.workspace_visible(workspace) {
                     self.switch_workspace(workspace);
@@ -4277,6 +4651,7 @@ impl<B: Backend> WindowManager<B> {
         };
         self.backend.publish_net_state(client.window, NetStateSnapshot {
             fullscreen: client.flags.contains(ClientFlags::FULLSCREEN),
+            client_fullscreen: client.flags.contains(ClientFlags::CLIENT_FULLSCREEN),
             maximized_horizontally: client.flags.contains(ClientFlags::MAXIMIZED_H),
             maximized_vertically: client.flags.contains(ClientFlags::MAXIMIZED_V),
             shaded: client.flags.contains(ClientFlags::SHADED),
@@ -4472,10 +4847,7 @@ impl<B: Backend> WindowManager<B> {
         // be, rather than assuming the transition left it right. Caught
         // by `a_client_that_starts_drawing_its_own_chrome_loses_its_frame_in_place`,
         // which found the window gone from the screen entirely.
-        let visible = !self.mac_client_hidden(id) && self.clients.get(id).is_some_and(|client| {
-            client.lifecycle == Lifecycle::Normal
-                && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
-        });
+        let visible = !self.mac_client_hidden(id) && self.client_visible(id);
         if visible {
             self.show_client_surface(id);
         } else {
@@ -4524,6 +4896,19 @@ impl<B: Backend> WindowManager<B> {
             .collect();
         for pinned in pinned {
             self.raise_transient_family(pinned);
+        }
+        // A shown special workspace is an overlay: its members sit
+        // above pinned windows too, with the one being raised on top
+        // of the rest of them.
+        let overlay = self.shown_special_members();
+        if overlay.is_empty() {
+            return;
+        }
+        for member in overlay.iter().copied().filter(|member| *member != id) {
+            self.raise_transient_family(member);
+        }
+        if overlay.contains(&id) {
+            self.raise_transient_family(id);
         }
     }
 
@@ -9769,7 +10154,7 @@ mod tests {
         assert_eq!(wm.client(id).unwrap().lifecycle, Lifecycle::Miniaturized);
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, true, false)),
+            Some(&(window, false, false, false, false, false, true, false)),
             "miniaturizing must publish the client as hidden"
         );
 
@@ -9786,7 +10171,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false)),
+            Some(&(window, false, false, false, false, false, false, false)),
             "the restored client must be re-published as not hidden"
         );
     }
@@ -10085,7 +10470,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, true, false, false, false, false, false))
+            Some(&(window, true, false, false, false, false, false, false))
         );
 
         wm.dispatch(toggle);
@@ -10098,7 +10483,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false))
+            Some(&(window, false, false, false, false, false, false, false))
         );
     }
 
@@ -10136,7 +10521,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, true, false, false, false, false, false))
+            Some(&(window, true, false, false, false, false, false, false))
         );
 
         wm.toggle_fullscreen(id);
@@ -10149,7 +10534,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false))
+            Some(&(window, false, false, false, false, false, false, false))
         );
     }
 
@@ -10217,7 +10602,7 @@ mod tests {
             .contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, true, true, false, false, false))
+            Some(&(window, false, false, true, true, false, false, false))
         );
 
         wm.dispatch(BackendEvent::NetStateRequested {
@@ -10290,7 +10675,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false))
+            Some(&(window, false, false, false, false, false, false, false))
         );
 
         wm.toggle_maximize_full(id);
@@ -10327,7 +10712,7 @@ mod tests {
         assert!(wm.client(id).unwrap().flags.contains(ClientFlags::MODAL));
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, true))
+            Some(&(window, false, false, false, false, false, false, true))
         );
 
         wm.dispatch(BackendEvent::NetStateRequested {
@@ -10339,7 +10724,7 @@ mod tests {
         assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::MODAL));
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false, false))
+            Some(&(window, false, false, false, false, false, false, false))
         );
     }
 
@@ -10603,6 +10988,181 @@ mod tests {
         assert_eq!(wm.client(id).unwrap().layout.frame_size, frame.size);
     }
 
+    /// Omarchy's picture-in-picture and webcam-overlay rules, as
+    /// `wm_config`'s rule reader answers them: arithmetic on the monitor
+    /// in logical pixels, which this crate measures for the policy and
+    /// scales back by the output's own scale.
+    ///
+    /// `pip`: `size 600 338`, `move (monitor_w-window_w-40) (monitor_h*0.04)`.
+    /// `WebcamOverlay-small`: `size (monitor_h*4/25) (monitor_h*9/50)`,
+    /// `move (monitor_w-monitor_h*4/25-40) (monitor_h-monitor_h*9/50-40)`.
+    /// `about`: `float on, center on` — no size, no position.
+    #[derive(Debug)]
+    struct CornerRules;
+
+    impl FloatPolicy for CornerRules {
+        fn decision_for(&self, class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+            matches!(class, "pip" | "WebcamOverlay-small" | "about")
+                .then_some(crate::placement::FloatDecision { size: None, center: true })
+        }
+
+        fn placement_for(
+            &self,
+            class: &str,
+            _title: &str,
+            metrics: &crate::placement::RuleMetrics,
+        ) -> Option<crate::placement::RulePlacement> {
+            let (monitor_w, monitor_h) = (f64::from(metrics.monitor.w), f64::from(metrics.monitor.h));
+            let px = |v: f64| v.round() as i32;
+            match class {
+                "pip" => {
+                    // `window_w` is the frame's visual width: the content
+                    // the rule just sized plus whatever chrome wraps it.
+                    let window_w = 600.0 + f64::from(metrics.chrome.w);
+                    Some(crate::placement::RulePlacement {
+                        size: Some(Size::new(600, 338)),
+                        position: Some(Point::new(px(monitor_w - window_w - 40.0), px(monitor_h * 0.04))),
+                    })
+                }
+                "WebcamOverlay-small" => Some(crate::placement::RulePlacement {
+                    size: Some(Size::new(px(monitor_h * 4.0 / 25.0) as u32, px(monitor_h * 9.0 / 50.0) as u32)),
+                    position: Some(Point::new(
+                        px(monitor_w - monitor_h * 4.0 / 25.0 - 40.0),
+                        px(monitor_h - monitor_h * 9.0 / 50.0 - 40.0),
+                    )),
+                }),
+                "about" => Some(crate::placement::RulePlacement::default()),
+                _ => None,
+            }
+        }
+    }
+
+    /// One output of `monitor` device pixels at `scale`, with three
+    /// client-drawn windows that each asked for 640x360 at the
+    /// placeholder origin: a picture-in-picture, the small webcam
+    /// overlay, and a plain centered float.
+    fn corner_desk(monitor: Rect, scale: f32) -> (WindowManager<FakeBackend>, [FakeWindowId; 3]) {
+        let mut backend = FakeBackend::new();
+        backend.set_monitor(monitor);
+        backend.set_monitor_scales(vec![scale]);
+        let windows = [backend.create_window(), backend.create_window(), backend.create_window()];
+        for (window, class) in windows.iter().zip(["pip", "WebcamOverlay-small", "about"]) {
+            backend.set_geometry(*window, Rect { pos: Point::new(0, 0), size: Size::new(640, 360) });
+            backend.set_client_draws_own_chrome(*window, true);
+            backend.window_classes.insert(*window, class.to_string());
+        }
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(CornerRules)));
+        (wm, windows)
+    }
+
+    fn mapped_geometry(wm: &mut WindowManager<FakeBackend>, window: FakeWindowId) -> Rect {
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).expect("the window maps");
+        let client = wm.client(id).unwrap();
+        assert!(client.placement.floating, "a rule-placed window floats");
+        client.geometry
+    }
+
+    /// The issue's own numbers: on a 1920x1080 output at scale 1 with
+    /// nothing reserved, the picture-in-picture lands 40 from the right
+    /// edge and 4% down, and the small webcam overlay lands in the
+    /// bottom-right corner at 4/25 by 9/50 of the monitor's height.
+    #[test]
+    fn rule_placed_windows_map_at_their_corners() {
+        let (mut wm, [pip, cam, _]) = corner_desk(Rect { pos: Point::new(0, 0), size: Size::new(1920, 1080) }, 1.0);
+        assert_eq!(
+            mapped_geometry(&mut wm, pip),
+            Rect { pos: Point::new(1280, 43), size: Size::new(600, 338) },
+            "x = 1920 - 600 - 40, y = round(1080 * 0.04)"
+        );
+        assert_eq!(
+            mapped_geometry(&mut wm, cam),
+            Rect { pos: Point::new(1707, 846), size: Size::new(173, 194) },
+            "round(172.8) x round(194.4) at (round(1707.2), round(845.6))"
+        );
+    }
+
+    /// The same desk at scale 2 is 3840x2160 device pixels and the same
+    /// 1920x1080 logical monitor: the rule is evaluated in logical
+    /// pixels and lands at the same logical place, scaled by the
+    /// output's own factor — not the session's `ui_scale`, which is
+    /// left at 1 here to prove which one is read.
+    #[test]
+    fn rule_placed_windows_follow_the_outputs_own_scale() {
+        let (mut wm, [pip, cam, _]) = corner_desk(Rect { pos: Point::new(0, 0), size: Size::new(3840, 2160) }, 2.0);
+        assert_eq!(
+            mapped_geometry(&mut wm, pip),
+            Rect { pos: Point::new(2560, 86), size: Size::new(1200, 676) },
+            "(1280, 43) and 600x338 logical, twice the pixels"
+        );
+        assert_eq!(
+            mapped_geometry(&mut wm, cam),
+            Rect { pos: Point::new(3414, 1692), size: Size::new(346, 388) },
+            "(1707, 846) and 173x194 logical, twice the pixels"
+        );
+    }
+
+    /// A rule position is relative to the monitor, not the primary: the
+    /// same corner on a second head starts from that head's origin.
+    #[test]
+    fn rule_positions_are_relative_to_the_monitor_the_window_maps_on() {
+        let (mut wm, [pip, _, _]) = corner_desk(Rect { pos: Point::new(2560, 0), size: Size::new(1920, 1080) }, 1.0);
+        assert_eq!(mapped_geometry(&mut wm, pip), Rect { pos: Point::new(2560 + 1280, 43), size: Size::new(600, 338) });
+    }
+
+    /// A rule can never put a frame where it cannot be reached: a bar
+    /// reserving the top of the screen pushes the picture-in-picture
+    /// down to the workarea's edge, and one at the right pulls the
+    /// webcam overlay in.
+    #[test]
+    fn rule_placed_windows_are_clamped_to_the_workarea() {
+        let (mut wm, [pip, cam, _]) = corner_desk(Rect { pos: Point::new(0, 0), size: Size::new(1920, 1080) }, 1.0);
+        wm.set_workareas(vec![Rect { pos: Point::new(0, 64), size: Size::new(1920, 1016) }]);
+        assert_eq!(
+            mapped_geometry(&mut wm, pip),
+            Rect { pos: Point::new(1280, 64), size: Size::new(600, 338) },
+            "y = 43 is under the bar, so the frame sits just below it"
+        );
+        wm.set_workareas(vec![Rect { pos: Point::new(0, 0), size: Size::new(1850, 1080) }]);
+        assert_eq!(
+            mapped_geometry(&mut wm, cam),
+            Rect { pos: Point::new(1850 - 173, 846), size: Size::new(173, 194) },
+            "the rule's x of 1707 would hang 30 pixels off the workarea"
+        );
+    }
+
+    /// A plain `float` plus `center` rule — no expression anywhere —
+    /// keeps the client's own size and centers it, exactly as before.
+    #[test]
+    fn a_plain_float_and_center_rule_still_centers() {
+        let (mut wm, [_, _, about]) = corner_desk(Rect { pos: Point::new(0, 0), size: Size::new(1920, 1080) }, 1.0);
+        assert_eq!(
+            mapped_geometry(&mut wm, about),
+            Rect { pos: Point::new((1920 - 640) / 2, (1080 - 360) / 2), size: Size::new(640, 360) }
+        );
+    }
+
+    /// With a server-side frame it is the frame, chrome included, that
+    /// sits 40 from the edge: the rule's `window_w` is the visual width.
+    #[test]
+    fn a_rule_position_places_the_frame_not_the_content() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(1920, 1080) });
+        let pip = backend.create_window();
+        backend.set_geometry(pip, Rect { pos: Point::new(0, 0), size: Size::new(640, 360) });
+        backend.window_classes.insert(pip, "pip".to_string());
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(CornerRules)));
+        wm.dispatch(BackendEvent::MapRequest(pip));
+        let id = wm.client_for_window(pip).unwrap();
+        let layout = wm.client(id).unwrap().layout.clone();
+        assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(600, 338));
+        let frame = frame_rect(&wm, pip);
+        let visual = Point::new(frame.pos.x + layout.input_margin as i32, frame.pos.y + layout.input_margin as i32);
+        assert_eq!(visual, Point::new(1920 - layout.visual_bounds().size.w as i32 - 40, 43), "{layout:?}");
+    }
+
     /// The same window on a scale-2 desk is the same *window*: twice the
     /// pixels, still centered. And an ordinary application is untouched
     /// by any of it — the rule keys on the identity, nothing else.
@@ -10727,6 +11287,8 @@ mod tests {
     }
     mod spatial;
     mod spaces;
+    mod monitors;
+    mod special;
     mod restyle;
     mod system7;
     fn mac_windows() -> (WindowManager<FakeBackend>, [ClientId; 3]) {
@@ -10794,6 +11356,24 @@ mod tests {
         let window=wm.client(last).unwrap().window;
         wm.dispatch(BackendEvent::Destroyed(window));
         assert_eq!((wm.workspace_count(),wm.current_workspace()), (1,0));
+        assert!(wm.mac_fullscreen.is_empty());
+    }
+
+    /// A window merely told it is fullscreen has not taken the screen,
+    /// so it gets no Space of its own; only compositor fullscreen does.
+    #[test]
+    fn mac_client_only_fullscreen_opens_no_space() {
+        let (mut wm, [_, _, last]) = mac_windows();
+        let geometry = wm.client(last).unwrap().geometry;
+        wm.set_fullscreen_state(last, FullscreenMode::None, FullscreenMode::Fullscreen);
+        assert!(wm.client(last).unwrap().flags.contains(ClientFlags::CLIENT_FULLSCREEN));
+        assert_eq!((wm.workspace_count(), wm.current_workspace()), (1, 0));
+        assert!(wm.mac_fullscreen.is_empty());
+        assert_eq!(wm.client(last).unwrap().geometry, geometry);
+        wm.set_fullscreen_state(last, FullscreenMode::Fullscreen, FullscreenMode::Fullscreen);
+        assert_eq!((wm.workspace_count(), wm.current_workspace()), (2, 1));
+        wm.set_fullscreen_state(last, FullscreenMode::None, FullscreenMode::None);
+        assert_eq!((wm.workspace_count(), wm.current_workspace()), (1, 0));
         assert!(wm.mac_fullscreen.is_empty());
     }
 

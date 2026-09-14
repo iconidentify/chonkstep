@@ -51,6 +51,8 @@ pub enum Directive {
     Input { name: String, value: String },
     /// One key from Hyprland's `cursor {}` table.
     Cursor { name: String, value: String },
+    /// One key from Hyprland's `binds {}` table.
+    Binds { name: String, value: String },
     /// `device { name = …; … }` / `hl.device({ name = …, … })`: settings
     /// for one input device, named exactly, still in the file's own words.
     Device { name: String, settings: Vec<(String, String)> },
@@ -66,6 +68,15 @@ pub enum Directive {
     WindowRule(WindowRule),
     /// `monitor = …` / `hl.monitor({ … })`.
     Monitor(Monitor),
+    /// `general.layout = "dwindle"` in `hl.config` / `general { layout
+    /// = … }` in conf: the style every workspace starts in. The name is
+    /// Hyprland's own, judged downstream.
+    DefaultLayout { layout: String },
+    /// `hl.workspace_rule({ workspace = "N", layout = "…" })` /
+    /// `workspace = N, layout:…`: the style one numbered workspace
+    /// starts in. `workspace` is Hyprland's 1-based number, already
+    /// checked to lie in 1 to 99 by [`workspace_number`].
+    WorkspaceLayout { workspace: u32, layout: String },
     /// Another file to read at exactly this point in the stream.
     ///
     /// Carried as a directive rather than resolved by the front ends
@@ -174,4 +185,34 @@ pub enum Include {
     /// directly under a directory, in sorted order — the fan-out
     /// Omarchy uses for its `bindings/` and `apps/` folders.
     ModuleDirectory { prefix: String },
+}
+
+/// The most bytes a workspace selector may be before it is refused
+/// unread. A number is at most two digits; anything longer is not one.
+const MAX_WORKSPACE_SELECTOR: usize = 64;
+
+/// The numbered workspace a rule's selector names, 1 to 99, or why it
+/// names something else. Every other selector Hyprland accepts —
+/// `special:name`, `name:x`, `r[1-5]`, `m[DP-1]` — is refused with a
+/// reason naming its kind, so the log says what was met rather than
+/// "not a number".
+pub fn workspace_number(selector: &str) -> Result<u32, String> {
+    let selector = selector.trim();
+    if selector.len() > MAX_WORKSPACE_SELECTOR {
+        return Err("not a workspace number".into());
+    }
+    if selector == "special" || selector.starts_with("special:") {
+        return Err("a special workspace; special-workspace rules are not read yet".into());
+    }
+    if selector.starts_with("name:") {
+        return Err("a named workspace; only workspaces numbered 1 to 99 are read".into());
+    }
+    if selector.starts_with("r[") || selector.starts_with("m[") || selector.starts_with("s[") {
+        return Err("a workspace selector; only workspaces numbered 1 to 99 are read".into());
+    }
+    match selector.parse::<u32>() {
+        Ok(number @ 1..=99) => Ok(number),
+        Ok(_) => Err("outside 1 to 99".into()),
+        Err(_) => Err("not a workspace number".into()),
+    }
 }

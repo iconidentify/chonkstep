@@ -863,7 +863,8 @@ fn foreign_toplevel_mapping_returns_the_same_live_ipc_address() {
         .iter()
         .find(|client| client["title"].as_str().is_some_and(|title| title.contains("mapping-probe")))
         .and_then(|client| client["fullscreen"].as_i64());
-    assert_eq!(fullscreen, Some(1), "Hyprland IPC and foreign-toplevel observe the same fullscreen transition");
+    // 2 is Hyprland's number for real fullscreen; 1 would be maximize.
+    assert_eq!(fullscreen, Some(2), "Hyprland IPC and foreign-toplevel observe the same fullscreen transition");
 
     session.kill_client("zenity");
     session.wait_for_window_gone("mapping-probe").expect("window unmaps cleanly");
@@ -1275,6 +1276,116 @@ fn activating_a_window_on_another_workspace_shows_it() {
         })
         .unwrap_or_else(|error| panic!("{spelling} activation: {error}"));
     }
+}
+
+/// Omarchy's scratchpad, live. `movetoworkspacesilent special:scratchpad`
+/// takes the focused window off the desk without changing the
+/// workspace; `togglespecialworkspace scratchpad` brings it back on top
+/// of the workspace's windows and focused, so the seat's keys reach it;
+/// a second toggle hides it again. The bar hears each step as
+/// Hyprland spells it: the special in `workspaces` with a negative id,
+/// `monitors[].specialWorkspace`, and the `activespecial` events.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn the_scratchpad_toggle_shows_a_silently_moved_window_on_top_and_hides_it_again() {
+    let mut session = boot("hypr-ipc-scratchpad");
+    let dir = socket_dir(&session);
+    let mut events = Events::connect(&dir);
+    let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
+    let program = probe.display().to_string();
+    session.launch(&program, &["ScratchA"]).expect("first probe launches");
+    session.wait_for_window("ScratchA").expect("first probe maps");
+    session.launch(&program, &["ScratchB"]).expect("second probe launches");
+    session.wait_for_window("ScratchB").expect("second probe maps and takes focus");
+    let monitor = json(&dir, "j/monitors")[0]["name"].as_str().expect("an output").to_string();
+
+    assert_eq!(request(&dir, "/dispatch movetoworkspacesilent special:scratchpad").trim(), "ok");
+    let address = poll_until(EVENT, "B to be parked on the hidden special workspace", || {
+        let clients = json(&dir, "j/clients");
+        let parked = clients.as_array()?.iter().find(|client| client["title"] == "ScratchB")?;
+        (parked["workspace"]["name"] == "special:scratchpad"
+            && parked["workspace"]["id"].as_i64()? < 0
+            && json(&dir, "j/activeworkspace")["id"] == serde_json::json!(1)
+            && json(&dir, "j/activewindow")["title"] == "ScratchA")
+            .then(|| parked["address"].as_str().map(str::to_string))?
+    })
+    .expect("the silent move parks B on the special, stays on workspace 1 and focuses A");
+    let bare = address.trim_start_matches("0x").to_string();
+    assert_eq!(events.wait_for("movewindowv2"), format!("{bare},-99,special:scratchpad"));
+    let world = session.door().windows().expect("read the desk");
+    let frame_shown = |world: &chonk_testkit::World, title: &str| {
+        let window = world.window_matching(title).unwrap_or_else(|| panic!("{title} is listed"));
+        world.frame_of(window.id).unwrap_or_else(|| panic!("{title} is decorated")).mapped
+    };
+    assert!(!frame_shown(&world, "ScratchB"), "a parked member's frame is unmapped: {:?}", world.frames);
+    assert!(frame_shown(&world, "ScratchA"));
+    let listed = json(&dir, "j/workspaces");
+    let special = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["name"] == "special:scratchpad")
+        .expect("the special is listed among the workspaces");
+    assert_eq!(special["id"], serde_json::json!(-99));
+    assert_eq!(special["windows"], serde_json::json!(1));
+    assert_eq!(json(&dir, "j/monitors")[0]["specialWorkspace"]["id"], serde_json::json!(0), "not shown yet");
+
+    assert_eq!(request(&dir, "/dispatch togglespecialworkspace scratchpad").trim(), "ok");
+    poll_until(EVENT, "the toggle to show B focused with the special on the monitor", || {
+        (json(&dir, "j/activewindow")["title"] == "ScratchB"
+            && json(&dir, "j/monitors")[0]["specialWorkspace"]["name"] == "special:scratchpad"
+            && json(&dir, "j/activeworkspace")["id"] == serde_json::json!(1))
+            .then_some(())
+    })
+    .expect("togglespecialworkspace must show the member, focus it and leave the workspace alone");
+    assert_eq!(events.wait_for("activespecial"), format!("special:scratchpad,{monitor}"));
+    assert_eq!(events.wait_for("activespecialv2"), format!("-99,special:scratchpad,{monitor}"));
+    let world = session.door().windows().expect("read the desk");
+    assert!(frame_shown(&world, "ScratchB"), "B is mapped again: {:?}", world.frames);
+    assert!(frame_shown(&world, "ScratchA"), "A stays on the workspace underneath");
+    let a = world.window_matching("ScratchA").unwrap();
+    let b = world.window_matching("ScratchB").unwrap();
+    assert!(b.stack_index > a.stack_index, "the overlay is on top: A {} B {}", a.stack_index, b.stack_index);
+
+    // The keys go to the shown member: the probe's `f` asks for
+    // fullscreen, and only B ends up fullscreen (mode 2, as Hyprland
+    // reports real fullscreen).
+    session.door().tap_key(33).expect("press f on the focused window");
+    poll_until(EVENT, "B, not A, to answer the key with a fullscreen request", || {
+        let clients = json(&dir, "j/clients");
+        let clients = clients.as_array()?;
+        let fullscreen = |title: &str| clients.iter().find(|client| client["title"] == title).map(|client| client["fullscreen"] == serde_json::json!(2));
+        (fullscreen("ScratchB") == Some(true) && fullscreen("ScratchA") == Some(false)).then_some(())
+    })
+    .expect("input reaches the shown special member");
+    session.door().tap_key(33).expect("press f again to leave fullscreen");
+    poll_until(EVENT, "B to leave fullscreen", || {
+        let clients = json(&dir, "j/clients");
+        let b = clients.as_array()?.iter().find(|client| client["title"] == "ScratchB")?;
+        (b["fullscreen"] == serde_json::json!(0)).then_some(())
+    })
+    .expect("the probe's fullscreen control toggles back");
+
+    assert_eq!(request(&dir, "/dispatch togglespecialworkspace scratchpad").trim(), "ok");
+    poll_until(EVENT, "the second toggle to hide B and hand focus back to A", || {
+        (json(&dir, "j/activewindow")["title"] == "ScratchA"
+            && json(&dir, "j/monitors")[0]["specialWorkspace"]["id"] == serde_json::json!(0))
+            .then_some(())
+    })
+    .expect("a second toggle hides the special");
+    assert_eq!(events.wait_for("activespecial"), format!(",{monitor}"));
+    assert_eq!(events.wait_for("activespecialv2"), format!(",,{monitor}"));
+    let world = session.door().windows().expect("read the desk");
+    assert!(!frame_shown(&world, "ScratchB"), "hidden again: {:?}", world.frames);
+    assert!(frame_shown(&world, "ScratchA"));
+
+    // The Lua dialect Omarchy's `tiling.lua` binds reaches the same place.
+    assert_eq!(request(&dir, r#"dispatch hl.dsp.workspace.toggle_special("scratchpad")"#).trim(), "ok");
+    poll_until(EVENT, "the Lua toggle to show B again", || {
+        (json(&dir, "j/activewindow")["title"] == "ScratchB").then_some(())
+    })
+    .expect("hl.dsp.workspace.toggle_special shows the special");
+    assert!(session.compositor_alive());
 }
 
 /// A mutation arriving through chonkstep's native bar protocol must

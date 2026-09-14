@@ -121,6 +121,9 @@ pub struct SessionState {
     /// Whether focus also raises. Only the focus a pointer crossing
     /// hands out consults this; a click raises regardless.
     pub autoraise: bool,
+    /// Whether a workspace switch hides the special workspace shown on
+    /// the output it lands on.
+    pub hide_special_on_workspace_change: bool,
     pub placement: PlacementPolicy,
     pub edge_resistance: u32,
     pub terminal_font_px: f32,
@@ -205,6 +208,19 @@ pub struct SessionState {
     pub input: wm_config::InputConfig,
     pub interaction: wm_core::InteractionConfig,
     pub monitor_rules: Vec<wm_config::hyprland::directive::Monitor>,
+    /// The style every workspace starts in, from the live Hyprland
+    /// read's `general.layout`; `None` is Freeform. Installed as the
+    /// window manager's default, so a workspace first reached with a
+    /// switch starts in it too, and on a reload it reaches only the
+    /// workspaces that never had a style chosen for them.
+    pub default_layout: Option<wm_core::LayoutMode>,
+    /// Styles for particular workspaces, by 0-based index, from that
+    /// read's workspace rules — the files Omarchy's own SUPER+L saves.
+    /// Above `default_layout` for the workspaces they name, below a
+    /// restored session's own modes when restore is on. On a reload
+    /// only an entry whose value changed since the last read is
+    /// applied, so a re-read can never undo a live toggle.
+    pub workspace_layouts: BTreeMap<usize, wm_core::LayoutMode>,
     pub keybindings: Vec<(KeyCombo, Action)>,
     /// Retained configuration refusals for the Hyprland-compatible
     /// `configerrors` query.
@@ -250,6 +266,7 @@ impl SessionState {
                 FocusPolicy::ClickToFocus
             },
             autoraise: config.autoraise,
+            hide_special_on_workspace_change: config.hide_special_on_workspace_change,
             placement: config.placement,
             edge_resistance: config.edge_resistance,
             terminal_font_px: config.terminal_font_px,
@@ -288,6 +305,8 @@ impl SessionState {
             input: config.input.clone(),
             interaction: config.interaction.clone(),
             monitor_rules: config.monitor_rules.clone(),
+            default_layout: config.default_layout,
+            workspace_layouts: config.workspace_layouts.clone(),
             keybindings: config.keybindings.clone(),
             config_diagnostics: config.diagnostics.clone(),
         }
@@ -990,6 +1009,7 @@ mod tests {
             scale_override: None,
             focus: FocusPolicy::ClickToFocus,
             autoraise: true,
+            hide_special_on_workspace_change: false,
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: 20.0,
@@ -1013,6 +1033,8 @@ mod tests {
             input: wm_config::InputConfig::default(),
             interaction: wm_core::InteractionConfig::default(),
             monitor_rules: Vec::new(),
+            default_layout: None,
+            workspace_layouts: BTreeMap::new(),
             keybindings: Vec::new(),
             config_diagnostics: Vec::new(),
         };

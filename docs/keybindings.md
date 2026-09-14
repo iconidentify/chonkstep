@@ -50,6 +50,7 @@ ever do disagree, the source wins.
 | `alt+shift+s`      | `toggle-shade`         | Roll the window up into its titlebar          |
 | `alt+shift+m`      | `miniaturize`          | Minimize; restore through Alt-Tab                      |
 | `alt+shift+f`      | `toggle-fullscreen`    | Borderless fullscreen on / off                |
+| --                 | `toggle-tiled-fullscreen` | Tell the app it is fullscreen; it drops its own chrome and keeps its place |
 | `alt+ctrl+right`   | `workspace-next`       | Next workspace (grows on demand)              |
 | `alt+ctrl+left`    | `workspace-prev`       | Previous workspace (stops at the first)       |
 | `alt+shift+right`  | `workspace-carry-next` | Carry the focused window to the next          |
@@ -62,8 +63,10 @@ ever do disagree, the source wins.
 | `control+escape`   | `window-menu`          | Window commands menu, no titlebar required    |
 
 Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
-`miniaturize`, `toggle-fullscreen`, `window-menu`) act on the focused
-window and do nothing when no window is focused.
+`miniaturize`, `toggle-fullscreen`, `toggle-tiled-fullscreen`,
+`window-menu`) act on the focused window and do nothing when no window
+is focused. `toggle-tiled-fullscreen` has no default chord; it is what
+Omarchy's `super+ctrl+f` becomes, and Hyprland's `fullscreenstate 0 2`.
 
 ChonkStep has three workspace styles. **Freeform** lets you place windows
 yourself. **Mosaic** keeps windows visible. **Flow** extends them sideways.
@@ -107,7 +110,7 @@ example:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-154 bindings, including four native capture shortcuts, derived from Omarchy's
+162 bindings, including four native capture shortcuts, derived from Omarchy's
 own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
@@ -116,10 +119,10 @@ in `[commands]`; the third column is the argv it runs, which is
 Omarchy's own command line. Selecting this keymap declares all 86 of
 those commands, so nothing here needs a `[commands]` table of your own.
 
-Three of these differ from what Omarchy does with the chord —
-`super+f`/`super+alt+f`, `super+alt+s`, and the chonkstep verb on
+Two of these differ from what Omarchy does with the chord —
+`super+f`/`super+alt+f`, and the chonkstep verb on
 `control+escape` — and
-[omarchy-mode.md](omarchy-mode.md#three-chords-we-do-differently) spells
+[omarchy-mode.md](omarchy-mode.md#two-chords-we-do-differently) spells
 out how. Omarchy's locked media/brightness keys, repeating ramps, and
 release bindings retain those firing semantics under chonkstep.
 
@@ -152,7 +155,7 @@ helpers are supported directly.
 | `super+alt+f`            | `toggle-maximize`                      | --                                                                                                                  |
 | `super+j` | `layout-noop` | -- |
 | `super+p` | `layout-noop` | -- |
-| `super+ctrl+f` | `toggle-maximize` | -- |
+| `super+ctrl+f` | `toggle-tiled-fullscreen` | -- |
 | `super+o` | `run omarchy-window-pop` | `omarchy-hyprland-window-pop` |
 | `super+alt+home` | `run omarchy-window-width-save` | `omarchy-hyprland-window-width save` |
 | `super+home` | `run omarchy-window-width-restore` | `omarchy-hyprland-window-width restore` |
@@ -171,8 +174,15 @@ helpers are supported directly.
 | `super+right`            | `focus-right`                          | --                                                                                                                  |
 | `super+up`               | `focus-up`                             | --                                                                                                                  |
 | `super+down`             | `focus-down`                           | --                                                                                                                  |
-| `super+tab`              | `workspace-next`                       | --                                                                                                                  |
-| `super+shift+tab`        | `workspace-prev`                       | --                                                                                                                  |
+| `super+tab`              | `workspace-next-occupied`              | --                                                                                                                  |
+| `super+shift+tab`        | `workspace-prev-occupied`              | --                                                                                                                  |
+| `super+ctrl+tab`         | `workspace-previous`                   | --                                                                                                                  |
+| `super+shift+alt+left`   | `move-workspace-to-monitor left`       | --                                                                                                                  |
+| `super+shift+alt+right`  | `move-workspace-to-monitor right`      | --                                                                                                                  |
+| `super+shift+alt+up`     | `move-workspace-to-monitor up`         | --                                                                                                                  |
+| `super+shift+alt+down`   | `move-workspace-to-monitor down`       | --                                                                                                                  |
+| `ctrl+alt+tab`           | `focus-monitor +1`                     | --                                                                                                                  |
+| `ctrl+alt+shift+tab`     | `focus-monitor -1`                     | --                                                                                                                  |
 | `super+1`                | `workspace 1`                          | --                                                                                                                  |
 | `super+2`                | `workspace 2`                          | --                                                                                                                  |
 | `super+3`                | `workspace 3`                          | --                                                                                                                  |
@@ -203,7 +213,8 @@ helpers are supported directly.
 | `super+shift+alt+8`      | `workspace-send 8`                     | --                                                                                                                  |
 | `super+shift+alt+9`      | `workspace-send 9`                     | --                                                                                                                  |
 | `super+shift+alt+0`      | `workspace-send 10`                    | --                                                                                                                  |
-| `super+alt+s`            | `miniaturize`                          | --                                                                                                                  |
+| `super+s`                | `toggle-special scratchpad`            | --                                                                                                                  |
+| `super+alt+s`            | `special-send scratchpad`              | --                                                                                                                  |
 | `super+slash` | `run omarchy-monitor-scaling-up` | `omarchy-hyprland-monitor-scaling up` |
 | `super+alt+slash` | `run omarchy-monitor-scaling-down` | `omarchy-hyprland-monitor-scaling down` |
 | `super+ctrl+v`           | `run omarchy-clipboard`                | `omarchy-shell shell toggle omarchy.clipboard`                                                                      |
@@ -292,7 +303,7 @@ helpers are supported directly.
 
 ### Deliberately unbound
 
-24 groups of Omarchy chords remain unbound in the static preset. The table
+20 groups of Omarchy chords remain unbound in the static preset. The table
 explains each limit; the live configuration reader supports additional chords.
 
 | Omarchy chord                                                                                      | What Omarchy does with it                                            | Why not here                                                |
@@ -305,10 +316,6 @@ explains each limit; the live configuration reader supports additional chords.
 | `super+ctrl+left / super+ctrl+right` | move the grouped-window focus | requires window groups or a feature ChonkStep does not provide |
 | `super+alt+1..5` | focus the nth window of the group | requires window groups or a feature ChonkStep does not provide |
 | `super+alt/ctrl+minus/equal` | large resize increments | chonkstep has no verb for it, and no command can stand in |
-| `super+s`                                                                                          | toggle the scratchpad workspace                                      | chonkstep has no verb for it, and no command can stand in   |
-| `super+ctrl+tab`                                                                                   | the workspace before this one                                        | chonkstep has no verb for it, and no command can stand in   |
-| `super+shift+alt+left/right/up/down`                                                               | move the workspace to the monitor in that direction                  | chonkstep has no verb for it, and no command can stand in   |
-| `ctrl+alt+tab / ctrl+alt+shift+tab`                                                                | focus the next / previous monitor                                    | chonkstep has no verb for it, and no command can stand in   |
 | `super+mouse wheel, super+drag`                                                                    | scroll through workspaces; move and resize by mouse                  | not a key chord this config format can express              |
 | `super+k`                                                                                          | Omarchy's keybinding cheatsheet                                      | declined on purpose — see the note under the table          |
 | `super+shift+space`                                                                                | toggle Omarchy's top bar                                             | chonkstep has no verb for it, and no command can stand in   |

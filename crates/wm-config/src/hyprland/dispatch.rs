@@ -31,6 +31,7 @@
 
 use crate::preset::Unbound;
 use crate::{Action, FocusDirection};
+use wm_core::OutputTarget;
 
 use super::directive::Dispatcher;
 
@@ -136,6 +137,9 @@ pub const SERVED_OMARCHY_SCRIPTS: &[&str] = &[
     "omarchy-hyprland-window-close-all",
     "omarchy-hyprland-monitor-scaling",
     "omarchy-hyprland-workspace-layout-toggle",
+    // Reads `.fullscreenClient` and sends `fullscreen_state`, both
+    // axes of which the IPC now serves.
+    "omarchy-hyprland-window-tiled-fullscreen-toggle",
 ];
 
 /// The `omarchy-hyprland-*` scripts Omarchy binds or starts whose
@@ -145,9 +149,6 @@ pub const SERVED_OMARCHY_SCRIPTS: &[&str] = &[
 /// [`SERVED_OMARCHY_SCRIPTS`] in the change that makes its requests
 /// served.
 pub const UNSERVED_OMARCHY_SCRIPTS: &[(&str, Unbound)] = &[
-    // It reads `.fullscreenClient` and asks for a window that keeps its
-    // tile while the client is told it is fullscreen.
-    ("omarchy-hyprland-window-tiled-fullscreen-toggle", Unbound::CLIENT_FULLSCREEN),
     ("omarchy-hyprland-window-transparency-toggle", Unbound::OPACITY),
     // Both rewrite a Hyprland config flag and run `hyprctl reload`.
     ("omarchy-hyprland-window-gaps-toggle", Unbound::GAPS),
@@ -196,6 +197,11 @@ pub fn commands_hyprland(program: &str) -> bool {
     hyprland_refusal(program).is_some()
 }
 
+/// One axis of `fullscreenstate`, in Hyprland's numbering.
+fn fullscreen_mode(level: &str) -> Option<wm_core::FullscreenMode> {
+    level.parse::<u8>().ok().and_then(wm_core::FullscreenMode::from_level)
+}
+
 /// Whether a command line contains shell grammar that argv splitting
 /// would destroy.
 fn needs_a_shell(command: &str) -> bool {
@@ -226,10 +232,18 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             "1" => Verb::Action(Action::ToggleMaximize),
             _ => Verb::Unbound(Unbound::NoVerb),
         },
-        // `fullscreenstate` sets the *client's* idea and the
-        // compositor's separately, which is how Omarchy builds "tiled
-        // fullscreen". Independent client/internal states are not modeled.
-        "fullscreenstate" => Verb::Unbound(Unbound::TilingOnly),
+        // `fullscreenstate <internal> <client>` sets the compositor's
+        // idea and the client's separately, which is how Omarchy's
+        // classic bindings spell "tiled fullscreen" (`0 2`). Both axes
+        // are required, each 0, 1 or 2; anything else is refused rather
+        // than rounded to a state the chord did not ask for.
+        "fullscreenstate" => match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [internal, client] => match (fullscreen_mode(internal), fullscreen_mode(client)) {
+                (Some(internal), Some(client)) => Verb::Action(Action::FullscreenState { internal, client }),
+                _ => Verb::Unbound(Unbound::NoVerb),
+            },
+            _ => Verb::Unbound(Unbound::NoVerb),
+        },
         "togglefloating" => Verb::Action(Action::Floating(None)),
         "setfloating" => Verb::Action(Action::Floating(Some(true))),
         "settiled" => Verb::Action(Action::Floating(Some(false))),
@@ -273,21 +287,28 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             }
         }
         // Workspaces. `e+1`/`e-1` are "the next/previous workspace that
-        // exists", which is exactly what this desktop's two workspace
-        // verbs do; a bare number is a workspace by index, and
-        // `previous`, `special:…` and the monitor-relative forms are
-        // not verbs here.
+        // exists": only workspaces with windows on them, wrapping, which
+        // is what Omarchy's SUPER+TAB means and not what this desktop's
+        // own `workspace-next` does (step by index, grow the row), so
+        // each keeps its verb. `+1`/`-1` step by index; a bare number
+        // is a workspace by index; `previous` is the two-workspace flip;
+        // `special` and `special:NAME` name a special workspace, which a
+        // switch shows and a move sends a window to; `name:…` and the
+        // monitor-relative forms are not verbs here.
         "workspace" | "focusworkspaceoncurrentmonitor" => match workspace_target(arg) {
             WorkspaceTarget::Next => Verb::Action(Action::WorkspaceNext),
             WorkspaceTarget::Prev => Verb::Action(Action::WorkspacePrev),
+            WorkspaceTarget::NextExisting => Verb::Action(Action::WorkspaceNextOccupied),
+            WorkspaceTarget::PrevExisting => Verb::Action(Action::WorkspacePrevOccupied),
+            WorkspaceTarget::Previous => Verb::Action(Action::WorkspacePrevious),
             WorkspaceTarget::Index(n) => match workspace_index_action(n) {
                 Some(action) => Verb::Action(action),
                 None => Verb::Unbound(Unbound::NoVerb),
             },
-            // `workspace special:scratchpad` *shows* the scratchpad
-            // rather than sending a window to it, which is a
-            // workspace this desktop does not have.
-            WorkspaceTarget::Special | WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
+            // `workspace special:scratchpad` shows the scratchpad — the
+            // same overlay `togglespecialworkspace` drops down.
+            WorkspaceTarget::Special(name) => Verb::Action(Action::ToggleSpecial(name)),
+            WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
         },
         // Silent sends are native: the window leaves and the workspace
         // does not. Relative targets are deliberately left alone here
@@ -298,31 +319,46 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
                 Some(action) => Verb::Action(action),
                 None => Verb::Unbound(Unbound::NoVerb),
             },
-            WorkspaceTarget::Special => Verb::Action(Action::Miniaturize),
+            // Omarchy's "move window to scratchpad": the window goes
+            // onto the special workspace and stays hidden until the
+            // toggle chord brings the overlay down.
+            WorkspaceTarget::Special(name) => Verb::Action(Action::SendToSpecial { name, follow: false }),
             _ => Verb::Unbound(Unbound::NoVerb),
         },
+        // Carrying a window to the next existing workspace is carrying
+        // it to the next one: a window in tow makes the destination
+        // occupied either way.
         "movetoworkspace" => match workspace_target(arg) {
-            WorkspaceTarget::Next => Verb::Action(Action::WorkspaceCarryNext),
-            WorkspaceTarget::Prev => Verb::Action(Action::WorkspaceCarryPrev),
+            WorkspaceTarget::Next | WorkspaceTarget::NextExisting => Verb::Action(Action::WorkspaceCarryNext),
+            WorkspaceTarget::Prev | WorkspaceTarget::PrevExisting => Verb::Action(Action::WorkspaceCarryPrev),
             WorkspaceTarget::Index(n) => match workspace_carry_index_action(n) {
                 Some(action) => Verb::Action(action),
                 None => Verb::Unbound(Unbound::NoVerb),
             },
-            // "Move this window to the scratchpad": put it out of the
-            // way and leave it recoverable. Chonkstep's nearest true
-            // verb is `miniaturize` — the window collapses to an icon
-            // tile on the desk rather than onto a special workspace,
-            // and it comes back by double-clicking that tile rather
-            // than by the same chord. The preset made this call; it is
-            // carried over here rather than re-argued.
-            WorkspaceTarget::Special => Verb::Action(Action::Miniaturize),
-            WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
+            WorkspaceTarget::Special(name) => Verb::Action(Action::SendToSpecial { name, follow: true }),
+            WorkspaceTarget::Previous | WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
         },
-        "togglespecialworkspace"
-        | "movecurrentworkspacetomonitor"
-        | "moveworkspacetomonitor"
-        | "focusmonitor"
-        | "swapactiveworkspaces" => Verb::Unbound(Unbound::NoVerb),
+        // The scratchpad toggle. No argument means Hyprland's default
+        // special workspace; a name the core would refuse to create
+        // (too long, or unprintable) leaves the chord unbound.
+        "togglespecialworkspace" => match wm_core::normalize_special_name(arg) {
+            Some(name) => Verb::Action(Action::ToggleSpecial(name)),
+            None => Verb::Unbound(Unbound::NoVerb),
+        },
+        // Monitors. `focusmonitor` takes a step, a direction or an
+        // output name, and so does `movecurrentworkspacetomonitor`,
+        // which moves the active Space under separate Spaces and is
+        // refused with a reason on the shared desktop. The forms that
+        // name a workspace *and* a monitor stay unbound.
+        "focusmonitor" => match output_target(arg) {
+            Some(target) => Verb::Action(Action::FocusMonitor(target)),
+            None => Verb::Unbound(Unbound::NoVerb),
+        },
+        "movecurrentworkspacetomonitor" => match output_target(arg) {
+            Some(target) => Verb::Action(Action::MoveWorkspaceToMonitor(target)),
+            None => Verb::Unbound(Unbound::NoVerb),
+        },
+        "moveworkspacetomonitor" | "swapactiveworkspaces" => Verb::Unbound(Unbound::NoVerb),
         // Alt-Tab. This desktop's switcher is modal machinery rather
         // than a binding — while it is up the shell owns the keyboard —
         // so the chord is already answered, correctly, by something
@@ -360,32 +396,48 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
 }
 
 /// What a workspace argument names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum WorkspaceTarget {
-    /// `e+1` / `+1` / `r+1`: the next workspace.
+    /// `+1` / `r+1`: the next workspace by index.
     Next,
-    /// `e-1` / `-1` / `r-1`.
+    /// `-1` / `r-1`.
     Prev,
+    /// `e+1`: the next workspace that has windows on it.
+    NextExisting,
+    /// `e-1`.
+    PrevExisting,
+    /// `previous`: the workspace before this one.
+    Previous,
     /// A bare index, 1-based as Hyprland counts them.
     Index(u32),
-    /// `special`, `special:scratchpad`.
-    Special,
-    /// `previous`, `empty`, `name:foo`, `m+1`, anything else.
+    /// `special`, `special:scratchpad`: a special workspace, by the
+    /// name the core will create it under.
+    Special(String),
+    /// `empty`, `name:foo`, `m+1`, anything else — and a special name
+    /// the core would refuse.
     Other,
 }
 
 fn workspace_target(arg: &str) -> WorkspaceTarget {
     let arg = arg.trim();
-    if arg.starts_with("special") {
-        return WorkspaceTarget::Special;
+    if arg == "special" || arg.starts_with("special:") {
+        return match wm_core::normalize_special_name(arg) {
+            Some(name) => WorkspaceTarget::Special(name),
+            None => WorkspaceTarget::Other,
+        };
     }
-    // `e`/`r` are Hyprland's "next existing" and "next in range";
-    // both are "the workspace after this one" for a desktop whose
-    // workspace list has no holes in it.
-    let relative = arg
-        .strip_prefix('e')
-        .or_else(|| arg.strip_prefix('r'))
-        .unwrap_or(arg);
+    if arg == "previous" {
+        return WorkspaceTarget::Previous;
+    }
+    // `e` is Hyprland's "next existing" and `r` its "next in range";
+    // the second is "the workspace after this one" for a desktop whose
+    // workspace list has no holes in it, the first is not.
+    match arg {
+        "e+1" => return WorkspaceTarget::NextExisting,
+        "e-1" => return WorkspaceTarget::PrevExisting,
+        _ => {}
+    }
+    let relative = arg.strip_prefix('r').unwrap_or(arg);
     match relative {
         "+1" => return WorkspaceTarget::Next,
         "-1" => return WorkspaceTarget::Prev,
@@ -395,6 +447,30 @@ fn workspace_target(arg: &str) -> WorkspaceTarget {
         Ok(n) if n >= 1 => WorkspaceTarget::Index(n),
         _ => WorkspaceTarget::Other,
     }
+}
+
+/// A monitor argument: `+N` / `-N`, `l`/`r`/`u`/`d` (or the words), or
+/// an output name as `hyprctl monitors` reports it. `None` for nothing,
+/// a name no config file should carry, or a step so large it can only
+/// be a mistake; a step wraps around the monitor list regardless.
+fn output_target(arg: &str) -> Option<OutputTarget> {
+    let arg = arg.trim();
+    if arg.is_empty() || arg.len() > 256 || arg.chars().any(char::is_control) {
+        return None;
+    }
+    // A sign that did not read as a step is a malformed step, not an
+    // output called `+`.
+    if arg.starts_with('+') || arg.starts_with('-') {
+        let step = arg.parse::<i32>().ok()?;
+        return (-64..=64).contains(&step).then_some(OutputTarget::Relative(step));
+    }
+    Some(match arg.to_ascii_lowercase().as_str() {
+        "l" | "left" => OutputTarget::Direction(FocusDirection::Left),
+        "r" | "right" => OutputTarget::Direction(FocusDirection::Right),
+        "u" | "up" => OutputTarget::Direction(FocusDirection::Up),
+        "d" | "down" => OutputTarget::Direction(FocusDirection::Down),
+        _ => OutputTarget::Name(arg.to_string()),
+    })
 }
 
 /// The verb for "switch to workspace `n`", if this desktop has one.

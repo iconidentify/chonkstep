@@ -83,9 +83,9 @@ start with `[[BATCH]]` and use `;` separators.
 | Request | Result |
 | --- | --- |
 | `status` | `configProvider="chonkstep"`; Quickshell uses classic dispatch while scripts may use the supported Lua forms |
-| `monitors` | Live output name, geometry, scale, focus, active workspace, transform, DPMS state, and measured VRR capability/runtime state. The optional `all` argument is accepted and ignored because connected outputs remain in the layout while powered down. |
-| `workspaces` | One-based ids; real per-workspace monitor assignment, fullscreen state and `tiledLayout` (`freeform`, `dwindle`, `scrolling`) |
-| `clients` / `activewindow` | Live pid, class/title, position, size, workspace, monitor, XWayland, floating, pinned, fullscreen, tags, focus history and idle inhibition |
+| `monitors` | Live output name, geometry, scale, focus, active workspace, shown special workspace (`specialWorkspace`), transform, DPMS state, and measured VRR capability/runtime state. The optional `all` argument is accepted and ignored because connected outputs remain in the layout while powered down. |
+| `workspaces` | One-based ids; real per-workspace monitor assignment, fullscreen state and `tiledLayout` (`freeform`, `dwindle`, `scrolling`); then each special workspace, with a negative id (`-99` downwards in creation order, stable for the session) and the name `special:NAME` |
+| `clients` / `activewindow` | Live pid, class/title, position, size, workspace, monitor, XWayland, floating, pinned, fullscreen, tags, focus history and idle inhibition. `fullscreen` is the compositor's mode (2 fullscreen, 1 maximized, 0 neither) and `fullscreenClient` what the window is told (2 for real or tiled fullscreen, 1 maximized, 0 neither), so Omarchy's tiled-fullscreen toggle can read its own state back |
 | `activeworkspace` | Exactly the active workspace, in JSON or one plain block |
 | `cursorpos` | The live pointer as plain `X, Y`, or `{"x": X, "y": Y}` with `-j` |
 | `devices` | Seat keyboards and pointers; keyboards include `name`, `layout` (the installed layout list, such as `us,de`), `active_keymap` (the group in force now), and `active_layout_index`. Plain `devices` uses Hyprland's block format, with one `active keymap:` line per keyboard |
@@ -125,13 +125,50 @@ Classic dispatch and Omarchy's Lua dispatch vocabulary reach the same
 actions. Supported families include:
 
 - workspace focus and moving a window to a workspace;
+- special workspaces, Omarchy's scratchpad: `togglespecialworkspace [NAME]`
+  (Lua `hl.dsp.workspace.toggle_special("NAME")`) shows the named special
+  as an overlay on the active output, above pinned windows, or hides it
+  when it is the one shown there; `workspace special:NAME` shows it;
+  `movetoworkspacesilent special[:NAME][,window]` moves a window there
+  hidden, and `movetoworkspace special[:NAME][,window]` moves it and
+  shows the special (Lua `hl.dsp.window.move({ workspace =
+  "special:NAME", follow = … })`). A bare `special` is the default
+  special workspace. Names are at most 64 bytes and a session holds at
+  most 16 special workspaces; a request that would create another is
+  refused before anything changes, and `name:…` workspaces are refused
+  by name;
 - focus by selector or spatial direction, close, kill-active, cycle,
-  fullscreen/maximize;
+  fullscreen/maximize, and `fullscreenstate <internal> <client>` /
+  `hl.dsp.window.fullscreen_state({ internal = …, client = … })`, each
+  axis 0, 1 or 2 and refused by name otherwise. `0 2` tells the window
+  it is fullscreen without moving it — Omarchy's tiled fullscreen — and
+  asking for the state a window already has clears both axes, as in
+  Hyprland. `hasfullscreen` and the `fullscreen` event follow only the
+  compositor's own fullscreen;
 - move, resize, center, raise, pin, tags, and floating membership;
 - `layout freeform|mosaic|flow`, `togglelayout`, `togglefloating`, `setfloating`,
   `settiled`, and directional `movewindow`/`swapwindow`;
-- `workspace +1|-1` and `movetoworkspace +1|-1` as relative steps, with or
-  without Hyprland's `e` prefix;
+- `workspace +1|-1` and `movetoworkspace +1|-1` as relative steps by index,
+  growing the row past its end like the keyboard's `workspace-next`;
+  `workspace e+1|e-1` as Omarchy's "next existing workspace": only
+  workspaces with windows on them plus the current one, wrapping, never
+  creating a workspace; and `workspace previous`, the workspace before
+  this one, refused until there has been a switch;
+- `focusmonitor +N|-N|current|l|r|u|d|ID|NAME` and `hl.dsp.focus({ monitor
+  = … })`: the pointer warps to the centre of that output's workarea
+  through the same path as `movecursor`, the output is selected under
+  separate Spaces, and the keyboard goes to its most recently focused
+  window (or stays put when it has none). A window opened next lands on
+  that output, which is how `omarchy-launch-screensaver` covers every
+  display. A name no output carries is refused by name, and the whole
+  verb is refused while the session is locked;
+- `movecurrentworkspacetomonitor DIR|NAME` and `hl.dsp.workspace.move({
+  monitor = … })`: under separate Spaces the active Space is re-homed to
+  that display with its windows, keeping their position relative to the
+  display. On the shared desktop the workspace already spans every
+  display, so the request is refused with the setting that would change
+  that; a fullscreen Space is refused because it is bound to its window's
+  display. Never `ok` and left undone;
 - `chonkstep <name>`, which runs a ChonkStep binding `binds` reported with that
   label, exactly as its key would. Only reported labels are accepted, and while
   the session is locked only a binding marked locked;
@@ -211,8 +248,8 @@ because a bar divides this into a frame budget.
 
 Omarchy's `dwindle` and `scrolling` select Mosaic and Flow. `Super+L` toggles
 between them; `Super+Shift+L` restores Freeform. `layoutmsg`, `togglesplit`,
-`swapsplit`, `pseudo` and `splitratio` are deliberate quiet no-ops. Groups,
-special workspaces and unsupported workspace options remain explicit refusals.
+`swapsplit`, `pseudo` and `splitratio` are deliberate quiet no-ops. Groups
+and unsupported workspace options remain explicit refusals.
 The mirrored menu retains its filter for direct Hyprland script rows; native
 shortcuts show a transient compositor caption without launching a script.
 
@@ -225,11 +262,17 @@ event:
 `createworkspacev2`, `destroyworkspacev2`, `workspacev2`, `workspace`,
 `moveworkspacev2`, `focusedmon`, `fullscreen`, `openwindow`,
 `closewindow`, `movewindowv2`, `windowtitlev2`, `windowtitle`,
-`activewindowv2`, `activewindow`, `urgent`, `changefloatingmode`, and `activelayout`.
+`activewindowv2`, `activewindow`, `activespecial`, `activespecialv2`,
+`urgent`, `changefloatingmode`, and `activelayout`.
 
 Addresses are `0x...` in JSON and bare hexadecimal in events; both are
 the same `ClientId`. Workspace ids are one-based on this wire and
-converted exactly once at its boundary.
+converted exactly once at its boundary. Special workspaces carry
+negative ids, `-99` downwards in creation order, resolved by their own
+function rather than the numbered one, and a member window's
+`workspace` is its special. `activespecial>>NAME,MONITOR` and
+`activespecialv2>>ID,NAME,MONITOR` announce a special shown on an
+output, with an empty name (and id) when it is hidden again.
 
 Chonkstep workspaces are persistent by design. Visiting workspace 9
 creates the intervening row and empty workspaces do not disappear, so
