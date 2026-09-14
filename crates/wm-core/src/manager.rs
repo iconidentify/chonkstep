@@ -1055,12 +1055,12 @@ impl<B: Backend> WindowManager<B> {
         client.flags.set(ClientFlags::STICKY, pinned);
         self.reflow_client_workspace(id);
         self.bump_protocol_state_revision();
-        if pinned {
-            self.show_client_surface(id);
-            self.raise_client(id);
-        } else if !self.client_visible(id) {
+        if !self.client_visible(id) {
             self.focus_successor_of(id);
             self.hide_client_surface(id);
+        } else if pinned {
+            self.show_client_surface(id);
+            self.raise_client(id);
         }
         true
     }
@@ -1426,6 +1426,7 @@ impl<B: Backend> WindowManager<B> {
     pub fn workspace_has_windows(&self, workspace: usize) -> bool {
         self.clients.values().any(|client| {
             client.workspace == workspace
+                && client.special.is_none()
                 && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
         })
     }
@@ -2288,8 +2289,16 @@ impl<B: Backend> WindowManager<B> {
                 }
             }
             _ => {
-                self.register_layout_client(id);
-                self.reflow_client_workspace(id);
+                // Dialogs inherit the parent's overlay as well as its
+                // numbered home. Do not show a hidden overlay merely
+                // because an application opened another toplevel.
+                let special = self.clients[id].parent.and_then(|parent| self.clients.get(parent)?.special);
+                if let Some(special) = special {
+                    self.move_one_client_to_special(id, special);
+                } else {
+                    self.register_layout_client(id);
+                    self.reflow_client_workspace(id);
+                }
             }
         }
         self.notifications.push_back(Notification::Mapped(id));
@@ -2515,12 +2524,19 @@ impl<B: Backend> WindowManager<B> {
             return;
         };
         let workspace = parent_client.workspace;
+        let special = parent_client.special;
         let parent_frame = client_frame_rect(parent_client);
         let center = Point::new(
             parent_frame.pos.x + parent_frame.size.w as i32 / 2,
             parent_frame.pos.y + parent_frame.size.h as i32 / 2,
         );
-        self.move_client_to_workspace(id, workspace);
+        if let Some(special) = special {
+            for member in self.transient_family(id) {
+                self.move_one_client_to_special(member, special);
+            }
+        } else {
+            self.move_client_to_workspace(id, workspace);
+        }
         if let Some(child) = self.clients.get(id) {
             let desired = Point::new(
                 center.x - child.layout.frame_size.w as i32 / 2,

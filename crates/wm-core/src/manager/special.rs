@@ -316,7 +316,7 @@ impl<B: Backend> WindowManager<B> {
         }
     }
 
-    fn move_one_client_to_special(&mut self, id: ClientId, index: usize) {
+    pub(super) fn move_one_client_to_special(&mut self, id: ClientId, index: usize) {
         let Some(client) = self.clients.get(id) else {
             return;
         };
