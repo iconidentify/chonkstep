@@ -399,28 +399,85 @@ fn build_snapshot(
     }
 }
 
+/// One binding as `hyprctl binds` reports it.
+///
+/// Omarchy's SUPER+K menu is a launcher as well as a cheat sheet: picking
+/// a row hands its dispatcher and argument straight back to `dispatch`.
+/// So every action is reported as a verb `dispatch::parse` lowers back to
+/// the same action, `exec` rows as shell source that rebuilds the argv,
+/// and an action with no Hyprland verb as `chonkstep <name>`, which
+/// replays the binding itself. Never a Rust `Debug` rendering.
 fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::SessionState) -> Binding {
-    let (dispatcher, argument) = match &binding.action {
-        wm_config::Action::Run(name) => ("exec".to_string(), session.commands.get(name).map(|argv| argv.join(" ")).unwrap_or_default()),
-        wm_config::Action::SpawnTerminal => ("exec".to_string(), session.terminal.as_ref().map(|argv| argv.join(" ")).unwrap_or_else(|| "foot".to_string())),
-        wm_config::Action::Close => ("killactive".to_string(), String::new()),
-        wm_config::Action::ToggleFullscreen => ("fullscreen".to_string(), "0".to_string()),
-        wm_config::Action::Focus(direction) => ("movefocus".to_string(), match direction {
+    use wm_config::Action as A;
+    let letter = |direction: &wm_core::FocusDirection| {
+        match direction {
             wm_core::FocusDirection::Left => "l",
             wm_core::FocusDirection::Right => "r",
             wm_core::FocusDirection::Up => "u",
             wm_core::FocusDirection::Down => "d",
-        }.to_string()),
-        wm_config::Action::Workspace(index) => ("workspace".to_string(), (index + 1).to_string()),
-        wm_config::Action::WorkspaceSend(index) => ("movetoworkspacesilent".to_string(), (index + 1).to_string()),
-        wm_config::Action::WorkspaceCarry(index) => ("movetoworkspace".to_string(), (index + 1).to_string()),
-        other => ("chonkstep".to_string(), format!("{other:?}")),
+        }
+        .to_string()
+    };
+    let verb = |dispatcher: &str, argument: &str| (dispatcher.to_string(), argument.to_string());
+    let (dispatcher, argument) = match &binding.action {
+        A::Run(name) => ("exec".to_string(), session.commands.get(name).map(|argv| shell_join(argv)).unwrap_or_default()),
+        A::SpawnTerminal => ("exec".to_string(), session.terminal.as_deref().map(shell_join).unwrap_or_else(|| "foot".to_string())),
+        A::Close => verb("killactive", ""),
+        A::ToggleFullscreen => verb("fullscreen", "0"),
+        A::ToggleMaximize => verb("fullscreen", "1"),
+        A::Focus(direction) => ("movefocus".to_string(), letter(direction)),
+        A::Move(direction) => ("movewindow".to_string(), letter(direction)),
+        A::Floating(None) => verb("togglefloating", ""),
+        A::Floating(Some(true)) => verb("setfloating", ""),
+        A::Floating(Some(false)) => verb("settiled", ""),
+        A::ToggleLayout => verb("togglelayout", ""),
+        A::Layout(mode) => verb("layout", mode.compatible_name()),
+        A::LayoutNoop => verb("layoutmsg", ""),
+        A::WorkspaceNext => verb("workspace", "+1"),
+        A::WorkspacePrev => verb("workspace", "-1"),
+        A::WorkspaceCarryNext => verb("movetoworkspace", "+1"),
+        A::WorkspaceCarryPrev => verb("movetoworkspace", "-1"),
+        A::Workspace(index) => ("workspace".to_string(), (index + 1).to_string()),
+        A::WorkspaceSend(index) => ("movetoworkspacesilent".to_string(), (index + 1).to_string()),
+        A::WorkspaceCarry(index) => ("movetoworkspace".to_string(), (index + 1).to_string()),
+        other => ("chonkstep".to_string(), chonkstep_label(other)),
     };
     Binding {
         modifiers: hypr_modmask(binding.combo.modifiers), key: keysym_name(binding.combo.keysym),
         description: binding.description.clone().unwrap_or_default(), dispatcher, argument,
         locked: binding.locked, repeating: binding.repeating, release: binding.release,
     }
+}
+
+/// The argument `chonkstep` reports for a binding with no Hyprland verb:
+/// the action's `[keybindings]` name where it has one, and a stable
+/// spelling for the few values no name produces. `dispatch` replays it by
+/// finding the binding that reports the same label.
+fn chonkstep_label(action: &wm_config::Action) -> String {
+    action.config_name().unwrap_or_else(|| match action {
+        wm_config::Action::Resize(delta) => format!("resize {} {}", delta.x, delta.y),
+        wm_config::Action::CycleApplications(step) => format!("application-cycle {step}"),
+        wm_config::Action::CycleAppWindows(step) => format!("application-window-cycle {step}"),
+        _ => "unnamed".to_string(),
+    })
+}
+
+/// An argv as POSIX shell source that rebuilds the same argv. The menu
+/// runs a reported `exec` row through `exec_cmd`, which is shell source,
+/// so `bash -lc "a || b"` joined with plain spaces would run `bash -lc a`.
+fn shell_join(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| {
+            let plain = !arg.is_empty()
+                && arg.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"@%+=:,./-_".contains(&byte));
+            if plain {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn hypr_modmask(modifiers: wm_core::Modifiers) -> u32 {
@@ -683,6 +740,36 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             true
         }
         Action::LayoutNoop => true,
+        Action::Binding(label) => {
+            // The label was validated against the snapshot the reply was
+            // formed from; resolve it against the session again, with the
+            // same lock rule, so a reload in between cannot run anything
+            // the report did not name.
+            let locked = comp.wm.backend().locked;
+            let session = comp.shell.session_state();
+            let action = session
+                .bindings
+                .iter()
+                .find(|binding| {
+                    (binding.locked || !locked) && {
+                        let reported = ipc_binding(binding, session);
+                        reported.dispatcher == "chonkstep" && reported.argument == label
+                    }
+                })
+                .map(|binding| binding.action.clone());
+            let Some(action) = action else {
+                return false;
+            };
+            if let wm_config::Action::GlobalShortcut(target) = &action {
+                let now = comp.start_time.elapsed();
+                comp.global_shortcuts.trigger(target, true, now);
+                comp.global_shortcuts.trigger(target, false, now);
+                return true;
+            }
+            let outcome = comp.shell.run_action(&mut comp.wm, &action);
+            comp.note_outcome(outcome);
+            true
+        }
         Action::MoveDirection(direction) => {
             let direction = match direction {
                 chonk_hyprland_ipc::dispatch::Direction::Left => wm_core::FocusDirection::Left,
@@ -957,5 +1044,161 @@ mod tests {
             assert!(name.starts_with("0x"), "{unknown:#x} -> {name:?}");
             assert!(!name.trim().is_empty(), "{unknown:#x} -> blank");
         }
+    }
+}
+
+#[cfg(test)]
+mod binding_replay_tests {
+    use super::{ipc_binding, shell_join};
+    use chonk_hyprland_ipc::dispatch::{self, Action, Direction};
+    use chonk_hyprland_ipc::state::{Monitor, MonitorMode, Snapshot, Window, Workspace};
+    use chonk_hyprland_ipc::Outcome;
+
+    const FOCUSED: u64 = 7;
+
+    fn desk(bindings: Vec<chonk_hyprland_ipc::state::Binding>) -> Snapshot {
+        Snapshot {
+            monitors: vec![Monitor {
+                id: 0,
+                name: "eDP-1".into(),
+                description: "a panel".into(),
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1600,
+                scale: 2.0,
+                powered: true,
+                vrr_supported: false,
+                vrr_enabled: false,
+                focused: true,
+                active_workspace: 1,
+                make: String::new(),
+                model: String::new(),
+                serial: String::new(),
+                refresh_millihertz: 60_000,
+                transform: 0,
+                modes: vec![MonitorMode { width: 2560, height: 1600, refresh_millihertz: 60_000 }],
+            }],
+            workspaces: (0..10)
+                .map(|index| Workspace {
+                    layout: "freeform".into(),
+                    index,
+                    monitor: "eDP-1".into(),
+                    monitor_id: 0,
+                    windows: u32::from(index == 1),
+                    has_fullscreen: false,
+                })
+                .collect(),
+            windows: vec![Window {
+                floating: true,
+                id: FOCUSED,
+                title: "~ — foot".into(),
+                class: "foot".into(),
+                x: 10,
+                y: 20,
+                width: 800,
+                height: 600,
+                workspace: 1,
+                monitor: 0,
+                pid: 4242,
+                xwayland: false,
+                fullscreen: false,
+                hidden: false,
+                urgent: false,
+                pinned: false,
+                inhibiting_idle: false,
+                tags: Vec::new(),
+                xdg_tag: String::new(),
+                xdg_description: String::new(),
+                focus_history_id: 0,
+            }],
+            focused: Some(FOCUSED),
+            bindings,
+            ..Snapshot::default()
+        }
+    }
+
+    /// A Lua string literal, as the menu JSON-encodes a command for
+    /// `hl.dsp.exec_cmd`.
+    fn lua_string(text: &str) -> String {
+        let mut out = String::from("\"");
+        for ch in text.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                other => out.push(other),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    fn sessions() -> Vec<(&'static str, chonk_shell::startup::SessionState)> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../wm-config/tests/fixtures/hyprland/machine");
+        let omarchy = wm_config::parse_with("desktop = \"omarchy\"", &|| {
+            Some(wm_config::hyprland::read(&wm_config::hyprland::Roots::under(&fixture)))
+        })
+        .expect("the captured Omarchy machine parses");
+        let built_in = wm_config::Config::default_config();
+        vec![
+            ("the captured Omarchy machine", chonk_shell::startup::SessionState::resolve(&omarchy)),
+            ("the built-in keymap", chonk_shell::startup::SessionState::resolve(&built_in)),
+        ]
+    }
+
+    /// Omarchy's SUPER+K menu hands every `binds` row back to `dispatch`:
+    /// `exec` rows through `hl.dsp.exec_cmd(<string>)`, the rest as
+    /// `<dispatcher> <arg>`. Every row must replay, none may be a `Debug`
+    /// rendering, and the families with a Hyprland verb must lower back to
+    /// the bound action.
+    #[test]
+    fn every_reported_binding_replays_through_dispatch() {
+        for (source, session) in sessions() {
+            assert!(!session.bindings.is_empty(), "{source} has bindings");
+            let reported: Vec<_> = session.bindings.iter().map(|binding| ipc_binding(binding, &session)).collect();
+            let snapshot = desk(reported.clone());
+            for (binding, row) in session.bindings.iter().zip(&reported) {
+                assert!(
+                    row.dispatcher != "chonkstep" || !row.argument.contains(['(', ')', '{', '"']),
+                    "{source}: {row:?} is a Debug rendering"
+                );
+                let wire = if row.dispatcher == "exec" {
+                    format!("hl.dsp.exec_cmd({})", lua_string(&row.argument))
+                } else {
+                    format!("{} {}", row.dispatcher, row.argument)
+                };
+                let outcome = dispatch::parse(&wire, &snapshot);
+                let Outcome::Run(lowered) = outcome else {
+                    panic!("{source}: {wire:?} for {:?} was refused: {outcome:?}", binding.action);
+                };
+                let expected = match &binding.action {
+                    wm_config::Action::ToggleLayout => Some(Action::ToggleLayout),
+                    wm_config::Action::ToggleMaximize => Some(Action::ToggleMaximize),
+                    wm_config::Action::Floating(floating) => Some(Action::SetFloating { window: FOCUSED, floating: *floating }),
+                    wm_config::Action::Move(wm_core::FocusDirection::Left) => Some(Action::MoveDirection(Direction::Left)),
+                    wm_config::Action::WorkspaceNext => Some(Action::FocusWorkspace(2)),
+                    wm_config::Action::WorkspacePrev => Some(Action::FocusWorkspace(0)),
+                    wm_config::Action::Workspace(index) => Some(Action::FocusWorkspace(*index)),
+                    wm_config::Action::Run(_) | wm_config::Action::SpawnTerminal => Some(Action::ExecShell(row.argument.clone())),
+                    _ if row.dispatcher == "chonkstep" => Some(Action::Binding(row.argument.clone())),
+                    _ => None,
+                };
+                if let Some(expected) = expected {
+                    assert_eq!(lowered, expected, "{source}: {wire:?} for {:?}", binding.action);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shell_join_quotes_only_what_the_shell_would_split_or_expand() {
+        let argv = |words: &[&str]| words.iter().map(|word| word.to_string()).collect::<Vec<_>>();
+        assert_eq!(shell_join(&argv(&["omarchy-launch-browser"])), "omarchy-launch-browser");
+        assert_eq!(
+            shell_join(&argv(&["bash", "-lc", "pkill hyprpicker || hyprpicker -a"])),
+            "bash -lc 'pkill hyprpicker || hyprpicker -a'"
+        );
+        assert_eq!(shell_join(&argv(&["echo", "it's", "", "$HOME"])), "echo 'it'\\''s' '' '$HOME'");
     }
 }

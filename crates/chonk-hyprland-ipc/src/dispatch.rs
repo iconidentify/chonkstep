@@ -102,6 +102,9 @@ pub enum Action {
     ToggleLayout,
     MoveDirection(Direction),
     LayoutNoop,
+    /// Run a ChonkStep binding that has no Hyprland dispatcher, named by
+    /// the label `binds` reported for it (`chonkstep overview`).
+    Binding(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,6 +336,25 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             match (fields.next(), fields.next(), fields.next()) {
                 (Some(Ok(x)), Some(Ok(y)), None) => Outcome::Run(Action::WarpPointer { x, y }),
                 _ => Outcome::Unsupported("movecursor requires integer x and y".to_string()),
+            }
+        }
+        // ChonkStep's own verbs, as `binds` reports a binding with no
+        // Hyprland dispatcher; Omarchy's keybindings menu hands that pair
+        // straight back. Only a label this snapshot reports replays, so a
+        // caller cannot name an arbitrary action, and while the session is
+        // locked only a binding marked locked does.
+        "chonkstep" => {
+            let label = rest.trim();
+            match snapshot
+                .bindings
+                .iter()
+                .find(|binding| binding.dispatcher == "chonkstep" && binding.argument == label)
+            {
+                Some(binding) if snapshot.locked && !binding.locked => Outcome::Unsupported(format!(
+                    "chonkstep {label} is not a locked binding and the session is locked"
+                )),
+                Some(_) => Outcome::Run(Action::Binding(label.to_string())),
+                None => Outcome::Unsupported(format!("chonkstep has no bound action named {label:?}")),
             }
         }
         "dpms" => parse_dpms(rest, snapshot),
@@ -1266,12 +1288,9 @@ fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> 
     if target.is_empty() {
         return Err("workspace with no argument".to_string());
     }
-    if let Ok(id) = target.parse::<i32>() {
-        let index = workspace_index_from_hypr_id(id).ok_or_else(|| format!("chonkstep has no workspace {id}"))?;
-        return in_range(index);
-    }
-    // Relative and named selectors. `e+1`/`e-1` and `+1`/`-1` are what
-    // Omarchy's keybindings send for next/previous workspace.
+    // Relative selectors first. `e+1`/`e-1` and `+1`/`-1` are what
+    // Omarchy's keybindings send for next/previous workspace, and read as
+    // integers `+1` is workspace 1 and `-1` a special workspace id.
     let relative = target.strip_prefix('e').unwrap_or(target);
     if let Some(delta) = relative.strip_prefix('+').and_then(|d| d.parse::<usize>().ok()) {
         let current = snapshot.active_workspace().map_or(0, |w| w.index);
@@ -1281,6 +1300,11 @@ fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> 
         let current = snapshot.active_workspace().map_or(0, |w| w.index);
         return in_range(current.saturating_sub(delta));
     }
+    if let Ok(id) = target.parse::<i32>() {
+        let index = workspace_index_from_hypr_id(id).ok_or_else(|| format!("chonkstep has no workspace {id}"))?;
+        return in_range(index);
+    }
+    // Named selectors.
     if target.starts_with("special") {
         return Err("chonkstep has no special (scratchpad) workspaces".to_string());
     }

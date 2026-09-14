@@ -1375,3 +1375,63 @@ fn membership_events_and_workspace_json_report_the_authoritative_layout() {
     let workspace: serde_json::Value = serde_json::from_str(&reply).unwrap();
     assert_eq!(workspace["tiledLayout"], "scrolling");
 }
+
+/// `binds` reports a ChonkStep binding with no Hyprland dispatcher as
+/// `chonkstep <name>`, and Omarchy's keybindings menu hands that pair back
+/// to `dispatch`. Only a label the snapshot reports replays, and a locked
+/// session replays only a locked binding.
+#[test]
+fn a_reported_chonkstep_binding_replays_and_nothing_else_does() {
+    use chonk_hyprland_ipc::state::Binding;
+    let binding = |argument: &str, locked: bool| Binding {
+        modifiers: 64,
+        key: "up".into(),
+        description: String::new(),
+        dispatcher: "chonkstep".into(),
+        argument: argument.into(),
+        locked,
+        repeating: false,
+        release: false,
+    };
+    let desk = Snapshot { bindings: vec![binding("overview", false), binding("reload", true)], ..desktop() };
+    assert_eq!(dispatch::parse("chonkstep overview", &desk), Outcome::Run(Action::Binding("overview".into())));
+    assert!(
+        matches!(dispatch::parse("chonkstep not-an-action", &desk), Outcome::Unsupported(why) if why.contains("not-an-action")),
+        "an unreported name is refused by name"
+    );
+    let locked = Snapshot { locked: true, ..desk.clone() };
+    assert!(!dispatch::parse("chonkstep overview", &locked).is_ok(), "an unlocked binding waits out the lock");
+    assert_eq!(dispatch::parse("chonkstep reload", &locked), Outcome::Run(Action::Binding("reload".into())));
+}
+
+/// Omarchy's next and previous workspace steps, and the report of a
+/// ChonkStep next/previous binding, are signed steps. Read as integers,
+/// `+1` named workspace 1 and `-1` a special workspace.
+#[test]
+fn signed_workspace_selectors_are_relative_steps() {
+    let desk = Snapshot { monitors: vec![monitor(0, "eDP-1", true, 1)], ..desktop() };
+    for (wire, index) in [
+        ("workspace +1", 2),
+        ("workspace -1", 0),
+        ("workspace e+1", 2),
+        ("workspace e-1", 0),
+        ("workspace 3", 2),
+    ] {
+        assert_eq!(dispatch::parse(wire, &desk), Outcome::Run(Action::FocusWorkspace(index)), "{wire}");
+    }
+}
+
+#[test]
+fn plain_devices_carries_the_active_keymap_line_scripts_grep_for() {
+    let mut desk = desktop();
+    desk.devices.keyboards.push(Keyboard {
+        name: "at-translated-set-2-keyboard".into(),
+        layout: "us,de".into(),
+        active_keymap: "German".into(),
+        active_layout_index: 1,
+    });
+    let plain = ask("devices", &desk);
+    assert!(plain.contains("\t\t\tactive keymap: German\n"), "{plain}");
+    assert!(!plain.trim_start().starts_with('{'), "plain devices is not JSON: {plain}");
+    assert_eq!(ask_json("j/devices", &desk)["keyboards"][0]["active_keymap"], "German");
+}

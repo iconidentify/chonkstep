@@ -3435,7 +3435,7 @@ impl Compositor {
     /// both end the dispatch loop; `Restart` additionally asks [`run`]
     /// to re-exec the on-disk binary after teardown, which is the
     /// config/theme hot-reload gesture on both stacks.
-    fn note_outcome(&mut self, outcome: ShellOutcome) {
+    pub(crate) fn note_outcome(&mut self, outcome: ShellOutcome) {
         match outcome {
             ShellOutcome::Continue => {}
             ShellOutcome::Capture(mode) => crate::capture_tool::begin(self, mode),

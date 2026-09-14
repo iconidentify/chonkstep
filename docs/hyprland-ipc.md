@@ -88,8 +88,8 @@ start with `[[BATCH]]` and use `;` separators.
 | `clients` / `activewindow` | Live pid, class/title, position, size, workspace, monitor, XWayland, floating, pinned, fullscreen, tags, focus history and idle inhibition |
 | `activeworkspace` | Exactly the active workspace, in JSON or one plain block |
 | `cursorpos` | The live pointer as plain `X, Y`, or `{"x": X, "y": Y}` with `-j` |
-| `devices` | Seat keyboards and pointers; keyboards include `name`, `layout` (the installed layout list, such as `us,de`), `active_keymap` (the group in force now), and `active_layout_index` |
-| `binds` | The live chonkstep keymap in Hyprland's plain bind-block format (or JSON) |
+| `devices` | Seat keyboards and pointers; keyboards include `name`, `layout` (the installed layout list, such as `us,de`), `active_keymap` (the group in force now), and `active_layout_index`. Plain `devices` uses Hyprland's block format, with one `active keymap:` line per keyboard |
+| `binds` | The live chonkstep keymap in Hyprland's plain bind-block format (or JSON). Every row replays through `dispatch`: an action with a Hyprland verb reports that verb, `exec` rows are shell-quoted so the command rebuilds exactly, and an action with no Hyprland verb reports `chonkstep <name>` |
 | `getoption` | An explicitly unset `{ "option": ..., "set": false }` object. Value fields are absent so JavaScript keeps its own default instead of coercing `null` or zero. |
 | `version`, `splash` | Supported |
 | `configerrors` | Retained live-Hyprland refusals, one per line or as JSON `{"error": "…"}` objects |
@@ -130,6 +130,11 @@ actions. Supported families include:
 - move, resize, center, raise, pin, tags, and floating membership;
 - `layout freeform|mosaic|flow`, `togglelayout`, `togglefloating`, `setfloating`,
   `settiled`, and directional `movewindow`/`swapwindow`;
+- `workspace +1|-1` and `movetoworkspace +1|-1` as relative steps, with or
+  without Hyprland's `e` prefix;
+- `chonkstep <name>`, which runs a ChonkStep binding `binds` reported with that
+  label, exactly as its key would. Only reported labels are accepted, and while
+  the session is locked only a binding marked locked;
 - `eval hl.workspace_rule({ workspace = "1", layout = "scrolling" })` and
   `keyword workspace 1, layout:scrolling` (also `dwindle` and `freeform`);
 - `exec -- <argv...>` as direct argv and Lua `exec_cmd` as shell
