@@ -678,15 +678,17 @@ fn kill_private_xwayland(session: &Session) {
     assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
 }
 
+/// Waits for the replacement generation to be usable, which means its
+/// EWMH watcher is on the root window: `connect_x11` resolves the display
+/// from the most recent "EWMH ready" line, so waiting only for the second
+/// "XWayland ready" line can hand it the dead generation's display and a
+/// refused connection.
 fn wait_restarted_xwayland(session: &Session) {
     poll_until(EVENT, "exactly one ready replacement XWayland", || {
-        (session
-            .log()
-            .lines()
-            .filter(|line| line.contains("XWayland ready"))
-            .count()
-            == 2)
-            .then_some(())
+        let log = session.log();
+        let ready = log.lines().filter(|line| line.contains("XWayland ready")).count();
+        let ewmh = log.lines().filter(|line| line.contains("EWMH ready on the XWayland root")).count();
+        (ready == 2 && ewmh == 2).then_some(())
     })
     .unwrap();
 }
