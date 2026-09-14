@@ -2151,6 +2151,19 @@ pub(crate) fn apply_monitor_rules(
     rules: &[wm_config::hyprland::directive::Monitor],
     scale_override: Option<f64>,
 ) -> Vec<f64> {
+    apply_monitor_rules_preserving(setups, rules, scale_override, &HashMap::new())
+}
+
+/// A reload preserves the live setup and scale of connectors whose
+/// resolved rule did not change. They still occupy space when placing
+/// an automatic neighbor, but their runtime choices are not reapplied
+/// from configuration.
+fn apply_monitor_rules_preserving(
+    setups: &mut [OutputSetup],
+    rules: &[wm_config::hyprland::directive::Monitor],
+    scale_override: Option<f64>,
+    preserved_scales: &HashMap<String, f64>,
+) -> Vec<f64> {
     // Both Hyprland and niri treat an omitted output scale as `auto`.
     // Do the same: an explicit session scale is the common baseline;
     // otherwise each output gets its own physical-DPI result. This is
@@ -2159,7 +2172,7 @@ pub(crate) fn apply_monitor_rules(
     let mut scales = setups
         .iter()
         .map(|setup| {
-            scale_override
+            preserved_scales.get(&setup.output.name()).copied().or(scale_override)
                 .map(|scale| scale.max(0.125))
                 .or_else(|| automatic_output_scale(&setup.output, setup.size))
                 .unwrap_or(1.0)
@@ -2168,6 +2181,10 @@ pub(crate) fn apply_monitor_rules(
     let mut auto_x = 0i32;
     let mut changed_position = false;
     for (index, setup) in setups.iter_mut().enumerate() {
+        if preserved_scales.contains_key(&setup.output.name()) {
+            auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
+            continue;
+        }
         let exact = rules.iter().rev().find(|rule| monitor_rule_matches(setup, &rule.output));
         let catch_all = rules.iter().rev().find(|rule| rule.output.trim().is_empty());
         let Some(rule) = exact.or(catch_all) else {
@@ -2667,7 +2684,7 @@ pub(crate) fn apply_connector_hotplug(
             }
         }
     }
-    apply_output_change(comp, removed, added.into_iter().flatten().collect());
+    apply_output_change(comp, removed, added.into_iter().flatten().collect(), None);
 }
 
 /// Takes one output out of the layout: the session backend clears its
@@ -2689,7 +2706,7 @@ pub(crate) fn park_output(comp: &mut Compositor, index: usize) -> Result<(), Str
     crate::session::park_output(&mut comp.graphics, index)?;
     let setup = setup_from_entry(&comp.outputs[index]);
     comp.parked_outputs.push(ParkedOutput { setup });
-    apply_output_change(comp, &[index], Vec::new());
+    apply_output_change(comp, &[index], Vec::new(), None);
     tracing::info!(output = %name, outputs = comp.outputs.len(), parked = comp.parked_outputs.len(), "output disabled: out of the layout");
     Ok(())
 }
@@ -2709,7 +2726,7 @@ pub(crate) fn unpark_output(comp: &mut Compositor, name: &str) -> Result<(), Str
     let parked = comp.parked_outputs.remove(at);
     let mut setup = fresh.unwrap_or(parked.setup);
     setup.powered = true;
-    apply_output_change(comp, &[], vec![setup]);
+    apply_output_change(comp, &[], vec![setup], None);
     tracing::info!(output = %name, outputs = comp.outputs.len(), parked = comp.parked_outputs.len(), "output enabled: back in the layout");
     Ok(())
 }
@@ -2794,7 +2811,7 @@ pub(crate) fn reconcile_monitor_rules(comp: &mut Compositor) {
         }
     }
     let (parked, unparked) = (removed.len(), added.len());
-    apply_output_change(comp, &removed, added);
+    apply_output_change(comp, &removed, added, Some(&changed));
     tracing::info!(
         changed = %changed.join(", "),
         parked,
@@ -2812,6 +2829,7 @@ fn apply_output_change(
     comp: &mut Compositor,
     removed: &[usize],
     added: Vec<OutputSetup>,
+    changed_rules: Option<&[String]>,
 ) {
     // Retire gesture-owned output geometry before changing any output indices.
     crate::input::gestures::cancel(comp);
@@ -2854,7 +2872,11 @@ fn apply_output_change(
     // session already holds (see `session_rules`).
     let (monitor_rules, scale_override) = session_rules(comp);
     let mut setups: Vec<OutputSetup> = comp.outputs.iter().map(setup_from_entry).collect();
-    let scales = apply_monitor_rules(&mut setups, &monitor_rules, scale_override);
+    let preserved_scales = comp.outputs.iter()
+        .filter(|entry| changed_rules.is_some_and(|changed| !changed.contains(&entry.output.name())))
+        .map(|entry| (entry.output.name(), entry.scale))
+        .collect();
+    let scales = apply_monitor_rules_preserving(&mut setups, &monitor_rules, scale_override, &preserved_scales);
     normalize_setups(&mut setups);
     crate::session::apply_output_setups(&mut comp.graphics, &mut setups);
     for ((entry, setup), scale) in comp.outputs.iter_mut().zip(setups).zip(scales) {
@@ -5803,6 +5825,27 @@ mod tests {
             scale: scale.into(),
             extra: extra.iter().map(|value| (*value).into()).collect(),
         }
+    }
+
+    #[test]
+    fn changed_monitor_rules_preserve_a_neighbors_runtime_setup() {
+        let mut left = output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(0, 50));
+        left.transform = Transform::_90;
+        left.size = Size::new(1080, 1920);
+        let right = output_setup("DP-2", (600, 340), Size::new(1920, 1080), Point::new(1920, 0));
+        let mut setups = vec![left, right];
+        let rules = vec![
+            monitor_rule("DP-1", "preferred", "auto", "1", &[]),
+            monitor_rule("DP-2", "preferred", "auto", "2", &[]),
+        ];
+        let preserved = HashMap::from([("DP-1".to_string(), 1.5)]);
+        let scales = apply_monitor_rules_preserving(&mut setups, &rules, Some(1.0), &preserved);
+        assert_eq!(scales, vec![1.5, 2.0]);
+        assert_eq!(setups[0].position, Point::new(0, 50));
+        assert_eq!(setups[0].size, Size::new(1080, 1920));
+        assert_eq!(setups[0].transform, Transform::_90);
+        assert_eq!(setups[0].requested_mode, None);
+        assert_eq!(setups[1].position, Point::new(1080, 0), "auto placement uses the neighbor's live width");
     }
 
     #[test]

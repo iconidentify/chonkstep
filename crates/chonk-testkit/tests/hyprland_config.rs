@@ -905,6 +905,15 @@ fn a_reload_applies_a_changed_scale_and_an_unchanged_reload_moves_nothing() {
             .collect()
     };
 
+    // A runtime change on the other head must survive this reload:
+    // only chonkstep-right's rule is about to change.
+    session.launch("wlr-randr", &["--output", "chonkstep", "--scale", "1.5"]).unwrap();
+    let status = poll_until(Duration::from_secs(10), "the runtime scale change", || {
+        session.client_status("wlr-randr").ok().flatten()
+    }).unwrap();
+    assert!(status.success(), "{}", session.client_log("wlr-randr"));
+    assert_eq!(geometry(&session)[0].3, 1.5);
+
     let watched_before = session.log().matches("Hyprland configuration changed").count();
     std::fs::write(
         monitors_lua(&session),
@@ -923,6 +932,7 @@ fn a_reload_applies_a_changed_scale_and_an_unchanged_reload_moves_nothing() {
     assert_eq!(session.log().matches("monitor rules reconciled after reload").count(), 1);
     let placed = geometry(&session);
     assert_eq!(placed.len(), 2, "{placed:?}");
+    assert_eq!(placed[0].3, 1.5, "a changed neighbor's rule must preserve this head's runtime scale");
 
     // The same file again: nothing to reconcile, nothing moved.
     reload(&mut session);
