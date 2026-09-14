@@ -1228,12 +1228,15 @@ impl Compositor {
         // viewport destination. Until a buffer at the requested size and the
         // original density arrives, keep the resize's coordinate system.
         // Otherwise a transient stretch becomes a new monitor scale and
-        // feeds a much larger/smaller configure
-        // back to the client. Output changes still establish a new scale.
+        // feeds a much larger/smaller configure back to the client. A drag
+        // retains this factor between individual replies too: another old
+        // buffer can arrive before the next pointer motion. Output changes
+        // still establish a new scale.
         let resize_complete = backend.windows.get(&id).is_some_and(|record| {
             record.resize_scale.is_some_and(|resize| {
                 resize.output_scale != backend.window_output_scale(record)
-                    || (backend.unlatched_window_surface_scale(record) == resize.factor
+                    || (backend.pointer_grab.is_none()
+                        && backend.unlatched_window_surface_scale(record) == resize.factor
                         && committed_content_size(&root, resize.factor, backend.output_size)
                             == Some(resize.expected))
             })

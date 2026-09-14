@@ -159,7 +159,7 @@ fn main() {
         let next = std::fs::read_to_string(&act).unwrap_or_default();
         if next != stage {
             stage = next;
-            let next_density = if stage.trim() == "2" || mode == "viewport-resize" { 2 } else { 1 };
+            let next_density = if stage.trim() == "2" || (mode == "viewport-resize" && stage.trim() != "density-one") { 2 } else { 1 };
             if mode == "viewport-destination" {
                 // Change only destination/window coordinates, retaining the
                 // raw buffer dimensions. This is distinct from increasing

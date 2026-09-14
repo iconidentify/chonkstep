@@ -1263,6 +1263,7 @@ impl Backend for WaylandBackend {
             None => return,
         };
         let screen = self.output_size;
+        let dragging = self.pointer_grab.is_some();
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
@@ -1331,7 +1332,7 @@ impl Backend for WaylandBackend {
                     // matching buffer committed. There is no resize to wait
                     // for in that case; keeping the latch would suppress the
                     // client's next legitimate density change indefinitely.
-                    if unlatched_factor == factor
+                    if !dragging && unlatched_factor == factor
                         && crate::xdg::committed_content_size(toplevel.wl_surface(), factor, screen)
                             == Some(expected)
                     {
@@ -1343,7 +1344,6 @@ impl Backend for WaylandBackend {
                             expected,
                         });
                     }
-
                 }
             }
             ManagedSurface::X11(surface) => {
@@ -1375,6 +1375,7 @@ impl Backend for WaylandBackend {
             return;
         };
         let density_settled = self.unlatched_window_surface_scale(record) == factor;
+        let dragging = self.pointer_grab.is_some();
         let root = toplevel.wl_surface().clone();
         if crate::xdg::committed_content_size(&root, factor, self.output_size) != Some(size) {
             // The WM may retain a maximized axis or clamp a hostile size.
@@ -1391,7 +1392,13 @@ impl Backend for WaylandBackend {
         // of the exact requested size. Once its density agrees, let subsequent
         // client-initiated density changes start a fresh negotiation.
         if density_settled {
-            record.resize_scale = None;
+            if dragging {
+                if let Some(resize) = record.resize_scale.as_mut() {
+                    resize.expected = size;
+                }
+            } else {
+                record.resize_scale = None;
+            }
         }
         // Do not send a configure back for pixels the client already owns.
         // Echoing them creates feedback with queued buffers; rejecting sizes
