@@ -1419,6 +1419,60 @@ fn native_control_mutations_reach_the_hyprland_event_stream() {
     assert_eq!(json(&dir, "j/activeworkspace")["id"], serde_json::json!(1));
 }
 
+/// Omarchy's transparency toggle, live: `set_prop` with `prop =
+/// "opaque"` answers `ok` *and* changes the pixels — a window whose
+/// rule makes it translucent is drawn opaque after the toggle and
+/// translucent again after the next — while every other property is
+/// still refused with a message.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn set_prop_opaque_toggles_the_window_and_other_properties_are_refused() {
+    let mut options = SessionOptions::default();
+    options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+    options.config_extra = "omarchy_menu = false\nhyprland_config = true\nshow_dock = false\n".into();
+    options.config_root_files =
+        vec![("hypr/hyprland.conf".into(), "windowrule = opacity 0.5 0.5, match:class ^foot$\n".into())];
+    let mut session = Session::boot("hypr-ipc-opaque", options).expect("nested session");
+    session
+        .launch("foot", &["--title", "Opaque Probe", "-o", "colors.background=ff0000", "-o", "colors.alpha=1.0", "sleep", "120"])
+        .unwrap();
+    let window = session.wait_for_window("Opaque Probe").unwrap();
+    session.door().click(f64::from(window.x) + f64::from(window.w) / 2.0, f64::from(window.y) + f64::from(window.h) / 2.0).unwrap();
+    session.door().barrier().unwrap();
+    let dir = socket_dir(&session);
+    let body = |session: &mut Session, label: &str| {
+        let shot = session.screenshot(label).unwrap();
+        (shot.mean_rgb(window.x as u32 + window.w / 2 - 8, window.y as u32 + window.h / 2 - 8, 16, 16), shot.path)
+    };
+    let pure_red = |[r, g, b]: [f64; 3]| r > 245.0 && g < 10.0 && b < 10.0;
+
+    let (before, path) = body(&mut session, "translucent");
+    assert!(!pure_red(before), "the rule makes the body translucent: {before:?} {}", path.display());
+
+    let address = json(&dir, "j/activewindow")["address"].as_str().expect("the active window's address").to_string();
+    let lua = format!(r#"/dispatch hl.dsp.window.set_prop({{ window = "address:{address}", prop = "opaque", value = "toggle" }})"#);
+    assert_eq!(request(&dir, &lua).trim(), "ok");
+    let (after, path) = body(&mut session, "forced-opaque");
+    assert!(pure_red(after), "the toggle draws the body opaque: {after:?} {}", path.display());
+
+    // The classic spelling the script falls back to, toggling back.
+    assert_eq!(request(&dir, &format!("/dispatch setprop address:{address} opaque toggle")).trim(), "ok");
+    let (again, path) = body(&mut session, "translucent-again");
+    assert!(!pure_red(again), "the second toggle lets the rule apply again: {again:?} {}", path.display());
+
+    for wire in [
+        format!(r#"/dispatch hl.dsp.window.set_prop({{ window = "address:{address}", prop = "rounding", value = "8" }})"#),
+        format!("/dispatch setprop address:{address} alpha 0.5"),
+    ] {
+        let answer = request(&dir, &wire);
+        assert!(answer.starts_with("Invalid dispatcher"), "{wire} is refused with a message: {answer:?}");
+        assert!(answer.contains("not modeled"), "{answer:?}");
+    }
+    let (still, path) = body(&mut session, "after-refusals");
+    assert!(!pure_red(still), "a refused property changes nothing: {still:?} {}", path.display());
+    assert!(session.compositor_alive());
+}
+
 /// The load-bearing rule, live: a verb chonkstep cannot honour fails,
 /// and is seen to change nothing.
 #[test]

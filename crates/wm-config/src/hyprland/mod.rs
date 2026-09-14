@@ -312,6 +312,9 @@ pub struct Reading {
     /// `binds:hide_special_on_workspace_change`, when the configuration
     /// says either way.
     pub hide_special_on_workspace_change: Option<bool>,
+    /// `decoration:dim_inactive` at `decoration:dim_strength`: how much
+    /// to darken every unfocused window, or `None` to leave them alone.
+    pub dim_inactive: Option<f32>,
     /// Every file actually read, in order. The [`Watch`]'s signature is
     /// taken over exactly this list.
     pub files: Vec<PathBuf>,
@@ -360,9 +363,10 @@ impl Reading {
         // future category cannot silently disappear at this loading boundary.
         let Self {
             keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
-            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, files: _, skipped: _, motion,
+            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, dim_inactive, files: _, skipped: _, motion,
         } = self;
         keybindings.is_empty()
+            && dim_inactive.is_none()
             && explicit_keys.is_empty()
             && bindings.is_empty()
             && layer_bindings.is_empty()
@@ -602,6 +606,7 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
     config.default_layout = reading.default_layout;
     config.workspace_layouts = reading.workspace_layouts.clone();
     config.motion = reading.motion.sanitized();
+    config.decorations.dim_inactive = reading.dim_inactive;
 }
 
 // ---- the file graph ---------------------------------------------------
@@ -945,6 +950,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
     };
     let mut window_rules = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
+    let mut dim = Dim::default();
     for entry in stream {
         match entry {
             Directive::Bind {
@@ -1001,6 +1007,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
             Directive::Input { name, value } => input(&mut reading, &name, &value),
             Directive::Cursor { name, value } => cursor(&mut reading, &name, &value),
             Directive::Binds { name, value } => binds(&mut reading, &name, &value),
+            Directive::Decoration { name, value } => decoration(&mut dim, &mut reading, &name, &value),
             Directive::Device { name, settings } => device(&mut reading, name, settings),
             Directive::ExecOnce { command } => autostart(&mut reading, &command),
             Directive::WindowRule(rule) => window_rules.push(rule),
@@ -1043,6 +1050,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
     }
     let (float_rules, notes) = rules::compile(&window_rules);
     reading.float_rules = float_rules;
+    reading.dim_inactive = dim.enabled.then_some(dim.strength);
     for note in notes {
         reading.skipped.push(Skipped {
             kind: "window-rule".into(),
@@ -1205,6 +1213,38 @@ fn switch_bind(
         action,
         locked,
     });
+}
+
+/// Hyprland's `decoration:dim_inactive` and `dim_strength`, gathered
+/// as they are met: the strength keeps Hyprland's default until a line
+/// names one, whichever order the two are written in.
+struct Dim {
+    enabled: bool,
+    strength: f32,
+}
+
+impl Default for Dim {
+    fn default() -> Self {
+        Self { enabled: false, strength: 0.5 }
+    }
+}
+
+fn decoration(dim: &mut Dim, reading: &mut Reading, name: &str, value: &str) {
+    let value = value.trim().trim_matches(['\"', '\'']).to_string();
+    match name {
+        "dim_inactive" => {
+            dim.enabled = matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "on" | "yes")
+        }
+        "dim_strength" => match value.parse::<f32>() {
+            Ok(strength) if strength.is_finite() && (0.0..=1.0).contains(&strength) => dim.strength = strength,
+            _ => reading.skipped.push(Skipped {
+                kind: "decoration".into(),
+                what: format!("dim_strength = {value}"),
+                why: "dim strength must be a number from 0 to 1".into(),
+            }),
+        },
+        _ => {}
+    }
 }
 
 fn input(reading: &mut Reading, name: &str, value: &str) {

@@ -71,6 +71,7 @@ fn action_label(action: &Action) -> (&'static str, String, bool) {
         Miniaturize => ("WINDOWS", "Minimize the focused window".into(), true),
         WindowMenu => ("WINDOWS", "Open window commands".into(), true),
         ToggleShade => ("WINDOWS", "Roll up / unroll the window".into(), false),
+        ToggleOpaque => ("WINDOWS", "Toggle the window's transparency".into(), false),
         QuitApplication => ("WINDOWS", "Quit the focused application".into(), false),
         ForceQuitApplications => ("WINDOWS", "Open Force Quit Applications".into(), false),
         HideApplication => ("WINDOWS", "Hide the focused application".into(), false),

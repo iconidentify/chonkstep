@@ -637,7 +637,6 @@ fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
         assert_eq!(argv_for(&reading, chord), Some(argv), "{chord} runs its served script");
     }
     for (chord, what, reason) in [
-        ("super+backspace", "SUPER + BACKSPACE (Toggle window transparency)", Unbound::OPACITY),
         ("super+shift+backspace", "SUPER + SHIFT + BACKSPACE (Toggle window gaps)", Unbound::GAPS),
         (
             "super+ctrl+backspace",
@@ -654,6 +653,13 @@ fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
         assert_eq!(action_for(&reading, chord), None, "{chord} must stay unbound");
         assert_eq!(skipped_why(&reading, what), Some(reason.reason().to_string()), "{what}");
     }
+    // The transparency toggle's script sends only requests the IPC
+    // serves now, and its chord takes the native toggle directly.
+    assert_eq!(
+        action_for(&reading, "super+backspace"),
+        Some(Action::ToggleOpaque),
+        "SUPER + BACKSPACE toggles the focused window opaque"
+    );
     // The clamshell half of Omarchy's lid bindings binds as a switch and
     // then meets the script filter: it disables outputs through requests
     // this desktop does not serve.
@@ -1191,7 +1197,7 @@ hl.config({
             reading.skipped
         );
         assert!(
-            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input, cursor, binds, animations")),
+            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input, cursor, binds, animations, decoration")),
             "{root:?}: the rest of the configuration is still reported: {:?}",
             reading.skipped
         );
@@ -2670,6 +2676,224 @@ fn non_geometric_window_rules_are_combined_property_by_property() {
     assert!(decision.maximize && decision.fullscreen);
 }
 
+/// Omarchy's opacity rules, as shipped, resolve to what Omarchy means
+/// by them. The whole scheme rests on tag removal: every window is
+/// tagged `default-opacity` first, each app file that wants an opaque
+/// window removes the tag again, and the opacity for the tag comes
+/// last — so a reader that ignored `-default-opacity` would make mpv
+/// translucent and give Chromium the terminal's alpha.
+#[test]
+fn omarchys_opacity_rules_resolve_as_authored() {
+    use wm_core::OpacityRule;
+    let reading = read(&machine());
+    let policy = reading.float_rules;
+    let opacity = |class: &str, title: &str| policy.window_decision_for(class, title).opacity;
+    // A terminal: the default, through the tag alone.
+    assert_eq!(
+        opacity("org.codeberg.dnkl.foot", ""),
+        Some(OpacityRule { active: 0.985, inactive: 0.96, fullscreen: None }),
+        "a terminal takes Omarchy's default opacity"
+    );
+    // Chromium: `apps/browser.lua` removes the default tag on the
+    // strength of the `chromium-based-browser` tag and sets its own.
+    assert_eq!(
+        opacity("chromium", ""),
+        Some(OpacityRule { active: 1.0, inactive: 0.985, fullscreen: None }),
+        "a browser is opaque while focused"
+    );
+    assert_eq!(opacity("firefox", ""), Some(OpacityRule { active: 1.0, inactive: 0.985, fullscreen: None }));
+    // Media, games and colour-critical work: `-default-opacity` and
+    // an explicit `1 1`.
+    for class in ["mpv", "steam", "steam_app_123", "resolve", "DaVinci Resolve"] {
+        assert_eq!(
+            opacity(class, ""),
+            Some(OpacityRule { active: 1.0, inactive: 1.0, fullscreen: None }),
+            "{class} is opaque in both focus states"
+        );
+    }
+    // A YouTube web app: only the tag is removed. No rule names an
+    // opacity for it, and no rule may, so it is drawn opaque.
+    assert_eq!(
+        opacity("chrome-youtube.com__-Default", "YouTube"),
+        None,
+        "tag removal alone takes the web app out of the default"
+    );
+    // The webcam overlay asks to be left alone by `dim_inactive`.
+    let overlay = policy.window_decision_for("WebcamOverlay-small", "WebcamOverlay");
+    assert!(overlay.no_dim, "the webcam overlay is never dimmed");
+    assert_eq!(overlay.opacity, Some(OpacityRule { active: 1.0, inactive: 1.0, fullscreen: None }));
+    assert!(
+        !policy.window_decision_for("org.codeberg.dnkl.foot", "").no_dim,
+        "no_dim is the overlay's, not everybody's"
+    );
+    assert!(
+        !reading.skipped.iter().any(|skip| skip.what.contains("tag removal is not followed")
+            || skip.what.contains("property opacity")
+            || skip.what.contains("property no_dim")),
+        "opacity, no_dim and tag removal are read now: {:?}",
+        reading.skipped.iter().filter(|skip| skip.kind == "window-rule").map(|skip| &skip.what).collect::<Vec<_>>()
+    );
+}
+
+/// The order Omarchy writes its tag rules in is not the order a
+/// one-pass reader would need. `floating-window`'s consumers sit above
+/// the lines that add the tag, while `default-opacity`'s removals sit
+/// between the add and the consumer; both have to come out the way
+/// Hyprland's repeated passes settle them.
+#[test]
+fn tag_removal_follows_file_order() {
+    let compile = |text: &str| {
+        let mut vars = BTreeMap::new();
+        let mut out = Vec::new();
+        conf::read(text, &mut vars, &mut out);
+        let parsed: Vec<_> = out
+            .into_iter()
+            .filter_map(|directive| match directive {
+                Directive::WindowRule(rule) => Some(rule),
+                _ => None,
+            })
+            .collect();
+        rules::compile(&parsed)
+    };
+    // Add, remove, consume: the removal between them holds.
+    let (rules, notes) = compile(concat!(
+        "windowrule = tag +translucent, match:class .*\n",
+        "windowrule = tag -translucent, match:class ^mpv$\n",
+        "windowrule = opacity 0.9, match:tag translucent\n",
+    ));
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(rules.window_decision_for("foot", "").opacity.map(|o| o.active), Some(0.9));
+    assert_eq!(rules.window_decision_for("mpv", "").opacity, None, "removed before the rule");
+    // Consume, add, remove: a rule above the add still sees the tag
+    // (the second pass does), and the removal after it still holds.
+    let (rules, notes) = compile(concat!(
+        "windowrule = float on, match:tag floating\n",
+        "windowrule = tag +floating, match:class ^(btop|mpv)$\n",
+        "windowrule = tag -floating, match:class ^mpv$\n",
+    ));
+    assert!(notes.is_empty(), "{notes:?}");
+    assert!(rules.decision_for("btop", "").is_some(), "tagged below the rule that reads the tag");
+    assert!(rules.decision_for("mpv", "").is_none(), "removed below both");
+    // Add, remove, add again: the last word wins.
+    let (rules, _) = compile(concat!(
+        "windowrule = tag +x, match:class ^a$\n",
+        "windowrule = tag -x, match:class ^a$\n",
+        "windowrule = tag +x, match:class ^a$\n",
+        "windowrule = pin on, match:tag x\n",
+    ));
+    assert!(rules.window_decision_for("a", "").pin);
+    // A removal on the strength of another tag is followed one level,
+    // exactly as Omarchy's browser file writes it.
+    let (rules, notes) = compile(concat!(
+        "windowrule = tag +default-opacity, match:class .*\n",
+        "windowrule = tag +browser, match:class ^(chromium|firefox)$\n",
+        "windowrule = tag -default-opacity, match:tag browser\n",
+        "windowrule = opacity 1.0 0.985, match:tag browser\n",
+        "windowrule = opacity 0.985 0.96, match:tag default-opacity\n",
+    ));
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(rules.window_decision_for("chromium", "").opacity.map(|o| o.inactive), Some(0.985));
+    assert_eq!(rules.window_decision_for("foot", "").opacity.map(|o| o.inactive), Some(0.96));
+    // Two levels is where following stops, loudly.
+    let (rules, notes) = compile(concat!(
+        "windowrule = tag +a, match:class ^x$\n",
+        "windowrule = tag +b, match:tag a\n",
+        "windowrule = tag +c, match:tag b\n",
+        "windowrule = pin on, match:tag c\n",
+    ));
+    assert!(!rules.window_decision_for("x", "").pin, "a chain of two tags is not followed");
+    assert!(notes.iter().any(|note| note.contains("chained tags are not followed")), "{notes:?}");
+}
+
+/// `opacity` in its three shapes, clamped, with the unreadable
+/// refused by name rather than read as something.
+#[test]
+fn opacity_values_are_read_clamped_and_refused_when_unreadable() {
+    use wm_core::OpacityRule;
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = opacity 0.8, match:class ^one$\n",
+            "windowrule = opacity 0.9 0.7, match:class ^two$\n",
+            "windowrule = opacity 0.9 0.7 0.5, match:class ^three$\n",
+            "windowrule = opacity 1.5 -2 override, match:class ^clamped$\n",
+            "windowrule = opacity nan, match:class ^nan$\n",
+            "windowrule = opacity inf 1, match:class ^inf$\n",
+            "windowrule = opacity 1 2 3 4, match:class ^many$\n",
+            "windowrule = opacity, match:class ^none$\n",
+            "windowrule = no_dim on, match:class ^nodim$\n",
+            "windowrule = no_dim off, match:class ^dimmed$\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    let opacity = |class: &str| rules.window_decision_for(class, "").opacity;
+    assert_eq!(opacity("one"), Some(OpacityRule { active: 0.8, inactive: 0.8, fullscreen: None }));
+    assert_eq!(opacity("two"), Some(OpacityRule { active: 0.9, inactive: 0.7, fullscreen: None }));
+    assert_eq!(opacity("three"), Some(OpacityRule { active: 0.9, inactive: 0.7, fullscreen: Some(0.5) }));
+    assert_eq!(opacity("clamped"), Some(OpacityRule { active: 1.0, inactive: 0.0, fullscreen: None }));
+    for class in ["nan", "inf", "many", "none"] {
+        assert_eq!(opacity(class), None, "{class} is refused");
+    }
+    assert_eq!(
+        notes.iter().filter(|note| note.contains("window rule opacity") && note.contains("property skipped")).count(),
+        4,
+        "{notes:?}"
+    );
+    assert!(rules.window_decision_for("nodim", "").no_dim);
+    assert!(!rules.window_decision_for("dimmed", "").no_dim);
+}
+
+/// `decoration:dim_inactive` and `dim_strength`, in both syntaxes,
+/// with the rest of the decoration table still declined by name.
+#[test]
+fn dim_inactive_is_read_from_the_decoration_table() {
+    let home = scratch("dim-lua");
+    write(
+        &home.join(".config/hypr/hyprland.lua"),
+        "hl.config({ decoration = { rounding = 8, dim_inactive = true, dim_strength = 0.15 } })\n",
+    );
+    let reading = read(&Roots::under(&home));
+    assert_eq!(reading.dim_inactive, Some(0.15));
+    assert!(
+        reading.skipped.iter().any(|skip| skip.what.contains("decoration.rounding")),
+        "the rest of the table is still declined by name: {:?}",
+        reading.skipped
+    );
+    let mut config = crate::Config::default_config();
+    apply(&mut config, Some(&reading));
+    assert_eq!(config.decorations.dim_inactive, Some(0.15));
+
+    let home = scratch("dim-conf");
+    write(
+        &home.join(".config/hypr/hyprland.conf"),
+        "decoration {\n    rounding = 8\n    dim_inactive = true\n    dim_strength = 0.4\n    blur {\n        enabled = true\n    }\n}\n",
+    );
+    let reading = read(&Roots::under(&home));
+    assert_eq!(reading.dim_inactive, Some(0.4));
+
+    // Hyprland's default strength applies when only the switch is set;
+    // an out-of-range strength is refused and the default kept.
+    let home = scratch("dim-default");
+    write(&home.join(".config/hypr/hyprland.lua"), "hl.config({ decoration = { dim_inactive = true, dim_strength = 7 } })\n");
+    let reading = read(&Roots::under(&home));
+    assert_eq!(reading.dim_inactive, Some(0.5));
+    assert!(reading.skipped.iter().any(|skip| skip.what.contains("dim_strength = 7")), "{:?}", reading.skipped);
+
+    let home = scratch("dim-off");
+    write(&home.join(".config/hypr/hyprland.lua"), "hl.config({ decoration = { dim_strength = 0.3 } })\n");
+    assert_eq!(read(&Roots::under(&home)).dim_inactive, None, "a strength without the switch dims nothing");
+}
+
 #[test]
 fn unsupported_rule_properties_are_named_without_discarding_supported_siblings() {
     let mut vars = BTreeMap::new();
@@ -4018,7 +4242,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     let reading = read(&machine());
     assert_eq!(
         reading.keybindings.len(),
-        188,
+        189,
         "bindings read from the captured machine"
     );
     assert_eq!(
@@ -4028,7 +4252,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert_eq!(
         reading.float_rules.len(),
-        49,
+        40,
         "window behaviors resolved through Omarchy's tags"
     );
     // The skipped count is quoted too, in the guide's sample log line.
@@ -4037,17 +4261,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        161,
+        139,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("188\nbindings over 121 commands") || MODE.contains("188 bindings over 121 commands"),
-        "docs/omarchy-mode.md no longer quotes the 188 bindings over 121 commands this machine produces"
+        MODE.contains("189\nbindings over 121 commands") || MODE.contains("189 bindings over 121 commands"),
+        "docs/omarchy-mode.md no longer quotes the 189 bindings over 121 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=188 commands=121 env=8 autostart=4")
-            && GUIDE.contains("float_rules=49 monitors=1 skipped=161"),
+        GUIDE.contains("files=42 bindings=189 commands=121 env=8 autostart=4")
+            && GUIDE.contains("float_rules=40 monitors=1 skipped=139"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

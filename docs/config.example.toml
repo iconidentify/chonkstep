@@ -160,6 +160,15 @@
 # false for sloppy focus that leaves the stack alone.
 #autoraise = true
 
+# Whether `opacity` window rules read from a Hyprland configuration
+# (Omarchy's 0.985 focused / 0.96 unfocused default, its opaque
+# browsers and video players) are drawn. A translucent window costs
+# something: everything beneath it is composited too, where an opaque
+# window hides it. Set this to false to draw every window opaque and
+# keep that occlusion; the rules are still read, `SUPER + BACKSPACE`'s
+# session toggle still answers, and `dim_inactive` still dims.
+#window_opacity = true
+
 # Pointer and touchpad hardware configuration. These values are applied to
 # each real libinput device when it appears and re-applied after a live config
 # reload. Unsupported settings are skipped per device instead of preventing

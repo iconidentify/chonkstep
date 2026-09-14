@@ -29,16 +29,27 @@
 //!
 //! A reader that did not resolve tags would find no float rule naming
 //! any class at all, and would conclude Omarchy floats nothing. So one
-//! level of indirection is resolved: every rule that *adds* a tag
-//! contributes its own matchers to that tag's set, and a rule matching
-//! on the tag is expanded into one rule per contributing matcher.
+//! level of indirection is resolved: every rule that adds or removes a
+//! tag is kept as an event on that tag, in file order, and a rule
+//! matching on the tag asks whether the window carries it.
+//!
+//! Removal is followed because Omarchy's opacity rules are written
+//! with it: every window is tagged `default-opacity` first, each app
+//! file that wants an opaque window removes the tag again, and the
+//! opacity rule for the tag comes last. Membership is decided the way
+//! Hyprland's own repeated rule passes settle it: the last matching
+//! add or remove before the rule decides, and when none precedes the
+//! rule, the last matching one anywhere in the file does — which is
+//! what lets Omarchy's `floating-window` rules sit *above* the lines
+//! that add the tag.
 //!
 //! One level, not arbitrarily many. A rule that tags on the strength
-//! of another tag (`match:tag pip` → `tag +foo`) is refused with a log
-//! line rather than followed, because chasing tag chains means
-//! ordering, removal (`tag -default-opacity`) and dynamic tags — a
-//! rule engine, in a config reader, for a case Omarchy does not
-//! currently write.
+//! of another tag (`match:tag chromium-based-browser` →
+//! `tag -default-opacity`, as Omarchy's browser file writes it) is
+//! followed when that other tag is carried directly by class or
+//! title; a tag whose carriers are themselves tag-matched is refused
+//! with a log line, because chasing arbitrary chains is a rule engine
+//! in a config reader, for a case Omarchy does not write.
 //!
 //! # Refusing a rule whole
 //!
@@ -150,6 +161,11 @@ fn to_size(w: f64, h: f64) -> Option<Size> {
 struct Rule {
     class: Option<Pattern>,
     title: Option<Pattern>,
+    /// The tags the rule matches on, every one of which the window
+    /// must carry at this rule's position in the file.
+    tags: Vec<String>,
+    /// Where the rule sits in the file, for the tag question above.
+    index: usize,
     float: Option<bool>,
     center: Option<bool>,
     /// Logical pixels, as Omarchy writes them. Scaled at the point of
@@ -173,10 +189,12 @@ struct Rule {
     scroll_touchpad: Option<f64>,
     /// The workspace to map onto.
     workspace: Option<RuleWorkspace>,
+    opacity: Option<wm_core::OpacityRule>,
+    no_dim: Option<bool>,
 }
 
 impl Rule {
-    fn matches(&self, class: &str, title: &str) -> bool {
+    fn matches(&self, tags: &TagLedger, class: &str, title: &str) -> bool {
         // A rule with no matcher at all matches everything — which is
         // what `o.window(".*", …)` means and is why Omarchy's
         // `suppress_event` and `tag +default-opacity` rules are written
@@ -184,6 +202,10 @@ impl Rule {
         // float property.
         self.class.as_ref().is_none_or(|p| p.matches(class))
             && self.title.as_ref().is_none_or(|p| p.matches(title))
+            && self
+                .tags
+                .iter()
+                .all(|tag| tags.carries(tag, self.index, class, title, 0))
     }
 
     fn describe(&self) -> String {
@@ -193,6 +215,9 @@ impl Rule {
         }
         if let Some(p) = &self.title {
             parts.push(format!("title {}", p.source));
+        }
+        for tag in &self.tags {
+            parts.push(format!("tag {tag}"));
         }
         if parts.is_empty() {
             parts.push("any window".into());
@@ -210,6 +235,66 @@ impl Rule {
 #[derive(Clone, Debug, Default)]
 pub struct FloatRules {
     rules: Vec<Rule>,
+    tags: TagLedger,
+}
+
+/// One `tag +name` or `tag -name` rule: who it applies to, and where
+/// in the file it sits.
+#[derive(Clone, Debug)]
+struct TagEvent {
+    index: usize,
+    add: bool,
+    class: Option<Pattern>,
+    title: Option<Pattern>,
+    /// The tags the rule itself matched on — the one level of
+    /// chaining this reader follows.
+    via: Vec<String>,
+}
+
+impl TagEvent {
+    fn applies(&self, ledger: &TagLedger, class: &str, title: &str, depth: u8) -> bool {
+        self.class.as_ref().is_none_or(|p| p.matches(class))
+            && self.title.as_ref().is_none_or(|p| p.matches(title))
+            && self
+                .via
+                .iter()
+                .all(|tag| depth == 0 && ledger.carries(tag, self.index, class, title, depth + 1))
+    }
+}
+
+/// Every tag event in the configuration, by tag, in file order — the
+/// first pass of [`compile`], kept so the rules can ask the tag
+/// question per window rather than being expanded per carrier.
+#[derive(Clone, Debug, Default)]
+struct TagLedger(std::collections::BTreeMap<String, Vec<TagEvent>>);
+
+impl TagLedger {
+    /// Whether a window carries `tag` at rule position `at`.
+    ///
+    /// The last applying event before the position decides; when none
+    /// precedes it, the last applying event anywhere in the file does.
+    /// That is the state Hyprland's repeated rule passes converge on:
+    /// tags persist on the window between passes, so a rule written
+    /// above the line that adds its tag still sees the tag on the
+    /// second pass, while a removal written between an add and the
+    /// rule is honoured on every pass.
+    fn carries(&self, tag: &str, at: usize, class: &str, title: &str, depth: u8) -> bool {
+        let Some(events) = self.0.get(tag) else {
+            return false;
+        };
+        let mut before = None;
+        let mut overall = None;
+        for event in events {
+            if !event.applies(self, class, title, depth) {
+                continue;
+            }
+            if event.index < at {
+                before = Some(event.add);
+            }
+            overall = Some(event.add);
+        }
+        before.or(overall).unwrap_or(false)
+    }
 }
 
 impl FloatRules {
@@ -278,6 +363,18 @@ impl FloatRules {
                 if rule.focus_on_activate == Some(false) {
                     what.push("activation cannot focus".to_string());
                 }
+                if let Some(opacity) = rule.opacity {
+                    what.push(match opacity.fullscreen {
+                        Some(fullscreen) => format!(
+                            "opacity {}/{}/{fullscreen}",
+                            opacity.active, opacity.inactive
+                        ),
+                        None => format!("opacity {}/{}", opacity.active, opacity.inactive),
+                    });
+                }
+                if rule.no_dim == Some(true) {
+                    what.push("never dimmed".to_string());
+                }
                 format!("{} -> {}", rule.describe(), what.join(", "))
             })
             .collect()
@@ -305,7 +402,7 @@ impl FloatPolicy for FloatRules {
         let mut center = None;
         let mut size = None;
         for rule in &self.rules {
-            if !rule.matches(class, title) {
+            if !rule.matches(&self.tags, class, title) {
                 continue;
             }
             float = rule.float.or(float);
@@ -341,7 +438,7 @@ impl FloatPolicy for FloatRules {
         let mut size = None;
         let mut position = None;
         for rule in &self.rules {
-            if !rule.matches(class, title) {
+            if !rule.matches(&self.tags, class, title) {
                 continue;
             }
             float = rule.float.or(float);
@@ -391,7 +488,7 @@ impl FloatPolicy for FloatRules {
     fn window_decision_for(&self, class: &str, title: &str) -> WindowRuleDecision {
         let mut decision = WindowRuleDecision::for_identity(class);
         for rule in &self.rules {
-            if !rule.matches(class, title) {
+            if !rule.matches(&self.tags, class, title) {
                 continue;
             }
             if let Some(value) = rule.idle_inhibit {
@@ -427,16 +524,16 @@ impl FloatPolicy for FloatRules {
             if let Some(value) = &rule.workspace {
                 decision.workspace = Some(value.clone());
             }
+            if let Some(value) = rule.opacity {
+                decision.opacity = Some(value);
+            }
+            if let Some(value) = rule.no_dim {
+                decision.no_dim = value;
+            }
         }
         decision
     }
 }
-
-/// Which class/title matcher pairs carry which tag — the first pass of
-/// [`compile`], named so the two passes can talk about the same thing.
-/// A tag may be added by several rules, and each of them contributes a
-/// matcher pair that a rule matching the tag then expands into.
-type TagCarriers = std::collections::BTreeMap<String, Vec<(Option<String>, Option<String>)>>;
 
 /// Turns the window rules read out of a config into float rules,
 /// resolving tags and reporting everything it declines.
@@ -446,29 +543,19 @@ type TagCarriers = std::collections::BTreeMap<String, Vec<(Option<String>, Optio
 /// `startup.rs` makes between its `read_*` and `resolve_*` halves.
 pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
     let mut notes = Vec::new();
-    // Pass one: who carries which tag.
-    let mut tagged: TagCarriers = TagCarriers::new();
-    for rule in rules {
+    // Pass one: every tag event, in file order.
+    let mut ledger = TagLedger::default();
+    for (index, rule) in rules.iter().enumerate() {
         for (name, value) in &rule.props {
             if name != "tag" {
                 continue;
             }
-            let Some(tag) = value.strip_prefix('+') else {
-                if let Some(removed) = value.strip_prefix('-') {
-                    notes.push(format!(
-                        "window rule removes tag {removed}: tag removal is not followed"
-                    ));
-                }
-                continue;
+            let (add, tag) = match (value.strip_prefix('+'), value.strip_prefix('-')) {
+                (Some(tag), _) => (true, tag),
+                (_, Some(tag)) => (false, tag),
+                // Hyprland reads a bare name as an add.
+                _ => (true, value.as_str()),
             };
-            // A rule that tags on the strength of another tag would
-            // need a second resolution pass; see the module docs.
-            if rule.matchers.iter().any(|m| matches!(m, Matcher::Tag(_))) {
-                notes.push(format!(
-                    "window rule tags {tag} based on another tag: chained tags are not followed"
-                ));
-                continue;
-            }
             let (class, title, refused) = split_matchers(&rule.matchers);
             if let Some(refused) = refused {
                 notes.push(format!(
@@ -476,15 +563,46 @@ pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
                 ));
                 continue;
             }
-            tagged
+            let via = tag_matchers(rule);
+            let (Some(class), Some(title)) = (
+                compile_pattern(class, "class", &mut notes),
+                compile_pattern(title, "title", &mut notes),
+            ) else {
+                continue;
+            };
+            ledger
+                .0
                 .entry(tag.to_string())
                 .or_default()
-                .push((class, title));
+                .push(TagEvent { index, add, class, title, via });
         }
     }
-    // Pass two: the rules that actually say something about floating.
+    // A tag event that hangs on another tag is followed exactly one
+    // level: the tag it hangs on has to be carried by class or title.
+    // Deciding that needs the whole ledger, so it is a second look.
+    let direct: std::collections::BTreeSet<String> = ledger
+        .0
+        .iter()
+        .filter(|(_, events)| events.iter().all(|event| event.via.is_empty()))
+        .map(|(tag, _)| tag.clone())
+        .collect();
+    for (tag, events) in ledger.0.iter_mut() {
+        events.retain(|event| {
+            for via in &event.via {
+                if !direct.contains(via) {
+                    notes.push(format!(
+                        "window rule tags {tag} based on tag {via}, which is not carried by class or title: chained tags are not followed"
+                    ));
+                    return false;
+                }
+            }
+            true
+        });
+    }
+    ledger.0.retain(|_, events| !events.is_empty());
+    // Pass two: the rules that actually say something about the window.
     let mut out = FloatRules::default();
-    for rule in rules {
+    for (index, rule) in rules.iter().enumerate() {
         let Some(spec) = rule_spec(rule, &mut notes) else {
             continue;
         };
@@ -495,42 +613,49 @@ pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
             ));
             continue;
         }
-        let tags: Vec<&String> = rule
-            .matchers
-            .iter()
-            .filter_map(|m| {
-                if let Matcher::Tag(t) = m {
-                    Some(t)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if tags.is_empty() {
-            push(&mut out, &mut notes, class, title, &spec);
+        let tags = tag_matchers(rule);
+        if let Some(tag) = tags.iter().find(|tag| !ledger.0.contains_key(*tag)) {
+            notes.push(format!(
+                "float rule matches tag {tag}, which no rule in this configuration adds: rule skipped"
+            ));
             continue;
         }
-        for tag in tags {
-            let Some(carriers) = tagged.get(tag) else {
-                notes.push(format!(
-                    "float rule matches tag {tag}, which no rule in this configuration adds: rule skipped"
-                ));
-                continue;
-            };
-            for (carrier_class, carrier_title) in carriers {
-                // The tag rule's own class/title matchers, if it had
-                // any, still apply on top of the carrier's.
-                push(
-                    &mut out,
-                    &mut notes,
-                    carrier_class.clone().or_else(|| class.clone()),
-                    carrier_title.clone().or_else(|| title.clone()),
-                    &spec,
-                );
-            }
-        }
+        push(&mut out, &mut notes, class, title, tags, index, &spec);
     }
+    out.tags = ledger;
     (out, notes)
+}
+
+/// The tags a rule matches on.
+fn tag_matchers(rule: &WindowRule) -> Vec<String> {
+    rule.matchers
+        .iter()
+        .filter_map(|m| match m {
+            Matcher::Tag(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Compiles an optional matcher pattern: `Some(None)` for no pattern,
+/// `None` (with a note) for one that does not compile.
+fn compile_pattern(
+    text: Option<String>,
+    what: &str,
+    notes: &mut Vec<String>,
+) -> Option<Option<Pattern>> {
+    match text {
+        Some(text) => match Pattern::compile(&text) {
+            Some(pattern) => Some(Some(pattern)),
+            None => {
+                notes.push(format!(
+                    "float rule has an unreadable {what} pattern {text:?}: rule skipped"
+                ));
+                None
+            }
+        },
+        None => Some(None),
+    }
 }
 
 /// The float-relevant half of a rule's properties, or `None` if it has
@@ -658,8 +783,27 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                     describe_matchers(rule)
                 )),
             },
+            // `a`, `a b` or `a b c`: the body alpha when focused,
+            // unfocused and fullscreen. Hyprland also accepts an
+            // `override` word, which says the value beats the
+            // window's own opacity request; every rule value already
+            // does here, so the word is accepted and means nothing.
+            "opacity" => match opacity_rule(value) {
+                Some(rule) => {
+                    spec.opacity = Some(rule);
+                    any = true;
+                }
+                None => notes.push(format!(
+                    "window rule opacity {value:?} on {} must be one to three numbers from 0 to 1: property skipped",
+                    describe_matchers(rule)
+                )),
+            },
+            "no_dim" | "nodim" => {
+                spec.no_dim = Some(truthy(value));
+                any = true;
+            }
             // `tag +name` is consumed by compile's first pass. A tag
-            // matcher likewise participates in expansion, so neither
+            // matcher likewise participates in resolution, so neither
             // is a silently dropped property.
             "tag" => {}
             unsupported => notes.push(format!(
@@ -688,6 +832,8 @@ struct Spec {
     suppress_fullscreen: Option<bool>,
     scroll_touchpad: Option<f64>,
     workspace: Option<RuleWorkspace>,
+    opacity: Option<wm_core::OpacityRule>,
+    no_dim: Option<bool>,
 }
 
 /// Reads a `workspace` rule's value.
@@ -723,40 +869,52 @@ fn workspace_rule(value: &str) -> Result<RuleWorkspace, String> {
     Ok(RuleWorkspace { target, silent })
 }
 
+/// Reads an `opacity` value: one to three finite numbers, each clamped
+/// to `0.0..=1.0`. A single number sets both focus states.
+fn opacity_rule(value: &str) -> Option<wm_core::OpacityRule> {
+    let mut numbers = Vec::new();
+    for word in value.split_whitespace() {
+        if word.eq_ignore_ascii_case("override") {
+            continue;
+        }
+        let number: f32 = word.parse().ok()?;
+        if !number.is_finite() {
+            return None;
+        }
+        numbers.push(number.clamp(0.0, 1.0));
+    }
+    match numbers.as_slice() {
+        [alpha] => Some(wm_core::OpacityRule { active: *alpha, inactive: *alpha, fullscreen: None }),
+        [active, inactive] => Some(wm_core::OpacityRule { active: *active, inactive: *inactive, fullscreen: None }),
+        [active, inactive, fullscreen] => Some(wm_core::OpacityRule {
+            active: *active,
+            inactive: *inactive,
+            fullscreen: Some(*fullscreen),
+        }),
+        _ => None,
+    }
+}
+
 fn push(
     out: &mut FloatRules,
     notes: &mut Vec<String>,
     class: Option<String>,
     title: Option<String>,
+    tags: Vec<String>,
+    index: usize,
     spec: &Spec,
 ) {
-    let class = match class {
-        Some(text) => match Pattern::compile(&text) {
-            Some(pattern) => Some(pattern),
-            None => {
-                notes.push(format!(
-                    "float rule has an unreadable class pattern {text:?}: rule skipped"
-                ));
-                return;
-            }
-        },
-        None => None,
+    let Some(class) = compile_pattern(class, "class", notes) else {
+        return;
     };
-    let title = match title {
-        Some(text) => match Pattern::compile(&text) {
-            Some(pattern) => Some(pattern),
-            None => {
-                notes.push(format!(
-                    "float rule has an unreadable title pattern {text:?}: rule skipped"
-                ));
-                return;
-            }
-        },
-        None => None,
+    let Some(title) = compile_pattern(title, "title", notes) else {
+        return;
     };
     out.rules.push(Rule {
         class,
         title,
+        tags,
+        index,
         float: spec.float,
         center: spec.center,
         size: spec.size.clone(),
@@ -772,6 +930,8 @@ fn push(
         suppress_fullscreen: spec.suppress_fullscreen,
         scroll_touchpad: spec.scroll_touchpad,
         workspace: spec.workspace.clone(),
+        opacity: spec.opacity,
+        no_dim: spec.no_dim,
     });
 }
 

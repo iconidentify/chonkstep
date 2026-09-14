@@ -323,6 +323,12 @@ pub struct WindowRuleDecision {
     /// Where the window maps when a `workspace` rule sends it somewhere
     /// other than the current workspace.
     pub workspace: Option<RuleWorkspace>,
+    /// The window's body alpha by focus state (`opacity`), or `None`
+    /// for a window no rule names, which is drawn opaque.
+    pub opacity: Option<OpacityRule>,
+    /// Leave this window undimmed when `dim_inactive` darkens the
+    /// unfocused ones (`no_dim`).
+    pub no_dim: bool,
 }
 
 /// A `workspace` window rule: the destination and whether the window
@@ -342,6 +348,20 @@ pub enum RuleWorkspaceTarget {
     Special(String),
     /// A numbered workspace, 0-based as the core counts them.
     Numbered(usize),
+}
+
+/// A window rule's `opacity`: the alpha its body is composited at,
+/// chosen by focus, with an optional third value for fullscreen.
+///
+/// Every value is already clamped to `0.0..=1.0` by the reader. The
+/// fullscreen alpha defaults to opaque rather than to the active
+/// alpha because a translucent fullscreen window can no longer be
+/// scanned out directly; a rule has to ask for that in so many words.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OpacityRule {
+    pub active: f32,
+    pub inactive: f32,
+    pub fullscreen: Option<f32>,
 }
 
 impl WindowRuleDecision {

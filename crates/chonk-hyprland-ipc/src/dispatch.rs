@@ -82,6 +82,12 @@ pub enum Action {
     RaiseWindow(u64),
     SetPinned { window: u64, pinned: Option<bool> },
     SetTag { window: u64, tag: String, present: bool },
+    /// `setprop <window> opaque <value>` and its Lua form: force the
+    /// window opaque for the session (`Some(true)`), let its opacity
+    /// rule apply again (`Some(false)`), or toggle (`None`). The one
+    /// window property that is modeled; every other `set_prop` is
+    /// refused by name.
+    SetOpaque { window: u64, opaque: Option<bool> },
     /// Scale in protocol units (120 == 1.0), avoiding floating-point
     /// equality in an action that is compared in conformance tests.
     SetMonitorScale { output: String, scale_120: u32 },
@@ -265,6 +271,16 @@ fn split_verb(args: &str) -> (String, &str) {
     }
 }
 
+/// The value of an `opaque` property request: `None` toggles.
+fn opaque_value(value: &str) -> Option<Option<bool>> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "toggle" => Some(None),
+        "1" | "true" | "on" => Some(Some(true)),
+        "0" | "false" | "off" => Some(Some(false)),
+        _ => None,
+    }
+}
+
 fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
     if let Some((_, why)) = UNSUPPORTED.iter().find(|(name, _)| *name == verb) {
         return Outcome::Unsupported((*why).to_string());
@@ -373,6 +389,28 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                 selected_window(&selector, snapshot)
                     .map(|window| Outcome::Run(Action::RaiseWindow(window.id)))
                     .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {selector:?}")))
+            }
+        }
+        // `setprop <window> opaque toggle|1|0`, the classic spelling
+        // Omarchy's transparency toggle falls back to. Any other
+        // property is refused by name, exactly as the Lua form is.
+        "setprop" => {
+            let mut words = rest.split_whitespace();
+            let (Some(window), Some(prop)) = (words.next(), words.next()) else {
+                return Outcome::Unsupported("setprop takes a window, a property and a value".to_string());
+            };
+            if prop != "opaque" {
+                return Outcome::Unsupported(format!(
+                    "window property {prop:?} is not modeled; opaque is the one setprop property ChonkStep serves"
+                ));
+            }
+            let value = words.next().unwrap_or("toggle");
+            let Some(opaque) = opaque_value(value) else {
+                return Outcome::Unsupported(format!("setprop opaque takes toggle, 1 or 0, not {value:?}"));
+            };
+            match resolve_window(window, snapshot) {
+                Some(window) => Outcome::Run(Action::SetOpaque { window: window.id, opaque }),
+                None => Outcome::Unsupported(format!("no window matches {window:?}")),
             }
         }
         "pin" => selected_window(rest, snapshot)
@@ -564,7 +602,21 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
                 (Err(why), _) | (_, Err(why)) => Outcome::Unsupported(why),
             }
         }
-        "window.set_prop" => Outcome::Unsupported("window opacity and other dynamic properties are not modeled".to_string()),
+        "window.set_prop" => {
+            let Some(prop) = lua_field(&args, "prop") else {
+                return Outcome::Unknown("hl.dsp.window.set_prop with no prop".to_string());
+            };
+            if prop != "opaque" {
+                return Outcome::Unsupported(format!(
+                    "window property {prop:?} is not modeled; opaque is the one set_prop property ChonkStep serves"
+                ));
+            }
+            let value = lua_field(&args, "value").unwrap_or_else(|| "toggle".to_string());
+            match opaque_value(&value) {
+                Some(opaque) => lua_window(&args, snapshot, |window| Action::SetOpaque { window: window.id, opaque }),
+                None => Outcome::Unsupported(format!("set_prop opaque takes toggle, 1 or 0, not {value:?}")),
+            }
+        }
         "cursor.move" => {
             let coordinate = |key: &str| lua_field(&args, key).and_then(|value| value.trim().parse::<i32>().ok());
             match (coordinate("x"), coordinate("y")) {
@@ -1849,6 +1901,89 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn one_window() -> Snapshot {
+        let window = Window {
+            floating: false,
+            id: 7,
+            title: "~".into(),
+            class: "foot".into(),
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+            workspace: 0,
+            special: None,
+            monitor: 0,
+            pid: 0,
+            xwayland: false,
+            fullscreen: false,
+            maximized: false,
+            client_fullscreen: false,
+            hidden: false,
+            urgent: false,
+            pinned: false,
+            inhibiting_idle: false,
+            tags: Vec::new(),
+            xdg_tag: String::new(),
+            xdg_description: String::new(),
+            focus_history_id: 0,
+        };
+        Snapshot { windows: vec![window], focused: Some(7), ..Default::default() }
+    }
+
+    /// `set_prop`, in Omarchy's Lua form and the classic spelling its
+    /// transparency toggle falls back to: `opaque` is served in its
+    /// three values, and every other property is refused by name
+    /// rather than answered `ok` for nothing.
+    #[test]
+    fn set_prop_serves_opaque_and_refuses_every_other_property() {
+        let snapshot = one_window();
+        let toggle = Outcome::Run(Action::SetOpaque { window: 7, opaque: None });
+        assert_eq!(
+            parse(r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "opaque", value = "toggle" })"#, &snapshot),
+            toggle
+        );
+        assert_eq!(
+            parse(r#"hl.dsp.window.set_prop({ prop = "opaque", value = "1" })"#, &snapshot),
+            Outcome::Run(Action::SetOpaque { window: 7, opaque: Some(true) }),
+            "the focused window when none is named"
+        );
+        assert_eq!(
+            parse(r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "opaque", value = "0" })"#, &snapshot),
+            Outcome::Run(Action::SetOpaque { window: 7, opaque: Some(false) })
+        );
+        assert_eq!(parse("setprop address:0x7 opaque toggle", &snapshot), toggle);
+        assert_eq!(
+            parse("setprop address:0x7 opaque 1", &snapshot),
+            Outcome::Run(Action::SetOpaque { window: 7, opaque: Some(true) })
+        );
+        for wire in [
+            r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "rounding", value = "8" })"#,
+            r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "alpha", value = "0.5" })"#,
+            "setprop address:0x7 rounding 8",
+            "setprop address:0x7 alpha 0.5",
+        ] {
+            match parse(wire, &snapshot) {
+                Outcome::Unsupported(why) => assert!(why.contains("not modeled"), "{wire}: {why}"),
+                other => panic!("{wire} must be refused, not {other:?}"),
+            }
+        }
+        for wire in [
+            r#"hl.dsp.window.set_prop({ window = "address:0x7", prop = "opaque", value = "maybe" })"#,
+            "setprop address:0x7 opaque half",
+        ] {
+            assert!(matches!(parse(wire, &snapshot), Outcome::Unsupported(_)), "{wire}");
+        }
+        assert!(
+            matches!(parse("setprop address:0x9 opaque toggle", &snapshot), Outcome::Unsupported(_)),
+            "an unknown window is refused"
+        );
+        // A value a client could not have chosen: the property never
+        // reads anything but the words above, so no number reaches
+        // the compositor from here.
+        assert!(matches!(parse("setprop address:0x7 opaque 0.5", &snapshot), Outcome::Unsupported(_)));
+    }
 
     /// The verb split has the same shape as the request split, so it
     /// had the same panic: a multibyte space after the verb put the

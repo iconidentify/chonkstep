@@ -157,7 +157,7 @@ windowrule   = float on, match:class steam               # 0.53+
 The supported properties are `float`, `size`, `move`, `center`,
 `idle_inhibit`, `pin`, `no_focus`, `no_initial_focus`,
 `focus_on_activate`, `fullscreen`, `maximize`, `suppress_event`,
-`scroll_touchpad`, and `workspace`. They match `class` and `title` as regular
+`scroll_touchpad`, `workspace`, `opacity` and `no_dim`. They match `class` and `title` as regular
 expressions, matched against the entire class or title, as in Hyprland's
 `RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
@@ -234,6 +234,30 @@ workspaces are numbered. `hl.workspace_rule` for a special workspace
 (`gaps_out`, `on_created_empty` and `dim_special`, which Omarchy's
 agent console sets for `special:scratchpad`) is not read yet.
 
+`opacity` is Omarchy's focus cue. It takes one to three numbers, each
+clamped to `0..1`: the body alpha while the window is focused, while it
+is not, and — a third value — while it is fullscreen. Omarchy's default
+is `0.985 0.96` for every window, `1.0 0.985` for browsers, and `1 1`
+for video players, games, virtual machines and colour-critical work,
+which it writes by removing the `default-opacity` tag (below). With no
+third value a fullscreen window is opaque whatever the other two say,
+so direct scanout is untouched by a translucent rule. The alpha
+applies to the whole window — content, popups, chrome, border and
+shadow — and never to input: a click lands where it always did.
+`SUPER + BACKSPACE` (Omarchy's `omarchy-hyprland-window-transparency-toggle`,
+the native `toggle-opaque`, or `hyprctl dispatch setprop … opaque toggle`)
+forces the focused window opaque for the rest of the session and back.
+Translucency is not free: everything beneath a translucent window is
+composited too. `window_opacity = false` in `config.toml` draws every
+window opaque and gives that occlusion back; `docs/performance.md`
+records the element counts either way.
+
+`no_dim` exempts a window from `decoration:dim_inactive`, the one part
+of Hyprland's `decoration` table this desktop reads: `dim_inactive = true`
+with `dim_strength` (Hyprland's default `0.5`) darkens every unfocused
+window by drawing one black quad in front of it. The window itself stays
+opaque, which is what makes dimming the cheaper focus cue of the two.
+
 Every unsupported property produces its own `Skipped` line naming both
 the property and matcher. A rule with an unsupported matcher is refused
 whole, so a partially understood condition can never broaden the rule.
@@ -247,6 +271,15 @@ o.window({ tag = "floating-window" }, { float = true, size = { 875, 600 } })
 ```
 
 A reader that skipped tags would conclude Omarchy floats nothing.
+**Tag removal is followed too**, in file order: `tag -default-opacity`
+in an app file takes that window out of the opacity rule written for
+the tag afterwards, and a removal made on the strength of another tag
+(`match:tag chromium-based-browser` → `tag -default-opacity`) is
+followed when that tag is carried by class or title. Membership settles
+the way Hyprland's repeated rule passes settle it — the last matching
+add or remove decides — so Omarchy's `floating-window` rules, written
+above the lines that add the tag, still resolve. A tag whose carriers
+are themselves tag-matched is refused with a log line.
 
 This replaces a hardcoded rule that used to live in `wm-core`: any
 window whose app-id started `org.omarchy.` mapped at 875×600. That
@@ -422,10 +455,10 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Not read | Why |
 |---|---|
 | Hyprland requests chonkstep does not serve — `hyprctl`, and `omarchy-hyprland-*` scripts outside [the list below](#omarchys-hyprland-scripts) | Chonkstep answers Hyprland's IPC, but only with the requests it can apply, and `hyprctl` exits zero on a refusal, so a binding whose request is refused would be a key that silently does nothing. A script therefore runs only when every request it sends is proven served. The same rule filters chonkstep's Omarchy menu rows and `exec-once` lines. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
-| Gaps, borders, rounding, blur, shadows, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. Two exceptions: `general.layout`, [read above](#workspace-layout) (the per-layout tables `dwindle { … }`, `master { … }`, `scrolling { … }` are not), and the animation *switches*, because turning motion off is a preference, not a look — see [Animations](#animations). |
+| Gaps, borders, rounding, blur, shadows, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. Three exceptions: `general.layout`, [read above](#workspace-layout) (the per-layout tables `dwindle { … }`, `master { … }`, `scrolling { … }` are not); the animation *switches*, because turning motion off is a preference, not a look — see [Animations](#animations); and `decoration:dim_inactive` with `dim_strength`, a focus cue rather than a look, read as described under [window rules](#window-rules). |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
 | Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use `focus_follows_mouse` and native [`[input.gestures]`](gestures.md). Arbitrary Hyprland gesture bindings remain declined. Device properties listed below are applied; remaining declined values are logged. |
-| Unsupported window-rule properties | `opacity`, `no_blur`, `workspace`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
+| Unsupported window-rule properties | `no_blur`, `keep_aspect_ratio`, `rounding`, … are each logged with their matcher. Tags used to select another supported rule are resolved, removals included. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
 | A `size` or `move` written in a form other than a number or a layout expression (`move cursor 0 0`, `size 50% 50%`, `move onscreen`) | Only the arithmetic Omarchy's rules use is read — see [window rules](#window-rules). The property is skipped with its text; the rule's other properties still apply. |
 | Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
@@ -455,6 +488,7 @@ script reads is missing. A script cannot join the list without that proof.
 | `omarchy-hyprland-monitor-scaling` | `SUPER + SLASH` / `SUPER + ALT + SLASH`: step the focused monitor's scale |
 | `omarchy-hyprland-workspace-layout-toggle` | The menu's Workspace Layout row. Its `SUPER + L` binding takes chonkstep's own `toggle-layout`. |
 | `omarchy-hyprland-window-tiled-fullscreen-toggle` | `SUPER + CTRL + F`: tell the window it is fullscreen in its tile, or stop. It reads `fullscreenClient` back to decide which. |
+| `omarchy-hyprland-window-transparency-toggle` | `SUPER + BACKSPACE`: force the focused window opaque, or let its opacity rule apply again. The binding takes chonkstep's own `toggle-opaque`; the script's `setprop … opaque` requests are served for a menu row or a shell. |
 
 On a Freeform workspace the pop-out's float toggle does nothing, because
 Freeform has no layout to float a window out of; the window is still
@@ -467,7 +501,6 @@ starts are refused with the piece they need:
 
 | Script | Why not here |
 |---|---|
-| `omarchy-hyprland-window-transparency-toggle` | needs per-window opacity, which ChonkStep does not model |
 | `omarchy-hyprland-window-gaps-toggle` | toggles Hyprland's gaps, which ChonkStep does not read |
 | `omarchy-hyprland-window-single-square-aspect-toggle` | toggles a Hyprland layout option, which ChonkStep does not read |
 | `omarchy-hyprland-monitor-internal` | disables an output, which ChonkStep does not do |
@@ -875,8 +908,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=188 commands=121 env=8 autostart=4
-      float_rules=49 monitors=1 skipped=161
+      files=42 bindings=189 commands=121 env=8 autostart=4
+      float_rules=40 monitors=1 skipped=139
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

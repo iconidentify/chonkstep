@@ -859,6 +859,7 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             None => false,
         },
         Action::SetTag { window, tag, present } => client_of(wm, window).is_some_and(|id| wm.set_client_tag(id, &tag, present)),
+        Action::SetOpaque { window, opaque } => client_of(wm, window).is_some_and(|id| wm.set_client_opaque(id, opaque)),
         Action::SetFloating { window, floating } => {
             if let Some(id) = client_of(wm, window) {
                 if let Some(value) = floating {

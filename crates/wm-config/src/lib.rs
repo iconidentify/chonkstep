@@ -155,6 +155,11 @@ pub enum Action {
     /// UI scale, focus policy, placement, edge resistance and these
     /// very bindings, with no restart and nothing closed.
     Reload,
+    /// Force the focused window opaque for the rest of the session, or
+    /// let its opacity rule apply again — Omarchy's `SUPER + BACKSPACE`.
+    /// A session toggle only: nothing is written anywhere, and a window
+    /// no rule makes translucent is unchanged by it.
+    ToggleOpaque,
     /// Re-exec the session's on-disk binary. Distinct from [`Self::Reload`]
     /// on purpose: reloading applies a changed *config*, restarting
     /// applies a changed *build*, and only the second one has to cost
@@ -270,6 +275,7 @@ impl Action {
             Action::GlobalShortcut(target) => return Some(format!("global-shortcut {target}")),
             Action::WindowMenu => "window-menu",
             Action::Reload => "reload",
+            Action::ToggleOpaque => "toggle-opaque",
             Action::Restart => "restart",
             Action::Run(name) => return Some(format!("run {name}")),
         };
@@ -613,6 +619,7 @@ fn action_from_name(name: &str) -> Option<Action> {
         "help" => Some(Action::Help),
         "window-menu" => Some(Action::WindowMenu),
         "reload" => Some(Action::Reload),
+        "toggle-opaque" => Some(Action::ToggleOpaque),
         "restart" => Some(Action::Restart),
         // The two verbs that carry a workspace *number* rather than a
         // name. Parameterised rather than eighteen literal spellings
@@ -1114,6 +1121,7 @@ impl Config {
             "desktop",
             "keymap",
             "hyprland_config",
+            "window_opacity",
             "input",
             "monitor_rules",
             "keybindings",
@@ -1803,6 +1811,17 @@ pub fn parse_with(
                     "config: autoraise must be a boolean, keeping default"
                 ),
             },
+            // The kill switch for `opacity` window rules. `false` draws
+            // every window opaque and gives back the occlusion a
+            // translucent window costs; the session toggle and
+            // `dim_inactive` are unaffected.
+            "window_opacity" => match value {
+                toml::Value::Boolean(enabled) => config.decorations.opacity_rules_disabled = !enabled,
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: window_opacity must be a boolean, keeping default"
+                ),
+            },
             "scale" => match scale_from_value(value) {
                 Some(scale) => config.scale = Some(scale),
                 None => tracing::warn!(
@@ -2119,6 +2138,7 @@ pub fn parse_with(
             | "show_dock"
             | "minimized_previews"
             | "hyprland_config"
+            | "window_opacity"
                 if value.is_bool() =>
             {
                 Some(key.as_str())
@@ -2947,7 +2967,7 @@ numlock_by_default = false
             "focus-left", "focus-right", "focus-up", "focus-down", "workspace-next", "workspace-prev",
             "workspace-carry-next", "workspace-carry-prev", "capture-screen-clipboard", "capture-area-clipboard",
             "capture-window-clipboard", "capture-screen", "capture-area", "capture-window", "capture",
-            "capture-stop", "overview", "root-menu", "help", "window-menu", "reload", "restart",
+            "capture-stop", "overview", "root-menu", "help", "window-menu", "reload", "restart", "toggle-opaque",
             "workspace 4", "workspace-send 10", "workspace-carry 1", "global-shortcut org.example:toggle",
             "run lock",
         ] {

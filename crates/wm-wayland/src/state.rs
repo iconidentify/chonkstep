@@ -465,6 +465,79 @@ pub(crate) struct WindowRecord {
     /// the new viewport destination with an older GPU buffer; that temporary
     /// stretch must not change the frame, renderer or input coordinate scale.
     pub resize_scale: Option<ResizeScale>,
+    /// The `opacity` window rule this window mapped under, from
+    /// configuration only. `None` draws it opaque. See
+    /// [`effective_alpha`] for how focus and fullscreen read it.
+    pub opacity: Option<wm_core::OpacityRule>,
+    /// The session toggle (`SUPER + BACKSPACE`, `setprop … opaque`):
+    /// draws the window opaque whatever its rule says until toggled
+    /// back. Never persisted, never set by a client.
+    pub force_opaque: bool,
+    /// `no_dim`: `dim_inactive` leaves this window alone.
+    pub no_dim: bool,
+    /// Stable id of the quad drawn in front of this window while it is
+    /// unfocused under `dim_inactive`. Minted once so the damage tracker
+    /// sees one retained element that comes and goes rather than a
+    /// fresh one every frame — the same reason `FrameRecord::fill_id`
+    /// exists.
+    pub dim_id: smithay::backend::renderer::element::Id,
+}
+
+/// The alpha a window's body is composited at.
+///
+/// The session toggle wins over everything; a window no rule names is
+/// opaque; fullscreen takes the rule's third value and is otherwise
+/// opaque even when the active alpha is not, because a translucent
+/// fullscreen surface can no longer be scanned out directly and no rule
+/// asked for that; and the rest is the focus cue Omarchy writes its
+/// rules for. Input never reads this: hit-testing and focus are the
+/// same at every alpha.
+pub(crate) fn effective_alpha(record: &WindowRecord, focused: bool, fullscreen: bool) -> f32 {
+    alpha_for(record.opacity, record.force_opaque, focused, fullscreen)
+}
+
+/// [`effective_alpha`] on the two fields it reads, so the decision is
+/// testable without a surface to hang a record on.
+fn alpha_for(opacity: Option<wm_core::OpacityRule>, force_opaque: bool, focused: bool, fullscreen: bool) -> f32 {
+    if force_opaque {
+        return 1.0;
+    }
+    let Some(rule) = opacity else {
+        return 1.0;
+    };
+    if fullscreen {
+        return rule.fullscreen.unwrap_or(1.0);
+    }
+    if focused {
+        rule.active
+    } else {
+        rule.inactive
+    }
+}
+
+/// Element counts from one drawn frame; see `WaylandBackend::scene_elements`.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SceneElementCounts {
+    pub total: usize,
+    pub composited: usize,
+    pub skipped: usize,
+}
+
+impl SceneElementCounts {
+    pub(crate) fn from_states(
+        total: usize,
+        states: &smithay::backend::renderer::element::RenderElementStates,
+    ) -> Self {
+        use smithay::backend::renderer::element::RenderElementPresentationState as State;
+        let mut counts = Self { total, composited: 0, skipped: 0 };
+        for state in states.states.values() {
+            match state.presentation_state {
+                State::Skipped => counts.skipped += 1,
+                State::Rendering { .. } | State::ZeroCopy => counts.composited += 1,
+            }
+        }
+        counts
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -501,6 +574,54 @@ impl WindowRecord {
             layout_tiled: false,
             content_offset: Point::new(0, 0),
             resize_scale: None,
+            opacity: None,
+            force_opaque: false,
+            no_dim: false,
+            dim_id: smithay::backend::renderer::element::Id::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod alpha_tests {
+    use super::alpha_for;
+    use wm_core::OpacityRule;
+
+    #[test]
+    fn a_window_without_a_rule_is_opaque_in_every_state() {
+        for focused in [true, false] {
+            for fullscreen in [true, false] {
+                assert_eq!(alpha_for(None, false, focused, fullscreen), 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn focus_picks_the_active_or_inactive_alpha_and_fullscreen_defaults_opaque() {
+        let rule = Some(OpacityRule { active: 0.985, inactive: 0.96, fullscreen: None });
+        assert_eq!(alpha_for(rule, false, true, false), 0.985);
+        assert_eq!(alpha_for(rule, false, false, false), 0.96);
+        // No third value: fullscreen stays opaque so the scanout path
+        // is untouched, whichever window has focus.
+        assert_eq!(alpha_for(rule, false, true, true), 1.0);
+        assert_eq!(alpha_for(rule, false, false, true), 1.0);
+    }
+
+    #[test]
+    fn a_third_value_is_the_fullscreen_alpha() {
+        let rule = Some(OpacityRule { active: 0.9, inactive: 0.8, fullscreen: Some(0.7) });
+        assert_eq!(alpha_for(rule, false, true, true), 0.7);
+        assert_eq!(alpha_for(rule, false, false, true), 0.7);
+        assert_eq!(alpha_for(rule, false, false, false), 0.8);
+    }
+
+    #[test]
+    fn the_session_toggle_wins_over_the_rule() {
+        let rule = Some(OpacityRule { active: 0.5, inactive: 0.5, fullscreen: Some(0.5) });
+        for focused in [true, false] {
+            for fullscreen in [true, false] {
+                assert_eq!(alpha_for(rule, true, focused, fullscreen), 1.0);
+            }
         }
     }
 }
@@ -935,6 +1056,12 @@ pub struct WaylandBackend {
     pub(crate) graphics_diagnostics: String,
     pub(crate) gpu_timings: std::rc::Rc<std::cell::RefCell<crate::gpu_timer::Measurements>>,
     pub(crate) native_frame_stats: Vec<crate::gpu_stats::OutputStats>,
+    /// What the nested backend's last drawn frame held: elements built,
+    /// elements the damage tracker composited, and elements it skipped
+    /// as fully occluded. The number the translucency cost is judged
+    /// by, reported through `debug scene`; the native pipeline keeps
+    /// the same counts per frame in [`Self::native_frame_stats`].
+    pub(crate) scene_elements: SceneElementCounts,
     /// Handle to the wayland display, for verbs that must touch
     /// protocol state directly (client credentials for `window_pid`,
     /// disconnecting a client for `kill_client`).
@@ -1201,6 +1328,7 @@ impl WaylandBackend {
             graphics_diagnostics: "backend=uninitialized".to_string(),
             gpu_timings: Default::default(),
             native_frame_stats: Vec::new(),
+            scene_elements: SceneElementCounts::default(),
             display_handle,
             pending_focus: None,
             preview_edge: None,
@@ -1289,6 +1417,40 @@ impl WaylandBackend {
     pub(crate) fn mark_damaged(&mut self) {
         self.damage = true;
         self.last_damage_source = Some(std::panic::Location::caller());
+    }
+
+    /// The alpha this window's body is composited at right now: its
+    /// rule read against the active window, unless the native kill
+    /// switch draws everything opaque.
+    pub(crate) fn window_alpha(&self, id: WlWindowId, record: &WindowRecord) -> f32 {
+        if self.decoration_rules.opacity_rules_disabled {
+            return 1.0;
+        }
+        effective_alpha(record, self.ewmh.active_window() == Some(id), record.fullscreen)
+    }
+
+    /// How dark a quad to draw in front of this window: `dim_inactive`'s
+    /// strength while the window is unfocused, unless its rule says
+    /// `no_dim`. A fullscreen window is never dimmed, so its surface
+    /// stays the single element its output shows.
+    pub(crate) fn window_dim(&self, id: WlWindowId, record: &WindowRecord) -> Option<f32> {
+        let strength = self.decoration_rules.dim_inactive.filter(|strength| *strength > 0.0)?;
+        (!record.no_dim && !record.fullscreen && self.ewmh.active_window() != Some(id)).then_some(strength)
+    }
+
+    /// Whether gaining or losing focus changes how this window is
+    /// drawn — an alpha that differs by focus, or a dim — so a focus
+    /// change knows whether it owes the scene a repaint.
+    pub(crate) fn focus_changes_look(&self, id: WlWindowId) -> bool {
+        let Some(record) = self.windows.get(&id).filter(|record| record.mapped) else {
+            return false;
+        };
+        let dims = self.decoration_rules.dim_inactive.is_some_and(|strength| strength > 0.0)
+            && !record.no_dim
+            && !record.fullscreen;
+        dims
+            || (!self.decoration_rules.opacity_rules_disabled
+                && effective_alpha(record, true, record.fullscreen) != effective_alpha(record, false, record.fullscreen))
     }
 
     /// Records that the answer to "may the session idle?" can have

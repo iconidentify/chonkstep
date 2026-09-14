@@ -1910,6 +1910,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // dispatch are shared verbatim.
             Action::Layout(mode) => wm.set_workspace_layout(wm.current_workspace(), *mode),
             Action::ToggleLayout => wm.toggle_workspace_layout(),
+            Action::ToggleOpaque => {
+                if let Some(id) = wm.focused_client() {
+                    wm.set_client_opaque(id, None);
+                }
+            }
             Action::Floating(value) => {
                 if let Some(id) = wm.focused_client() {
                     if let Some(value) = value {

@@ -91,6 +91,7 @@ pub fn read(
                     && !name.eq_ignore_ascii_case("cursor")
                     && !name.eq_ignore_ascii_case("binds")
                     && !name.eq_ignore_ascii_case("animations")
+                    && !name.eq_ignore_ascii_case("decoration")
                 {
                     out.push(Directive::Ignored {
                         kind: "block",
@@ -116,6 +117,9 @@ pub fn read(
                     kind: "binds",
                     detail: format!("nested binds block {name} {{ … }} is not implemented"),
                 });
+            } else if block.first().is_some_and(|root| root.eq_ignore_ascii_case("decoration")) {
+                // `blur { … }`, `shadow { … }`: Hyprland's look, which
+                // the top-level skip already names.
             } else if block.first().is_some_and(|root| root.eq_ignore_ascii_case("device")) {
                 out.push(Directive::Ignored {
                     kind: "device",
@@ -173,6 +177,25 @@ pub fn read(
                         kind: "animation",
                         detail: truncate(line),
                     }),
+                }
+            } else if block[0].eq_ignore_ascii_case("decoration") {
+                // Only the two dim keys, and only at the top of the
+                // block; the rest is Hyprland's look, named once as
+                // declined rather than once per line.
+                match line.split_once('=') {
+                    Some((name, value))
+                        if block.len() == 1
+                            && matches!(
+                                name.trim().to_ascii_lowercase().as_str(),
+                                "dim_inactive" | "dim_strength"
+                            ) =>
+                    {
+                        out.push(Directive::Decoration {
+                            name: name.trim().to_ascii_lowercase(),
+                            value: substitute(value.trim(), vars),
+                        })
+                    }
+                    _ => {}
                 }
             } else if block[0].eq_ignore_ascii_case("input") {
                 match line.split_once('=') {

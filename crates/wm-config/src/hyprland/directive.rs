@@ -53,6 +53,10 @@ pub enum Directive {
     Cursor { name: String, value: String },
     /// One key from Hyprland's `binds {}` table.
     Binds { name: String, value: String },
+    /// One of the two keys read from Hyprland's `decoration {}` table,
+    /// `dim_inactive` and `dim_strength`. The rest of the table is
+    /// Hyprland's look and stays declined.
+    Decoration { name: String, value: String },
     /// `device { name = …; … }` / `hl.device({ name = …, … })`: settings
     /// for one input device, named exactly, still in the file's own words.
     Device { name: String, settings: Vec<(String, String)> },

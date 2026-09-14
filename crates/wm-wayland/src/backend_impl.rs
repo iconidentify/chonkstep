@@ -445,6 +445,11 @@ impl Backend for WaylandBackend {
             self.pending_pointer_grab.is_some(),
         );
         let _ = writeln!(report, "diagnostics {}", crate::diagnostics::describe());
+        let _ = writeln!(
+            report,
+            "scene_elements total={} composited={} skipped={}",
+            self.scene_elements.total, self.scene_elements.composited, self.scene_elements.skipped,
+        );
         self.gpu_timings.borrow().describe(&mut report);
         report.push_str(&crate::readback::diagnostics());
         for output in &self.native_frame_stats { output.describe(&mut report); }
@@ -1868,6 +1873,14 @@ impl Backend for WaylandBackend {
     }
 
     fn publish_active_window(&mut self, window: Option<Self::WindowId>) {
+        // The renderer reads focus from the same ledger this updates,
+        // so a window whose body alpha or dim follows focus has to be
+        // repainted on the next frame — the change is otherwise
+        // invisible until something else damages the scene.
+        let previous = self.ewmh.active_window();
+        if previous != window && [previous, window].into_iter().flatten().any(|id| self.focus_changes_look(id)) {
+            self.mark_damaged();
+        }
         self.ewmh.note_active_window(window);
         // A focus-mode `idle_inhibit` rule answers differently once focus
         // moves; the idle refresh is otherwise a two-boolean early return.
@@ -2156,6 +2169,22 @@ impl Backend for WaylandBackend {
             record.chrome = chrome;
         }
         self.sync_tiled_states(window);
+    }
+
+    fn set_window_opacity(&mut self, window: Self::WindowId, opacity: Option<wm_core::OpacityRule>, no_dim: bool) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.opacity = opacity;
+            record.no_dim = no_dim;
+        }
+    }
+
+    fn set_window_opaque(&mut self, window: Self::WindowId, opaque: Option<bool>) -> bool {
+        let Some(record) = self.windows.get_mut(&window) else {
+            return false;
+        };
+        record.force_opaque = opaque.unwrap_or(!record.force_opaque);
+        self.mark_damaged();
+        true
     }
 
     fn client_chrome(&self, window: Self::WindowId) -> wm_core::ClientChrome {

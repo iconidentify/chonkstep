@@ -1474,10 +1474,23 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
         }),
         None => {}
     }
-    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor" | "binds" | "animations"))) {
+    match root.iter().find(|(key, _)| key.as_deref() == Some("decoration")).map(|(_, value)| value) {
+        Some(Value::Table(fields)) => {
+            for (key, value) in fields {
+                let Some(key) = key else { continue };
+                out.push(decoration_setting(key, value));
+            }
+        }
+        Some(_) => out.push(Directive::Ignored {
+            kind: "decoration",
+            detail: "hl.config decoration table is unreadable".into(),
+        }),
+        None => {}
+    }
+    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor" | "binds" | "animations" | "decoration"))) {
         out.push(Directive::Ignored {
             kind: "config",
-            detail: "hl.config settings outside input, cursor, binds, animations and general.layout are not carried over".into(),
+            detail: "hl.config settings outside input, cursor, binds, animations, decoration and general.layout are not carried over".into(),
         });
     }
 }
@@ -1597,6 +1610,26 @@ fn workspace_rule(value: &Value, out: &mut Vec<Directive>) {
             kind: "workspace-rule",
             detail: format!("hl.workspace_rule(workspace = {shown}): {why}"),
         }),
+    }
+}
+
+/// One `decoration` key: the two that dim unfocused windows are read,
+/// everything else in the table is Hyprland's look and is named as
+/// declined, exactly as the conf reader names a `decoration { … }`
+/// block.
+fn decoration_setting(key: &str, value: &Value) -> Directive {
+    if !matches!(key, "dim_inactive" | "dim_strength") {
+        return Directive::Ignored {
+            kind: "decoration",
+            detail: format!("decoration.{key}: a Hyprland subsystem this desktop has its own answer for"),
+        };
+    }
+    match property_text(value) {
+        Some(value) => Directive::Decoration { name: key.to_string(), value },
+        None => Directive::Ignored {
+            kind: "decoration",
+            detail: format!("{key} = {}: computed at runtime, not carried over", describe(value)),
+        },
     }
 }
 

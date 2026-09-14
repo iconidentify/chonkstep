@@ -1072,6 +1072,17 @@ fn served_script_requests(snapshot: &Snapshot) -> Vec<(&'static str, Vec<ScriptR
                 dispatch("fullscreenstate 0 2"),
             ],
         ),
+        (
+            "omarchy-hyprland-window-transparency-toggle",
+            vec![
+                Query("j/activewindow", &["address"]),
+                dispatch(&format!(
+                    r#"hl.dsp.window.set_prop({{ window = "{window}", prop = "opaque", value = "toggle" }})"#
+                )),
+                // The script's fallback when the Lua form is refused.
+                Mutation(format!("/dispatch setprop {window} opaque toggle")),
+            ],
+        ),
     ]
 }
 
