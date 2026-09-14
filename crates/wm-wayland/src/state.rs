@@ -1384,9 +1384,23 @@ impl WaylandBackend {
             // Only an unanswered resize stretches. A client whose settled
             // buffer differs from the interior (a fullscreen page rounded a
             // pixel, a size it chose) is drawn and hit-tested 1:1; stretching
-            // it anyway moves every click by the ratio on both axes.
+            // it anyway moves every click by the ratio on both axes. Nor does
+            // a buffer that already fills the interior: its pixels answer the
+            // resize whatever its last window geometry says. Chromium can
+            // present its fullscreen buffer while that geometry is still the
+            // windowed one, and any configure then in flight, such as the
+            // activation a click books, stretched its clicks by that ratio.
             record.surface.wl_surface().filter(|surface| {
-                self.surface_windows.get(&surface.id())
+                let fills = smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+                    state.surface_size()
+                })
+                .flatten()
+                .is_some_and(|size| {
+                    let w = crate::xdg::scale_length(size.w, base).max(0) as u32;
+                    let h = crate::xdg::scale_length(size.h, base).max(0) as u32;
+                    w.abs_diff(record.content.size.w) <= 1 && h.abs_diff(record.content.size.h) <= 1
+                });
+                !fills && self.surface_windows.get(&surface.id())
                     .is_some_and(|window| crate::xdg::resize_pending(self, *window, surface))
             }).and_then(|surface| {
                 crate::xdg::committed_content_size(&surface, base, self.output_size)

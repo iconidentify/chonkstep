@@ -73,9 +73,10 @@ crate and both session binaries carry the same number.
   cannot undo the final request, and a newly mapped client's size is
   acknowledged before its first drag.
 - Stretch a framed native window's buffer only while a resize reply is
-  pending. After a settled fullscreen or resize, a committed size that
-  differed from the frame interior kept the buffer stretched per axis, so
-  browser clicks and selections landed a few pixels off.
+  pending, and never once the buffer fills the frame. After a fullscreen or
+  resize, a window geometry that differed from the frame interior kept the
+  buffer stretched per axis, so browser clicks and selections landed off by
+  that ratio.
 - Keep a fullscreen window at its monitor's size when the client answers with
   another buffer, such as a browser still showing its windowed frame or a
   fixed-size game. The compositor adopted that size and resized the window

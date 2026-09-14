@@ -10,6 +10,10 @@
 //! `--kde-bind-only` binds `org_kde_kwin_server_decoration_manager` and
 //! creates no decoration object, which is how a GTK4 header-bar window says
 //! it draws its own titlebar.
+//! `lagged-fullscreen` requests fullscreen and answers each configure with its
+//! old 400x300 buffer. `stale-geometry-fullscreen` pins a 400x300 window
+//! geometry, answers the fullscreen configure with a buffer of the full size,
+//! then asks to be maximized and leaves every later configure unacknowledged.
 
 #[path = "chonk-input-probe/constraints.rs"]
 mod constraints;
@@ -56,7 +60,7 @@ use wayland_protocols::wp::viewporter::client::{
 };
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::{self, XdgSurface},
-    xdg_toplevel::XdgToplevel,
+    xdg_toplevel::{self, XdgToplevel},
     xdg_wm_base::{self, XdgWmBase},
 };
 use wayland_protocols_misc::server_decoration::client::org_kde_kwin_server_decoration_manager::OrgKdeKwinServerDecorationManager;
@@ -108,6 +112,14 @@ struct Probe {
     position: (f64, f64),
     sequence: u64,
     answer_with_old_buffer: bool,
+    /// `stale-geometry-fullscreen` state: the last toplevel configure's size
+    /// and fullscreen flag, whether later configures go unacknowledged, and
+    /// the full-size buffer kept alive for as long as it is attached.
+    stale_geometry: bool,
+    toplevel_size: (i32, i32),
+    toplevel_fullscreen: bool,
+    withhold_acks: bool,
+    full_buffer: Option<(std::fs::File, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer)>,
 }
 
 /// The enter serial a `set_shape` used. The sync sent after it is
@@ -621,6 +633,10 @@ impl Dispatch<XdgSurface, ()> for Probe {
     ) {
         if let xdg_surface::Event::Configure { serial } = event {
             say(&format!("surface configure {serial}"));
+            if probe.withhold_acks {
+                say(&format!("left configure {serial} unanswered"));
+                return;
+            }
             surface.ack_configure(serial);
             // `lagged-fullscreen`: answer at once with the old buffer, as a
             // client whose redraw lags its acknowledgement does.
@@ -629,6 +645,25 @@ impl Dispatch<XdgSurface, ()> for Probe {
                     root.commit();
                     connection.display().sync(qh, ConfigureAnswered(serial));
                 }
+            } else if probe.stale_geometry && probe.toplevel_fullscreen && probe.toplevel_size.0 > 0 && probe.toplevel_size.1 > 0 {
+                // `stale-geometry-fullscreen`: pixels that fill the fullscreen
+                // size under the pinned 400x300 geometry, then a maximize
+                // request whose configure is never acknowledged, so a reply
+                // stays pending while the buffer already answers the resize.
+                let (width, height) = probe.toplevel_size;
+                let shm = probe.shm.clone().expect("wl_shm");
+                let full = solid_buffer(&shm, qh, width, height);
+                if let Some(root) = &probe.surface {
+                    root.attach(Some(&full.2), 0, 0);
+                    root.damage_buffer(0, 0, width, height);
+                    root.commit();
+                }
+                probe.full_buffer = Some(full);
+                probe.withhold_acks = true;
+                if let Some(toplevel) = &probe.toplevel {
+                    toplevel.set_maximized();
+                }
+                connection.display().sync(qh, ConfigureAnswered(serial));
             }
         }
     }
@@ -644,6 +679,52 @@ impl Dispatch<ZwpPointerGestureSwipeV1, ()> for Probe {
             _ => {}
         }
     }
+}
+
+impl Dispatch<XdgToplevel, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        _: &XdgToplevel,
+        event: xdg_toplevel::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_toplevel::Event::Configure { width, height, states } = event {
+            probe.toplevel_size = (width, height);
+            probe.toplevel_fullscreen = states
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|state| u32::from_ne_bytes(*state) == xdg_toplevel::State::Fullscreen as u32);
+        }
+    }
+}
+
+/// An opaque shm buffer of `width` by `height` pixels. The file behind the
+/// pool is returned with it and must outlive the buffer.
+fn solid_buffer(
+    shm: &wl_shm::WlShm,
+    qh: &QueueHandle<Probe>,
+    width: i32,
+    height: i32,
+) -> (std::fs::File, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer) {
+    let path = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("private runtime"))
+        .join(format!("chonk-input-probe-{}-{width}x{height}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .expect("exclusive scratch buffer");
+    std::fs::remove_file(&path).expect("unlink scratch buffer");
+    let bytes: Vec<u8> = std::iter::repeat_n([0x40u8, 0xC0, 0x40, 0xFF], (width * height) as usize)
+        .flatten()
+        .collect();
+    file.write_all(&bytes).expect("fill buffer");
+    let pool = shm.create_pool(file.as_fd(), width * height * 4, qh, ());
+    let buffer = pool.create_buffer(0, width, height, width * 4, wl_shm::Format::Argb8888, qh, ());
+    (file, pool, buffer)
 }
 
 macro_rules! ignore_events {
@@ -668,7 +749,6 @@ ignore_events!(
     WlSubcompositor,
     WlSubsurface,
     WlSurface,
-    XdgToplevel,
     wl_shm::WlShm,
     wl_shm_pool::WlShmPool,
     wl_buffer::WlBuffer,
@@ -806,6 +886,11 @@ fn main() {
         surface.set_input_region(Some(&region));
         region.destroy();
     }
+    if std::env::args().any(|arg| arg == "stale-geometry-fullscreen") {
+        // Set once and never restated, so it stays 400x300 whatever buffer
+        // later answers a configure.
+        xdg.set_window_geometry(0, 0, content_w, content_h);
+    }
     toplevel.set_min_size(content_w, content_h);
     if !probe.interactive.enabled() && !std::env::args().any(|arg| arg == "resizable") {
         toplevel.set_max_size(content_w, content_h);
@@ -907,6 +992,11 @@ fn main() {
     say("mapped input-probe");
     if std::env::args().any(|arg| arg == "lagged-fullscreen") {
         probe.answer_with_old_buffer = true;
+        toplevel.set_fullscreen(None);
+        say("requested fullscreen");
+    }
+    if std::env::args().any(|arg| arg == "stale-geometry-fullscreen") {
+        probe.stale_geometry = true;
         toplevel.set_fullscreen(None);
         say("requested fullscreen");
     }
