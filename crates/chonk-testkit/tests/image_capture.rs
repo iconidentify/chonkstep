@@ -1,7 +1,7 @@
 //! Native ext-image-copy-capture lifetime and locked-output behavior.
 #![allow(clippy::disallowed_methods)]
 
-use chonk_testkit::{poll_until, profile_binary, Screenshot, Session, SessionOptions};
+use chonk_testkit::{poll_until, profile_binary, Screenshot, Session, SessionOptions, WindowInfo};
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -14,8 +14,12 @@ use wayland_client::protocol::{
     wl_buffer, wl_callback, wl_output, wl_registry, wl_shm, wl_shm_pool,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
+};
 use wayland_protocols::ext::image_capture_source::v1::client::{
-    ext_image_capture_source_v1, ext_output_image_capture_source_manager_v1,
+    ext_foreign_toplevel_image_capture_source_manager_v1, ext_image_capture_source_v1,
+    ext_output_image_capture_source_manager_v1,
 };
 use wayland_protocols::ext::image_copy_capture::v1::client::{
     ext_image_copy_capture_frame_v1, ext_image_copy_capture_manager_v1,
@@ -25,6 +29,9 @@ use wayland_protocols::ext::image_copy_capture::v1::client::{
 const EVENT: Duration = Duration::from_secs(5);
 type CopySession = ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1;
 type CopyFrame = ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1;
+type ToplevelHandle = ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
+type ToplevelSources =
+    ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1;
 
 #[derive(Default)]
 struct Probe {
@@ -33,6 +40,14 @@ struct Probe {
     sources:
         Option<ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1>,
     copies: Option<ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1>,
+    /// Bind the foreign-toplevel list and its capture sources. Off for
+    /// the output-only tests, which should not subscribe to toplevel
+    /// publishing they never read.
+    toplevel_capture: bool,
+    toplevel_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
+    toplevel_sources: Option<ToplevelSources>,
+    /// Every toplevel the list announced, with its app id once sent.
+    toplevels: Vec<(ToplevelHandle, Option<String>)>,
     sizes: HashMap<usize, (u32, u32)>,
     constraints_done: HashSet<usize>,
     stopped: HashSet<usize>,
@@ -68,7 +83,47 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                 "ext_image_copy_capture_manager_v1" => {
                     state.copies = Some(registry.bind(name, 1, qh, ()))
                 }
+                "ext_foreign_toplevel_list_v1" if state.toplevel_capture => {
+                    state.toplevel_list = Some(registry.bind(name, 1, qh, ()))
+                }
+                "ext_foreign_toplevel_image_capture_source_manager_v1" if state.toplevel_capture => {
+                    state.toplevel_sources = Some(registry.bind(name, 1, qh, ()))
+                }
                 _ => {}
+            }
+        }
+    }
+}
+impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for Probe {
+    fn event(
+        state: &mut Self,
+        _: &ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+        event: ext_foreign_toplevel_list_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } = event {
+            state.toplevels.push((toplevel, None));
+        }
+    }
+
+    wayland_client::event_created_child!(Probe, ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, [
+        ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => (ToplevelHandle, ()),
+    ]);
+}
+impl Dispatch<ToplevelHandle, ()> for Probe {
+    fn event(
+        state: &mut Self,
+        handle: &ToplevelHandle,
+        event: ext_foreign_toplevel_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_foreign_toplevel_handle_v1::Event::AppId { app_id } = event {
+            if let Some(entry) = state.toplevels.iter_mut().find(|(known, _)| known == handle) {
+                entry.1 = Some(app_id);
             }
         }
     }
@@ -144,7 +199,8 @@ ignore_events!(
     wl_buffer::WlBuffer,
     ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
     ext_image_capture_source_v1::ExtImageCaptureSourceV1,
-    ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1
+    ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1,
+    ToplevelSources
 );
 
 struct Client {
@@ -166,6 +222,13 @@ impl Client {
         Self::connect_display(&session.wayland_display)
     }
     fn connect_display(display: &str) -> Self {
+        Self::connect_probe(display, Probe::default())
+    }
+    /// A client that can also name toplevels as capture sources.
+    fn connect_for_toplevels(session: &Session) -> Self {
+        Self::connect_probe(&session.wayland_display, Probe { toplevel_capture: true, ..Probe::default() })
+    }
+    fn connect_probe(display: &str, probe: Probe) -> Self {
         let socket = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap())
             .join(display);
         let connection = Connection::from_socket(UnixStream::connect(socket).unwrap()).unwrap();
@@ -174,7 +237,7 @@ impl Client {
         let mut client = Self {
             connection,
             queue,
-            probe: Probe::default(),
+            probe,
             serial: 0,
         };
         client.sync();
@@ -247,6 +310,64 @@ impl Client {
             "unexpectedly stopped session {id}"
         );
         (session, self.probe.sizes[&id])
+    }
+    /// A capture session on `source`, which it consumes, once the
+    /// session's buffer constraints are complete.
+    fn session_on(
+        &mut self,
+        source: ext_image_capture_source_v1::ExtImageCaptureSourceV1,
+        options: ext_image_copy_capture_manager_v1::Options,
+    ) -> (CopySession, (u32, u32)) {
+        self.serial += 1;
+        let id = self.serial;
+        let session = self.probe.copies.as_ref().unwrap().create_session(
+            &source,
+            options,
+            &self.queue.handle(),
+            id,
+        );
+        source.destroy();
+        self.until("complete capture constraints", |p| {
+            p.constraints_done.contains(&id) || p.stopped.contains(&id)
+        });
+        assert!(!self.probe.stopped.contains(&id), "unexpectedly stopped session {id}");
+        (session, self.probe.sizes[&id])
+    }
+    fn output_session(
+        &mut self,
+        options: ext_image_copy_capture_manager_v1::Options,
+    ) -> (CopySession, (u32, u32)) {
+        let source = self.probe.sources.as_ref().unwrap().create_source(
+            self.probe.output.as_ref().unwrap(),
+            &self.queue.handle(),
+            (),
+        );
+        self.session_on(source, options)
+    }
+    /// A session capturing the toplevel whose app id is `app_id`, through
+    /// its ext-foreign-toplevel-list handle.
+    fn toplevel_session(
+        &mut self,
+        app_id: &str,
+        options: ext_image_copy_capture_manager_v1::Options,
+    ) -> (CopySession, (u32, u32)) {
+        self.until(&format!("a foreign toplevel handle for {app_id}"), |p| {
+            p.toplevels.iter().any(|(_, app)| app.as_deref() == Some(app_id))
+        });
+        let handle = self
+            .probe
+            .toplevels
+            .iter()
+            .find(|(_, app)| app.as_deref() == Some(app_id))
+            .map(|(handle, _)| handle.clone())
+            .unwrap();
+        let source = self
+            .probe
+            .toplevel_sources
+            .as_ref()
+            .expect("the toplevel capture source manager is advertised")
+            .create_source(&handle, &self.queue.handle(), ());
+        self.session_on(source, options)
     }
     fn frame(&mut self, session: &CopySession, size: (u32, u32)) -> Frame {
         self.serial += 1;
@@ -338,10 +459,50 @@ impl Frame {
             }
         }
     }
+    /// Every pixel as the compositor wrote it: row-major XRGB8888,
+    /// little-endian (B, G, R, X).
+    fn bgrx(&self) -> Vec<u8> {
+        let mut pixels = vec![0; self.size.0 as usize * self.size.1 as usize * 4];
+        self.pixels.read_exact_at(&mut pixels, 0).unwrap();
+        pixels
+    }
     fn destroy(self) {
         self.resource.destroy();
         self.buffer.destroy();
         self.pool.destroy();
+    }
+}
+
+/// Compares a toplevel capture pixel for pixel with the rectangle of an
+/// output capture that the window's content rect covers on screen.
+fn assert_window_matches_screen(window: &Frame, screen: &Frame, content: &WindowInfo, what: &str) {
+    assert_eq!(window.size, (content.w, content.h), "{what}: the toplevel capture is the content rect");
+    assert!(
+        content.x >= 0
+            && content.y >= 0
+            && content.x as u32 + content.w <= screen.size.0
+            && content.y as u32 + content.h <= screen.size.1,
+        "{what}: the window must lie wholly on the output to be compared"
+    );
+    let (image, output) = (window.bgrx(), screen.bgrx());
+    let mut differing = 0;
+    let mut first = None;
+    for y in 0..content.h {
+        for x in 0..content.w {
+            let at = (y * content.w + x) as usize * 4;
+            let on_screen = ((content.y as u32 + y) * screen.size.0 + content.x as u32 + x) as usize * 4;
+            if image[at..at + 3] != output[on_screen..on_screen + 3] {
+                differing += 1;
+                first.get_or_insert((x, y, image[at..at + 3].to_vec(), output[on_screen..on_screen + 3].to_vec()));
+            }
+        }
+    }
+    if let Some((x, y, captured, shown)) = first {
+        panic!(
+            "{what}: {differing} of {} pixels differ from the screen; first at content ({x}, {y}): \
+             captured BGR {captured:?}, on screen {shown:?}",
+            content.w * content.h
+        );
     }
 }
 
@@ -643,4 +804,119 @@ fn demo_image_capture_keeps_its_policy_and_respects_locking() {
     demo.sync();
     normal.sync();
     assert!(session.compositor_alive());
+}
+
+/// The client-decorated probe's app id: listed as client-side so no frame
+/// covers it and its geometry offset is the only thing between the buffer
+/// corner and the content rect.
+const CSD_APP: &str = "csd-capture-probe";
+
+/// "Share this window" for a client that draws its own shadow. The probe
+/// declares window geometry (25, 30, 340x230 logical) inside a larger
+/// buffer whose shadow band is grey and whose content names each pixel's
+/// buffer position, so the toplevel capture has to show exactly what the
+/// output shows inside the content rect: not the shadow band along two
+/// edges, not the content shifted by it, and with `paint_cursors` not the
+/// pointer misregistered against it.
+fn toplevel_capture_matches_the_window_on_screen(scale: f32) {
+    let mut session = Session::boot(
+        &format!("image-capture-csd-toplevel-{scale}"),
+        SessionOptions {
+            scale: Some(scale),
+            config_extra: format!(
+                "show_dock = false\nomarchy_menu = false\nhyprland_config = false\n\
+                 [decorations]\nclient_side = [\"{CSD_APP}\"]\n"
+            ),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let probe = profile_binary("chonk-input-probe").unwrap();
+    session
+        .launch_isolated(
+            probe.to_str().unwrap(),
+            &[&scale.to_string(), "--csd-input-region", &format!("--app-id={CSD_APP}")],
+        )
+        .unwrap();
+    session.wait_for_window(CSD_APP).unwrap();
+    // The ledger is in physical pixels; the buffer is committed once the
+    // presented extent includes the shadow.
+    let content = poll_until(EVENT, "the probe's committed window geometry", || {
+        let window = session.world().ok()?.window_matching(CSD_APP)?.clone();
+        (window.offset_x == (25.0 * scale).round() as i32
+            && window.offset_y == (30.0 * scale).round() as i32
+            && window.w == (340.0 * scale) as u32
+            && window.h == (230.0 * scale) as u32
+            && window.presented_w > window.w)
+            .then_some(window)
+    })
+    .unwrap();
+    session.door().barrier().unwrap();
+
+    let mut client = Client::connect_for_toplevels(&session);
+    let plain = ext_image_copy_capture_manager_v1::Options::empty();
+    let (screen_copy, screen_size) = client.output_session(plain);
+    let (window_copy, window_size) = client.toplevel_session(CSD_APP, plain);
+    let screen = client.frame(&screen_copy, screen_size);
+    client.capture(&screen);
+    let window = client.frame(&window_copy, window_size);
+    client.capture(&window);
+    // The capture's corner is the window-geometry origin: content blue,
+    // coded with its own buffer position, never the shadow's grey.
+    assert_eq!(
+        window.bgrx()[..3],
+        [0xC0, content.offset_y as u8, content.offset_x as u8],
+        "scale {scale}: the toplevel capture must start at the window geometry, not the buffer corner"
+    );
+    assert_window_matches_screen(&window, &screen, &content, &format!("scale {scale}"));
+
+    // -- the painted pointer lands on the same content pixel ----------------
+    let pointer = (content.x + content.w as i32 / 3, content.y + content.h as i32 / 3);
+    session.door().motion(f64::from(pointer.0), f64::from(pointer.1)).unwrap();
+    session.door().barrier().unwrap();
+    let cursors = ext_image_copy_capture_manager_v1::Options::PaintCursors;
+    let (screen_cursor_copy, _) = client.output_session(cursors);
+    let (window_cursor_copy, _) = client.toplevel_session(CSD_APP, cursors);
+    let screen_cursor = client.frame(&screen_cursor_copy, screen_size);
+    client.capture(&screen_cursor);
+    let window_cursor = client.frame(&window_cursor_copy, window_size);
+    client.capture(&window_cursor);
+    // The cursor really is in the picture, and only around the pointer.
+    let (bare, painted) = (window.bgrx(), window_cursor.bgrx());
+    let origin = ((pointer.0 - content.x) as u32, (pointer.1 - content.y) as u32);
+    let changed: Vec<(u32, u32)> = (0..content.h)
+        .flat_map(|y| (0..content.w).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let at = (y * content.w + x) as usize * 4;
+            bare[at..at + 3] != painted[at..at + 3]
+        })
+        .collect();
+    assert!(!changed.is_empty(), "scale {scale}: paint_cursors must draw the pointer into the toplevel capture");
+    assert!(
+        changed.iter().all(|&(x, y)| (origin.0..origin.0 + 96).contains(&x) && (origin.1..origin.1 + 96).contains(&y)),
+        "scale {scale}: the painted cursor strayed from the pointer at content {origin:?}: {:?}",
+        changed.iter().find(|&&(x, y)| !(origin.0..origin.0 + 96).contains(&x) || !(origin.1..origin.1 + 96).contains(&y))
+    );
+    assert_window_matches_screen(&window_cursor, &screen_cursor, &content, &format!("scale {scale} with cursors"));
+
+    for frame in [screen, window, screen_cursor, window_cursor] {
+        frame.destroy();
+    }
+    for copy in [screen_copy, window_copy, screen_cursor_copy, window_cursor_copy] {
+        copy.destroy();
+    }
+    client.sync();
+    assert!(session.compositor_alive());
+}
+
+#[test]
+#[ignore = "needs nested Wayland: scripts/e2e.sh --headless --test image_capture"]
+fn toplevel_capture_of_a_shadowed_client_matches_the_screen_at_1x() {
+    toplevel_capture_matches_the_window_on_screen(1.0);
+}
+
+#[test]
+#[ignore = "needs nested Wayland: scripts/e2e.sh --headless --test image_capture"]
+fn toplevel_capture_of_a_shadowed_client_matches_the_screen_at_fractional_scale() {
+    toplevel_capture_matches_the_window_on_screen(1.5);
 }

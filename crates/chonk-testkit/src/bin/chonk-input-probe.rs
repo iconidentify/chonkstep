@@ -591,6 +591,30 @@ ignore_events!(
     WpViewport
 );
 
+/// The `--csd-input-region` buffer, drawn the way a toolkit with client-side
+/// shadows draws one: an opaque grey band around the declared window
+/// geometry (25, 30, 340x230 logical), and inside it content whose every
+/// pixel names its own buffer position (red the column, green the row, both
+/// modulo 256). A capture anchored anywhere but the geometry origin shows
+/// the band, or the right colours in the wrong places. Opaque throughout, so
+/// a capture over a transparent clear and the composited output agree.
+fn csd_shadow_buffer(width: i32, height: i32, scale: f64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let (logical_x, logical_y) = (f64::from(x) / scale, f64::from(y) / scale);
+            let content = (25.0..365.0).contains(&logical_x) && (30.0..260.0).contains(&logical_y);
+            // Premultiplied ARGB8888, little-endian: B, G, R, A.
+            bytes.extend_from_slice(&if content {
+                [0xC0, (y & 0xFF) as u8, (x & 0xFF) as u8, 0xFF]
+            } else {
+                [0x30, 0x30, 0x30, 0xFF]
+            });
+        }
+    }
+    bytes
+}
+
 fn main() {
     let scale: f64 = std::env::args()
         .nth(1)
@@ -709,9 +733,13 @@ fn main() {
         .open(&path)
         .expect("exclusive scratch buffer");
     std::fs::remove_file(&path).expect("unlink scratch buffer");
-    let bytes: Vec<u8> = std::iter::repeat_n([0x40u8, 0x40, 0xC0, 0xFF], (width * height) as usize)
-        .flatten()
-        .collect();
+    let bytes: Vec<u8> = if csd_region {
+        csd_shadow_buffer(width, height, scale)
+    } else {
+        std::iter::repeat_n([0x40u8, 0x40, 0xC0, 0xFF], (width * height) as usize)
+            .flatten()
+            .collect()
+    };
     file.write_all(&bytes).expect("fill buffer");
     let pool =
         probe
