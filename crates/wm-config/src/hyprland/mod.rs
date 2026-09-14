@@ -272,6 +272,9 @@ pub struct Reading {
     /// and its human description.
     pub bindings: Vec<crate::Binding>,
     pub layer_bindings: BTreeMap<String, Vec<crate::Binding>>,
+    /// `switch:on:Lid Switch` and its kin, later bindings on the same
+    /// device and edge replacing earlier ones.
+    pub switch_bindings: Vec<crate::SwitchBinding>,
     /// The argv every [`Action::Run`] above names, keyed by the name
     /// [`dispatch::command_name`] derived from the argv.
     pub commands: BTreeMap<String, Vec<String>>,
@@ -328,13 +331,14 @@ impl Reading {
         // replaced the built-in keybindings. Destructure exhaustively so a
         // future category cannot silently disappear at this loading boundary.
         let Self {
-            keybindings, explicit_keys, bindings, layer_bindings, commands, env, autostart,
+            keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
             float_rules, monitors, input, files: _, skipped: _,
         } = self;
         keybindings.is_empty()
             && explicit_keys.is_empty()
             && bindings.is_empty()
             && layer_bindings.is_empty()
+            && switch_bindings.is_empty()
             && commands.is_empty()
             && env.is_empty()
             && autostart.is_empty()
@@ -545,6 +549,7 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
         || reading.keybindings.iter().any(|(other, _)| other == key));
     config.bindings = reading.bindings.clone();
     config.layer_bindings = reading.layer_bindings.clone();
+    config.switch_bindings = reading.switch_bindings.clone();
     // Commands are *inserted*, so a `[commands]` entry of the same name
     // read later from the user's own file replaces this one — the same
     // rule `preset::apply_keymap` applies to its own declarations.
@@ -867,6 +872,11 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
                 flags,
                 &dispatcher,
             ),
+            Directive::Unbind { keys } if keys::switch_for(&keys).is_some() => {
+                if let Some((device, edge)) = keys::switch_for(&keys) {
+                    reading.switch_bindings.retain(|binding| binding.device != device || binding.edge != edge);
+                }
+            }
             Directive::Unbind { keys } => match keys::spec_for(&keys) {
                 Ok(spec) => {
                     if let Some(combo) = crate::parse_key(&spec) {
@@ -948,6 +958,9 @@ fn bind(
         Some(text) => format!("{keys} ({text})"),
         None => keys.to_string(),
     };
+    if let Some(switch) = keys::switch_for(keys) {
+        return switch_bind(reading, what, switch, flags.locked, dispatcher);
+    }
     let spec = match keys::spec_for(keys) {
         Ok(spec) => spec,
         Err(trouble) => {
@@ -967,29 +980,8 @@ fn bind(
         });
         return;
     };
-    let action = match dispatch::verb_for(dispatcher) {
-        dispatch::Verb::Action(action) => action,
-        dispatch::Verb::Run(argv) => {
-            if argv.is_empty() {
-                reading.skipped.push(Skipped {
-                    kind: "bind".into(),
-                    what,
-                    why: "empty command".into(),
-                });
-                return;
-            }
-            let name = dispatch::command_name(&argv);
-            reading.commands.insert(name.clone(), argv);
-            Action::Run(name)
-        }
-        dispatch::Verb::Unbound(reason) => {
-            reading.skipped.push(Skipped {
-                kind: "bind".into(),
-                what,
-                why: reason.reason().to_string(),
-            });
-            return;
-        }
+    let Some(action) = binding_action(reading, &what, dispatcher) else {
+        return;
     };
     // Press and release are independent namespaces. In particular the
     // F9 release half of push-to-talk must not replace its press half.
@@ -1010,6 +1002,71 @@ fn bind(
             .retain(|(existing, _)| *existing != combo);
         reading.keybindings.push((combo, action));
     }
+}
+
+/// What a binding's dispatcher does, through the three answers in
+/// [`dispatch`], or `None` with the reason recorded against `what`.
+fn binding_action(reading: &mut Reading, what: &str, dispatcher: &directive::Dispatcher) -> Option<Action> {
+    let why = match dispatch::verb_for(dispatcher) {
+        dispatch::Verb::Action(action) => return Some(action),
+        dispatch::Verb::Run(argv) if !argv.is_empty() => {
+            let name = dispatch::command_name(&argv);
+            reading.commands.insert(name.clone(), argv);
+            return Some(Action::Run(name));
+        }
+        dispatch::Verb::Run(_) => "empty command".to_string(),
+        dispatch::Verb::Unbound(reason) => reason.reason().to_string(),
+    };
+    reading.skipped.push(Skipped {
+        kind: "bind".into(),
+        what: what.to_string(),
+        why,
+    });
+    None
+}
+
+/// The longest switch device name a binding carries. Kernel input
+/// device names are far shorter; the bound keeps a hostile file from
+/// storing megabytes per binding.
+const MAX_SWITCH_NAME: usize = 256;
+
+/// `switch:on:Lid Switch` and its kin: a binding on a hardware switch,
+/// resolved through the same answers as a chord, so a script outside
+/// the served list stays unbound here too. A later binding on the same
+/// device and edge replaces an earlier one, as for a chord.
+fn switch_bind(
+    reading: &mut Reading,
+    what: String,
+    (device, edge): (&str, crate::SwitchEdge),
+    locked: bool,
+    dispatcher: &directive::Dispatcher,
+) {
+    let refuse = |reading: &mut Reading, why: String| {
+        reading.skipped.push(Skipped {
+            kind: "bind".into(),
+            what: what.clone(),
+            why,
+        })
+    };
+    if device.is_empty() || device.len() > MAX_SWITCH_NAME {
+        refuse(reading, format!("a switch binding needs a device name of 1 to {MAX_SWITCH_NAME} bytes"));
+        return;
+    }
+    let same = |binding: &crate::SwitchBinding| binding.device == device && binding.edge == edge;
+    if !reading.switch_bindings.iter().any(same) && reading.switch_bindings.len() >= crate::SwitchBinding::MAX {
+        refuse(reading, format!("more than {} switch bindings", crate::SwitchBinding::MAX));
+        return;
+    }
+    let Some(action) = binding_action(reading, &what, dispatcher) else {
+        return;
+    };
+    reading.switch_bindings.retain(|binding| !same(binding));
+    reading.switch_bindings.push(crate::SwitchBinding {
+        device: device.to_string(),
+        edge,
+        action,
+        locked,
+    });
 }
 
 fn input(reading: &mut Reading, name: &str, value: &str) {

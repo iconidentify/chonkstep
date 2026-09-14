@@ -201,6 +201,7 @@ pub struct SessionState {
     /// Full binding metadata for phase, lock and repeat behavior.
     pub bindings: Vec<wm_config::Binding>,
     pub layer_bindings: std::collections::BTreeMap<String, Vec<wm_config::Binding>>,
+    pub switch_bindings: Vec<wm_config::SwitchBinding>,
     pub input: wm_config::InputConfig,
     pub interaction: wm_core::InteractionConfig,
     pub monitor_rules: Vec<wm_config::hyprland::directive::Monitor>,
@@ -283,6 +284,7 @@ impl SessionState {
                 config.bindings.clone()
             },
             layer_bindings: config.layer_bindings.clone(),
+            switch_bindings: config.switch_bindings.clone(),
             input: config.input.clone(),
             interaction: config.interaction.clone(),
             monitor_rules: config.monitor_rules.clone(),
@@ -949,6 +951,7 @@ mod tests {
             session_env: Vec::new(),
             bindings: Vec::new(),
             layer_bindings: BTreeMap::new(),
+            switch_bindings: Vec::new(),
             input: wm_config::InputConfig::default(),
             interaction: wm_core::InteractionConfig::default(),
             monitor_rules: Vec::new(),

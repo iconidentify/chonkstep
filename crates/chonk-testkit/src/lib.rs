@@ -1562,6 +1562,14 @@ impl Door {
         self.send(&format!("primary-scale {scale}"))
     }
 
+    /// A hardware switch toggle — `kind` is `lid` or `tablet-mode` — from
+    /// a switch device named `device`, through the production input
+    /// funnel, settled.
+    pub fn switch(&mut self, kind: &str, on: bool, device: &str) -> Result<(), String> {
+        self.send(&format!("switch {kind} {} {device}", if on { "on" } else { "off" }))?;
+        self.barrier()
+    }
+
     /// A full tap: press, settle, release, settle — the two edges in
     /// different dispatch passes, the way a human's land.
     pub fn tap_key(&mut self, code: u32) -> Result<(), String> {

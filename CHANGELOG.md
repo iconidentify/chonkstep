@@ -5,6 +5,10 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Run Hyprland switch bindings (`switch:on:Lid Switch`, `switch:off:…`,
+  `switch:…`) from both configuration syntaxes. Omarchy's lid-close handler
+  now locks the session as the lid shuts; only `bindl` switch bindings run
+  while locked, and opening the lid wakes sleeping screens and resets idle.
 - Hide `ext_foreign_toplevel_list_v1` and `ext_workspace_manager_v1` from
   clients admitted through `wp_security_context_v1`. The 0.4.4 boundary hid the
   wlr foreign-toplevel manager but missed its ext twin, so a sandboxed app could

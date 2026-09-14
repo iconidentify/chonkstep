@@ -1752,6 +1752,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.release_keymap.get(combo).cloned()
     }
 
+    /// The actions a hardware switch toggle runs, in configuration
+    /// order. While the session is locked only `locked` bindings answer,
+    /// as for keys.
+    pub fn switch_actions(&self, device: &str, on: bool, locked: bool) -> Vec<Action> {
+        self.state
+            .switch_bindings
+            .iter()
+            .filter(|binding| binding.runs(device, on, locked))
+            .map(|binding| binding.action.clone())
+            .collect()
+    }
+
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
             Action::Help => {

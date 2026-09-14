@@ -169,6 +169,48 @@ pub struct Binding {
     pub release: bool,
 }
 
+/// Which edge of a hardware switch a [`SwitchBinding`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchEdge {
+    /// The switch turned on: a lid closed, tablet mode entered.
+    On,
+    /// The switch turned off: a lid opened, tablet mode left.
+    Off,
+    /// Either edge.
+    Any,
+}
+
+/// A binding on a hardware switch, Hyprland's `switch:on:Lid Switch`.
+///
+/// Keyed by the libinput device name, matched exactly. Apple Silicon
+/// names its lid differently, which is why Omarchy binds both names;
+/// a fuzzy match would run one machine's handler on another's switch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwitchBinding {
+    pub device: String,
+    pub edge: SwitchEdge,
+    pub action: Action,
+    /// Runs while the session is locked too (`bindl`, `locked = true`).
+    pub locked: bool,
+}
+
+impl SwitchBinding {
+    /// The most switch bindings one configuration holds.
+    pub const MAX: usize = 32;
+
+    /// Whether `device` turning `on` (or off) runs this binding, given
+    /// whether the session is locked.
+    pub fn runs(&self, device: &str, on: bool, locked: bool) -> bool {
+        (self.locked || !locked)
+            && self.device == device
+            && match self.edge {
+                SwitchEdge::On => on,
+                SwitchEdge::Off => !on,
+                SwitchEdge::Any => true,
+            }
+    }
+}
+
 /// Keyboard settings imported from Hyprland's `input {}` table.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InputConfig {
@@ -626,6 +668,8 @@ pub struct Config {
     pub monitor_rules: Vec<hyprland::directive::Monitor>,
     pub bindings: Vec<Binding>,
     pub layer_bindings: BTreeMap<String, Vec<Binding>>,
+    /// Bindings on hardware switches, from the live Hyprland read.
+    pub switch_bindings: Vec<SwitchBinding>,
     pub keybindings: Vec<(KeyCombo, Action)>,
     /// Human-readable refusals retained for `hyprctl configerrors` and
     /// the offline inspection commands.
@@ -729,6 +773,7 @@ impl Config {
             monitor_rules: Vec::new(),
             bindings: Vec::new(),
             layer_bindings: BTreeMap::new(),
+            switch_bindings: Vec::new(),
             keybindings: vec![
                 bind("super+t", Action::Floating(None)),
                 bind("super+l", Action::ToggleLayout),

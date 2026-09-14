@@ -108,6 +108,32 @@ Two things a hand-written table could not do, and this can:
   an `if` that could not be answered) is not taken to be `nil` either.
   An `if` whose condition is not followed by `then` is skipped whole.
 
+### Switch bindings
+
+`switch:on:NAME`, `switch:off:NAME` and `switch:NAME` bind a hardware
+switch instead of a key, in both syntaxes: `bindl = , switch:on:Lid
+Switch, exec, …` in conf, `o.bind("switch:on:Lid Switch", nil, …, {
+locked = true })` in Lua. `on` is a lid closing or tablet mode starting,
+`off` the reverse, and a bare name answers both. `NAME` is the device
+name libinput reports, the one `hyprctl devices` lists under `switches`,
+and it must match exactly: Apple Silicon calls its lid `Apple SMC
+power/lid events`, which is why Omarchy binds both names. A switch
+binding runs its command the way a key binding does, and `unbind` takes
+the same spelling. While the session is locked only bindings marked
+locked (`bindl`, `locked = true`) run, so Omarchy's lid handlers still
+answer on the lock screen. Opening the lid wakes sleeping screens and
+counts as activity for idle timers; closing it does neither. One
+configuration holds at most 32 switch bindings.
+
+On a stock Omarchy install, closing the lid runs
+`omarchy-system-lid-close`, which locks the session straight away when
+no external monitor is connected. The clamshell handler Omarchy binds
+beside it, `omarchy-hyprland-monitor-clamshell`, stays unbound: it
+disables outputs through Hyprland requests ChonkStep does not serve, so
+it is reported like any other script outside the served list. The baked
+Omarchy keymap holds key chords only, so switch bindings come from the
+live configuration.
+
 ### Window rules
 
 `windowrule`, `windowrulev2` and `o.window` / `hl.window_rule`, in all
@@ -227,7 +253,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Unsupported window-rule properties | `opacity`, `no_blur`, `suppress_event`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
 | A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
-| Mouse, wheel and switch bindings (`bindm`, `mouse:272`, `mouse_up`, `switch:on:Lid Switch`) | Not key chords; this config format cannot express one. |
+| Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
 | `submap`, workspace rules, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
 | Lua calls that act while Hyprland runs (`hl.timer`, `hl.dispatch`, `hl.get_*`), and any other call with no configuration meaning here (`disabled_input_device`, `hl.device`, `table.insert`) | None of them configures anything as the file is read. Each is logged by name, so a call this reader cannot place is never dropped silently. |
@@ -588,8 +614,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=179 commands=119 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=173
+      files=42 bindings=179 commands=120 env=8 autostart=4
+      float_rules=47 monitors=1 skipped=172
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

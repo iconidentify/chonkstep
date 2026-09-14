@@ -75,7 +75,7 @@ use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent, GestureEndEvent,
     GesturePinchUpdateEvent as BackendPinchUpdateEvent, GestureSwipeUpdateEvent as BackendSwipeUpdateEvent,
     Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent, MouseButton as InputMouseButton,
-    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, ProximityState, SwitchToggleEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, ProximityState, Switch, SwitchState, SwitchToggleEvent,
     TabletToolButtonEvent, TabletToolDescriptor, TabletToolEvent, TabletToolProximityEvent,
     TabletToolTipEvent, TabletToolTipState, TouchEvent,
 };
@@ -732,6 +732,8 @@ impl InputFamily {
         }
     }
 
+    /// Switches are the one family whose idle policy depends on the
+    /// event's state; [`switch_resets_idle`] decides those per toggle.
     fn resets_idle(self) -> bool {
         matches!(
             self,
@@ -937,11 +939,43 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
         InputEvent::TouchUp { event } => on_touch_up::<I>(state, event),
         InputEvent::TouchCancel { event: _ } => on_touch_cancel(state),
         InputEvent::TouchFrame { event: _ } => on_touch_frame(state),
-        InputEvent::SwitchToggle { event } => {
-            tracing::info!(switch = ?event.switch(), state = ?event.state(), "input switch toggled");
-        }
+        InputEvent::SwitchToggle { event } => on_switch_toggle::<I>(state, event),
         InputEvent::Special(_) => {}
     }
+}
+
+// -- switches -----------------------------------------------------------
+
+/// The most switch toggles one dispatch pass holds. A real lid produces
+/// one per open or close; the bound keeps a flapping or hostile device
+/// from growing the queue.
+const MAX_PENDING_SWITCHES: usize = 16;
+
+/// Stages a switch toggle for the switch bindings, which resolve in
+/// `dispatch_pending` beside key bindings. The device name is compared
+/// there, never interpreted.
+fn on_switch_toggle<I: InputBackend>(state: &mut Compositor, event: I::SwitchToggleEvent) {
+    let on = event.state() == SwitchState::On;
+    let switch = event.switch();
+    let device = event.device().name();
+    tracing::info!(?switch, on, ?device, "input switch toggled");
+    if switch_resets_idle(switch, on) {
+        crate::output_power::wake_all(state);
+        crate::idle::note_activity(state);
+    }
+    let pending = &mut state.wm.backend_mut().pending_switches;
+    if pending.len() < MAX_PENDING_SWITCHES {
+        pending.push((device, on));
+    } else {
+        tracing::warn!(?device, on, "switch toggles are arriving faster than they resolve; dropping one");
+    }
+}
+
+/// A lid opening is someone sitting down at the machine: it wakes the
+/// screens and resets the idle timers. A lid closing is not activity,
+/// and neither is tablet mode.
+fn switch_resets_idle(switch: Option<Switch>, on: bool) -> bool {
+    switch == Some(Switch::Lid) && !on
 }
 
 // -- touch --------------------------------------------------------------
@@ -3745,6 +3779,7 @@ mod tests {
     fn every_input_family_has_an_explicit_lock_route_and_idle_policy() {
         use InputFamily::*;
         use LockedInputRoute::*;
+        use smithay::backend::input::Switch;
 
         let cases = [
             (DeviceLifecycle, false, NoClientDelivery),
@@ -3761,6 +3796,12 @@ mod tests {
         for (family, resets_idle, locked_route) in cases {
             assert_eq!(family.resets_idle(), resets_idle, "idle policy for {family:?}");
             assert_eq!(family.locked_route(), locked_route, "lock route for {family:?}");
+        }
+        // The switch family's exception, decided per toggle: only a lid
+        // opening is activity.
+        assert!(switch_resets_idle(Some(Switch::Lid), false));
+        for (switch, on) in [(Some(Switch::Lid), true), (Some(Switch::TabletMode), false), (Some(Switch::TabletMode), true), (None, false)] {
+            assert!(!switch_resets_idle(switch, on), "{switch:?} on={on}");
         }
     }
 

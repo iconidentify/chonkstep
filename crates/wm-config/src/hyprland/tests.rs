@@ -488,9 +488,14 @@ fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
         assert_eq!(action_for(&reading, chord), None, "{chord} must stay unbound");
         assert_eq!(skipped_why(&reading, what), Some(reason.reason().to_string()), "{what}");
     }
-    // The lid switches never reach the script filter: a switch is not a
-    // chord this desktop can grab.
-    assert!(skipped_why(&reading, "switch:off:Lid Switch").is_some());
+    // The clamshell half of Omarchy's lid bindings binds as a switch and
+    // then meets the script filter: it disables outputs through requests
+    // this desktop does not serve.
+    assert!(
+        skipped_why(&reading, "switch:off:Lid Switch").is_some_and(|why| !why.contains("pointer or switch")),
+        "{:?}",
+        reading.skipped
+    );
     assert_eq!(
         argv_for(&reading, "super+print"),
         Some(vec![
@@ -915,15 +920,110 @@ fn metadata_only_is_empty_but_release_bindings_and_monitors_are_not() {
     }
 }
 
-/// Bindings that are not key chords at all — the mouse wheel, a mouse
-/// button, the lid switch — are refused by name rather than mangled
-/// into some nearby keysym.
+/// Pointer bindings — the mouse wheel, a mouse button — are not key
+/// chords and are refused by name rather than mangled into some nearby
+/// keysym. The lid switch binds as a switch.
 #[test]
-fn pointer_and_switch_bindings_are_refused_by_name() {
+fn pointer_bindings_are_refused_by_name_and_the_lid_switch_binds() {
     let reading = read(&machine());
     assert!(skipped_why(&reading, "mouse_down").is_some_and(|w| w.contains("pointer or switch")));
     assert!(skipped_why(&reading, "mouse:272").is_some_and(|w| w.contains("pointer or switch")));
-    assert!(skipped_why(&reading, "Lid Switch").is_some_and(|w| w.contains("pointer or switch")));
+    let shape: Vec<_> = reading.switch_bindings.iter().map(|b| (b.device.as_str(), b.edge, b.locked)).collect();
+    assert_eq!(shape, [("Lid Switch", crate::SwitchEdge::On, true)], "{:?}", reading.skipped);
+    assert!(
+        matches!(&reading.switch_bindings[0].action, Action::Run(name)
+            if reading.commands.get(name).is_some_and(|argv| argv.iter().any(|arg| arg.contains("omarchy-system-lid-close")))),
+        "closing the lid runs Omarchy's lock-on-close handler: {:?}",
+        reading.switch_bindings
+    );
+}
+
+/// Switch bindings read the same from conf and Lua: the edge, the exact
+/// device name, the locked flag, and `unbind`. A nameless switch is
+/// refused by name.
+#[test]
+fn switch_bindings_carry_edge_device_and_lock_from_either_syntax() {
+    let lua = scratch("switch-bindings-lua");
+    write(
+        &lua.join(".config/hypr/hyprland.lua"),
+        r#"
+o.bind("switch:on:Lid Switch", nil, "lock-now", { locked = true })
+hl.bind("switch:off:Lid Switch", "wake-panel")
+hl.bind("switch:Tablet Mode Switch", "flip")
+hl.bind("switch:on:", "nameless")
+hl.bind("switch:on:Gone", "gone")
+hl.unbind("switch:on:Gone")
+"#,
+    );
+    let conf = scratch("switch-bindings-conf");
+    write(
+        &conf.join(".config/hypr/hyprland.conf"),
+        concat!(
+            "bindl = , switch:on:Lid Switch, exec, lock-now\n",
+            "bind = , switch:off:Lid Switch, exec, wake-panel\n",
+            "bind = , switch:Tablet Mode Switch, exec, flip\n",
+            "bind = , switch:on:, exec, nameless\n",
+            "bind = , switch:on:Gone, exec, gone\n",
+            "unbind = , switch:on:Gone\n",
+        ),
+    );
+    for root in [lua, conf] {
+        let reading = read(&Roots::under(&root));
+        let shape: Vec<_> = reading.switch_bindings.iter().map(|b| (b.device.as_str(), b.edge, b.locked)).collect();
+        assert_eq!(
+            shape,
+            [
+                ("Lid Switch", crate::SwitchEdge::On, true),
+                ("Lid Switch", crate::SwitchEdge::Off, false),
+                ("Tablet Mode Switch", crate::SwitchEdge::Any, false),
+            ],
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(
+            reading.skipped.iter().any(|skip| skip.what.contains("switch:on:") && skip.why.contains("device name")),
+            "{root:?}: {:?}",
+            reading.skipped
+        );
+        assert!(reading.keybindings.is_empty(), "{root:?}: a switch is never a key chord");
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+        assert_eq!(config.switch_bindings, reading.switch_bindings, "{root:?}");
+    }
+}
+
+#[test]
+fn switch_bindings_are_bounded_and_run_by_exact_name_edge_and_lock() {
+    let mut reading = Reading::default();
+    let run = directive::Dispatcher::Exec("true".into());
+    for n in 0..=crate::SwitchBinding::MAX {
+        bind(&mut reading, &format!("switch:on:Switch {n}"), None, directive::BindFlags::default(), &run);
+    }
+    bind(&mut reading, "switch:on:Switch 0", None, directive::BindFlags::default(), &run);
+    assert_eq!(reading.switch_bindings.len(), crate::SwitchBinding::MAX, "a rebinding replaces within the bound");
+    assert!(
+        skipped_why(&reading, &format!("Switch {}", crate::SwitchBinding::MAX)).is_some_and(|why| why.contains("more than")),
+        "{:?}",
+        reading.skipped
+    );
+    let mut reading = Reading::default();
+    bind(&mut reading, &format!("switch:{}", "x".repeat(257)), None, directive::BindFlags::default(), &run);
+    assert!(reading.switch_bindings.is_empty());
+    assert_eq!(reading.skipped.len(), 1);
+
+    let binding = crate::SwitchBinding {
+        device: "Lid Switch".into(),
+        edge: crate::SwitchEdge::On,
+        action: Action::Run("x".into()),
+        locked: false,
+    };
+    assert!(binding.runs("Lid Switch", true, false));
+    assert!(!binding.runs("Lid Switch", false, false), "the other edge");
+    assert!(!binding.runs("lid switch", true, false), "names match exactly");
+    assert!(!binding.runs("Lid Switch", true, true), "an unlocked binding waits out the lock");
+    let locked = crate::SwitchBinding { locked: true, edge: crate::SwitchEdge::Any, ..binding };
+    assert!(locked.runs("Lid Switch", true, true) && locked.runs("Lid Switch", false, true));
+    assert_eq!(keys::switch_for("SWITCH:OFF:Lid Switch"), Some(("Lid Switch", crate::SwitchEdge::Off)));
+    assert_eq!(keys::switch_for("SUPER + L"), None);
 }
 
 // ---- window rules -----------------------------------------------------
@@ -2856,7 +2956,7 @@ fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
 ///
 /// `docs/omarchy-mode.md` tells a reader what they gain by having a
 /// real Omarchy configuration rather than the baked table — "167
-/// bindings over 119 commands, against the baked table's 151 over 83",
+/// bindings over 120 commands, against the baked table's 151 over 83",
 /// and 38 float rules where the hardcoded one had a single prefix.
 /// Those numbers are the argument for the whole module, and a number
 /// in prose is the first thing to go stale. Pinned here against the
@@ -2873,7 +2973,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert_eq!(
         reading.commands.len(),
-        119,
+        120,
         "commands declared for global and scoped bindings"
     );
     assert_eq!(
@@ -2887,17 +2987,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        173,
+        172,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("179\nbindings over 119 commands") || MODE.contains("179 bindings over 119 commands"),
-        "docs/omarchy-mode.md no longer quotes the 179 bindings over 119 commands this machine produces"
+        MODE.contains("179\nbindings over 120 commands") || MODE.contains("179 bindings over 120 commands"),
+        "docs/omarchy-mode.md no longer quotes the 179 bindings over 120 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=179 commands=119 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=173"),
+        GUIDE.contains("files=42 bindings=179 commands=120 env=8 autostart=4")
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=172"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

@@ -765,6 +765,10 @@ pub struct WaylandBackend {
     pub(crate) release_combos: Vec<KeyCombo>,
     pub(crate) locked_combos: Vec<KeyCombo>,
     pub(crate) repeating_combos: Vec<KeyCombo>,
+    /// Switch toggles, as device name and new state, waiting for
+    /// `dispatch_pending` to resolve them against the switch bindings.
+    /// Bounded where they are staged.
+    pub(crate) pending_switches: Vec<(String, bool)>,
     pub(crate) repeat_rate: u32,
     pub(crate) repeat_delay: std::time::Duration,
     /// The modal exclusive grab (`Backend::grab_keyboard`, the Alt-Tab
@@ -1074,6 +1078,7 @@ impl WaylandBackend {
             release_combos: Vec::new(),
             locked_combos: Vec::new(),
             repeating_combos: Vec::new(),
+            pending_switches: Vec::new(),
             repeat_rate: 25,
             repeat_delay: std::time::Duration::from_millis(200),
             pending_quit: Vec::new(),
@@ -2655,6 +2660,17 @@ impl Compositor {
         let phase_started = Instant::now();
         tracing::debug_span!("dispatch_phase", phase = "input")
             .in_scope(|| crate::input::tick_repeating_binding(self));
+        // Switch toggles resolve beside key bindings and run through the
+        // same `run_action`; on the lock screen only `locked` ones answer.
+        for (device, on) in std::mem::take(&mut self.wm.backend_mut().pending_switches) {
+            let locked = self.wm.backend().locked;
+            let actions = self.shell.switch_actions(&device, on, locked);
+            tracing::info!(?device, on, locked, actions = actions.len(), "switch toggle resolved");
+            for action in actions {
+                let outcome = self.shell.run_action(&mut self.wm, &action);
+                self.note_outcome(outcome);
+            }
+        }
         // Consecutive `PointerMotion` events coalesce to the most
         // recent one — same rationale as the X11 loop: during a fast
         // drag every intermediate position is stale by the time it

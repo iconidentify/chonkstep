@@ -64,6 +64,7 @@
 //! | `touch down\|motion SLOT X Y` | touch position in global output coordinates |
 //! | `touch up SLOT` | release a touch slot |
 //! | `touch cancel\|frame` | cancel the touch sequence or finish its input frame |
+//! | `switch lid\|tablet-mode on\|off NAME` | a hardware switch toggle from a switch device named NAME (spaces allowed, at most 256 bytes) |
 //! | `key CODE press\|release` | keyboard key by *evdev* keycode (`KEY_*` from input-event-codes.h; the xkb +8 offset is applied here) |
 //! | `primary-scale FACTOR` | changes the live primary-output scale through the production IPC mutation path |
 //! | `virtual-outputs split\|single\|compact\|aligned\|none` | changes nested output topology; `aligned` gives exact logical extents at 1x, 1.5x and 2x for pixel comparisons |
@@ -128,6 +129,7 @@ use std::path::PathBuf;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, GestureBeginEvent,
+    Switch, SwitchState, SwitchToggleEvent,
     GestureEndEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
     InputBackend, InputEvent, KeyState, KeyboardKeyEvent, PointerButtonEvent,
     PointerMotionAbsoluteEvent, TouchCancelEvent, TouchDownEvent, TouchEvent, TouchFrameEvent,
@@ -150,21 +152,38 @@ use crate::state::Compositor;
 #[derive(Debug)]
 pub(crate) struct TestInput;
 
-/// The one virtual device every injected event reports. Identity only
-/// — nothing in `input.rs` routes by device, but the `Event` trait
-/// requires one and honesty in logs is worth the ten lines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct TestDevice;
+/// The virtual device an injected event reports: the door itself for
+/// keys, pointer and touch, or a switch of the harness's naming, because
+/// switch bindings match their device by exact name. Nothing else in
+/// `input.rs` routes by device, but the `Event` trait requires one and
+/// honesty in logs is worth the lines.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TestDevice {
+    switch: Option<std::rc::Rc<str>>,
+}
+
+impl TestDevice {
+    const DOOR: Self = Self { switch: None };
+}
 
 impl Device for TestDevice {
     fn id(&self) -> String {
-        "chonkstep-test-door".into()
+        match self.switch {
+            None => "chonkstep-test-door".into(),
+            Some(_) => "chonkstep-test-switch".into(),
+        }
     }
     fn name(&self) -> String {
-        "chonkstep test door".into()
+        match &self.switch {
+            None => "chonkstep test door".into(),
+            Some(name) => name.to_string(),
+        }
     }
     fn has_capability(&self, capability: DeviceCapability) -> bool {
-        matches!(capability, DeviceCapability::Keyboard | DeviceCapability::Pointer | DeviceCapability::Touch)
+        match self.switch {
+            None => matches!(capability, DeviceCapability::Keyboard | DeviceCapability::Pointer | DeviceCapability::Touch),
+            Some(_) => matches!(capability, DeviceCapability::Switch),
+        }
     }
     fn usb_id(&self) -> Option<(u32, u32)> {
         None
@@ -190,7 +209,7 @@ impl Event<TestInput> for TestKeyEvent {
         self.time
     }
     fn device(&self) -> TestDevice {
-        TestDevice
+        TestDevice::DOOR
     }
 }
 
@@ -221,7 +240,7 @@ impl Event<TestInput> for TestButtonEvent {
         self.time
     }
     fn device(&self) -> TestDevice {
-        TestDevice
+        TestDevice::DOOR
     }
 }
 
@@ -250,7 +269,7 @@ impl Event<TestInput> for TestMotionEvent {
         self.time
     }
     fn device(&self) -> TestDevice {
-        TestDevice
+        TestDevice::DOOR
     }
 }
 
@@ -281,7 +300,7 @@ pub(crate) struct TestTouchEvent {
 
 impl Event<TestInput> for TestTouchEvent {
     fn time(&self) -> u64 { self.position.time }
-    fn device(&self) -> TestDevice { TestDevice }
+    fn device(&self) -> TestDevice { TestDevice::DOOR }
 }
 
 impl AbsolutePositionEvent<TestInput> for TestTouchEvent {
@@ -315,7 +334,7 @@ impl Event<TestInput> for TestSwipeEvent {
         self.time
     }
     fn device(&self) -> TestDevice {
-        TestDevice
+        TestDevice::DOOR
     }
 }
 impl GestureBeginEvent<TestInput> for TestSwipeEvent {
@@ -336,6 +355,33 @@ impl GestureSwipeUpdateEvent<TestInput> for TestSwipeEvent {
     }
     fn delta_y(&self) -> f64 {
         self.delta.1
+    }
+}
+
+/// Injected switch toggle, from the switch device the command names.
+#[derive(Debug)]
+pub(crate) struct TestSwitchEvent {
+    device: TestDevice,
+    switch: Switch,
+    state: SwitchState,
+    time: u64,
+}
+
+impl Event<TestInput> for TestSwitchEvent {
+    fn time(&self) -> u64 {
+        self.time
+    }
+    fn device(&self) -> TestDevice {
+        self.device.clone()
+    }
+}
+
+impl SwitchToggleEvent<TestInput> for TestSwitchEvent {
+    fn switch(&self) -> Option<Switch> {
+        Some(self.switch)
+    }
+    fn state(&self) -> SwitchState {
+        self.state
     }
 }
 
@@ -363,7 +409,7 @@ impl InputBackend for TestInput {
     type TabletToolProximityEvent = UnusedEvent;
     type TabletToolTipEvent = UnusedEvent;
     type TabletToolButtonEvent = UnusedEvent;
-    type SwitchToggleEvent = UnusedEvent;
+    type SwitchToggleEvent = TestSwitchEvent;
     type SpecialEvent = ();
 }
 
@@ -618,11 +664,36 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             };
             crate::input::process_input_event::<TestInput>(comp, input);
         }
+        Some("switch") => {
+            let switch = match words.next() {
+                Some("lid") => Switch::Lid,
+                Some("tablet-mode") => Switch::TabletMode,
+                _ => {
+                    reply_err(stream, "switch wants lid|tablet-mode on|off NAME");
+                    return;
+                }
+            };
+            let state = match words.next() {
+                Some("on") => SwitchState::On,
+                Some("off") => SwitchState::Off,
+                _ => {
+                    reply_err(stream, "switch wants lid|tablet-mode on|off NAME");
+                    return;
+                }
+            };
+            let name = words.collect::<Vec<_>>().join(" ");
+            if name.is_empty() || name.len() > 256 {
+                reply_err(stream, "switch NAME must be 1 to 256 bytes");
+                return;
+            }
+            let event = TestSwitchEvent { device: TestDevice { switch: Some(name.into()) }, switch, state, time };
+            crate::input::process_input_event::<TestInput>(comp, InputEvent::SwitchToggle { event });
+        }
         Some("input-reset") => {
             match words.next() {
                 Some("resume") => crate::input::resynchronise_input_after_resume(comp),
                 Some("pause") => crate::input::gestures::cancel(comp),
-                Some("device") => crate::input::process_input_event::<TestInput>(comp, InputEvent::DeviceRemoved { device: TestDevice }),
+                Some("device") => crate::input::process_input_event::<TestInput>(comp, InputEvent::DeviceRemoved { device: TestDevice::DOOR }),
                 _ => reply_err(stream, "input-reset wants pause|resume|device"),
             }
         }

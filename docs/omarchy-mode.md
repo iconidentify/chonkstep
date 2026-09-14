@@ -185,7 +185,7 @@ between "chonkstep knows what Omarchy's chords were in August" and
 their UI and the running session follows it within a second.
 
 On the machine this was developed on the live read produced **179
-bindings over 119 commands**, against the baked table's 151 over 83 —
+bindings over 120 commands**, against the baked table's 151 over 83 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
 file test that only a live read can make, and Omarchy's twelve keyboard

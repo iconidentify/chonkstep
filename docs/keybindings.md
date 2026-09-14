@@ -316,7 +316,7 @@ explains each limit; the live configuration reader supports additional chords.
 | `super+ctrl+delete` | toggle the laptop display | disables an output, which ChonkStep does not do |
 | `super+ctrl+alt+delete` | toggle laptop display mirroring | mirrors an output, which ChonkStep does not do |
 | `super+ctrl+z / super+ctrl+alt+z`                                                                  | cursor zoom in / reset                                               | commands Hyprland beyond the requests ChonkStep serves      |
-| `switch:on/off:Lid Switch`                                                                         | run the lid-close and clamshell handlers                             | not a key chord this config format can express              |
+| `switch:on/off:Lid Switch`                                                                         | run the lid-close and clamshell handlers                             | a switch binding, which only the live Omarchy configuration carries |
 | `touchpad toggle / on / off`                                                                       | enable and disable the touchpad                                      | commands Hyprland beyond the requests ChonkStep serves      |
 | `super+ctrl+x, f9`                                                                                 | voxtype dictation: toggle, and push-to-talk                          | Omarchy binds it conditionally; a table of constants cannot |
 
