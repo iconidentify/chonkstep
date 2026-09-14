@@ -261,7 +261,7 @@ pub(crate) fn build_scene_into(
             if !entry.surface.alive() {
                 continue;
             }
-            let Some(monitor) = backend.monitors.get(entry.output) else {
+            let Some(monitor) = entry.output.and_then(|index| backend.monitors.get(index)) else {
                 continue;
             };
             if overlap_area(monitor.geometry, viewport) == 0 {
@@ -583,9 +583,9 @@ pub(crate) fn send_frame_callbacks(
     if backend.locked {
         for entry in &backend.lock_surfaces {
             if entry.surface.alive()
-                && backend
-                    .monitors
-                    .get(entry.output)
+                && entry
+                    .output
+                    .and_then(|index| backend.monitors.get(index))
                     .is_some_and(|monitor| monitor.geometry == output_rect)
             {
                 send_tree(entry.surface.wl_surface());
@@ -697,7 +697,7 @@ pub(crate) fn take_presentation_feedback(
     if backend.locked {
         for entry in &backend.lock_surfaces {
             if entry.surface.alive()
-                && backend.monitors.get(entry.output).is_some_and(|monitor| monitor.geometry == output_rect)
+                && entry.output.and_then(|index| backend.monitors.get(index)).is_some_and(|monitor| monitor.geometry == output_rect)
             {
                 take_tree(entry.surface.wl_surface());
             }

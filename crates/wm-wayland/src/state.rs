@@ -2097,6 +2097,17 @@ pub(crate) fn transform_number(transform: Transform) -> i32 {
 /// Session outputs have already been inserted/removed when this is
 /// called; this half owns protocol globals, monitor policy, shell
 /// resize, and the index-bearing layer/lock records.
+/// Where an index into `Compositor::outputs` points once entry `removed`
+/// has left: nowhere for the removed entry itself, one lower for every
+/// later one.
+fn reindex_after_removal(output: Option<usize>, removed: usize) -> Option<usize> {
+    match output {
+        Some(at) if at == removed => None,
+        Some(at) if at > removed => Some(at - 1),
+        other => other,
+    }
+}
+
 pub(crate) fn apply_connector_hotplug(
     comp: &mut Compositor,
     removed: &[usize],
@@ -2128,11 +2139,10 @@ pub(crate) fn apply_connector_hotplug(
                 layer.output -= 1;
             }
         });
-        backend.lock_surfaces.retain(|surface| surface.output != index);
+        // A lock surface on the removed output stays its client's until
+        // the client destroys it; it simply names no output any more.
         for surface in &mut backend.lock_surfaces {
-            if surface.output > index {
-                surface.output -= 1;
-            }
+            surface.output = reindex_after_removal(surface.output, index);
         }
     }
 
@@ -4742,6 +4752,14 @@ fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32,
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn removing_an_output_unassigns_its_lock_surfaces_and_shifts_later_ones() {
+        assert_eq!(reindex_after_removal(Some(1), 1), None);
+        assert_eq!(reindex_after_removal(Some(2), 1), Some(1));
+        assert_eq!(reindex_after_removal(Some(0), 1), Some(0));
+        assert_eq!(reindex_after_removal(None, 0), None, "an unassigned surface stays unassigned");
+    }
 
     #[test]
     fn frame_stats_use_bounded_power_of_two_buckets_and_saturating_counts() {

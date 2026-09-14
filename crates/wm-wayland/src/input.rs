@@ -3162,7 +3162,7 @@ fn lock_hit(
         if !entry.surface.alive() {
             continue;
         }
-        let Some(monitor) = backend.monitors.get(entry.output) else {
+        let Some(monitor) = entry.output.and_then(|index| backend.monitors.get(index)) else {
             continue;
         };
         if !monitor.geometry.contains(at) {
