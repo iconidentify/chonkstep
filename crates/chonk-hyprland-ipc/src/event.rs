@@ -40,7 +40,7 @@
 //! 1. `monitoradded`, `monitoraddedv2`, `createworkspacev2` — things others will refer to
 //! 2. `openwindow` — needs its workspace to exist
 //! 3. `movewindowv2`, `windowtitlev2`, `urgent` — need their window to exist
-//! 4. `workspacev2`, `focusedmon`, `activewindowv2`, `fullscreen` — focus
+//! 4. `workspacev2`, `activespecial`, `focusedmon`, `activewindowv2`, `fullscreen` — focus
 //! 5. `closewindow`, `destroyworkspacev2`, `monitorremoved` — removals last
 //!
 //! # Address formatting is not cosmetic
@@ -53,7 +53,7 @@
 //! match Hyprland byte for byte, because `socat` transcripts get
 //! compared against real ones by people debugging bars.
 
-use crate::state::{Snapshot, Window, Workspace};
+use crate::state::{Snapshot, SpecialWorkspace, Window, Workspace};
 
 /// One line of the event stream, already formatted.
 ///
@@ -158,13 +158,18 @@ impl Differ {
                 ));
             }
         }
+        for special in &now.specials {
+            if !previous.specials.iter().any(|old| old.index == special.index) {
+                events.push(Event::new("createworkspacev2", format!("{},{}", special.hypr_id(), special.hypr_name())));
+            }
+        }
 
         // --- 2. windows that appeared ---------------------------------
         for window in &now.windows {
             if previous.windows.iter().any(|old| old.id == window.id) {
                 continue;
             }
-            let workspace = workspace_name(now, window.workspace);
+            let workspace = window_workspace_name(now, window);
             events.push(Event::new(
                 "openwindow",
                 format!("{},{},{},{}", address(window), workspace, window.class, window.title),
@@ -194,17 +199,9 @@ impl Differ {
             let Some(old) = previous.windows.iter().find(|old| old.id == window.id) else {
                 continue;
             };
-            if old.workspace != window.workspace {
-                let workspace = now.workspaces.iter().find(|w| w.index == window.workspace);
-                events.push(Event::new(
-                    "movewindowv2",
-                    format!(
-                        "{},{},{}",
-                        address(window),
-                        workspace.map_or(1, Workspace::hypr_id),
-                        workspace.map_or_else(|| "1".to_string(), Workspace::hypr_name),
-                    ),
-                ));
+            if old.workspace != window.workspace || old.special != window.special {
+                let (id, name) = window_workspace_id_name(now, window);
+                events.push(Event::new("movewindowv2", format!("{},{},{}", address(window), id, name)));
             }
             if old.floating != window.floating {
                 events.push(Event::new(
@@ -232,6 +229,30 @@ impl Differ {
                 events.push(Event::new("workspacev2", format!("{},{}", workspace.hypr_id(), workspace.hypr_name())));
                 events.push(Event::new("workspace", workspace.hypr_name()));
             }
+        }
+
+        // A special workspace shown or hidden on an output. Hyprland
+        // spells "hidden" as an empty name (and an empty id in the v2
+        // form) before the monitor name.
+        for monitor in &now.monitors {
+            let Some(old) = previous.monitors.iter().find(|old| old.id == monitor.id) else { continue };
+            if old.special_workspace == monitor.special_workspace {
+                continue;
+            }
+            let shown = monitor.special_workspace.as_deref().and_then(|name| now.special_named(name));
+            events.push(Event::new(
+                "activespecial",
+                format!("{},{}", shown.map(SpecialWorkspace::hypr_name).unwrap_or_default(), monitor.name),
+            ));
+            events.push(Event::new(
+                "activespecialv2",
+                format!(
+                    "{},{},{}",
+                    shown.map(|special| special.hypr_id().to_string()).unwrap_or_default(),
+                    shown.map(SpecialWorkspace::hypr_name).unwrap_or_default(),
+                    monitor.name
+                ),
+            ));
         }
 
         let old_monitor = previous.focused_monitor().map(|monitor| monitor.name.clone());
@@ -292,6 +313,11 @@ impl Differ {
                 ));
             }
         }
+        for special in &previous.specials {
+            if !now.specials.iter().any(|new| new.index == special.index) {
+                events.push(Event::new("destroyworkspacev2", format!("{},{}", special.hypr_id(), special.hypr_name())));
+            }
+        }
         for monitor in &previous.monitors {
             if !now.monitors.iter().any(|new| new.id == monitor.id) {
                 events.push(Event::new("monitorremoved", monitor.name.clone()));
@@ -311,12 +337,21 @@ impl Differ {
     }
 }
 
-fn workspace_name(snapshot: &Snapshot, index: usize) -> String {
-    snapshot
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.index == index)
-        .map_or_else(|| "1".to_string(), Workspace::hypr_name)
+/// The `id, name` pair of where `window` lives: its special workspace
+/// while it is a member, its numbered workspace otherwise.
+fn window_workspace_id_name(snapshot: &Snapshot, window: &Window) -> (i32, String) {
+    if let Some(special) = window.special.as_deref().and_then(|name| snapshot.special_named(name)) {
+        return (special.hypr_id(), special.hypr_name());
+    }
+    let workspace = snapshot.workspaces.iter().find(|workspace| workspace.index == window.workspace);
+    (
+        workspace.map_or(1, Workspace::hypr_id),
+        workspace.map_or_else(|| "1".to_string(), Workspace::hypr_name),
+    )
+}
+
+fn window_workspace_name(snapshot: &Snapshot, window: &Window) -> String {
+    window_workspace_id_name(snapshot, window).1
 }
 
 /// The `configreloaded` event, which asks every client to re-query.

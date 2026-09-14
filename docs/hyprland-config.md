@@ -154,8 +154,8 @@ windowrule   = float on, match:class steam               # 0.53+
 
 The supported properties are `float`, `size`, `move`, `center`,
 `idle_inhibit`, `pin`, `no_focus`, `no_initial_focus`,
-`focus_on_activate`, `fullscreen`, `maximize`, `suppress_event`, and
-`scroll_touchpad`. They match `class` and `title` as regular
+`focus_on_activate`, `fullscreen`, `maximize`, `suppress_event`,
+`scroll_touchpad`, and `workspace`. They match `class` and `title` as regular
 expressions, matched against the entire class or title, as in Hyprland's
 `RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
@@ -218,6 +218,19 @@ still apply, and an application may still leave a state it did not ask
 for. `activate` and `activatefocus` stop activation requests from
 focusing the window, like `focus_on_activate = false`. Any other event is
 reported by name.
+
+`workspace` maps the window somewhere other than the current
+workspace: a number (`workspace = "3"`), `special` for the default
+special workspace, or `special:NAME`. Adding `silent` (`"special
+silent"`, `"3 silent"`) sends it there without following — no switch,
+no shown overlay and no initial focus — which is how Omarchy's
+`apps/browser.lua` keeps Chromium's "is sharing your screen" bar off
+the desk, and out of the tiling, for the length of a call. Without
+`silent` a numbered target is switched to and a special one shown.
+`name:…` and the relative forms are refused by name: chonkstep
+workspaces are numbered. `hl.workspace_rule` for a special workspace
+(`gaps_out`, `on_created_empty` and `dim_special`, which Omarchy's
+agent console sets for `special:scratchpad`) is not read yet.
 
 Every unsupported property produces its own `Skipped` line naming both
 the property and matcher. A rule with an unsupported matcher is refused
@@ -433,9 +446,19 @@ the workarea. Floating windows retain traditional movement and resizing.
 
 Silent workspace sends (`movetoworkspacesilent 1..99`) are native too:
 the active window moves without changing the current workspace, and an
-exposed window receives focus. The scratchpad form remains mapped to
-`miniaturize`, because Chonkstep models recoverable desktop icons rather
-than a special scratchpad workspace.
+exposed window receives focus. So is the scratchpad.
+`togglespecialworkspace [NAME]` (Lua
+`hl.dsp.workspace.toggle_special("NAME")`) shows the named special
+workspace as an overlay on the active output, above pinned windows, or
+hides it again when it is the one shown there; `movetoworkspacesilent
+special:NAME` (Lua `hl.dsp.window.move({ workspace = "special:NAME",
+follow = false })`) sends the focused window there without following;
+and the following form, `movetoworkspace special:NAME`, shows the
+special and keeps the keyboard on the window. A bare `special` is the
+default special workspace. Omarchy's `SUPER + S` and `SUPER + ALT + S`
+are the first two, and a window sent away comes back with the chord
+that hid it. `miniaturize` keeps its own chord and its place in the
+window menu. Named workspaces (`name:…`) remain unbound.
 
 A last group is refused for a different reason — *declined on purpose*,
 meaning chonkstep could bind them and does not, because what it would
@@ -451,6 +474,12 @@ do is not what you are asking for:
   and a cheatsheet that lies is worse than none.
 
 ### Input and binding behavior
+
+`binds.hide_special_on_workspace_change`, which Omarchy turns on, makes
+a workspace switch hide the special workspace shown on the output the
+switch lands on. Off — Hyprland's own default — the scratchpad stays
+shown across the switch. The rest of the `binds` table is Hyprland's
+own binding behaviour and is reported rather than carried.
 
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
 build the seat's xkb keymap. A value Hyprland would compute as it runs,
@@ -638,8 +667,8 @@ shape this reader cannot follow. There is never a moment where both are
 in effect.
 
 The preset's *judgements* are carried over rather than re-argued: the
-same `Unbound` reasons, the same deliberate handling of unsupported operations, the same
-scratchpad-to-`miniaturize` call. `docs/keybindings.md` still documents
+same `Unbound` reasons and the same deliberate handling of unsupported
+operations. `docs/keybindings.md` still documents
 that table, and it remains accurate for a machine with no Hyprland
 configuration on it.
 
@@ -757,8 +786,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=187 commands=121 env=8 autostart=4
-      float_rules=48 monitors=1 skipped=152
+      files=42 bindings=188 commands=121 env=8 autostart=4
+      float_rules=49 monitors=1 skipped=150
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

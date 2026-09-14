@@ -1346,10 +1346,33 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
         }),
         None => {}
     }
-    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor"))) {
+    match root.iter().find(|(key, _)| key.as_deref() == Some("binds")).map(|(_, value)| value) {
+        Some(Value::Table(fields)) => {
+            for (key, value) in fields {
+                let Some(key) = key else { continue };
+                out.push(match (value, property_text(value)) {
+                    (Value::Table(_), _) => Directive::Ignored {
+                        kind: "binds",
+                        detail: format!("nested binds setting {key} is not implemented"),
+                    },
+                    (_, Some(value)) => Directive::Binds { name: key.clone(), value },
+                    (_, None) => Directive::Ignored {
+                        kind: "binds",
+                        detail: format!("{key} = {}: computed at runtime, not carried over", describe(value)),
+                    },
+                });
+            }
+        }
+        Some(_) => out.push(Directive::Ignored {
+            kind: "binds",
+            detail: "hl.config binds table is unreadable".into(),
+        }),
+        None => {}
+    }
+    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor" | "binds"))) {
         out.push(Directive::Ignored {
             kind: "config",
-            detail: "hl.config settings outside input, cursor and general.layout are not carried over".into(),
+            detail: "hl.config settings outside input, cursor, binds and general.layout are not carried over".into(),
         });
     }
 }

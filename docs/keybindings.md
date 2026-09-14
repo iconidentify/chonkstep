@@ -110,7 +110,7 @@ example:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-161 bindings, including four native capture shortcuts, derived from Omarchy's
+162 bindings, including four native capture shortcuts, derived from Omarchy's
 own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
@@ -119,10 +119,10 @@ in `[commands]`; the third column is the argv it runs, which is
 Omarchy's own command line. Selecting this keymap declares all 86 of
 those commands, so nothing here needs a `[commands]` table of your own.
 
-Three of these differ from what Omarchy does with the chord —
-`super+f`/`super+alt+f`, `super+alt+s`, and the chonkstep verb on
+Two of these differ from what Omarchy does with the chord —
+`super+f`/`super+alt+f`, and the chonkstep verb on
 `control+escape` — and
-[omarchy-mode.md](omarchy-mode.md#three-chords-we-do-differently) spells
+[omarchy-mode.md](omarchy-mode.md#two-chords-we-do-differently) spells
 out how. Omarchy's locked media/brightness keys, repeating ramps, and
 release bindings retain those firing semantics under chonkstep.
 
@@ -213,7 +213,8 @@ helpers are supported directly.
 | `super+shift+alt+8`      | `workspace-send 8`                     | --                                                                                                                  |
 | `super+shift+alt+9`      | `workspace-send 9`                     | --                                                                                                                  |
 | `super+shift+alt+0`      | `workspace-send 10`                    | --                                                                                                                  |
-| `super+alt+s`            | `miniaturize`                          | --                                                                                                                  |
+| `super+s`                | `toggle-special scratchpad`            | --                                                                                                                  |
+| `super+alt+s`            | `special-send scratchpad`              | --                                                                                                                  |
 | `super+slash` | `run omarchy-monitor-scaling-up` | `omarchy-hyprland-monitor-scaling up` |
 | `super+alt+slash` | `run omarchy-monitor-scaling-down` | `omarchy-hyprland-monitor-scaling down` |
 | `super+ctrl+v`           | `run omarchy-clipboard`                | `omarchy-shell shell toggle omarchy.clipboard`                                                                      |
@@ -302,7 +303,7 @@ helpers are supported directly.
 
 ### Deliberately unbound
 
-21 groups of Omarchy chords remain unbound in the static preset. The table
+20 groups of Omarchy chords remain unbound in the static preset. The table
 explains each limit; the live configuration reader supports additional chords.
 
 | Omarchy chord                                                                                      | What Omarchy does with it                                            | Why not here                                                |
@@ -315,7 +316,6 @@ explains each limit; the live configuration reader supports additional chords.
 | `super+ctrl+left / super+ctrl+right` | move the grouped-window focus | requires window groups or a feature ChonkStep does not provide |
 | `super+alt+1..5` | focus the nth window of the group | requires window groups or a feature ChonkStep does not provide |
 | `super+alt/ctrl+minus/equal` | large resize increments | chonkstep has no verb for it, and no command can stand in |
-| `super+s`                                                                                          | toggle the scratchpad workspace                                      | chonkstep has no verb for it, and no command can stand in   |
 | `super+mouse wheel, super+drag`                                                                    | scroll through workspaces; move and resize by mouse                  | not a key chord this config format can express              |
 | `super+k`                                                                                          | Omarchy's keybinding cheatsheet                                      | declined on purpose — see the note under the table          |
 | `super+shift+space`                                                                                | toggle Omarchy's top bar                                             | chonkstep has no verb for it, and no command can stand in   |

@@ -187,6 +187,19 @@ fn action_label(action: &Action) -> (&'static str, String, bool) {
             format!("Move window to desktop {} and follow", n + 1),
             *n == 0,
         ),
+        ToggleSpecial(name) => (
+            "SPACES & WORKSPACES",
+            format!("Show / hide the {name} scratchpad"),
+            true,
+        ),
+        SendToSpecial { name, follow } => (
+            "SPACES & WORKSPACES",
+            format!(
+                "Send window to the {name} scratchpad{}",
+                if *follow { " and follow" } else { "" }
+            ),
+            true,
+        ),
         Capture(mode) => (
             "CAPTURE",
             match mode {

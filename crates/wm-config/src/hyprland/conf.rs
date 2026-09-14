@@ -86,7 +86,10 @@ pub fn read(
                         kind: "block",
                         detail: format!("{name} {{ … }}: only layout is read; the rest is Hyprland's look"),
                     });
-                } else if !name.eq_ignore_ascii_case("input") && !name.eq_ignore_ascii_case("cursor") {
+                } else if !name.eq_ignore_ascii_case("input")
+                    && !name.eq_ignore_ascii_case("cursor")
+                    && !name.eq_ignore_ascii_case("binds")
+                {
                     out.push(Directive::Ignored {
                         kind: "block",
                         detail: format!("{name} {{ … }}: a Hyprland subsystem this desktop has its own answer for"),
@@ -105,6 +108,11 @@ pub fn read(
                 out.push(Directive::Ignored {
                     kind: "cursor",
                     detail: format!("nested cursor block {name} {{ … }} is not implemented"),
+                });
+            } else if block.first().is_some_and(|root| root.eq_ignore_ascii_case("binds")) {
+                out.push(Directive::Ignored {
+                    kind: "binds",
+                    detail: format!("nested binds block {name} {{ … }} is not implemented"),
                 });
             } else if block.first().is_some_and(|root| root.eq_ignore_ascii_case("device")) {
                 out.push(Directive::Ignored {
@@ -140,6 +148,17 @@ pub fn read(
                     }),
                     None => out.push(Directive::Ignored {
                         kind: "cursor",
+                        detail: truncate(line),
+                    }),
+                }
+            } else if block.len() == 1 && block[0].eq_ignore_ascii_case("binds") {
+                match line.split_once('=') {
+                    Some((name, value)) => out.push(Directive::Binds {
+                        name: name.trim().to_ascii_lowercase(),
+                        value: substitute(value.trim(), vars),
+                    }),
+                    None => out.push(Directive::Ignored {
+                        kind: "binds",
                         detail: truncate(line),
                     }),
                 }

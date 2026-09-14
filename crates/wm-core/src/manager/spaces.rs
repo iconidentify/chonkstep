@@ -533,6 +533,7 @@ impl<B: Backend> WindowManager<B> {
 
     /// Called at topology/configuration boundaries, never at frame cadence.
     pub fn reconcile_display_spaces(&mut self) {
+        self.prune_special_shown();
         if !self.spaces_mode() || !self.interaction.separate_spaces {
             return;
         }
@@ -1088,8 +1089,7 @@ impl<B: Backend> WindowManager<B> {
                 continue;
             }
             if !self.monitors_ref().is_empty() && !self.mac_client_hidden(id)
-                && (self.workspace_visible(client.workspace)
-                    || client.flags.contains(ClientFlags::STICKY))
+                && self.client_placed_on_screen(client)
             {
                 self.show_client_surface(id);
                 self.repaint_decoration(id);
@@ -1122,7 +1122,9 @@ impl<B: Backend> WindowManager<B> {
         state.snapshot.selected.clone_from(&display.key);
         self.previous_workspace = Some(self.current_workspace);
         self.current_workspace = workspace;
+        self.hide_special_for_workspace_switch(workspace);
         self.refresh_space_visibility();
+        self.raise_shown_specials();
         let next = self
             .focus_history
             .iter()

@@ -121,6 +121,9 @@ pub struct SessionState {
     /// Whether focus also raises. Only the focus a pointer crossing
     /// hands out consults this; a click raises regardless.
     pub autoraise: bool,
+    /// Whether a workspace switch hides the special workspace shown on
+    /// the output it lands on.
+    pub hide_special_on_workspace_change: bool,
     pub placement: PlacementPolicy,
     pub edge_resistance: u32,
     pub terminal_font_px: f32,
@@ -263,6 +266,7 @@ impl SessionState {
                 FocusPolicy::ClickToFocus
             },
             autoraise: config.autoraise,
+            hide_special_on_workspace_change: config.hide_special_on_workspace_change,
             placement: config.placement,
             edge_resistance: config.edge_resistance,
             terminal_font_px: config.terminal_font_px,
@@ -1005,6 +1009,7 @@ mod tests {
             scale_override: None,
             focus: FocusPolicy::ClickToFocus,
             autoraise: true,
+            hide_special_on_workspace_change: false,
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: 20.0,

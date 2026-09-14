@@ -304,6 +304,9 @@ pub struct Reading {
     /// index — Hyprland's workspace N is index N−1, as the IPC path
     /// resolves it — with a later rule for the same workspace winning.
     pub workspace_layouts: BTreeMap<usize, wm_core::LayoutMode>,
+    /// `binds:hide_special_on_workspace_change`, when the configuration
+    /// says either way.
+    pub hide_special_on_workspace_change: Option<bool>,
     /// Every file actually read, in order. The [`Watch`]'s signature is
     /// taken over exactly this list.
     pub files: Vec<PathBuf>,
@@ -349,7 +352,7 @@ impl Reading {
         // future category cannot silently disappear at this loading boundary.
         let Self {
             keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
-            float_rules, monitors, input, default_layout, workspace_layouts, files: _, skipped: _,
+            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, files: _, skipped: _,
         } = self;
         keybindings.is_empty()
             && explicit_keys.is_empty()
@@ -364,6 +367,7 @@ impl Reading {
             && *input == crate::InputConfig::default()
             && default_layout.is_none()
             && workspace_layouts.is_empty()
+            && hide_special_on_workspace_change.is_none()
     }
 
     /// Logs the read: one summary line, and one line per thing
@@ -579,6 +583,9 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
     }
     config.session_env = reading.env.clone();
     config.input = reading.input.clone();
+    if let Some(hide) = reading.hide_special_on_workspace_change {
+        config.hide_special_on_workspace_change = hide;
+    }
     config.monitor_rules = reading.monitors.lines.clone();
     config.autostart = reading.autostart.clone();
     config.float_policy = reading.float_rules.clone().policy();
@@ -964,6 +971,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
             }
             Directive::Input { name, value } => input(&mut reading, &name, &value),
             Directive::Cursor { name, value } => cursor(&mut reading, &name, &value),
+            Directive::Binds { name, value } => binds(&mut reading, &name, &value),
             Directive::Device { name, settings } => device(&mut reading, name, settings),
             Directive::ExecOnce { command } => autostart(&mut reading, &command),
             Directive::WindowRule(rule) => window_rules.push(rule),
@@ -1363,6 +1371,30 @@ fn cursor(reading: &mut Reading, name: &str, value: &str) {
     };
     reading.skipped.push(Skipped {
         kind: "cursor".into(),
+        what: format!("{name} = {value}"),
+        why: why.into(),
+    });
+}
+
+/// One key of the `binds` table. The one carried is the scratchpad's:
+/// whether a workspace switch takes the shown special down with it.
+/// Everything else in the table is Hyprland's own binding behaviour,
+/// which this desktop answers its own way.
+fn binds(reading: &mut Reading, name: &str, value: &str) {
+    let value = value.trim().trim_matches(['\"', '\'']);
+    let name = name.trim().to_ascii_lowercase();
+    let why = match name.as_str() {
+        "hide_special_on_workspace_change" => match toggle(value) {
+            Some(hide) => {
+                reading.hide_special_on_workspace_change = Some(hide);
+                return;
+            }
+            None => "hide_special_on_workspace_change must be true or false",
+        },
+        _ => "binds setting is not implemented",
+    };
+    reading.skipped.push(Skipped {
+        kind: "binds".into(),
         what: format!("{name} = {value}"),
         why: why.into(),
     });

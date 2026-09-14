@@ -17,7 +17,9 @@ use crate::resize;
 use crate::snap;
 mod mac;
 mod spaces;
+mod special;
 pub use spaces::{DisplaySpace, DisplaySpacesSnapshot, Space, SpaceHomeGeometry, FULLSCREEN_SPACE_STAYS_HOME, SHARED_DESKTOP_SPANS_DISPLAYS};
+pub use special::{normalize_special_name, DEFAULT_SPECIAL_NAME, MAX_SPECIAL_NAME, MAX_SPECIAL_WORKSPACES};
 use crate::types::{
     BackendEvent, ClientChrome, DragHandle, FullscreenMode, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
     NetStateSnapshot, SurfaceRef, WindowType,
@@ -330,6 +332,15 @@ pub struct WindowManager<B: Backend> {
     /// workspace never explicitly set follows when the default changes.
     /// Installed by the shell from the desktop's configuration.
     default_layout: crate::LayoutMode,
+    /// The special workspaces created so far, in creation order and
+    /// never removed, so an index is a stable identity for the session.
+    /// See `special.rs`.
+    specials: Vec<special::SpecialWorkspace>,
+    /// Output identity key -> index of the special workspace shown there.
+    special_shown: HashMap<String, usize>,
+    /// Whether a workspace switch hides the special shown on the output
+    /// it lands on — Omarchy's `binds.hide_special_on_workspace_change`.
+    hide_special_on_workspace_change: bool,
     layout_drop: Option<(ClientId, ClientId)>,
     layout_resize_snapshot: Option<crate::spatial::ResizeSnapshot>,
     layout_statistics: crate::LayoutStatistics,
@@ -428,6 +439,9 @@ impl<B: Backend> WindowManager<B> {
             workspace_count: 1,
             layouts: vec![crate::spatial::WorkspaceLayout::default()],
             default_layout: crate::LayoutMode::Freeform,
+            specials: Vec::new(),
+            special_shown: HashMap::new(),
+            hide_special_on_workspace_change: false,
             layout_drop: None,
             layout_resize_snapshot: None,
             layout_statistics: crate::LayoutStatistics::default(),
@@ -830,6 +844,7 @@ impl<B: Backend> WindowManager<B> {
     /// geometry obey the same rules if the X backend grows RandR
     /// hotplug later.
     pub fn rescue_clients_from_removed_monitor(&mut self, departed: Rect) {
+        self.prune_special_shown();
         if self.separate_spaces() { self.reconcile_display_spaces(); return; }
         self.end_active_drag();
         let monitors = self.backend.monitors();
@@ -984,9 +999,7 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get(id) else {
             return false;
         };
-        let showing = client.lifecycle == Lifecycle::Normal
-            && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY));
-        showing
+        self.client_on_screen(client)
             && match mode {
                 IdleInhibitRule::None => false,
                 IdleInhibitRule::Always => true,
@@ -1045,7 +1058,7 @@ impl<B: Backend> WindowManager<B> {
         if pinned {
             self.show_client_surface(id);
             self.raise_client(id);
-        } else if self.clients.get(id).is_some_and(|client| !self.workspace_visible(client.workspace)) {
+        } else if !self.client_visible(id) {
             self.focus_successor_of(id);
             self.hide_client_surface(id);
         }
@@ -1139,11 +1152,11 @@ impl<B: Backend> WindowManager<B> {
 
     /// Whether `client` is somewhere the user can see it: mapped
     /// (neither miniaturized nor withdrawn) and on a visible workspace,
-    /// or pinned to all of them. The one condition keyboard focus is
-    /// never granted without.
+    /// pinned to all of them, or a member of a special workspace that
+    /// is shown. The one condition keyboard focus is never granted
+    /// without; [`Self::client_visible`] is the by-id form.
     fn client_on_screen(&self, client: &Client<B>) -> bool {
-        client.lifecycle == Lifecycle::Normal
-            && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
+        client.lifecycle == Lifecycle::Normal && self.client_placed_on_screen(client)
     }
 
     /// Every focusable client, most-recently-focused first, with any
@@ -1170,7 +1183,7 @@ impl<B: Backend> WindowManager<B> {
             || (self.separate_spaces() && self.monitors_ref().is_empty()) { return false; }
         self.clients.get(id).is_some_and(|client| {
             matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
-                && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
+                && self.client_placed_on_screen(client)
                 && !client.flags.contains(ClientFlags::NO_FOCUS)
         })
     }
@@ -1460,6 +1473,7 @@ impl<B: Backend> WindowManager<B> {
             // their lifecycle, and sticky windows were already on screen.
             if client.lifecycle == Lifecycle::Normal
                 && !client.flags.contains(ClientFlags::STICKY)
+                && client.special.is_none()
                 && old != previous
                 && client.workspace == self.current_workspace
             {
@@ -1555,6 +1569,10 @@ impl<B: Backend> WindowManager<B> {
         if workspace == self.current_workspace {
             return;
         }
+        // Before the switch, so the special's focused member hands the
+        // keyboard to something still on screen and the switch below
+        // then moves it on exactly as it would have.
+        self.hide_special_for_workspace_switch(workspace);
         self.workspace_count = self.workspace_count.max(workspace + 1);
         self.grow_layouts();
         self.previous_workspace = Some(self.current_workspace);
@@ -1572,8 +1590,8 @@ impl<B: Backend> WindowManager<B> {
             }
             // No `frame` guard: a client that draws its own chrome has
             // none and must still follow its workspace on and off the
-            // screen.
-            if client.workspace == workspace || client.flags.contains(ClientFlags::STICKY) {
+            // screen. A special member follows its overlay instead.
+            if self.client_placed_on_screen(client) {
                 self.show_client_surface(id);
                 // Same reasoning as `deminiaturize`: a remapped frame
                 // isn't guaranteed to still hold its old pixel content
@@ -1587,10 +1605,13 @@ impl<B: Backend> WindowManager<B> {
             }
         }
 
+        // Whatever the switch just remapped went on top of a special
+        // still shown; the overlay is reasserted before focus lands.
+        self.raise_shown_specials();
         let still_visible = self
             .focused
             .and_then(|id| self.clients.get(id))
-            .is_some_and(|c| c.workspace == workspace || c.flags.contains(ClientFlags::STICKY));
+            .is_some_and(|c| self.client_placed_on_screen(c));
         if !still_visible {
             if let Some(next) = arriving.filter(|&id| self.is_focusable(id)) {
                 self.focus_client(next);
@@ -1638,10 +1659,14 @@ impl<B: Backend> WindowManager<B> {
             // — a pager showing the workspace row needs to hear it.
             self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
         }
+        // A numbered destination ends any special membership; a member
+        // going back to its own home still has to rejoin that
+        // workspace's layout and come on or off screen with it.
+        let left_special = self.leave_special(id);
         let Some(client) = self.clients.get(id) else {
             return;
         };
-        if client.workspace == workspace {
+        if client.workspace == workspace && !left_special {
             return;
         }
         // Sending the active window away should expose a usable
@@ -1693,8 +1718,15 @@ impl<B: Backend> WindowManager<B> {
                 self.focused = None;
                 self.backend.publish_active_window(None);
             }
-        } else if self.separate_spaces() && !self.mac_client_hidden(id) && self.clients[id].lifecycle == Lifecycle::Normal {
+        } else if (left_special || self.separate_spaces())
+            && !self.mac_client_hidden(id)
+            && self.clients[id].lifecycle == Lifecycle::Normal
+        {
             self.show_client_surface(id);
+            if left_special {
+                self.repaint_decoration(id);
+                self.raise_client(id);
+            }
         }
     }
 
@@ -2096,10 +2128,7 @@ impl<B: Backend> WindowManager<B> {
             let existing: Vec<Rect> = self
                 .clients
                 .iter()
-                .filter(|(_, c)| {
-                    c.lifecycle == Lifecycle::Normal
-                        && (self.workspace_visible(c.workspace) || c.flags.contains(ClientFlags::STICKY))
-                })
+                .filter(|(_, c)| self.client_on_screen(c))
                 .map(|(_, c)| client_frame_rect(c))
                 .collect();
             let policy = if window_type == WindowType::Dialog || floated.is_some() {
@@ -2240,8 +2269,29 @@ impl<B: Backend> WindowManager<B> {
         }
 
         self.publish_frame_extents(id);
-        self.register_layout_client(id);
-        self.reflow_client_workspace(id);
+        // A `workspace` rule decides where the window lives before it
+        // joins any layout: a special member never enters its numbered
+        // home's order, and a numbered destination is a move made
+        // before the window has been seen anywhere else. `silent` maps
+        // it there without following — no switch, no shown overlay, and
+        // no initial focus below.
+        let silent = window_rule.workspace.as_ref().is_some_and(|rule| rule.silent);
+        match window_rule.workspace.as_ref().map(|rule| &rule.target) {
+            Some(placement::RuleWorkspaceTarget::Special(name)) if self.move_client_to_special(id, name, !silent) => {}
+            Some(placement::RuleWorkspaceTarget::Numbered(workspace)) => {
+                let workspace = *workspace;
+                self.register_layout_client(id);
+                self.reflow_client_workspace(id);
+                self.move_client_to_workspace(id, workspace);
+                if !silent {
+                    self.switch_workspace_to_focus(workspace, Some(id));
+                }
+            }
+            _ => {
+                self.register_layout_client(id);
+                self.reflow_client_workspace(id);
+            }
+        }
         self.notifications.push_back(Notification::Mapped(id));
         // Maximize first so a simultaneous fullscreen rule preserves
         // the maximized geometry/state underneath fullscreen.
@@ -2251,7 +2301,7 @@ impl<B: Backend> WindowManager<B> {
         if window_rule.fullscreen {
             self.fullscreen(id);
         }
-        if !window_rule.no_initial_focus && !window_rule.no_focus {
+        if !window_rule.no_initial_focus && !window_rule.no_focus && !silent {
             self.focus_client(id);
         }
     }
@@ -2350,9 +2400,11 @@ impl<B: Backend> WindowManager<B> {
             self.end_active_drag();
         }
         let workspace = self.clients.get(id).map(|c| c.workspace);
+        let special = self.clients.get(id).and_then(|c| c.special);
         for layout in &mut self.layouts {
             layout.order.retain(|&other| other != id);
         }
+        self.forget_special_member(id);
         self.fullscreen_restore.remove(&id);
         self.restore_title_metrics.remove(&(id, RestoreKind::Maximized));
         self.restore_title_metrics.remove(&(id, RestoreKind::Fullscreen));
@@ -2379,7 +2431,12 @@ impl<B: Backend> WindowManager<B> {
         // pointed at nothing until the user clicked something.
         if self.focused == Some(id) {
             self.focused = None;
-            match self.focus_successor(Some(id)) {
+            // A member of a shown overlay hands the keyboard to a
+            // sibling first: the overlay is what the user was working
+            // in, and the ordinary successor would be the window under
+            // it.
+            let sibling = special.and_then(|index| self.special_focus_successor(index, id));
+            match sibling.or_else(|| self.focus_successor(Some(id))) {
                 Some(next) => self.focus_client(next),
                 None => self.backend.publish_active_window(None),
             }
@@ -3992,9 +4049,7 @@ impl<B: Backend> WindowManager<B> {
     /// screen.
     fn activation_changes_workspace(&self, id: ClientId) -> bool {
         let target = self.modal_blocker(id).unwrap_or(id);
-        self.clients.get(target).is_some_and(|client| {
-            !client.flags.contains(ClientFlags::STICKY) && !self.workspace_visible(client.workspace)
-        })
+        self.clients.get(target).is_some_and(|client| !self.client_placed_on_screen(client))
     }
 
     /// Switches to the workspace holding the window that focusing `id`
@@ -4010,10 +4065,14 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get(target) else {
             return;
         };
-        if client.lifecycle != Lifecycle::Normal
-            || client.flags.contains(ClientFlags::STICKY)
-            || self.workspace_visible(client.workspace)
-        {
+        if client.lifecycle != Lifecycle::Normal || self.client_placed_on_screen(client) {
+            return;
+        }
+        if let Some(index) = client.special {
+            // A hidden special member is activated by showing its
+            // overlay where the user is, not by switching workspace.
+            let output = self.active_output_index();
+            self.show_special_on_output(index, output);
             return;
         }
         let workspace = client.workspace;
@@ -4465,7 +4524,8 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         if self.separate_spaces() {
-            if let Some(client) = self.clients.get(id) {
+            // A special member is shown by its overlay, not by a Space.
+            if let Some(client) = self.clients.get(id).filter(|client| client.special.is_none()) {
                 let workspace = client.workspace;
                 if !client.flags.contains(ClientFlags::STICKY) && !self.workspace_visible(workspace) {
                     self.switch_workspace(workspace);
@@ -4770,10 +4830,7 @@ impl<B: Backend> WindowManager<B> {
         // be, rather than assuming the transition left it right. Caught
         // by `a_client_that_starts_drawing_its_own_chrome_loses_its_frame_in_place`,
         // which found the window gone from the screen entirely.
-        let visible = !self.mac_client_hidden(id) && self.clients.get(id).is_some_and(|client| {
-            client.lifecycle == Lifecycle::Normal
-                && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
-        });
+        let visible = !self.mac_client_hidden(id) && self.client_visible(id);
         if visible {
             self.show_client_surface(id);
         } else {
@@ -4822,6 +4879,19 @@ impl<B: Backend> WindowManager<B> {
             .collect();
         for pinned in pinned {
             self.raise_transient_family(pinned);
+        }
+        // A shown special workspace is an overlay: its members sit
+        // above pinned windows too, with the one being raised on top
+        // of the rest of them.
+        let overlay = self.shown_special_members();
+        if overlay.is_empty() {
+            return;
+        }
+        for member in overlay.iter().copied().filter(|member| *member != id) {
+            self.raise_transient_family(member);
+        }
+        if overlay.contains(&id) {
+            self.raise_transient_family(id);
         }
     }
 
@@ -11201,6 +11271,7 @@ mod tests {
     mod spatial;
     mod spaces;
     mod monitors;
+    mod special;
     mod restyle;
     mod system7;
     fn mac_windows() -> (WindowManager<FakeBackend>, [ClientId; 3]) {

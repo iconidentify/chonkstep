@@ -51,6 +51,8 @@ pub enum Directive {
     Input { name: String, value: String },
     /// One key from Hyprland's `cursor {}` table.
     Cursor { name: String, value: String },
+    /// One key from Hyprland's `binds {}` table.
+    Binds { name: String, value: String },
     /// `device { name = …; … }` / `hl.device({ name = …, … })`: settings
     /// for one input device, named exactly, still in the file's own words.
     Device { name: String, settings: Vec<(String, String)> },

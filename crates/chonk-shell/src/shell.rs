@@ -1343,6 +1343,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // 1. Policy.
         wm.set_focus_policy(next.focus);
         wm.set_raise_on_focus(next.autoraise);
+        wm.set_hide_special_on_workspace_change(next.hide_special_on_workspace_change);
         wm.set_placement_policy(next.placement);
         wm.set_snap_threshold(next.edge_resistance);
         wm.set_drag_modifier(next.drag_modifier);
@@ -1856,6 +1857,14 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             Action::Miniaturize => {
                 if let Some(id) = wm.focused_client() {
                     wm.miniaturize(id);
+                }
+            }
+            Action::ToggleSpecial(name) => {
+                wm.toggle_special(name);
+            }
+            Action::SendToSpecial { name, follow } => {
+                if let Some(id) = wm.focused_client() {
+                    wm.move_client_to_special(id, name, *follow);
                 }
             }
             Action::ToggleFullscreen => {

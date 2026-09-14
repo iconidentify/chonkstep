@@ -292,7 +292,9 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         // own `workspace-next` does (step by index, grow the row), so
         // each keeps its verb. `+1`/`-1` step by index; a bare number
         // is a workspace by index; `previous` is the two-workspace flip;
-        // `special:…` and the monitor-relative forms are not verbs here.
+        // `special` and `special:NAME` name a special workspace, which a
+        // switch shows and a move sends a window to; `name:…` and the
+        // monitor-relative forms are not verbs here.
         "workspace" | "focusworkspaceoncurrentmonitor" => match workspace_target(arg) {
             WorkspaceTarget::Next => Verb::Action(Action::WorkspaceNext),
             WorkspaceTarget::Prev => Verb::Action(Action::WorkspacePrev),
@@ -303,10 +305,10 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
                 Some(action) => Verb::Action(action),
                 None => Verb::Unbound(Unbound::NoVerb),
             },
-            // `workspace special:scratchpad` *shows* the scratchpad
-            // rather than sending a window to it, which is a
-            // workspace this desktop does not have.
-            WorkspaceTarget::Special | WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
+            // `workspace special:scratchpad` shows the scratchpad — the
+            // same overlay `togglespecialworkspace` drops down.
+            WorkspaceTarget::Special(name) => Verb::Action(Action::ToggleSpecial(name)),
+            WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
         },
         // Silent sends are native: the window leaves and the workspace
         // does not. Relative targets are deliberately left alone here
@@ -317,7 +319,10 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
                 Some(action) => Verb::Action(action),
                 None => Verb::Unbound(Unbound::NoVerb),
             },
-            WorkspaceTarget::Special => Verb::Action(Action::Miniaturize),
+            // Omarchy's "move window to scratchpad": the window goes
+            // onto the special workspace and stays hidden until the
+            // toggle chord brings the overlay down.
+            WorkspaceTarget::Special(name) => Verb::Action(Action::SendToSpecial { name, follow: false }),
             _ => Verb::Unbound(Unbound::NoVerb),
         },
         // Carrying a window to the next existing workspace is carrying
@@ -330,15 +335,15 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
                 Some(action) => Verb::Action(action),
                 None => Verb::Unbound(Unbound::NoVerb),
             },
-            // "Move this window to the scratchpad": put it out of the
-            // way and leave it recoverable. Chonkstep's nearest true
-            // verb is `miniaturize` — the window collapses to an icon
-            // tile on the desk rather than onto a special workspace,
-            // and it comes back by double-clicking that tile rather
-            // than by the same chord. The preset made this call; it is
-            // carried over here rather than re-argued.
-            WorkspaceTarget::Special => Verb::Action(Action::Miniaturize),
+            WorkspaceTarget::Special(name) => Verb::Action(Action::SendToSpecial { name, follow: true }),
             WorkspaceTarget::Previous | WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
+        },
+        // The scratchpad toggle. No argument means Hyprland's default
+        // special workspace; a name the core would refuse to create
+        // (too long, or unprintable) leaves the chord unbound.
+        "togglespecialworkspace" => match wm_core::normalize_special_name(arg) {
+            Some(name) => Verb::Action(Action::ToggleSpecial(name)),
+            None => Verb::Unbound(Unbound::NoVerb),
         },
         // Monitors. `focusmonitor` takes a step, a direction or an
         // output name, and so does `movecurrentworkspacetomonitor`,
@@ -353,9 +358,7 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             Some(target) => Verb::Action(Action::MoveWorkspaceToMonitor(target)),
             None => Verb::Unbound(Unbound::NoVerb),
         },
-        "togglespecialworkspace" | "moveworkspacetomonitor" | "swapactiveworkspaces" => {
-            Verb::Unbound(Unbound::NoVerb)
-        }
+        "moveworkspacetomonitor" | "swapactiveworkspaces" => Verb::Unbound(Unbound::NoVerb),
         // Alt-Tab. This desktop's switcher is modal machinery rather
         // than a binding — while it is up the shell owns the keyboard —
         // so the chord is already answered, correctly, by something
@@ -393,7 +396,7 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
 }
 
 /// What a workspace argument names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum WorkspaceTarget {
     /// `+1` / `r+1`: the next workspace by index.
     Next,
@@ -407,16 +410,21 @@ enum WorkspaceTarget {
     Previous,
     /// A bare index, 1-based as Hyprland counts them.
     Index(u32),
-    /// `special`, `special:scratchpad`.
-    Special,
-    /// `empty`, `name:foo`, `m+1`, anything else.
+    /// `special`, `special:scratchpad`: a special workspace, by the
+    /// name the core will create it under.
+    Special(String),
+    /// `empty`, `name:foo`, `m+1`, anything else — and a special name
+    /// the core would refuse.
     Other,
 }
 
 fn workspace_target(arg: &str) -> WorkspaceTarget {
     let arg = arg.trim();
-    if arg.starts_with("special") {
-        return WorkspaceTarget::Special;
+    if arg == "special" || arg.starts_with("special:") {
+        return match wm_core::normalize_special_name(arg) {
+            Some(name) => WorkspaceTarget::Special(name),
+            None => WorkspaceTarget::Other,
+        };
     }
     if arg == "previous" {
         return WorkspaceTarget::Previous;

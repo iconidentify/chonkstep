@@ -296,7 +296,7 @@ pub enum IdleInhibitRule {
 /// These are deliberately separate from [`FloatDecision`]: a rule such
 /// as `no_initial_focus` says nothing about placement and must not
 /// accidentally opt the window into centered placement.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WindowRuleDecision {
     /// When this window keeps the idle notifier inhibited.
     pub idle_inhibit: IdleInhibitRule,
@@ -320,6 +320,28 @@ pub struct WindowRuleDecision {
     /// The touchpad scroll factor while the pointer is over this window,
     /// replacing the global touchpad factor (`scroll_touchpad`).
     pub touchpad_scroll_factor: Option<f64>,
+    /// Where the window maps when a `workspace` rule sends it somewhere
+    /// other than the current workspace.
+    pub workspace: Option<RuleWorkspace>,
+}
+
+/// A `workspace` window rule: the destination and whether the window
+/// is sent there quietly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleWorkspace {
+    pub target: RuleWorkspaceTarget,
+    /// `silent`: map without taking focus, without switching to a
+    /// numbered target and without showing a special one.
+    pub silent: bool,
+}
+
+/// What a `workspace` rule names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuleWorkspaceTarget {
+    /// A special workspace by name; `special` alone is the default one.
+    Special(String),
+    /// A numbered workspace, 0-based as the core counts them.
+    Numbered(usize),
 }
 
 impl WindowRuleDecision {

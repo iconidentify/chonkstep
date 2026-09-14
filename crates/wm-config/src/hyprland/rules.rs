@@ -52,7 +52,10 @@
 use std::sync::Arc;
 
 use regex::{Regex, RegexBuilder};
-use wm_core::{FloatDecision, FloatPolicy, Point, RuleMetrics, RulePlacement, Size, WindowRuleDecision};
+use wm_core::{
+    FloatDecision, FloatPolicy, Point, RuleMetrics, RulePlacement, RuleWorkspace, RuleWorkspaceTarget, Size,
+    WindowRuleDecision,
+};
 
 use super::directive::{Matcher, WindowRule};
 use super::expr::{Expr, Values};
@@ -168,6 +171,8 @@ struct Rule {
     suppress_fullscreen: Option<bool>,
     /// The touchpad scroll factor over this window.
     scroll_touchpad: Option<f64>,
+    /// The workspace to map onto.
+    workspace: Option<RuleWorkspace>,
 }
 
 impl Rule {
@@ -249,6 +254,13 @@ impl FloatRules {
                 }
                 if let Some(factor) = rule.scroll_touchpad {
                     what.push(format!("touchpad scroll x{factor}"));
+                }
+                if let Some(rule) = &rule.workspace {
+                    let target = match &rule.target {
+                        RuleWorkspaceTarget::Special(name) => format!("special:{name}"),
+                        RuleWorkspaceTarget::Numbered(index) => (index + 1).to_string(),
+                    };
+                    what.push(format!("workspace {target}{}", if rule.silent { " silently" } else { "" }));
                 }
                 for (enabled, label) in [
                     (rule.pin, "pinned"),
@@ -411,6 +423,9 @@ impl FloatPolicy for FloatRules {
             }
             if let Some(value) = rule.suppress_fullscreen {
                 decision.suppress_fullscreen = value;
+            }
+            if let Some(value) = &rule.workspace {
+                decision.workspace = Some(value.clone());
             }
         }
         decision
@@ -617,6 +632,22 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                     any = true;
                 }
             }
+            // `workspace N`, `workspace special`, `workspace
+            // special:NAME`, each with an optional `silent`. Named
+            // workspaces (`name:…`) and the relative forms are refused
+            // by name: this desktop's workspaces are numbered, and a
+            // rule is read long before the row it would be relative to
+            // exists.
+            "workspace" => match workspace_rule(value) {
+                Ok(rule) => {
+                    spec.workspace = Some(rule);
+                    any = true;
+                }
+                Err(why) => notes.push(format!(
+                    "window rule workspace {value:?} on {} {why}: property skipped",
+                    describe_matchers(rule)
+                )),
+            },
             "scroll_touchpad" | "scrolltouchpad" => match value.trim().parse::<f64>() {
                 Ok(factor) if factor.is_finite() && (0.01..=10.0).contains(&factor) => {
                     spec.scroll_touchpad = Some(factor);
@@ -656,6 +687,40 @@ struct Spec {
     suppress_maximize: Option<bool>,
     suppress_fullscreen: Option<bool>,
     scroll_touchpad: Option<f64>,
+    workspace: Option<RuleWorkspace>,
+}
+
+/// Reads a `workspace` rule's value.
+fn workspace_rule(value: &str) -> Result<RuleWorkspace, String> {
+    let mut words = value.split_whitespace();
+    let target = words.next().ok_or_else(|| "names no workspace".to_string())?;
+    let mut silent = false;
+    for word in words {
+        if word.eq_ignore_ascii_case("silent") {
+            silent = true;
+        } else {
+            return Err(format!("carries {word:?}, which this reader does not implement"));
+        }
+    }
+    let target = if target == "special" || target.starts_with("special:") {
+        let name = wm_core::normalize_special_name(target)
+            .ok_or_else(|| "names a special workspace this desktop will not create".to_string())?;
+        RuleWorkspaceTarget::Special(name)
+    } else if let Some(name) = target.strip_prefix("name:") {
+        return Err(format!("names workspace {name:?}, and chonkstep workspaces are numbered, not named"));
+    } else {
+        // Digits only: `+1`, `-1` and `e+1` are relative to a row that
+        // does not exist when a rule is read.
+        let index = target
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| target.parse::<usize>().ok())
+            .flatten()
+            .filter(|index| (1..=crate::MAX_WORKSPACE).contains(index))
+            .ok_or_else(|| format!("must be 1 to {}, special or special:NAME", crate::MAX_WORKSPACE))?;
+        RuleWorkspaceTarget::Numbered(index - 1)
+    };
+    Ok(RuleWorkspace { target, silent })
 }
 
 fn push(
@@ -706,6 +771,7 @@ fn push(
         suppress_maximize: spec.suppress_maximize,
         suppress_fullscreen: spec.suppress_fullscreen,
         scroll_touchpad: spec.scroll_touchpad,
+        workspace: spec.workspace.clone(),
     });
 }
 

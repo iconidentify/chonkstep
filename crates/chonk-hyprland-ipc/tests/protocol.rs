@@ -12,7 +12,10 @@
 use chonk_hyprland_ipc::dispatch::{self, Action, Direction, Fullscreen, LayoutTarget, MonitorTarget};
 use chonk_hyprland_ipc::request::Request;
 use chonk_hyprland_ipc::server::answer_payload;
-use chonk_hyprland_ipc::state::{Devices, Keyboard, Monitor, MonitorMode, Snapshot, Window, Workspace};
+use chonk_hyprland_ipc::state::{
+    special_index_from_hypr_id, workspace_index_from_hypr_id, Devices, Keyboard, Monitor, MonitorMode, Snapshot,
+    SpecialWorkspace, Window, Workspace, MAX_SPECIAL_NAME, MAX_SPECIAL_WORKSPACES,
+};
 use chonk_hyprland_ipc::{Differ, Outcome};
 use wm_config::hyprland::dispatch::SERVED_OMARCHY_SCRIPTS;
 
@@ -31,6 +34,7 @@ fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monit
         vrr_enabled: false,
         focused,
         active_workspace,
+        special_workspace: None,
         make: "Sharp".to_string(),
         model: name.to_string(),
         serial: "0x01020304".to_string(),
@@ -68,6 +72,7 @@ fn window(id: u64, title: &str, class: &str, workspace: usize) -> Window {
         width: 800,
         height: 600,
         workspace,
+        special: None,
         monitor: 0,
         pid: 4242,
         xwayland: false,
@@ -89,6 +94,7 @@ fn desktop() -> Snapshot {
     Snapshot {
         monitors: vec![monitor(0, "eDP-1", true, 0)],
         workspaces: vec![workspace(0, 1), workspace(1, 0), workspace(2, 0)],
+        specials: Vec::new(),
         windows: vec![window(4_294_967_297, "~ — foot", "foot", 0)],
         focused: Some(4_294_967_297),
         locked: false,
@@ -115,6 +121,29 @@ fn two_heads() -> Snapshot {
 /// The same desk with a session lock in force.
 fn locked_desktop() -> Snapshot {
     Snapshot { locked: true, ..desktop() }
+}
+
+fn special(index: usize, name: &str, windows: u32) -> SpecialWorkspace {
+    SpecialWorkspace {
+        index,
+        name: name.to_string(),
+        layout: "freeform".into(),
+        monitor: None,
+        monitor_id: 0,
+        windows,
+        has_fullscreen: false,
+    }
+}
+
+/// The desk with a scratchpad holding one window and a second, empty
+/// special workspace created after it.
+fn desktop_with_specials() -> Snapshot {
+    let mut snapshot = desktop();
+    snapshot.specials = vec![special(0, "scratchpad", 1), special(1, "notes", 0)];
+    let mut parked = window(4_294_967_298, "console", "foot", 0);
+    parked.special = Some("scratchpad".into());
+    snapshot.windows.push(parked);
+    snapshot
 }
 
 fn ask(wire: &str, snapshot: &Snapshot) -> String {
@@ -612,18 +641,221 @@ fn live_diagnostic_commands_have_truthful_wire_shapes() {
 /// and each must produce an error a caller can branch on rather than
 /// an `ok` it will believe.
 #[test]
-fn unsupported_group_and_special_workspace_dispatchers_fail_cleanly() {
+fn unsupported_group_and_workspace_option_dispatchers_fail_cleanly() {
     let snapshot = desktop();
     for verb in [
         "togglegroup",
-        "togglespecialworkspace magic",
         "workspaceopt allfloat",
+        "movetoworkspacesilent name:notes",
+        "workspace name:notes",
     ] {
         let (response, actions) = answer_payload(format!("/dispatch {verb}").as_bytes(), &snapshot);
         assert!(actions.is_empty(), "{verb} must not act, got {actions:?}");
         assert!(response.starts_with("Invalid dispatcher"), "{verb} must fail like Hyprland does, got {response:?}");
         assert_ne!(response.trim(), "ok", "{verb} must never claim success");
     }
+}
+
+// ---------------------------------------------------------------------
+// Special workspaces: Omarchy's scratchpad and the agent console.
+// ---------------------------------------------------------------------
+
+/// `togglespecialworkspace [NAME]`, `movetoworkspace[silent]
+/// special[:NAME][,window]` and the Lua forms Omarchy's `tiling.lua`
+/// binds all lower to the two special-workspace actions. A bare
+/// `special` is the default special workspace; a numbered verb keeps
+/// its numbered action.
+#[test]
+fn special_workspace_dispatchers_parse_in_both_dialects() {
+    let snapshot = desktop();
+    let toggle = |name: &str| Outcome::Run(Action::ToggleSpecialWorkspace(name.to_string()));
+    let send = |name: &str, follow: bool| {
+        Outcome::Run(Action::MoveToSpecial { window: None, name: name.to_string(), follow })
+    };
+    for (wire, expected) in [
+        ("togglespecialworkspace scratchpad", toggle("scratchpad")),
+        ("togglespecialworkspace", toggle("special")),
+        ("togglespecialworkspace special:notes", toggle("notes")),
+        ("workspace special:scratchpad", toggle("scratchpad")),
+        ("workspace special", toggle("special")),
+        ("movetoworkspacesilent special:scratchpad", send("scratchpad", false)),
+        ("movetoworkspacesilent special", send("special", false)),
+        ("movetoworkspace special:scratchpad", send("scratchpad", true)),
+        (
+            "movetoworkspacesilent special:scratchpad,address:0x100000001",
+            Outcome::Run(Action::MoveToSpecial { window: Some(4_294_967_297), name: "scratchpad".into(), follow: false }),
+        ),
+        (r#"hl.dsp.workspace.toggle_special("scratchpad")"#, toggle("scratchpad")),
+        ("hl.dsp.workspace.toggle_special()", toggle("special")),
+        (r#"hl.dsp.focus({ workspace = "special:scratchpad" })"#, toggle("scratchpad")),
+        (r#"hl.dsp.window.move({ workspace = "special:scratchpad", follow = false })"#, send("scratchpad", false)),
+        (r#"hl.dsp.window.move({ workspace = "special:scratchpad" })"#, send("scratchpad", true)),
+        (
+            r#"hl.dsp.window.move({ workspace = "special:scratchpad", window = "address:0x100000001", follow = false })"#,
+            Outcome::Run(Action::MoveToSpecial { window: Some(4_294_967_297), name: "scratchpad".into(), follow: false }),
+        ),
+        (
+            r#"hl.dsp.window.move({ workspace = "3", follow = false })"#,
+            Outcome::Run(Action::MoveToWorkspace { window: None, workspace: 2, follow: false }),
+        ),
+        ("movetoworkspacesilent 2", Outcome::Run(Action::MoveToWorkspace { window: None, workspace: 1, follow: false })),
+    ] {
+        assert_eq!(dispatch::parse(wire, &snapshot), expected, "{wire}");
+        let (response, actions) = answer_payload(format!("/dispatch {wire}").as_bytes(), &snapshot);
+        assert_eq!(response.trim(), "ok", "{wire}");
+        assert_eq!(actions.len(), 1, "{wire}");
+    }
+    assert!(matches!(
+        dispatch::parse(r#"hl.dsp.window.move({ into_group = "l" })"#, &snapshot),
+        Outcome::Unsupported(why) if why.contains("groups")
+    ));
+}
+
+/// Names come off an unauthenticated socket and are published back out
+/// through `workspaces` and the event stream, so they are bounded
+/// before anything is asked to create them, and the session's count of
+/// specials cannot be grown past the compositor's limit.
+#[test]
+fn special_workspace_names_and_count_are_bounded_before_creation() {
+    let snapshot = desktop();
+    let long = "n".repeat(MAX_SPECIAL_NAME);
+    assert!(matches!(
+        dispatch::parse(&format!("togglespecialworkspace {long}"), &snapshot),
+        Outcome::Run(Action::ToggleSpecialWorkspace(name)) if name == long
+    ));
+    let (response, actions) = answer_payload(format!("/dispatch togglespecialworkspace {long}n").as_bytes(), &snapshot);
+    assert!(response.starts_with("Invalid dispatcher"), "{response:?}");
+    assert!(actions.is_empty());
+    assert!(matches!(
+        dispatch::parse("movetoworkspacesilent special:bad\u{7}name", &snapshot),
+        Outcome::Unsupported(why) if why.contains("control")
+    ));
+
+    let mut full = desktop();
+    full.specials = (0..MAX_SPECIAL_WORKSPACES).map(|index| special(index, &format!("s{index}"), 0)).collect();
+    assert!(matches!(
+        dispatch::parse("togglespecialworkspace one-too-many", &full),
+        Outcome::Unsupported(why) if why.contains("will not create")
+    ));
+    assert!(matches!(
+        dispatch::parse("movetoworkspacesilent special:one-too-many", &full),
+        Outcome::Unsupported(_)
+    ));
+    assert_eq!(
+        dispatch::parse("togglespecialworkspace s3", &full),
+        Outcome::Run(Action::ToggleSpecialWorkspace("s3".into())),
+        "an existing special still toggles at the cap"
+    );
+}
+
+/// `workspaces` lists each special after the numbered ones, with the
+/// negative id Hyprland gives one — stable for the session, since the
+/// core never destroys a special — and the `special:NAME` name both
+/// Quickshell and Omarchy match on. The numbered resolver stays strict
+/// and the special resolver is its own function; no id is both.
+#[test]
+fn workspaces_list_specials_with_stable_negative_ids_and_names() {
+    let snapshot = desktop_with_specials();
+    let listed = ask_json("j/workspaces", &snapshot);
+    let listed = listed.as_array().expect("array");
+    assert_eq!(listed.len(), 5, "{listed:?}");
+    let scratchpad = &listed[3];
+    assert_eq!(scratchpad["id"], serde_json::json!(-99));
+    assert_eq!(scratchpad["name"], "special:scratchpad");
+    assert_eq!(scratchpad["windows"], serde_json::json!(1));
+    assert_eq!(scratchpad["tiledLayout"], "freeform");
+    assert_eq!(listed[4]["id"], serde_json::json!(-100));
+    assert_eq!(listed[4]["name"], "special:notes");
+    assert_eq!(listed[4]["windows"], serde_json::json!(0));
+    assert!(listed[..3].iter().all(|workspace| workspace["id"].as_i64().unwrap() > 0));
+
+    let plain = ask("workspaces", &snapshot);
+    assert!(plain.contains("workspace ID -99 (special:scratchpad)"), "{plain}");
+    assert!(plain.contains("workspace ID -100 (special:notes)"), "{plain}");
+
+    assert_eq!(special_index_from_hypr_id(-99), Some(0));
+    assert_eq!(special_index_from_hypr_id(-100), Some(1));
+    assert_eq!(special_index_from_hypr_id(-1), None, "ids above the special range are not specials");
+    assert_eq!(special_index_from_hypr_id(1), None);
+    assert_eq!(workspace_index_from_hypr_id(-99), None, "the numbered resolver stays strict");
+    assert_eq!(workspace_index_from_hypr_id(1), Some(0));
+    for special in &snapshot.specials {
+        assert_eq!(special_index_from_hypr_id(special.hypr_id()), Some(special.index));
+        assert!(special.hypr_id() < 0);
+    }
+}
+
+/// `monitors[].specialWorkspace` names the special shown on that
+/// output, and Hyprland's `{ 0, "" }` when none is; a member window's
+/// `workspace` is its special, in JSON and in the plain form.
+#[test]
+fn monitors_and_clients_report_special_workspace_membership() {
+    let mut snapshot = desktop_with_specials();
+    let none = ask_json("j/monitors", &snapshot);
+    assert_eq!(none[0]["specialWorkspace"], serde_json::json!({ "id": 0, "name": "" }));
+
+    snapshot.monitors[0].special_workspace = Some("scratchpad".into());
+    let shown = ask_json("j/monitors", &snapshot);
+    assert_eq!(shown[0]["specialWorkspace"], serde_json::json!({ "id": -99, "name": "special:scratchpad" }));
+
+    let clients = ask_json("j/clients", &snapshot);
+    let console = clients.as_array().unwrap().iter().find(|client| client["title"] == "console").expect("listed");
+    assert_eq!(console["workspace"], serde_json::json!({ "id": -99, "name": "special:scratchpad" }));
+    let ordinary = clients.as_array().unwrap().iter().find(|client| client["title"] == "~ — foot").expect("listed");
+    assert_eq!(ordinary["workspace"]["id"], serde_json::json!(1));
+    let plain = ask("clients", &snapshot);
+    assert!(plain.contains("workspace: -99 (special:scratchpad)"), "{plain}");
+
+    snapshot.focused = Some(4_294_967_298);
+    assert_eq!(ask_json("j/activewindow", &snapshot)["workspace"]["name"], "special:scratchpad");
+}
+
+/// Showing a special on an output emits `activespecial>>NAME,MONITOR`
+/// and `activespecialv2>>ID,NAME,MONITOR`; hiding it emits both with an
+/// empty name (and id), which is how Hyprland spells "none". A special
+/// coming into existence is announced like any workspace, and a window
+/// joining one moves there.
+#[test]
+fn showing_and_hiding_a_special_emits_activespecial_events() {
+    let mut differ = Differ::new();
+    let before = desktop();
+    differ.diff(&before);
+
+    let mut created = before.clone();
+    created.specials.push(special(0, "scratchpad", 0));
+    let events = differ.diff(&created);
+    let create = events.iter().find(|e| e.name() == "createworkspacev2").expect("createworkspacev2");
+    assert_eq!(create.data(), "-99,special:scratchpad");
+    assert!(events.iter().all(|e| e.name() != "activespecial"), "creating is not showing: {events:?}");
+
+    let mut joined = created.clone();
+    joined.windows[0].special = Some("scratchpad".into());
+    let events = differ.diff(&joined);
+    let moved = events.iter().find(|e| e.name() == "movewindowv2").expect("movewindowv2");
+    assert_eq!(moved.data(), "100000001,-99,special:scratchpad");
+
+    let mut shown = joined.clone();
+    shown.monitors[0].special_workspace = Some("scratchpad".into());
+    let events = differ.diff(&shown);
+    let legacy = events.iter().find(|e| e.name() == "activespecial").expect("activespecial");
+    assert_eq!(legacy.line(), "activespecial>>special:scratchpad,eDP-1\n");
+    let v2 = events.iter().find(|e| e.name() == "activespecialv2").expect("activespecialv2");
+    assert_eq!(v2.line(), "activespecialv2>>-99,special:scratchpad,eDP-1\n");
+    assert!(events.iter().all(|e| e.name() != "workspacev2"), "the numbered workspace did not change: {events:?}");
+
+    let mut hidden = shown.clone();
+    hidden.monitors[0].special_workspace = None;
+    let events = differ.diff(&hidden);
+    let legacy = events.iter().find(|e| e.name() == "activespecial").expect("activespecial on hide");
+    assert_eq!(legacy.line(), "activespecial>>,eDP-1\n");
+    let v2 = events.iter().find(|e| e.name() == "activespecialv2").expect("activespecialv2 on hide");
+    assert_eq!(v2.line(), "activespecialv2>>,,eDP-1\n");
+
+    let mut left = hidden.clone();
+    left.windows[0].special = None;
+    let events = differ.diff(&left);
+    let moved = events.iter().find(|e| e.name() == "movewindowv2").expect("movewindowv2 back");
+    assert_eq!(moved.data(), "100000001,1,1");
 }
 
 /// A refusal should say what chonkstep *is*, not merely that something

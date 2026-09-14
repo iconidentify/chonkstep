@@ -116,6 +116,16 @@ pub enum Action {
     /// semantics exactly as [`Self::Workspace`]; a silent no-op when
     /// nothing is focused, like every other window-targeted verb.
     WorkspaceCarry(usize),
+    /// Show the named special workspace — Omarchy's scratchpad — as an
+    /// overlay on the active output, or hide it if it is the one shown
+    /// there: `"toggle-special scratchpad"`. The name alone selects the
+    /// default special workspace, `special`.
+    ToggleSpecial(String),
+    /// Send the focused window to the named special workspace.
+    /// `"special-send NAME"` leaves it hidden until that special is
+    /// shown; `"special-carry NAME"` (`follow`) shows the special and
+    /// keeps the keyboard on the window.
+    SendToSpecial { name: String, follow: bool },
     /// Toggle the modal Overview: every window on the current
     /// workspace as a grid of live thumbnails plus a workspace strip,
     /// drawn and driven by the desktop shell. One verb on purpose —
@@ -251,6 +261,9 @@ impl Action {
             Action::Workspace(index) => return Some(format!("workspace {}", index + 1)),
             Action::WorkspaceSend(index) => return Some(format!("workspace-send {}", index + 1)),
             Action::WorkspaceCarry(index) => return Some(format!("workspace-carry {}", index + 1)),
+            Action::ToggleSpecial(name) => return Some(format!("toggle-special {name}")),
+            Action::SendToSpecial { name, follow: false } => return Some(format!("special-send {name}")),
+            Action::SendToSpecial { name, follow: true } => return Some(format!("special-carry {name}")),
             Action::Overview => "overview",
             Action::RootMenu => "root-menu",
             Action::Help => "help",
@@ -620,6 +633,23 @@ fn action_from_name(name: &str) -> Option<Action> {
                 _ => Action::WorkspaceCarry(index),
             })
         }
+        // The special-workspace verbs carry a name. A bare
+        // `toggle-special` is the default special workspace, as a bare
+        // `togglespecialworkspace` is in Hyprland; the name is bounded
+        // and checked by the core's own rule so a config file cannot
+        // name a special the compositor would refuse to create.
+        rest if rest == "toggle-special"
+            || rest.starts_with("toggle-special ")
+            || rest.starts_with("special-send ")
+            || rest.starts_with("special-carry ") => {
+            let (verb, name) = rest.split_once(' ').unwrap_or((rest, ""));
+            let name = wm_core::normalize_special_name(name)?;
+            Some(match verb {
+                "toggle-special" => Action::ToggleSpecial(name),
+                "special-send" => Action::SendToSpecial { name, follow: false },
+                _ => Action::SendToSpecial { name, follow: true },
+            })
+        }
         // `run <name>` carries an argument like the three workspace
         // verbs above, but its argument is a key into `[commands]` —
         // not a command line. Everything after the verb is taken
@@ -774,6 +804,12 @@ pub struct Config {
     /// imitates; `drag_modifier = "super"` picks the modern convention,
     /// and `"none"` disables the gesture.
     pub drag_modifier: Option<Modifiers>,
+    /// Whether switching workspace hides the special workspace shown
+    /// on the output the switch lands on — Hyprland's
+    /// `binds:hide_special_on_workspace_change`, which Omarchy sets.
+    /// Off by default, as in Hyprland: the scratchpad stays where it
+    /// was dropped until the same chord takes it away.
+    pub hide_special_on_workspace_change: bool,
     /// Relaunch the previous session's windows at startup, restoring
     /// each one's geometry, workspace and shape flags from the layout
     /// file the shell keeps. Off by default — a session that spawns
@@ -941,6 +977,7 @@ impl Config {
         let mut config = Config {
             focus_follows_mouse: false,
             autoraise: true,
+            hide_special_on_workspace_change: false,
             scale: None,
             theme: None,
             appearance: None,
@@ -3265,6 +3302,31 @@ numlock_by_default = false
                 "action {name:?}"
             );
         }
+    }
+
+    /// The special-workspace verbs carry a name, bounded by the core's
+    /// own rule, and a bare toggle means the default special.
+    #[test]
+    fn special_workspace_action_names_carry_their_name() {
+        let text = "[keybindings]\n\"super+a\" = \"toggle-special scratchpad\"\n\"super+b\" = \"special-send scratchpad\"\n\"super+c\" = \"special-carry notes\"\n\"super+d\" = \"toggle-special\"\n\"super+e\" = \"toggle-special special:magic\"\n";
+        let config = parse(text).unwrap();
+        assert_eq!(action_for(&config, "super+a"), Some(Action::ToggleSpecial("scratchpad".into())));
+        assert_eq!(
+            action_for(&config, "super+b"),
+            Some(Action::SendToSpecial { name: "scratchpad".into(), follow: false })
+        );
+        assert_eq!(action_for(&config, "super+c"), Some(Action::SendToSpecial { name: "notes".into(), follow: true }));
+        assert_eq!(action_for(&config, "super+d"), Some(Action::ToggleSpecial(wm_core::DEFAULT_SPECIAL_NAME.into())));
+        assert_eq!(action_for(&config, "super+e"), Some(Action::ToggleSpecial("magic".into())));
+        for (name, action) in [
+            ("toggle-special scratchpad", Action::ToggleSpecial("scratchpad".into())),
+            ("special-send scratchpad", Action::SendToSpecial { name: "scratchpad".into(), follow: false }),
+            ("special-carry scratchpad", Action::SendToSpecial { name: "scratchpad".into(), follow: true }),
+        ] {
+            assert_eq!(action.config_name().as_deref(), Some(name), "{name} round-trips");
+        }
+        let overlong = format!("[keybindings]\n\"super+a\" = \"toggle-special {}\"\n", "n".repeat(wm_core::MAX_SPECIAL_NAME + 1));
+        assert_eq!(action_for(&parse(&overlong).unwrap(), "super+a"), None, "an overlong name is dropped like an unknown verb");
     }
 
     #[test]

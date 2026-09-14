@@ -24,7 +24,9 @@
 //! beginning with `Invalid dispatcher`. The server logs and counts each
 //! one because most non-interactive callers will otherwise hide it.
 
-use crate::state::{workspace_index_from_hypr_id, Snapshot, Window, NESTED_DEVICES};
+use crate::state::{
+    workspace_index_from_hypr_id, Snapshot, Window, MAX_SPECIAL_NAME, MAX_SPECIAL_WORKSPACES, NESTED_DEVICES,
+};
 
 /// What a dispatch request asks chonkstep to do.
 ///
@@ -46,6 +48,13 @@ pub enum Action {
     /// Move a window (or the focused one) to a 0-based workspace index.
     /// `follow` distinguishes Hyprland's ordinary and `silent` verbs.
     MoveToWorkspace { window: Option<u64>, workspace: usize, follow: bool },
+    /// Show the named special workspace on the active output, or hide it
+    /// if it is the one shown there — `togglespecialworkspace [NAME]`.
+    ToggleSpecialWorkspace(String),
+    /// Move a window (or the focused one) onto the named special
+    /// workspace — `movetoworkspace[silent] special[:NAME][,window]`.
+    /// With `follow` the special is shown and the window focused.
+    MoveToSpecial { window: Option<u64>, name: String, follow: bool },
     /// Run a command line through the user's POSIX shell. This is the
     /// spelling used by Lua's `hl.dsp.exec_cmd`, whose single string is
     /// explicitly shell source.
@@ -211,7 +220,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("moveintogroup", "chonkstep has no window groups"),
     ("moveoutofgroup", "chonkstep has no window groups"),
     ("lockgroups", "chonkstep has no window groups"),
-    ("togglespecialworkspace", "chonkstep has no special (scratchpad) workspaces"),
     ("workspaceopt", "chonkstep has no per-workspace layout options"),
     ("submap", "chonkstep's keybindings do not have submaps"),
 ];
@@ -275,8 +283,15 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             "d" | "down" => Outcome::Run(Action::MoveDirection(Direction::Down)),
             _ => Outcome::Unsupported("window movement requires a direction".into()),
         },
-        "workspace" => match workspace_target(rest, snapshot) {
-            Ok(index) => Outcome::Run(Action::FocusWorkspace(index)),
+        "workspace" => match workspace_selector(rest, snapshot) {
+            Ok(WorkspaceSelector::Numbered(index)) => Outcome::Run(Action::FocusWorkspace(index)),
+            // `workspace special:NAME` shows the special: the overlay
+            // `togglespecialworkspace` drops down, reached by name.
+            Ok(WorkspaceSelector::Special(name)) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
+            Err(why) => Outcome::Unsupported(why),
+        },
+        "togglespecialworkspace" => match special_name(rest, snapshot) {
+            Ok(name) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
             Err(why) => Outcome::Unsupported(why),
         },
         "focuswindow" => match resolve_window(rest, snapshot) {
@@ -303,8 +318,8 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                 Some((target, window)) => (target.trim(), Some(window.trim())),
                 None => (rest, None),
             };
-            let workspace = match workspace_target(target, snapshot) {
-                Ok(index) => index,
+            let selector = match workspace_selector(target, snapshot) {
+                Ok(selector) => selector,
                 Err(why) => return Outcome::Unsupported(why),
             };
             let window = match window {
@@ -314,7 +329,7 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                     None => return Outcome::Unsupported(format!("no window matches {selector:?}")),
                 },
             };
-            Outcome::Run(Action::MoveToWorkspace { window, workspace, follow })
+            Outcome::Run(move_action(selector, window, follow))
         }
         "exec" => classic_exec(rest),
         "fullscreen" => {
@@ -431,8 +446,9 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
     match path {
         "focus" => {
             if let Some(value) = lua_field(&args, "workspace") {
-                return match workspace_target(&value, snapshot) {
-                    Ok(index) => Outcome::Run(Action::FocusWorkspace(index)),
+                return match workspace_selector(&value, snapshot) {
+                    Ok(WorkspaceSelector::Numbered(index)) => Outcome::Run(Action::FocusWorkspace(index)),
+                    Ok(WorkspaceSelector::Special(name)) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
                     Err(why) => Outcome::Unsupported(why),
                 };
             }
@@ -476,7 +492,42 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
         "layout" => Outcome::Run(Action::LayoutNoop),
         "window.pin" => lua_window(&args, snapshot, |window| Action::SetPinned { window: window.id, pinned: None }),
         "window.resize" => lua_geometry(&args, snapshot, true),
-        "window.move" => lua_geometry(&args, snapshot, false),
+        // `hl.dsp.window.move` is a move to a workspace when it names
+        // one — Omarchy's `{ workspace = "special:scratchpad", follow =
+        // false }` — and a geometry move otherwise. Groups are refused
+        // by the name Omarchy gives them.
+        "window.move" => {
+            if lua_field(&args, "into_group").is_some() || lua_field(&args, "out_of_group").is_some() {
+                return Outcome::Unsupported("chonkstep has no window groups".to_string());
+            }
+            match lua_field(&args, "workspace") {
+                Some(target) => {
+                    let selector = match workspace_selector(&target, snapshot) {
+                        Ok(selector) => selector,
+                        Err(why) => return Outcome::Unsupported(why),
+                    };
+                    let follow = lua_field(&args, "follow").is_none_or(|value| value != "false");
+                    let window = match lua_field(&args, "window") {
+                        None => None,
+                        Some(value) => match resolve_window(&value, snapshot) {
+                            Some(window) => Some(window.id),
+                            None => return Outcome::Unsupported(format!("no window matches {value:?}")),
+                        },
+                    };
+                    Outcome::Run(move_action(selector, window, follow))
+                }
+                None => lua_geometry(&args, snapshot, false),
+            }
+        }
+        // `hl.dsp.workspace.toggle_special("scratchpad")`, or with no
+        // argument the default special workspace.
+        "workspace.toggle_special" => {
+            let name = lua_field(&args, "name").or_else(|| lua_string(&args)).unwrap_or_default();
+            match special_name(&name, snapshot) {
+                Ok(name) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
+                Err(why) => Outcome::Unsupported(why),
+            }
+        }
         "window.center" => lua_window(&args, snapshot, |window| Action::CenterWindow(window.id)),
         "window.alter_zorder" => {
             if lua_field(&args, "mode").as_deref() != Some("top") {
@@ -1439,7 +1490,64 @@ fn in_range(index: usize) -> Result<usize, String> {
     Err(format!("chonkstep has workspaces 1 to {MAX_WORKSPACE}; {} is past the end", index + 1))
 }
 
-/// Resolve a workspace selector to a 0-based chonkstep index.
+/// What a workspace selector named: a numbered workspace by 0-based
+/// index, or a special workspace by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceSelector {
+    Numbered(usize),
+    Special(String),
+}
+
+/// The move a resolved selector asks for.
+fn move_action(selector: WorkspaceSelector, window: Option<u64>, follow: bool) -> Action {
+    match selector {
+        WorkspaceSelector::Numbered(workspace) => Action::MoveToWorkspace { window, workspace, follow },
+        WorkspaceSelector::Special(name) => Action::MoveToSpecial { window, name, follow },
+    }
+}
+
+/// The name a special workspace selector means, checked against what
+/// the compositor will create.
+///
+/// Accepts `special`, `special:NAME`, a bare `NAME`, and nothing at all
+/// for the default special workspace. The name is untrusted socket
+/// input and is published back out through `workspaces` and the event
+/// stream, so it is bounded and printable before anything is asked to
+/// create it; and a name the session does not have yet is refused once
+/// the session holds [`MAX_SPECIAL_WORKSPACES`] of them, so a script
+/// cannot grow the table without limit.
+fn special_name(selector: &str, snapshot: &Snapshot) -> Result<String, String> {
+    let selector = selector.trim();
+    let name = selector.strip_prefix("special:").map_or(selector, str::trim);
+    let name = if name.is_empty() || name == "special" { "special" } else { name };
+    if name.len() > MAX_SPECIAL_NAME {
+        return Err(format!("a special workspace name is at most {MAX_SPECIAL_NAME} bytes"));
+    }
+    if name.chars().any(char::is_control) {
+        return Err("a special workspace name cannot contain control characters".to_string());
+    }
+    if snapshot.special_named(name).is_none() && snapshot.specials.len() >= MAX_SPECIAL_WORKSPACES {
+        return Err(format!(
+            "chonkstep has {MAX_SPECIAL_WORKSPACES} special workspaces already and will not create {name:?}"
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Resolve a workspace selector to a numbered workspace's 0-based
+/// index or a special workspace's name.
+fn workspace_selector(target: &str, snapshot: &Snapshot) -> Result<WorkspaceSelector, String> {
+    let target = target.trim();
+    if target == "special" || target.starts_with("special:") {
+        return special_name(target, snapshot).map(WorkspaceSelector::Special);
+    }
+    workspace_target(target, snapshot).map(WorkspaceSelector::Numbered)
+}
+
+/// Resolve a numbered workspace selector to a 0-based chonkstep index.
+/// Special workspaces are named, not numbered, and are resolved by
+/// [`workspace_selector`]; here they are refused, as is any negative
+/// id, which is how Hyprland numbers them on the wire.
 fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> {
     let target = target.trim();
     if target.is_empty() {
@@ -1480,8 +1588,8 @@ fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> 
         return in_range(index);
     }
     // Named selectors.
-    if target.starts_with("special") {
-        return Err("chonkstep has no special (scratchpad) workspaces".to_string());
+    if target == "special" || target.starts_with("special:") {
+        return Err(format!("{target:?} names a special workspace, which this verb does not take"));
     }
     if let Some(name) = target.strip_prefix("name:") {
         return Err(format!("chonkstep workspaces are numbered, not named ({name:?})"));

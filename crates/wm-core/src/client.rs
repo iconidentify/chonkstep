@@ -182,6 +182,11 @@ pub struct Client<B: Backend> {
     /// the extra safety a slotmap key buys elsewhere in this crate
     /// isn't needed here.
     pub workspace: usize,
+    /// The special workspace this client is a member of — an index
+    /// into the window manager's specials — or `None` for an ordinary
+    /// window. While set, the special decides visibility and layout;
+    /// `workspace` stays the numbered home it returns to.
+    pub special: Option<usize>,
     pub monitor: MonitorId,
     /// User-visible labels attached through compositor control APIs.
     /// Kept in core state so IPC queries and rule-driven behavior see
@@ -231,6 +236,7 @@ impl<B: Backend> Client<B> {
             // the *current* workspace right after construction — this
             // default only matters for a `Client` that's never mapped.
             workspace: 0,
+            special: None,
             // Still unset (null slotmap key): multi-monitor policy
             // resolves a window's monitor geometrically, from its frame
             // center against `Backend::monitors()` (see

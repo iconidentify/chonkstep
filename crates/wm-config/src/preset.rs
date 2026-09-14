@@ -541,13 +541,10 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+shift+alt+8", "workspace-send 8"),
     ("super+shift+alt+9", "workspace-send 9"),
     ("super+shift+alt+0", "workspace-send 10"),
-    // "Move window to scratchpad": send this window out of the way and
-    // leave it recoverable. Chonkstep's nearest true verb is
-    // `miniaturize` — the window collapses to an icon tile on the desk
-    // rather than onto a special workspace, and it comes back by
-    // double-clicking that tile rather than by the same chord. See
-    // docs/omarchy-mode.md for the difference spelled out.
-    ("super+alt+s", "miniaturize"),
+    // The scratchpad: a special workspace shown as an overlay on the
+    // active output by the one chord, and sent a window by the other.
+    ("super+s", "toggle-special scratchpad"),
+    ("super+alt+s", "special-send scratchpad"),
     ("super+slash", "run omarchy-monitor-scaling-up"),
     ("super+alt+slash", "run omarchy-monitor-scaling-down"),
     // -- clipboard.lua ------------------------------------------------
@@ -751,7 +748,6 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+ctrl+left / super+ctrl+right", "move the grouped-window focus", Unbound::TilingOnly),
     ("super+alt+1..5", "focus the nth window of the group", Unbound::TilingOnly),
     ("super+alt/ctrl+minus/equal", "large resize increments", Unbound::NoVerb),
-    ("super+s", "toggle the scratchpad workspace", Unbound::NoVerb),
     ("super+mouse wheel, super+drag", "scroll through workspaces; move and resize by mouse", Unbound::NotAKey),
     // utilities.lua
     ("super+k", "Omarchy's keybinding cheatsheet", Unbound::Declined),
@@ -979,7 +975,6 @@ mod tests {
             "super+alt+shift+tab",
             "super+ctrl+left",
             "super+ctrl+right",
-            "super+s",
             "super+k",
             "super+shift+space",
             "super+ctrl+d",
@@ -1218,7 +1213,11 @@ mod tests {
             action("super+shift+alt+left"),
             Some(Action::MoveWorkspaceToMonitor(wm_core::OutputTarget::Direction(wm_core::FocusDirection::Left)))
         );
-        assert_eq!(action("super+alt+s"), Some(Action::Miniaturize));
+        assert_eq!(action("super+s"), Some(Action::ToggleSpecial("scratchpad".into())));
+        assert_eq!(
+            action("super+alt+s"),
+            Some(Action::SendToSpecial { name: "scratchpad".into(), follow: false })
+        );
         assert_eq!(
             action("super+space"),
             Some(Action::Run("omarchy-menu".to_string()))

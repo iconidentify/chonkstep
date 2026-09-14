@@ -380,13 +380,111 @@ fn moving_a_window_without_following_it_is_native() {
     let reading = read(&machine());
     assert_eq!(action_for(&reading, "super+shift+alt+1"), Some(Action::WorkspaceSend(0)));
     assert_eq!(action_for(&reading, "super+shift+alt+0"), Some(Action::WorkspaceSend(9)));
-    // ...except for the scratchpad, where "silent" is the whole point
-    // and `miniaturize` is the honest match. Omarchy's own
-    // `SUPER + ALT + S`.
+    // The scratchpad send is a silent move too, onto the special
+    // workspace the toggle chord shows. Omarchy's own `SUPER + ALT + S`.
     assert_eq!(
         action_for(&reading, "super+alt+s"),
-        Some(Action::Miniaturize)
+        Some(Action::SendToSpecial { name: "scratchpad".into(), follow: false })
     );
+}
+
+/// Omarchy's scratchpad chords. `SUPER + S` toggles the special
+/// workspace and `SUPER + ALT + S` sends the focused window there
+/// without following; the grave spellings do the same. None of them is
+/// `miniaturize`, which the send used to be mapped to, and none is
+/// unbound, which the toggle used to be.
+#[test]
+fn the_scratchpad_chords_bind_to_special_workspace_verbs() {
+    let reading = read(&machine());
+    assert_eq!(action_for(&reading, "super+s"), Some(Action::ToggleSpecial("scratchpad".into())));
+    assert_eq!(
+        action_for(&reading, "super+alt+s"),
+        Some(Action::SendToSpecial { name: "scratchpad".into(), follow: false })
+    );
+    assert!(!reading.skipped.iter().any(|skip| skip.what == "SUPER + S"), "{:?}", reading.skipped);
+    assert!(!reading.keybindings.iter().any(|(_, action)| *action == Action::Miniaturize));
+
+    let root = scratch("scratchpad-grave");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.bind("SUPER + grave", hl.dsp.workspace.toggle_special("scratchpad"))
+hl.bind("SUPER + SHIFT + grave", hl.dsp.window.move({ workspace = "special:scratchpad", follow = false }))
+hl.bind("SUPER + ALT + grave", hl.dsp.window.move({ workspace = "special:scratchpad" }))
+hl.bind("SUPER + CTRL + grave", hl.dsp.workspace.toggle_special())
+hl.bind("SUPER + CTRL + S", hl.dsp.focus({ workspace = "special:notes" }))
+hl.bind("SUPER + CTRL + N", hl.dsp.window.move({ workspace = "name:notes", follow = false }))
+"#,
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(action_for(&reading, "super+grave"), Some(Action::ToggleSpecial("scratchpad".into())));
+    assert_eq!(
+        action_for(&reading, "super+shift+grave"),
+        Some(Action::SendToSpecial { name: "scratchpad".into(), follow: false })
+    );
+    assert_eq!(
+        action_for(&reading, "super+alt+grave"),
+        Some(Action::SendToSpecial { name: "scratchpad".into(), follow: true }),
+        "the following form shows the special"
+    );
+    assert_eq!(
+        action_for(&reading, "super+ctrl+grave"),
+        Some(Action::ToggleSpecial(wm_core::DEFAULT_SPECIAL_NAME.into())),
+        "no name is the default special workspace"
+    );
+    assert_eq!(action_for(&reading, "super+ctrl+s"), Some(Action::ToggleSpecial("notes".into())));
+    assert_eq!(action_for(&reading, "super+ctrl+n"), None, "named workspaces are refused by name");
+    assert!(skipped_why(&reading, "SUPER + CTRL + N").is_some(), "{:?}", reading.skipped);
+    let _ = std::fs::remove_file(root.join(".config/hypr/hyprland.lua"));
+
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "bind = SUPER, grave, togglespecialworkspace, scratchpad\n\
+         bind = SUPER SHIFT, grave, movetoworkspacesilent, special:scratchpad\n\
+         bind = SUPER ALT, grave, movetoworkspace, special\n\
+         bind = SUPER CTRL, grave, togglespecialworkspace\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(action_for(&reading, "super+grave"), Some(Action::ToggleSpecial("scratchpad".into())));
+    assert_eq!(
+        action_for(&reading, "super+shift+grave"),
+        Some(Action::SendToSpecial { name: "scratchpad".into(), follow: false })
+    );
+    assert_eq!(
+        action_for(&reading, "super+alt+grave"),
+        Some(Action::SendToSpecial { name: wm_core::DEFAULT_SPECIAL_NAME.into(), follow: true })
+    );
+    assert_eq!(
+        action_for(&reading, "super+ctrl+grave"),
+        Some(Action::ToggleSpecial(wm_core::DEFAULT_SPECIAL_NAME.into()))
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `binds.hide_special_on_workspace_change`, the one `binds` key with a
+/// meaning here: Omarchy sets it, and a workspace switch then takes
+/// the scratchpad down with it.
+#[test]
+fn hide_special_on_workspace_change_is_read_from_either_syntax() {
+    let reading = read(&machine());
+    assert_eq!(reading.hide_special_on_workspace_change, Some(true), "{:?}", reading.skipped);
+    let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&machine()))).unwrap();
+    assert!(config.hide_special_on_workspace_change);
+    assert!(!crate::parse("").unwrap().hide_special_on_workspace_change, "off by default, as in Hyprland");
+
+    let root = scratch("binds-conf");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "binds {\n    hide_special_on_workspace_change = false\n    workspace_back_and_forth = true\n}\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.hide_special_on_workspace_change, Some(false));
+    assert!(
+        skipped_why(&reading, "workspace_back_and_forth").is_some(),
+        "the rest of the table is reported: {:?}",
+        reading.skipped
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The conditional Omarchy gates its preinstalled application chords
@@ -981,7 +1079,7 @@ hl.config({
             reading.skipped
         );
         assert!(
-            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input and cursor")),
+            reading.skipped.iter().any(|skip| skip.what.contains("general") || skip.what.contains("outside input, cursor and binds")),
             "{root:?}: the rest of the configuration is still reported: {:?}",
             reading.skipped
         );
@@ -1337,6 +1435,91 @@ fn float_rules_resolve_through_omarchys_tags() {
     // The `.*` rules that carry no float property must not float
     // everything on the desk.
     assert_eq!(policy.decision_for("some-ordinary-app", "A window"), None);
+}
+
+/// `apps/browser.lua` sends Chromium's "is sharing your screen" bar to
+/// the hidden special workspace: `workspace = "special silent"`. The
+/// rule compiles, and through the window manager the bar maps hidden
+/// and unfocused instead of taking a tile.
+#[test]
+fn the_screen_sharing_bar_rule_maps_the_window_hidden_and_unfocused() {
+    let reading = read(&machine());
+    let policy = reading.float_rules;
+    let decision = policy.window_decision_for("chromium", "example.com is sharing your screen.");
+    assert_eq!(
+        decision.workspace,
+        Some(wm_core::RuleWorkspace {
+            target: wm_core::RuleWorkspaceTarget::Special(wm_core::DEFAULT_SPECIAL_NAME.into()),
+            silent: true,
+        })
+    );
+    assert_eq!(policy.window_decision_for("chromium", "New Tab").workspace, None);
+    assert!(
+        policy.descriptions().iter().any(|line| line.contains("workspace special:special silently")),
+        "{:?}",
+        policy.descriptions()
+    );
+
+    use wm_core::fake_backend::{FakeBackend, FakeTheme};
+    let mut wm = wm_core::WindowManager::new(FakeBackend::new(), Box::new(FakeTheme));
+    wm.set_float_policy(policy.policy());
+    let ordinary = wm.backend_mut().create_window();
+    wm.backend_mut().set_title(ordinary, "New Tab");
+    wm.dispatch(wm_core::BackendEvent::MapRequest(ordinary));
+    let ordinary = wm.client_for_window(ordinary).unwrap();
+    let bar = wm.backend_mut().create_window();
+    wm.backend_mut().set_title(bar, "example.com is sharing your screen.");
+    wm.dispatch(wm_core::BackendEvent::MapRequest(bar));
+    let bar = wm.client_for_window(bar).unwrap();
+    let frame = wm.client(bar).unwrap().frame.expect("decorated");
+    assert!(!wm.backend().mapped_frames.contains(&frame), "the bar is parked on the hidden special");
+    assert_eq!(wm.focused_client(), Some(ordinary), "and took no focus");
+    assert_eq!(wm.client(bar).unwrap().special, Some(0));
+    assert_eq!(wm.special_name(0), Some(wm_core::DEFAULT_SPECIAL_NAME));
+    assert!(!wm.layout_order(0).contains(&bar), "it never took a tile");
+}
+
+/// The `workspace` rule's spellings: a number, `special`,
+/// `special:NAME`, each with an optional `silent`; `name:…` and the
+/// relative forms are refused by name.
+#[test]
+fn workspace_rules_read_numbers_and_specials_and_refuse_names() {
+    let root = scratch("workspace-rules");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.window_rule({ match = { class = "^(numbered)$" }, workspace = "3 silent" })
+hl.window_rule({ match = { class = "^(followed)$" }, workspace = "2" })
+hl.window_rule({ match = { class = "^(notes)$" }, workspace = "special:notes" })
+hl.window_rule({ match = { class = "^(named)$" }, workspace = "name:notes silent" })
+hl.window_rule({ match = { class = "^(relative)$" }, workspace = "+1" })
+hl.window_rule({ match = { class = "^(loud)$" }, workspace = "special quiet" })
+"#,
+    );
+    let reading = read(&Roots::under(&root));
+    let policy = &reading.float_rules;
+    let target = |class: &str| policy.window_decision_for(class, "").workspace;
+    assert_eq!(
+        target("numbered"),
+        Some(wm_core::RuleWorkspace { target: wm_core::RuleWorkspaceTarget::Numbered(2), silent: true })
+    );
+    assert_eq!(
+        target("followed"),
+        Some(wm_core::RuleWorkspace { target: wm_core::RuleWorkspaceTarget::Numbered(1), silent: false })
+    );
+    assert_eq!(
+        target("notes"),
+        Some(wm_core::RuleWorkspace { target: wm_core::RuleWorkspaceTarget::Special("notes".into()), silent: false })
+    );
+    for (class, why) in [("named", "numbered, not named"), ("relative", "must be 1 to"), ("loud", "\"quiet\"")] {
+        assert_eq!(target(class), None, "{class}");
+        assert!(
+            reading.skipped.iter().any(|skip| skip.what.contains(class) && skip.what.contains(why)),
+            "{class}: {:?}",
+            reading.skipped
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// And the reason reading them properly is worth more than the one
@@ -3718,7 +3901,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     let reading = read(&machine());
     assert_eq!(
         reading.keybindings.len(),
-        187,
+        188,
         "bindings read from the captured machine"
     );
     assert_eq!(
@@ -3728,7 +3911,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert_eq!(
         reading.float_rules.len(),
-        48,
+        49,
         "window behaviors resolved through Omarchy's tags"
     );
     // The skipped count is quoted too, in the guide's sample log line.
@@ -3737,17 +3920,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        152,
+        150,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("187\nbindings over 121 commands") || MODE.contains("187 bindings over 121 commands"),
-        "docs/omarchy-mode.md no longer quotes the 187 bindings over 121 commands this machine produces"
+        MODE.contains("188\nbindings over 121 commands") || MODE.contains("188 bindings over 121 commands"),
+        "docs/omarchy-mode.md no longer quotes the 188 bindings over 121 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=187 commands=121 env=8 autostart=4")
-            && GUIDE.contains("float_rules=48 monitors=1 skipped=152"),
+        GUIDE.contains("files=42 bindings=188 commands=121 env=8 autostart=4")
+            && GUIDE.contains("float_rules=49 monitors=1 skipped=150"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }
