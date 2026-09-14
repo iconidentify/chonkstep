@@ -196,9 +196,11 @@ pub fn parse(args: &str, snapshot: &Snapshot) -> Outcome {
     parse_classic(&verb, rest, snapshot)
 }
 
+/// Split the verb from its arguments on the first whitespace character,
+/// whatever its width; see `Request::parse`, which splits the same way.
 fn split_verb(args: &str) -> (String, &str) {
-    match args.find(char::is_whitespace) {
-        Some(space) => (args[..space].to_ascii_lowercase(), args[space + 1..].trim()),
+    match args.split_once(char::is_whitespace) {
+        Some((verb, rest)) => (verb.to_ascii_lowercase(), rest.trim()),
         None => (args.to_ascii_lowercase(), ""),
     }
 }
@@ -927,4 +929,21 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
         return false;
     }
     haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The verb split has the same shape as the request split, so it
+    /// had the same panic: a multibyte space after the verb put the
+    /// argument slice inside the character.
+    #[test]
+    fn non_ascii_whitespace_after_the_verb_splits_without_panicking() {
+        assert_eq!(split_verb("exec\u{a0}foot"), ("exec".to_string(), "foot"));
+        assert_eq!(
+            parse("exec\u{a0}foot", &Snapshot::default()),
+            Outcome::Run(Action::ExecArgv(vec!["foot".to_string()]))
+        );
+    }
 }

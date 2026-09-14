@@ -887,6 +887,39 @@ fn hostile_payloads_do_not_panic() {
     }
 }
 
+/// Every Unicode whitespace character, in each place the parsers split
+/// a word from what follows it: after the command, after a dispatcher
+/// verb, and inside a `[[BATCH]]` segment. All but the ASCII ones are
+/// several bytes long, and a split that stepped one byte past the start
+/// of the match panicked on them, ending the session through the panic
+/// hook. Each must separate the words exactly as a plain space does.
+#[test]
+fn every_unicode_whitespace_separates_words_without_panicking() {
+    let snapshot = desktop();
+    let spaces = (0..=u32::from(char::MAX)).filter_map(char::from_u32).filter(|c| c.is_whitespace());
+    let mut seen = 0;
+    for space in spaces {
+        seen += 1;
+        let (response, actions) = answer_payload(format!("dispatch{space}workspace 2").as_bytes(), &snapshot);
+        assert_eq!(actions, vec![Action::FocusWorkspace(1)], "after the command, {space:?}: {response:?}");
+
+        let (response, actions) = answer_payload(format!("/dispatch exec{space}foot").as_bytes(), &snapshot);
+        assert_eq!(actions, vec![Action::ExecArgv(vec!["foot".into()])], "after the verb, {space:?}: {response:?}");
+
+        let batch = format!("[[BATCH]]/dispatch{space}workspace 2;dispatch exec{space}foot");
+        let (response, actions) = answer_payload(batch.as_bytes(), &snapshot);
+        assert_eq!(
+            actions,
+            vec![Action::FocusWorkspace(1), Action::ExecArgv(vec!["foot".into()])],
+            "inside a batch, {space:?}: {response:?}"
+        );
+    }
+    // Unicode's White_Space property, which `char::is_whitespace`
+    // follows, has 25 members; fewer would mean the sweep tested less
+    // than it claims.
+    assert_eq!(seen, 25);
+}
+
 /// A batch answers each segment in order and collects every action.
 #[test]
 fn batches_answer_each_segment() {
