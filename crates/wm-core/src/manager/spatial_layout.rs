@@ -306,6 +306,11 @@ impl<B: Backend> WindowManager<B> {
     /// Flow positions may be outside every output: never infer ownership from
     /// its current frame center once an output affinity has been recorded.
     pub fn client_output_index(&self, id: ClientId) -> usize {
+        if let Some(special) = self.clients.get(id).and_then(|c| c.special) {
+            return self.special_output_index(special).unwrap_or_else(|| {
+                self.monitor_index_at(self.client_frame_center(id).unwrap_or(self.clients[id].geometry.pos))
+            });
+        }
         if let Some(output) = self.clients.get(id).and_then(|c| self.workspace_output_index(c.workspace)) { return output; }
         let Some(c) = self.clients.get(id) else {
             return self.primary_monitor_index();

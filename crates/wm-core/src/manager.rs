@@ -1663,6 +1663,7 @@ impl<B: Backend> WindowManager<B> {
         // A numbered destination ends any special membership; a member
         // going back to its own home still has to rejoin that
         // workspace's layout and come on or off screen with it.
+        let special_output = self.clients.get(id).filter(|client| client.special.is_some()).map(|_| self.client_output_index(id));
         let left_special = self.leave_special(id);
         let Some(client) = self.clients.get(id) else {
             return;
@@ -1686,7 +1687,7 @@ impl<B: Backend> WindowManager<B> {
             self.focus_adjacent_client(true);
         }
         let target_visible = self.workspace_visible(workspace);
-        self.translate_space_move(id, workspace);
+        self.translate_space_move_from_output(id, workspace, special_output);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };

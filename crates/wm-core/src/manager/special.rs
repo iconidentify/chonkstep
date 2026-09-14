@@ -113,6 +113,10 @@ impl<B: Backend> WindowManager<B> {
         self.connected_output_keys().iter().any(|key| self.special_shown.get(key) == Some(&index))
     }
 
+    pub(super) fn special_output_index(&self, index: usize) -> Option<usize> {
+        self.connected_output_keys().iter().position(|key| self.special_shown.get(key) == Some(&index))
+    }
+
     /// Whether the user can see this window: mapped, and either its
     /// special workspace is shown, or it sits on a visible numbered
     /// workspace or is pinned to all of them. The one predicate the
@@ -269,6 +273,7 @@ impl<B: Backend> WindowManager<B> {
         let members = self.special_members(index);
         for &id in &members {
             self.carry_frame_to_output(id, output);
+            self.publish_space_output(id);
             self.show_client_surface(id);
             // A remapped frame is not guaranteed to still hold its
             // pixels; repaint rather than wait for an expose.
@@ -358,6 +363,7 @@ impl<B: Backend> WindowManager<B> {
             self.hide_client_surface(id);
         }
         self.reflow_special(index);
+        self.publish_space_output(id);
         self.bump_protocol_state_revision();
     }
 
@@ -437,7 +443,10 @@ impl<B: Backend> WindowManager<B> {
     /// overlay is shown *here*, and a member left on the other head
     /// would be an invisible window holding focus.
     fn carry_frame_to_output(&mut self, id: ClientId, output: usize) {
-        let from = self.client_output_index(id);
+        // The shown-output entry already names the destination. Read
+        // the frame's actual location to work out the translation.
+        let Some(center) = self.client_frame_center(id) else { return };
+        let from = self.monitor_index_at(center);
         if from == output {
             return;
         }
