@@ -23,6 +23,11 @@ crate and both session binaries carry the same number.
   desktops; native CPU and storage measurements are documented.
 - Require actual video before reporting recording startup, flush small fragments
   promptly, and normalize output rotation on both old and new wf-recorder versions.
+- Bind Omarchy 4's twelve keyboard resize chords from its Lua configuration, and
+  refuse exact-size resize bindings instead of reading them as deltas. Every bound
+  resize delta, including chonkstep's own `grow-width`/`shrink-width` family, is
+  now in logical pixels, so on a scaled output each step is as large as the same
+  `hyprctl dispatch resizeactive` rather than a fraction of it.
 
 ## [0.5.0] - 2026-09-10
 

@@ -184,11 +184,12 @@ between "chonkstep knows what Omarchy's chords were in August" and
 "Omarchy's menu still configures your machine": rebind a key through
 their UI and the running session follows it within a second.
 
-On the machine this was developed on the live read produced **167
+On the machine this was developed on the live read produced **179
 bindings over 119 commands**, against the baked table's 151 over 83 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
-file test that only a live read can make.
+file test that only a live read can make, and Omarchy's twelve keyboard
+resize chords.
 
 It also generalises the one hardcoded window rule: `org.omarchy.*` at
 875x600 becomes Omarchy's real 38 float rules, so Steam gets 1100x700

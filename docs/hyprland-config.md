@@ -285,7 +285,14 @@ is worth knowing about:
 Directional focus (`movefocus l/r/u/d`) follows actual geometry in Freeform
 and Mosaic. Flow follows its horizontal sequence; up/down does nothing.
 `movewindow` and `swapwindow` directions reorder managed windows while keeping
-focus. `resizeactive` changes Mosaic boundaries or the focused Flow width.
+focus. `resizeactive` changes Mosaic boundaries or the focused Flow width,
+in both syntaxes, including Omarchy 4's Lua
+`hl.dsp.window.resize({ x = …, y = …, relative = true })` chords. Its
+deltas are logical pixels, converted by the scale of the focused
+window's output exactly as `hyprctl dispatch resizeactive` is. The
+exact-size forms (`resizeactive exact w h`, and the Lua call without
+`relative = true`) have no verb here and are refused rather than read
+as a delta.
 `fullscreen 0` toggles real fullscreen; `fullscreen 1` toggles maximize within
 the workarea. Floating windows retain traditional movement and resizing.
 
@@ -569,8 +576,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=167 commands=119 env=8 autostart=4
-      float_rules=47 monitors=1 skipped=184
+      files=42 bindings=179 commands=119 env=8 autostart=4
+      float_rules=47 monitors=1 skipped=172
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

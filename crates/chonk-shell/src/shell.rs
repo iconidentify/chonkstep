@@ -1102,6 +1102,33 @@ fn hyprland_watch(state: &SessionState) -> Option<(wm_config::hyprland::Roots, w
     Some((roots, watch))
 }
 
+/// A bound `Action::Resize` on one window: a layout-managed window
+/// moves its shared boundary or its Flow width, and any other window
+/// resizes its content.
+///
+/// The delta is in logical pixels, the unit Omarchy writes its chords in
+/// and `hyprctl dispatch resizeactive` takes, while both resize paths
+/// work in the device pixels of the window's output. It is converted
+/// once, here, by that output's scale, so a chord on a 2x panel moves as
+/// far as the same IPC request instead of half as far.
+fn resize_by_logical_delta<B: Backend>(wm: &mut WindowManager<B>, id: ClientId, delta: Point) {
+    let scale = wm.client_output_scale(id);
+    // A delta from a config file is untrusted. `as` saturates at the
+    // bounds of `i32`, so a wild delta times the scale cannot wrap, and
+    // the size clamp below still holds.
+    let physical = |length: i32| (f64::from(length) * scale).round() as i32;
+    let delta = Point::new(physical(delta.x), physical(delta.y));
+    if !wm.resize_layout_window(id, delta) {
+        if let Some(c) = wm.client(id) {
+            let size = wm_core::Size::new(
+                (c.geometry.size.w as i64 + delta.x as i64).clamp(1, 65536) as u32,
+                (c.geometry.size.h as i64 + delta.y as i64).clamp(1, 65536) as u32,
+            );
+            wm.resize_client_content(id, size);
+        }
+    }
+}
+
 impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// Inspect the shared font/glyph cache without clearing it. Explicit
     /// diagnostics only: this walks cache entries and must not run per frame.
@@ -1795,15 +1822,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             }
             Action::Resize(delta) => {
                 if let Some(id) = wm.focused_client() {
-                    if !wm.resize_layout_window(id, *delta) {
-                        if let Some(c) = wm.client(id) {
-                            let size = wm_core::Size::new(
-                                (c.geometry.size.w as i64 + delta.x as i64).clamp(1, 65536) as u32,
-                                (c.geometry.size.h as i64 + delta.y as i64).clamp(1, 65536) as u32,
-                            );
-                            wm.resize_client_content(id, size);
-                        }
-                    }
+                    resize_by_logical_delta(wm, id, *delta);
                 }
             }
             Action::LayoutNoop => {}
@@ -3360,5 +3379,62 @@ mod adversarial_spaces_review {
         let records = layout_snapshot(&wm, &[]);
         assert_eq!(restored_geometry(wm.monitors_ref(), &records[0]), original,
             "fullscreen serialization must preserve the pre-maximize restore point");
+    }
+}
+
+#[cfg(test)]
+mod bound_resize {
+    use super::*;
+    use wm_core::fake_backend::{FakeBackend, FakeTheme};
+
+    /// One output at scale 2, with two windows arranged by `layout`.
+    fn desk(layout: wm_core::LayoutMode) -> (WindowManager<FakeBackend>, Vec<ClientId>) {
+        let mut wm = WindowManager::new(FakeBackend::new(), Box::new(FakeTheme));
+        wm.backend_mut().set_monitor_scales(vec![2.0]);
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let window = wm.backend_mut().create_window();
+            wm.dispatch(BackendEvent::MapRequest(window));
+            ids.push(wm.client_for_window(window).unwrap());
+        }
+        wm.set_workspace_layout(0, layout);
+        (wm, ids)
+    }
+
+    /// A bound resize delta is in logical pixels, the unit Omarchy writes
+    /// its chords in and `hyprctl dispatch resizeactive` takes. On a
+    /// scale-2 output, SUPER+minus's -100 must move a Mosaic boundary as
+    /// far as the IPC path's -200 device pixels, and SUPER+equal's +100
+    /// must widen a Flow column by 100 logical pixels.
+    #[test]
+    fn a_bound_resize_moves_as_far_as_the_same_ipc_resize_on_a_scaled_output() {
+        for (layout, delta) in [
+            (wm_core::LayoutMode::Mosaic, Point::new(-100, 0)),
+            (wm_core::LayoutMode::Flow, Point::new(100, 0)),
+        ] {
+            let (mut bound, ids) = desk(layout);
+            let (mut ipc, ipc_ids) = desk(layout);
+            let geometry = |wm: &WindowManager<FakeBackend>, ids: &[ClientId]| {
+                ids.iter().map(|&id| wm.client(id).unwrap().geometry).collect::<Vec<_>>()
+            };
+            let before = geometry(&bound, &ids);
+            resize_by_logical_delta(&mut bound, ids[0], delta);
+            assert!(ipc.resize_layout_window(ipc_ids[0], Point::new(delta.x * 2, delta.y * 2)));
+            assert_ne!(geometry(&bound, &ids), before, "{layout:?}: the resize did nothing");
+            assert_eq!(
+                geometry(&bound, &ids),
+                geometry(&ipc, &ipc_ids),
+                "{layout:?}: a bound delta must be logical pixels"
+            );
+        }
+        // A window outside the layouts resizes its content by the same
+        // logical amount.
+        let (mut wm, ids) = desk(wm_core::LayoutMode::Freeform);
+        let before = wm.client(ids[0]).unwrap().geometry.size;
+        resize_by_logical_delta(&mut wm, ids[0], Point::new(-50, -25));
+        assert_eq!(
+            wm.client(ids[0]).unwrap().geometry.size,
+            Size::new(before.w - 100, before.h - 50)
+        );
     }
 }

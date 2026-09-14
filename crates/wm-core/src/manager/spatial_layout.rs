@@ -212,6 +212,19 @@ impl<B: Backend> WindowManager<B> {
         monitor.identity.as_deref().unwrap_or(&monitor.name)
     }
 
+    /// Device pixels per logical pixel on the output a client belongs to:
+    /// the scale `resize_managed` measures a managed frame against, and
+    /// so the one a resize delta written in logical pixels converts by.
+    /// A scale that is not a finite positive number reads as 1.
+    pub fn client_output_scale(&self, id: ClientId) -> f64 {
+        self.backend
+            .monitors_ref()
+            .get(self.client_output_index(id))
+            .map(|monitor| f64::from(self.backend.decoration_scale(monitor.geometry)))
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .unwrap_or(1.0)
+    }
+
     /// Flow positions may be outside every output: never infer ownership from
     /// its current frame center once an output affinity has been recorded.
     pub fn client_output_index(&self, id: ClientId) -> usize {

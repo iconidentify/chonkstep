@@ -236,17 +236,18 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         "layoutmsg" | "togglesplit" | "swapsplit" | "pseudo" | "splitratio" => {
             Verb::Action(Action::LayoutNoop)
         }
-        "resizeactive" => {
-            let values: Vec<_> = arg
-                .split_whitespace()
-                .filter_map(|s| s.parse::<i32>().ok())
-                .collect();
-            if let [x, y] = values.as_slice() {
-                Verb::Action(Action::Resize(wm_core::Point::new(*x, *y)))
-            } else {
-                Verb::Unbound(Unbound::NoVerb)
-            }
-        }
+        // `resizeactive x y` is a delta, in logical pixels. Exactly two
+        // integers and nothing else: the `exact w h` form sets a size,
+        // which this desktop has no binding verb for, and reading its
+        // numbers as a delta would grow the window by the size it asked
+        // for. Percentages and every other spelling are refused alike.
+        "resizeactive" => match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [x, y] => match (x.parse::<i32>(), y.parse::<i32>()) {
+                (Ok(x), Ok(y)) => Verb::Action(Action::Resize(wm_core::Point::new(x, y))),
+                _ => Verb::Unbound(Unbound::NoVerb),
+            },
+            _ => Verb::Unbound(Unbound::NoVerb),
+        },
         "swapnext" | "moveactive" | "pin" | "centerwindow" => Verb::Unbound(Unbound::TilingOnly),
         "togglegroup"
         | "changegroupactive"

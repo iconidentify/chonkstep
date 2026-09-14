@@ -237,6 +237,73 @@ fn the_generated_workspace_chords_are_expanded_from_the_loop() {
     );
 }
 
+/// Omarchy's keyboard resize chords, all twelve, from `tiling.lua`: SUPER
+/// with minus or equal, SHIFT for the other axis, and ALT and CTRL for
+/// the small and the large step, each `hl.dsp.window.resize({ x = …,
+/// y = …, relative = true })`. The deltas are carried as written, in the
+/// logical pixels Omarchy writes them in.
+#[test]
+fn the_keyboard_resize_chords_carry_their_deltas() {
+    let reading = read(&machine());
+    for (spec, x, y) in [
+        ("super+minus", -100, 0),
+        ("super+equal", 100, 0),
+        ("super+shift+minus", 0, -100),
+        ("super+shift+equal", 0, 100),
+        ("super+alt+minus", -25, 0),
+        ("super+alt+equal", 25, 0),
+        ("super+shift+alt+minus", 0, -25),
+        ("super+shift+alt+equal", 0, 25),
+        ("super+ctrl+minus", -300, 0),
+        ("super+ctrl+equal", 300, 0),
+        ("super+ctrl+shift+minus", 0, -300),
+        ("super+ctrl+shift+equal", 0, 300),
+    ] {
+        assert_eq!(
+            action_for(&reading, spec),
+            Some(Action::Resize(wm_core::Point::new(x, y))),
+            "{spec}"
+        );
+    }
+}
+
+/// Without `relative = true`, Hyprland's Lua resize sets an exact size,
+/// as the classic `resizeactive exact` does. This desktop has no
+/// exact-size verb, and an exact size read as a delta would grow the
+/// window by the size it asked for, so both spellings are refused by
+/// name while a relative resize beside them still binds.
+#[test]
+fn an_exact_resize_is_refused_rather_than_read_as_a_delta() {
+    let root = scratch("exact-resize");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        concat!(
+            "hl.bind(\"SUPER + R\", hl.dsp.window.resize({ x = 1300, y = 900 }))\n",
+            "hl.bind(\"SUPER + T\", hl.dsp.window.resize({ x = -40, y = 0, relative = true }))\n",
+        ),
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(action_for(&reading, "super+r"), None);
+    assert!(skipped_why(&reading, "SUPER + R").is_some(), "{:?}", reading.skipped);
+    assert_eq!(
+        action_for(&reading, "super+t"),
+        Some(Action::Resize(wm_core::Point::new(-40, 0)))
+    );
+    let _ = std::fs::remove_file(root.join(".config/hypr/hyprland.lua"));
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "bind = SUPER, R, resizeactive, exact 1300 900\nbind = SUPER, T, resizeactive, -40 0\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(action_for(&reading, "super+r"), None, "the classic spelling of an exact size");
+    assert!(skipped_why(&reading, "SUPER R").is_some(), "{:?}", reading.skipped);
+    assert_eq!(
+        action_for(&reading, "super+t"),
+        Some(Action::Resize(wm_core::Point::new(-40, 0)))
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Hyprland's `movetoworkspacesilent` moves a window *without*
 /// following it. The translated action preserves that distinction from
 /// `workspace-carry`, including Omarchy's tenth workspace on zero.
@@ -2712,7 +2779,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     let reading = read(&machine());
     assert_eq!(
         reading.keybindings.len(),
-        167,
+        179,
         "bindings read from the captured machine"
     );
     assert_eq!(
@@ -2731,17 +2798,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        184,
+        172,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("167\nbindings over 119 commands") || MODE.contains("167 bindings over 119 commands"),
-        "docs/omarchy-mode.md no longer quotes the 167 bindings over 119 commands this machine produces"
+        MODE.contains("179\nbindings over 119 commands") || MODE.contains("179 bindings over 119 commands"),
+        "docs/omarchy-mode.md no longer quotes the 179 bindings over 119 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=167 commands=119 env=8 autostart=4")
-            && GUIDE.contains("float_rules=47 monitors=1 skipped=184"),
+        GUIDE.contains("files=42 bindings=179 commands=119 env=8 autostart=4")
+            && GUIDE.contains("float_rules=47 monitors=1 skipped=172"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

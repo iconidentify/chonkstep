@@ -1358,7 +1358,25 @@ fn dsp(path: &str, args: &[Value]) -> Dispatcher {
         "window.float" => verb("togglefloating", String::new()),
         "window.pin" => verb("pin", String::new()),
         "window.swap" => verb("swapwindow", text("direction")),
-        "window.resize" => verb("resizeactive", String::new()),
+        // `x` and `y` are a delta with `relative = true`, and an exact
+        // size without it: Omarchy's `omarchy-hyprland-window-pop` pairs
+        // the bare form with the classic `resizeactive exact`. Both are
+        // carried in the classic spelling so that `super::dispatch`
+        // makes the one judgement for both syntaxes, and a table this
+        // cannot read keeps the empty argument it refuses.
+        "window.resize" => {
+            let number = |name: &str| match field(name) {
+                Some(Value::Num(n)) if n.is_finite() => Some(format_number(*n)),
+                _ => None,
+            };
+            match (number("x"), number("y")) {
+                (Some(x), Some(y)) if matches!(field("relative"), Some(Value::Bool(true))) => {
+                    verb("resizeactive", format!("{x} {y}"))
+                }
+                (Some(x), Some(y)) => verb("resizeactive", format!("exact {x} {y}")),
+                _ => verb("resizeactive", String::new()),
+            }
+        }
         "window.drag" => verb("movewindow", String::new()),
         "window.cycle_next" => verb("cyclenext", String::new()),
         "window.bring_to_top" => verb("bringactivetotop", String::new()),
