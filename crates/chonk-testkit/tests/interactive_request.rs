@@ -336,6 +336,52 @@ fn a_current_pointer_grab_can_begin_an_xdg_move() {
     assert_eq!((after.x - before.x, after.y - before.y), (100, 70));
 }
 
+/// The popups the compositor maps above every window; the window menu is one.
+fn popups(session: &mut Session) -> usize {
+    session
+        .world()
+        .unwrap()
+        .shells
+        .iter()
+        .filter(|shell| shell.mapped && shell.above && shell.buffer_bytes > 0)
+        .count()
+}
+
+/// A client-drawn header that is right-clicked asks for the window menu with
+/// the press serial. The menu opens and survives the button's release, which
+/// belongs to the menu rather than reaching the client as a click.
+#[test]
+#[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
+fn a_current_pointer_grab_can_open_the_window_menu() {
+    let (mut session, app) = boot("show-window-menu");
+    let before = window(&mut session, &app);
+    assert_eq!(popups(&mut session), 0);
+    session
+        .door()
+        .motion(f64::from(before.x + 80), f64::from(before.y + 80))
+        .unwrap();
+    session.door().button("right", true).unwrap();
+    wait_for_prefix(&session, "interactive pointer serial ");
+    session.door().tap_key(F1).unwrap();
+    wait_for_prefix(&session, &format!("interactive fence {F1} "));
+    poll_until(EVENT, "the window menu to open", || (popups(&mut session) == 1).then_some(()))
+        .unwrap_or_else(|error| panic!("{error}; {}", session.client_log(PROBE)));
+    session.door().button("right", false).unwrap();
+    session.door().barrier().unwrap();
+    assert_eq!(popups(&mut session), 1, "releasing the button leaves the menu open");
+}
+
+/// Without the user action behind it, the same request opens nothing.
+#[test]
+#[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
+fn a_zero_serial_cannot_open_the_window_menu() {
+    let (mut session, _app) = boot("show-window-menu");
+    session.door().tap_key(F2).unwrap();
+    wait_for_prefix(&session, &format!("interactive fence {F2} "));
+    session.door().barrier().unwrap();
+    assert_eq!(popups(&mut session), 0);
+}
+
 #[test]
 #[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
 fn a_current_pointer_grab_can_begin_an_xdg_resize() {

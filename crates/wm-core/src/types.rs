@@ -224,6 +224,10 @@ pub enum BackendEvent<Win, Frame> {
     /// first mapped — which is a worse bug than the spare titlebar that
     /// removing our chrome was meant to fix.
     MoveRequest(Win),
+    /// `xdg_toplevel.show_window_menu`: a client's own titlebar asked for
+    /// the window menu, at a root-coordinate point. The backend has already
+    /// authorized it against the user action that prompted it.
+    WindowMenuRequested { window: Win, at: Point },
     /// The pointer button came up during an interactive drag, somewhere
     /// the backend cannot name a surface for.
     ///
