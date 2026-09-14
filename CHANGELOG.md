@@ -5,6 +5,11 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Open fullscreen or maximized when a client asks before its window maps.
+  An xdg toplevel's `set_fullscreen` or `set_maximized` during setup, and an
+  X11 window's `_NET_WM_STATE` written while withdrawn, were dropped, so
+  games and players that start fullscreen opened windowed. Both now apply at
+  map, through the same path window rules can refuse.
 - Read the `suppress_event` window rule. Omarchy's `suppress_event maximize`
   on every window now keeps a tile in its cell when an application asks to
   be maximized; `fullscreen` works the same way, `activate` refuses focus

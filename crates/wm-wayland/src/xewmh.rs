@@ -362,6 +362,11 @@ struct WriteAtoms {
     net_wm_state_above: Atom,
     net_wm_state_sticky: Atom,
     net_wm_state_demands_attention: Atom,
+    /// Read only from a withdrawn window's `_NET_WM_STATE` at map. Client
+    /// messages naming these are Smithay's to decode, never this module's.
+    net_wm_state_fullscreen: Atom,
+    net_wm_state_maximized_horz: Atom,
+    net_wm_state_maximized_vert: Atom,
 }
 
 impl WriteAtoms {
@@ -394,6 +399,9 @@ impl WriteAtoms {
                 .intern_atom(false, b"_NET_WM_STATE_DEMANDS_ATTENTION")?
                 .reply()?
                 .atom,
+            net_wm_state_fullscreen: conn.intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?.reply()?.atom,
+            net_wm_state_maximized_horz: conn.intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_HORZ")?.reply()?.atom,
+            net_wm_state_maximized_vert: conn.intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_VERT")?.reply()?.atom,
         })
     }
 }
@@ -566,6 +574,40 @@ impl XEwmh {
         reply
             .value32()
             .is_some_and(|mut states| states.any(|atom| atom == self.atoms.net_wm_state_modal))
+    }
+
+    /// The fullscreen and maximize states a withdrawn window wrote into
+    /// `_NET_WM_STATE` before asking to be mapped. EWMH asks the window
+    /// manager to honour that property at map, and Smithay's XWM loads a
+    /// new window's properties but leaves this one to the window manager.
+    /// The property is untrusted: at most 32 atoms are read, and each
+    /// state is reported once.
+    pub(crate) fn withdrawn_states(&self, window: XWindow) -> Vec<NetState> {
+        let Ok(cookie) = self.conn.get_property(false, window, self.atoms.net_wm_state, AtomEnum::ATOM, 0, 32) else {
+            return Vec::new();
+        };
+        let Ok(reply) = cookie.reply() else {
+            return Vec::new();
+        };
+        let Some(atoms) = reply.value32() else {
+            return Vec::new();
+        };
+        let mut states = Vec::new();
+        for atom in atoms {
+            let state = if atom == self.atoms.net_wm_state_fullscreen {
+                NetState::Fullscreen
+            } else if atom == self.atoms.net_wm_state_maximized_horz {
+                NetState::MaximizedHorz
+            } else if atom == self.atoms.net_wm_state_maximized_vert {
+                NetState::MaximizedVert
+            } else {
+                continue;
+            };
+            if !states.contains(&state) {
+                states.push(state);
+            }
+        }
+        states
     }
 }
 

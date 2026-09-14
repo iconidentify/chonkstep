@@ -222,6 +222,12 @@ impl XwmHandler for Compositor {
                 .xwayland.ewmh
                 .as_ref()
                 .is_some_and(|xewmh| xewmh.window_is_modal(window.window_id()));
+        let withdrawn = self
+            .xwayland
+            .ewmh
+            .as_ref()
+            .map(|xewmh| xewmh.withdrawn_states(window.window_id()))
+            .unwrap_or_default();
         let backend = self.wm.backend_mut();
         let id = ensure_x11_record(backend, &window);
         // Refresh the pre-map geometry — the client may have configured
@@ -244,6 +250,32 @@ impl XwmHandler for Compositor {
                 window: id,
                 action: NetStateAction::Add,
                 first: NetState::DemandsAttention,
+                second: None,
+            });
+        }
+        // `_NET_WM_STATE` written while the window was withdrawn, which
+        // EWMH asks the window manager to honour at map: an SDL game or a
+        // player created fullscreen. Queued after the MapRequest for the
+        // reason above, maximize before fullscreen as a rule-driven map
+        // applies them, and decided by the same request path, so a window
+        // rule can still refuse it.
+        let mut maximized = withdrawn
+            .iter()
+            .copied()
+            .filter(|state| matches!(state, NetState::MaximizedHorz | NetState::MaximizedVert));
+        if let Some(first) = maximized.next() {
+            backend.queue(WmEvent::NetStateRequested {
+                window: id,
+                action: NetStateAction::Add,
+                first,
+                second: maximized.next(),
+            });
+        }
+        if withdrawn.contains(&NetState::Fullscreen) {
+            backend.queue(WmEvent::NetStateRequested {
+                window: id,
+                action: NetStateAction::Add,
+                first: NetState::Fullscreen,
                 second: None,
             });
         }

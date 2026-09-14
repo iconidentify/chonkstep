@@ -32,6 +32,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         x11rb::protocol::xproto::PropMode::REPLACE, window, AtomEnum::WM_CLASS,
         AtomEnum::STRING, b"x11-autostart\0X11Autostart\0",
     )?;
+    if std::env::args().nth(2).as_deref() == Some("fullscreen-before-map") {
+        // What SDL's X11 backend does for a window created fullscreen:
+        // the state goes on the withdrawn window, before the map request.
+        let state = connection.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
+        let fullscreen = connection.intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?.reply()?.atom;
+        connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE, window, state, AtomEnum::ATOM, &[fullscreen],
+        )?;
+    }
     connection.map_window(window)?;
     connection.flush()?;
     std::fs::write(marker, format!("DISPLAY={display}\n"))?;

@@ -489,6 +489,51 @@ fn a_suppressed_maximize_request_keeps_every_tile_in_its_cell() {
     assert!(session.compositor_alive());
 }
 
+/// A client that asks for fullscreen or maximize during setup, before its
+/// initial commit, opens in that state. Under Omarchy's `suppress_event
+/// maximize` rule the maximize asked for at launch is refused like any
+/// other, and the window opens at its own size.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn state_requested_before_the_first_commit_is_applied_at_map() {
+    let probe = profile_binary("chonk-fullscreen-probe").expect("cargo build -p chonk-testkit builds the probe");
+    for (mode, rules) in [
+        ("premap-fullscreen", None),
+        ("premap-maximize", None),
+        ("premap-maximize", Some("windowrule = suppress_event maximize, match:class .*\nbind = SUPER, F12, workspace, 1\n")),
+    ] {
+        let name = format!("{mode}{}", if rules.is_some() { "-suppressed" } else { "" });
+        let mut options = SessionOptions { scale: Some(1.0), ..SessionOptions::default() };
+        match rules {
+            Some(rules) => {
+                options.config_extra = "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into();
+                options.config_root_files = vec![("hypr/hyprland.conf".into(), rules.into())];
+            }
+            None => options.config_extra = "hyprland_config = false\n".into(),
+        }
+        let mut session = Session::boot(&name, options).expect("the nested compositor boots");
+        session.launch(&probe.to_string_lossy(), &["premap-probe", "premap-probe", mode]).expect("the probe launches");
+        session.wait_for_window("premap-probe").expect("the probe maps");
+        let settled = poll_until(Duration::from_secs(10), "the window to settle in its opening state", || {
+            let world = session.world().ok()?;
+            let window = world.window_matching("premap-probe")?.clone();
+            let covers = (window.x, window.y, window.w, window.h) == (0, 0, world.output_w, world.output_h);
+            let large = window.w * 4 >= world.output_w * 3 && window.h * 2 >= world.output_h;
+            let windowed = (window.w, window.h) == (400, 300);
+            let expected = match (mode, rules.is_some()) {
+                ("premap-fullscreen", _) => covers,
+                (_, false) => large && !covers,
+                (_, true) => windowed,
+            };
+            expected.then_some(window)
+        })
+        .unwrap_or_else(|error| {
+            panic!("{error}: {name}\n{:?}\n{}", session.world().ok().map(|world| world.windows), session.log())
+        });
+        assert!(session.compositor_alive(), "{name}: {settled:?}");
+    }
+}
+
 #[test]
 #[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
 fn screensaver_covers_the_output_without_any_imported_window_rules() {

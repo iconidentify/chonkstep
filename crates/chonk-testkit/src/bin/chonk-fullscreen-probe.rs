@@ -697,6 +697,20 @@ fn main() {
         xdg_surface.set_window_geometry(0, 0, 600_000_000, 10);
         say("declared absurd window geometry 600000000x10");
     }
+    // State asked for during setup, before the initial commit, as
+    // xdg-shell allows: a player or game started fullscreen, or an
+    // application restoring a remembered maximized window.
+    match animation.as_deref() {
+        Some("premap-fullscreen") => {
+            toplevel.set_fullscreen(None);
+            say("requested fullscreen before the initial commit");
+        }
+        Some("premap-maximize") => {
+            toplevel.set_maximized();
+            say("requested maximize before the initial commit");
+        }
+        _ => {}
+    }
     surface.commit();
     probe.surface = Some(surface.clone());
     probe.toplevel = Some(toplevel);

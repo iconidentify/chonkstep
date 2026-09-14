@@ -400,6 +400,9 @@ pub(crate) struct WindowRecord {
     pub parent: Option<WlWindowId>,
     /// Protocol-declared modal state (`xdg_dialog_v1` or EWMH modal).
     pub modal: bool,
+    /// State an xdg toplevel asked for before its first buffer, replayed
+    /// to `wm-core` right after its `MapRequest`.
+    pub premap: PremapStates,
     /// Most recent preview of this window's contents, refreshed by
     /// [`crate::capture`] while rendering and served back through
     /// `Backend::capture_window_image`. `None` until the first
@@ -468,12 +471,56 @@ impl WindowRecord {
             window_type: WindowType::Normal,
             parent: None,
             modal: false,
+            premap: PremapStates::default(),
             snapshot: None,
             snapshot_dirty: true,
             snapshot_attempted_at: None,
             decoration: crate::decoration::DecorationNegotiation::default(),
             content_offset: Point::new(0, 0),
         }
+    }
+}
+
+/// Window states an xdg toplevel asked for before its first buffer.
+///
+/// xdg-shell lets a client set its toplevel up, fullscreen or maximized
+/// included, before the initial commit. `wm-core` has no client to apply
+/// such a request to until the map, and would drop it, so the request is
+/// recorded here and replayed right after the `MapRequest`. The last
+/// request of each kind wins.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PremapStates {
+    pub fullscreen: bool,
+    pub maximized: bool,
+}
+
+impl PremapStates {
+    /// The requests to replay after the map. Maximize goes first, so a
+    /// window that asked for both keeps the maximized state underneath
+    /// fullscreen, as a rule-driven map applies them.
+    pub(crate) fn requests(self) -> impl Iterator<Item = (wm_core::NetState, Option<wm_core::NetState>)> {
+        [
+            self.maximized.then_some((wm_core::NetState::MaximizedHorz, Some(wm_core::NetState::MaximizedVert))),
+            self.fullscreen.then_some((wm_core::NetState::Fullscreen, None)),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
+#[cfg(test)]
+mod premap_tests {
+    use super::PremapStates;
+    use wm_core::NetState;
+
+    #[test]
+    fn premap_states_replay_maximize_under_fullscreen_and_nothing_when_unset() {
+        assert_eq!(PremapStates::default().requests().count(), 0);
+        let both = PremapStates { fullscreen: true, maximized: true };
+        assert_eq!(
+            both.requests().collect::<Vec<_>>(),
+            [(NetState::MaximizedHorz, Some(NetState::MaximizedVert)), (NetState::Fullscreen, None)]
+        );
     }
 }
 
