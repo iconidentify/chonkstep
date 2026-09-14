@@ -1352,26 +1352,304 @@ fn a_float_rule_on_an_unknown_tag_names_the_tag() {
     assert!(notes.iter().any(|n| n.contains("ghost")), "{notes:?}");
 }
 
-/// `size` given as a Hyprland layout expression needs a monitor to
-/// evaluate against, which a config reader does not have. The rule's
-/// float still applies; the size is dropped, loudly.
+// ---- layout expressions -----------------------------------------------
+
+/// A monitor to evaluate against, and no window of note.
+fn on_1080p() -> expr::Values {
+    expr::Values { monitor_w: 1920.0, monitor_h: 1080.0, window_w: 600.0, window_h: 338.0 }
+}
+
+fn eval(source: &str) -> Option<f64> {
+    expr::Expr::parse(source).unwrap_or_else(|why| panic!("{source:?}: {why}")).eval(&on_1080p())
+}
+
 #[test]
-fn a_size_expression_is_dropped_with_its_own_reason() {
+fn expressions_follow_arithmetic_precedence_and_associativity() {
+    assert_eq!(eval("2+3*4"), Some(14.0));
+    assert_eq!(eval("2*3+4"), Some(10.0));
+    assert_eq!(eval("10-4-3"), Some(3.0), "subtraction is left-associative");
+    assert_eq!(eval("8/2/2"), Some(2.0), "so is division");
+    assert_eq!(eval("1+8/2*3"), Some(13.0));
+    assert_eq!(eval("0.04*100"), Some(4.0));
+}
+
+#[test]
+fn unary_minus_binds_tighter_than_the_binary_operators() {
+    assert_eq!(eval("-5"), Some(-5.0));
+    assert_eq!(eval("--5"), Some(5.0));
+    assert_eq!(eval("-2*3"), Some(-6.0));
+    assert_eq!(eval("2*-3"), Some(-6.0));
+    assert_eq!(eval("-(2+3)"), Some(-5.0));
+    assert_eq!(eval("10--5"), Some(15.0));
+    assert_eq!(eval("-monitor_w+10"), Some(-1910.0));
+}
+
+#[test]
+fn parentheses_group() {
+    assert_eq!(eval("(2+3)*4"), Some(20.0));
+    assert_eq!(eval("((2+3))*(4)"), Some(20.0));
+    assert_eq!(eval("2*(3+(4*(5-1)))"), Some(38.0));
+    assert!(expr::Expr::parse("(2+3").is_err(), "an unclosed parenthesis is refused");
+    assert!(expr::Expr::parse("2+3)").is_err(), "and so is an unopened one");
+}
+
+#[test]
+fn each_variable_reads_its_own_value() {
+    assert_eq!(eval("monitor_w"), Some(1920.0));
+    assert_eq!(eval("monitor_h"), Some(1080.0));
+    assert_eq!(eval("window_w"), Some(600.0));
+    assert_eq!(eval("window_h"), Some(338.0));
+    // Omarchy's own expressions, verbatim.
+    assert_eq!(eval("(monitor_w-window_w-40)"), Some(1280.0));
+    assert_eq!(eval("(monitor_h*0.04)"), Some(43.2));
+    assert_eq!(eval("(monitor_h-window_h-40)"), Some(702.0));
+    assert_eq!(eval("(monitor_h*4/25)"), Some(172.8));
+    assert_eq!(eval("(monitor_w-monitor_h*4/25-40)"), Some(1707.2));
+    for unknown in ["monitor_x", "w", "cursor", "monitor_w2", "Monitor_W", "100%"] {
+        assert!(expr::Expr::parse(unknown).is_err(), "{unknown:?} is not a variable");
+    }
+}
+
+#[test]
+fn a_result_that_is_not_a_number_is_no_result() {
+    assert_eq!(eval("1/0"), None, "division by zero");
+    assert_eq!(eval("-1/0"), None);
+    assert_eq!(eval("0/0"), None);
+    assert_eq!(eval("(1/0)*0"), None, "and it does not come back");
+    assert_eq!(eval("monitor_w/(window_w-600)"), None);
+    assert_eq!(eval("1/0.5"), Some(2.0), "a fraction is not zero");
+}
+
+#[test]
+fn malformed_expressions_are_refused_with_a_reason() {
+    for bad in ["", "2+", "+2", "*3", "2 3", "2..3", "(", ")", "monitor_w monitor_h", "3x", "1e3"] {
+        assert!(expr::Expr::parse(bad).is_err(), "{bad:?} must not parse");
+    }
+}
+
+#[test]
+fn an_expression_over_the_length_bound_is_refused() {
+    // `1+1+…+1`, negated and parenthesised to land exactly on the bound.
+    let flat = |terms: usize| format!("1{}", "+1".repeat(terms));
+    let at_bound = format!("-({})", flat(62));
+    assert_eq!(at_bound.len(), expr::MAX_SOURCE_BYTES);
+    assert_eq!(expr::Expr::parse(&at_bound).map(|e| e.eval(&on_1080p())), Ok(Some(-63.0)), "the bound is inclusive");
+    let over = flat(64);
+    assert_eq!(over.len(), expr::MAX_SOURCE_BYTES + 1);
+    let why = expr::Expr::parse(&over).unwrap_err();
+    assert!(why.contains("longer than"), "{why}");
+}
+
+#[test]
+fn an_expression_nested_over_the_depth_bound_is_refused() {
+    let nested = |depth: usize| format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
+    assert_eq!(
+        expr::Expr::parse(&nested(expr::MAX_DEPTH)).map(|e| e.eval(&on_1080p())),
+        Ok(Some(1.0)),
+        "the bound is inclusive"
+    );
+    let why = expr::Expr::parse(&nested(expr::MAX_DEPTH + 1)).unwrap_err();
+    assert!(why.contains("deeper than"), "{why}");
+    // A run of minus signs nests the same way and is bounded the same way.
+    assert!(expr::Expr::parse(&format!("{}1", "-".repeat(expr::MAX_DEPTH))).is_ok());
+    assert!(expr::Expr::parse(&format!("{}1", "-".repeat(expr::MAX_DEPTH + 1))).is_err());
+    // And a long flat chain is not deep at all.
+    assert!(expr::Expr::parse(&format!("1{}", "+1".repeat(50))).is_ok());
+}
+
+/// The monitor Omarchy's fixtures are written against, with a
+/// client-drawn window that asked for a size the rules override.
+fn metrics_1080p() -> wm_core::RuleMetrics {
+    wm_core::RuleMetrics {
+        monitor: wm_core::Size::new(1920, 1080),
+        window: wm_core::Size::new(640, 360),
+        chrome: wm_core::Size::new(0, 0),
+    }
+}
+
+/// `size` given as a layout expression is evaluated when the window
+/// maps, against the monitor it maps on.
+#[test]
+fn a_size_expression_is_evaluated_against_the_monitor() {
     let rule = directive::WindowRule {
         matchers: vec![directive::Matcher::Class("^WebcamOverlay-small$".into())],
         props: vec![("size".into(), "(monitor_h*4/25) (monitor_h*9/50)".into())],
     };
     let (rules, notes) = rules::compile(&[rule]);
-    assert_eq!(
-        rules
-            .decision_for("WebcamOverlay-small", "")
-            .and_then(|d| d.size),
-        None
-    );
+    assert!(notes.is_empty(), "{notes:?}");
+    // Without a monitor there is no size — and no guess.
+    let decision = rules.decision_for("WebcamOverlay-small", "").expect("a sized window floats");
+    assert_eq!(decision.size, None);
+    let placement = rules.placement_for("WebcamOverlay-small", "", &metrics_1080p()).expect("the rule matches");
+    assert_eq!(placement.size, Some(wm_core::Size::new(173, 194)), "round(172.8) x round(194.4)");
+    assert_eq!(placement.position, None);
     assert!(
-        notes.iter().any(|n| n.contains("needs a monitor")),
-        "{notes:?}"
+        rules.descriptions()[0].contains("size (monitor_h*4/25) (monitor_h*9/50)"),
+        "{:?}",
+        rules.descriptions()
     );
+}
+
+/// `move` is evaluated after `size`, with the size the rule resolved
+/// as `window_w`/`window_h` — which is how Omarchy's picture-in-picture
+/// rule reaches the corner.
+#[test]
+fn a_move_expression_sees_the_rules_own_size() {
+    let rule = directive::WindowRule {
+        matchers: vec![directive::Matcher::Title("^pip$".into())],
+        props: vec![
+            ("float".into(), "on".into()),
+            ("size".into(), "600 338".into()),
+            ("move".into(), "(monitor_w-window_w-40) (monitor_h*0.04)".into()),
+        ],
+    };
+    let (rules, notes) = rules::compile(&[rule]);
+    assert!(notes.is_empty(), "{notes:?}");
+    let placement = rules.placement_for("firefox", "pip", &metrics_1080p()).unwrap();
+    assert_eq!(placement.size, Some(wm_core::Size::new(600, 338)));
+    assert_eq!(placement.position, Some(wm_core::Point::new(1280, 43)));
+    // A framed window's visual size includes its chrome, so the same
+    // rule keeps the frame, not the content, 40 from the edge.
+    let framed = wm_core::RuleMetrics { chrome: wm_core::Size::new(2, 24), ..metrics_1080p() };
+    let placement = rules.placement_for("firefox", "pip", &framed).unwrap();
+    assert_eq!(placement.position, Some(wm_core::Point::new(1278, 43)));
+    // The scale-2 desk is measured in the same logical pixels, so the
+    // answer is the same; the window manager scales it back.
+    assert_eq!(rules.decision_for("firefox", "pip").and_then(|d| d.size), Some(wm_core::Size::new(600, 338)));
+}
+
+/// A `move` with no `size` positions the client's own size, and an
+/// expression that comes out non-finite drops only its own property.
+#[test]
+fn a_move_without_a_size_places_the_clients_own_size() {
+    let rule = directive::WindowRule {
+        matchers: vec![directive::Matcher::Class("^cam$".into())],
+        props: vec![("float".into(), "on".into()), ("move".into(), "(monitor_w-window_w) (monitor_h-window_h)".into())],
+    };
+    let (rules, notes) = rules::compile(&[rule]);
+    assert!(notes.is_empty(), "{notes:?}");
+    let placement = rules.placement_for("cam", "", &metrics_1080p()).unwrap();
+    assert_eq!(placement.size, None);
+    assert_eq!(placement.position, Some(wm_core::Point::new(1280, 720)));
+
+    let broken = directive::WindowRule {
+        matchers: vec![directive::Matcher::Class("^cam$".into())],
+        props: vec![
+            ("float".into(), "on".into()),
+            ("size".into(), "(monitor_w/0) 100".into()),
+            ("move".into(), "(monitor_w/(window_w-window_w)) 0".into()),
+        ],
+    };
+    let (rules, notes) = rules::compile(&[broken]);
+    assert!(notes.is_empty(), "a division by zero is a map-time fact, not a parse error: {notes:?}");
+    let placement = rules.placement_for("cam", "", &metrics_1080p()).unwrap();
+    assert_eq!(placement, wm_core::RulePlacement { size: None, position: None }, "both drop, the float stays");
+}
+
+/// What this reader refuses to guess at: Hyprland's other `move`
+/// spellings, a size that is not a size, and a third value.
+#[test]
+fn unreadable_sizes_and_moves_are_reported_by_property() {
+    for (name, value, why) in [
+        ("move", "cursor 0", "\"cursor\""),
+        ("move", "onscreen", "exactly two values"),
+        ("move", "cursor 0 0", "exactly two values"),
+        ("move", "100%-w-40 0", "\"100%-w-40\""),
+        ("size", "50% 50%", "\"50%\""),
+        ("size", "0 0", "not a positive size"),
+        ("size", "-600 338", "not a positive size"),
+        ("size", "600 338 1", "exactly two values"),
+    ] {
+        let rule = directive::WindowRule {
+            matchers: vec![directive::Matcher::Class("^x$".into())],
+            props: vec![("float".into(), "on".into()), (name.into(), value.into())],
+        };
+        let (rules, notes) = rules::compile(&[rule]);
+        assert!(
+            notes.iter().any(|n| n.contains(&format!("window rule {name} {value:?}")) && n.contains(why)),
+            "{name} {value:?}: {notes:?}"
+        );
+        assert!(notes.iter().all(|n| n.contains("property skipped")), "{notes:?}");
+        let placement = rules.placement_for("x", "", &metrics_1080p()).expect("the float survives");
+        assert_eq!(placement, wm_core::RulePlacement::default());
+    }
+    // Over-long and over-deep text is refused at compile time, with the reason.
+    let rule = directive::WindowRule {
+        matchers: vec![directive::Matcher::Class("^x$".into())],
+        props: vec![("move".into(), format!("{}1{} 0", "(".repeat(17), ")".repeat(17)))],
+    };
+    let (_, notes) = rules::compile(&[rule]);
+    assert!(notes.iter().any(|n| n.contains("deeper than 16 levels")), "{notes:?}");
+}
+
+/// A rule that floats and centres, with no expression anywhere, is
+/// placed exactly as before: no size, no position, centred.
+#[test]
+fn a_plain_float_and_center_rule_still_centers() {
+    let rule = directive::WindowRule {
+        matchers: vec![directive::Matcher::Class("^about$".into())],
+        props: vec![("float".into(), "on".into()), ("center".into(), "on".into())],
+    };
+    let (rules, notes) = rules::compile(&[rule]);
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(rules.decision_for("about", ""), Some(wm_core::FloatDecision { size: None, center: true }));
+    assert_eq!(rules.placement_for("about", "", &metrics_1080p()), Some(wm_core::RulePlacement::default()));
+    // An explicit `center` is the stronger statement: a `move` beside it
+    // does not win.
+    let both = directive::WindowRule {
+        matchers: vec![directive::Matcher::Class("^about$".into())],
+        props: vec![("float".into(), "on".into()), ("move".into(), "0 0".into()), ("center".into(), "on".into())],
+    };
+    let (rules, _) = rules::compile(&[both]);
+    assert_eq!(rules.placement_for("about", "", &metrics_1080p()), Some(wm_core::RulePlacement::default()));
+    // And a policy that does not float says nothing.
+    assert_eq!(rules.placement_for("other", "", &metrics_1080p()), None);
+}
+
+/// Omarchy's real `pip.lua` and `webcam-overlay.lua`, through the
+/// whole machine read: every `size` and `move` in them is read, and the
+/// windows land where the file says.
+#[test]
+fn omarchys_pip_and_webcam_overlay_rules_are_read_whole() {
+    let reading = read(&machine());
+    let notes: Vec<&str> = reading
+        .skipped
+        .iter()
+        .filter(|s| s.kind == "window-rule")
+        .map(|s| s.what.as_str())
+        .collect();
+    for forbidden in ["size ignored", "property move", "needs a monitor", "property size", "window rule size", "window rule move"] {
+        assert!(
+            !notes.iter().any(|n| n.contains(forbidden)),
+            "{forbidden:?} must no longer be reported: {notes:?}"
+        );
+    }
+    let policy = reading.float_rules;
+    let metrics = metrics_1080p();
+
+    // `apps/pip.lua`: a title-matched rule through the `pip` tag.
+    let pip = policy.placement_for("firefox", "Picture-in-Picture", &metrics).expect("pip floats");
+    assert_eq!(pip.size, Some(wm_core::Size::new(600, 338)));
+    assert_eq!(pip.position, Some(wm_core::Point::new(1280, 43)), "top right, 40 in, 4% down");
+    // Google Meet's variant, through the `chromium-based-browser` tag
+    // plus its own title: bottom right.
+    let meet = policy.placement_for("chromium", "Meet - abc-defg-hij", &metrics).expect("meet floats");
+    assert_eq!(meet.size, Some(wm_core::Size::new(600, 338)));
+    assert_eq!(meet.position, Some(wm_core::Point::new(1280, 702)));
+
+    // `apps/webcam-overlay.lua`: sized off the monitor height.
+    let small = policy.placement_for("WebcamOverlay-small", "WebcamOverlay", &metrics).expect("small floats");
+    assert_eq!(small.size, Some(wm_core::Size::new(173, 194)));
+    assert_eq!(small.position, Some(wm_core::Point::new(1707, 846)));
+    let medium = policy.placement_for("WebcamOverlay-medium", "WebcamOverlay", &metrics).expect("medium floats");
+    assert_eq!(medium.size, Some(wm_core::Size::new(240, 270)));
+    assert_eq!(medium.position, Some(wm_core::Point::new(1640, 770)));
+    let large = policy.placement_for("WebcamOverlay-large", "WebcamOverlay", &metrics).expect("large floats");
+    assert_eq!(large.size, Some(wm_core::Size::new(324, 365)), "round(364.5) rounds away from zero");
+    assert_eq!(large.position, Some(wm_core::Point::new(1556, 676)), "round(675.5)");
+    // The overlay's own rule still says what it said.
+    let decision = policy.window_decision_for("WebcamOverlay-small", "WebcamOverlay");
+    assert!(decision.pin && decision.no_initial_focus);
 }
 
 // ---- autostart and environment ----------------------------------------
@@ -3391,7 +3669,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        168,
+        160,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -3401,7 +3679,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=179 commands=120 env=8 autostart=4")
-            && GUIDE.contains("float_rules=48 monitors=1 skipped=168"),
+            && GUIDE.contains("float_rules=48 monitors=1 skipped=160"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

@@ -440,6 +440,41 @@ fn omarchys_default_and_saved_workspace_layouts_come_up_in_a_fresh_session() {
     );
 }
 
+/// Omarchy's own `apps/pip.lua`, from the scratch machine's defaults,
+/// places a picture-in-picture window by arithmetic on the monitor:
+/// `size = { 600, 338 }` and `move = { "(monitor_w-window_w-40)",
+/// "(monitor_h*0.04)" }`. A real client whose title matches the rule's
+/// `(Picture.?in.?[Pp]icture)` has to land in the top-right corner of
+/// the real output, frame and all — not in the middle of the screen,
+/// which is where a floated window with no position used to go.
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn a_rule_placed_window_maps_at_the_corner_its_expressions_name() {
+    let (_omarchy_root, options) = scratch_machine("hyprland-rule-placement", FIRST_SIZE, "SUPER + SHIFT + K");
+    let mut session = Session::boot("hyprland-rule-placement", options).expect("session boots");
+    let probe = profile_binary(PROBE).expect("the probe is built");
+    session
+        .launch(&probe.display().to_string(), &["Picture-in-Picture", "pip-probe"])
+        .expect("the probe launches as a picture-in-picture window");
+    let window = session.wait_for_window("Picture-in-Picture").expect("the pip window maps");
+    assert_eq!((window.w, window.h), (600, 338), "the rule's size, through the pip tag: {window:?}");
+
+    let world = session.world().expect("world");
+    assert_eq!(world.scale, 1.0, "the numbers below are written for a scale-1 output");
+    let frame = world.frame_of(window.id).cloned().expect("the probe has server decorations");
+    let margin = frame.input_margin as i32;
+    let visual = (frame.x + margin, frame.y + margin, frame.w as i32 - 2 * margin, frame.h as i32 - 2 * margin);
+    let expected_x = world.output_w as i32 - visual.2 - 40;
+    let expected_y = (f64::from(world.output_h) * 0.04).round() as i32;
+    assert_eq!(
+        (visual.0, visual.1),
+        (expected_x, expected_y),
+        "the frame must sit 40 in from the right edge and 4% down on a {}x{} output: frame={frame:?} window={window:?}",
+        world.output_w,
+        world.output_h
+    );
+}
+
 /// Omarchy's stock `SUPER + Arrow` binding crosses the complete live
 /// path: Lua dispatcher, config action, seat grab, shell dispatch, and
 /// geometry-ranked core focus. Closing after the focus move makes the

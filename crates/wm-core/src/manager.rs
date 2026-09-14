@@ -1856,18 +1856,44 @@ impl<B: Backend> WindowManager<B> {
         // this first layout already added around the client's own
         // content; a titlebar's height does not depend on how wide the
         // window under it is.
-        let floated = placement::float_override_for(
-            self.float_policy.as_deref(),
-            &client.class,
-            &client.title,
-            self.placement_area(),
-            Size::new(
-                layout.visual_bounds().size.w.saturating_sub(content.size.w),
-                layout.visual_bounds().size.h.saturating_sub(content.size.h),
-            ),
-            content.size,
-            self.ui_scale,
+        //
+        // A rule can also be arithmetic on the monitor — Omarchy's
+        // picture-in-picture sits at `(monitor_w-window_w-40)`, its
+        // webcam overlay is `(monitor_h*4/25)` wide — which only makes
+        // sense against the output the window is mapping onto, in that
+        // output's own logical pixels. The core measures monitor,
+        // client and chrome in those pixels and lets the policy do the
+        // arithmetic; whatever it answers is scaled back by the same
+        // output's scale, so a mixed-DPI desk places the window where
+        // the rule says on the head it opens on.
+        let (output, workarea) = self.placement_output();
+        let monitor = self.backend.monitors_ref().get(output).map(|m| m.geometry).unwrap_or(workarea);
+        let output_scale = self.backend.decoration_scale(monitor);
+        let chrome_size = Size::new(
+            layout.visual_bounds().size.w.saturating_sub(content.size.w),
+            layout.visual_bounds().size.h.saturating_sub(content.size.h),
         );
+        let metrics = placement::RuleMetrics {
+            monitor: placement::logical_size(monitor.size, output_scale),
+            window: placement::logical_size(content.size, output_scale),
+            chrome: placement::logical_size(chrome_size, output_scale),
+        };
+        let rule_placement = self
+            .float_policy
+            .as_deref()
+            .and_then(|policy| policy.placement_for(&client.class, &client.title, &metrics));
+        let floated = match rule_placement.and_then(|rule| rule.size) {
+            Some(size) => Some(placement::fit_in(size, workarea, chrome_size, output_scale)),
+            None => placement::float_override_for(
+                self.float_policy.as_deref(),
+                &client.class,
+                &client.title,
+                workarea,
+                chrome_size,
+                content.size,
+                self.ui_scale,
+            ),
+        };
         if let Some(size) = floated {
             tracing::info!(?window, app = %client.class, title = %client.title, ?size, "a window rule places this window at a fixed size");
             client.geometry.size = size;
@@ -1910,12 +1936,23 @@ impl<B: Backend> WindowManager<B> {
                 placement::clamp_to(self.usable_area_at(center), layout.visual_bounds().size, desired)
             })
         });
+        let rule_pos = rule_placement.and_then(|rule| rule.position).map(|logical| {
+            // Monitor-relative, in the output's logical pixels, and
+            // pulled inside the workarea: a rule can never put a frame
+            // where it cannot be reached, so a reserved bar or dock is
+            // never covered whatever the expression says.
+            let device = placement::device_position(monitor.pos, logical, output_scale);
+            let pos = placement::clamp_to(workarea, layout.visual_bounds().size, device);
+            tracing::info!(?window, app = %client.class, title = %client.title, ?logical, ?pos, "a window rule places this window at a position");
+            pos
+        });
         let frame_pos = if let Some(pos) = transient_pos {
+            pos
+        } else if let Some(pos) = rule_pos {
             pos
         } else if floated.is_none() && content.pos != Point::new(0, 0) {
             content.pos
         } else {
-            let workarea = self.placement_area();
             let existing: Vec<Rect> = self
                 .clients
                 .iter()
@@ -2691,7 +2728,7 @@ impl<B: Backend> WindowManager<B> {
         // Recorded before any drag branch returns: this is the core's
         // only sighting of where the user's attention is, and new-window
         // placement reads it to open on the monitor being looked at
-        // (see `placement_area`). A drag in progress is no reason to
+        // (see `placement_output`). A drag in progress is no reason to
         // stop tracking — it is the most emphatic pointer motion there
         // is.
         self.last_pointer = Some(root);
@@ -2981,20 +3018,24 @@ impl<B: Backend> WindowManager<B> {
     /// head. With no pointer seen yet the focused window's monitor is
     /// the next best guess (a keyboard-spawned window joins its
     /// siblings), and the primary is the last.
-    fn placement_area(&self) -> Rect {
+    ///
+    /// Returned with the index of the monitor the workarea belongs to,
+    /// for the window rules that are arithmetic on the monitor itself
+    /// rather than its workarea.
+    fn placement_output(&self) -> (usize, Rect) {
         if self.separate_spaces() {
             let index = self.active_output_index();
             if let Some(monitor) = self.monitors_ref().get(index) {
-                return self.workareas.get(index).copied().unwrap_or(monitor.geometry);
+                return (index, self.workareas.get(index).copied().unwrap_or(monitor.geometry));
             }
         }
         if let Some(pointer) = self.last_pointer {
-            return self.usable_area_at(pointer);
+            return (self.monitor_index_at(pointer), self.usable_area_at(pointer));
         }
         if let Some(center) = self.focused.and_then(|id| self.client_frame_center(id)) {
-            return self.usable_area_at(center);
+            return (self.monitor_index_at(center), self.usable_area_at(center));
         }
-        self.usable_area()
+        (self.primary_monitor_index(), self.usable_area())
     }
 
     /// Re-derives layout from a client's current `geometry.size`, then
@@ -10604,6 +10645,181 @@ mod tests {
         // The frame extents a client reasons from describe the window it
         // actually got, not the one it asked for.
         assert_eq!(wm.client(id).unwrap().layout.frame_size, frame.size);
+    }
+
+    /// Omarchy's picture-in-picture and webcam-overlay rules, as
+    /// `wm_config`'s rule reader answers them: arithmetic on the monitor
+    /// in logical pixels, which this crate measures for the policy and
+    /// scales back by the output's own scale.
+    ///
+    /// `pip`: `size 600 338`, `move (monitor_w-window_w-40) (monitor_h*0.04)`.
+    /// `WebcamOverlay-small`: `size (monitor_h*4/25) (monitor_h*9/50)`,
+    /// `move (monitor_w-monitor_h*4/25-40) (monitor_h-monitor_h*9/50-40)`.
+    /// `about`: `float on, center on` — no size, no position.
+    #[derive(Debug)]
+    struct CornerRules;
+
+    impl FloatPolicy for CornerRules {
+        fn decision_for(&self, class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+            matches!(class, "pip" | "WebcamOverlay-small" | "about")
+                .then_some(crate::placement::FloatDecision { size: None, center: true })
+        }
+
+        fn placement_for(
+            &self,
+            class: &str,
+            _title: &str,
+            metrics: &crate::placement::RuleMetrics,
+        ) -> Option<crate::placement::RulePlacement> {
+            let (monitor_w, monitor_h) = (f64::from(metrics.monitor.w), f64::from(metrics.monitor.h));
+            let px = |v: f64| v.round() as i32;
+            match class {
+                "pip" => {
+                    // `window_w` is the frame's visual width: the content
+                    // the rule just sized plus whatever chrome wraps it.
+                    let window_w = 600.0 + f64::from(metrics.chrome.w);
+                    Some(crate::placement::RulePlacement {
+                        size: Some(Size::new(600, 338)),
+                        position: Some(Point::new(px(monitor_w - window_w - 40.0), px(monitor_h * 0.04))),
+                    })
+                }
+                "WebcamOverlay-small" => Some(crate::placement::RulePlacement {
+                    size: Some(Size::new(px(monitor_h * 4.0 / 25.0) as u32, px(monitor_h * 9.0 / 50.0) as u32)),
+                    position: Some(Point::new(
+                        px(monitor_w - monitor_h * 4.0 / 25.0 - 40.0),
+                        px(monitor_h - monitor_h * 9.0 / 50.0 - 40.0),
+                    )),
+                }),
+                "about" => Some(crate::placement::RulePlacement::default()),
+                _ => None,
+            }
+        }
+    }
+
+    /// One output of `monitor` device pixels at `scale`, with three
+    /// client-drawn windows that each asked for 640x360 at the
+    /// placeholder origin: a picture-in-picture, the small webcam
+    /// overlay, and a plain centered float.
+    fn corner_desk(monitor: Rect, scale: f32) -> (WindowManager<FakeBackend>, [FakeWindowId; 3]) {
+        let mut backend = FakeBackend::new();
+        backend.set_monitor(monitor);
+        backend.set_monitor_scales(vec![scale]);
+        let windows = [backend.create_window(), backend.create_window(), backend.create_window()];
+        for (window, class) in windows.iter().zip(["pip", "WebcamOverlay-small", "about"]) {
+            backend.set_geometry(*window, Rect { pos: Point::new(0, 0), size: Size::new(640, 360) });
+            backend.set_client_draws_own_chrome(*window, true);
+            backend.window_classes.insert(*window, class.to_string());
+        }
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(CornerRules)));
+        (wm, windows)
+    }
+
+    fn mapped_geometry(wm: &mut WindowManager<FakeBackend>, window: FakeWindowId) -> Rect {
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).expect("the window maps");
+        let client = wm.client(id).unwrap();
+        assert!(client.placement.floating, "a rule-placed window floats");
+        client.geometry
+    }
+
+    /// The issue's own numbers: on a 1920x1080 output at scale 1 with
+    /// nothing reserved, the picture-in-picture lands 40 from the right
+    /// edge and 4% down, and the small webcam overlay lands in the
+    /// bottom-right corner at 4/25 by 9/50 of the monitor's height.
+    #[test]
+    fn rule_placed_windows_map_at_their_corners() {
+        let (mut wm, [pip, cam, _]) = corner_desk(Rect { pos: Point::new(0, 0), size: Size::new(1920, 1080) }, 1.0);
+        assert_eq!(
+            mapped_geometry(&mut wm, pip),
+            Rect { pos: Point::new(1280, 43), size: Size::new(600, 338) },
+            "x = 1920 - 600 - 40, y = round(1080 * 0.04)"
+        );
+        assert_eq!(
+            mapped_geometry(&mut wm, cam),
+            Rect { pos: Point::new(1707, 846), size: Size::new(173, 194) },
+            "round(172.8) x round(194.4) at (round(1707.2), round(845.6))"
+        );
+    }
+
+    /// The same desk at scale 2 is 3840x2160 device pixels and the same
+    /// 1920x1080 logical monitor: the rule is evaluated in logical
+    /// pixels and lands at the same logical place, scaled by the
+    /// output's own factor — not the session's `ui_scale`, which is
+    /// left at 1 here to prove which one is read.
+    #[test]
+    fn rule_placed_windows_follow_the_outputs_own_scale() {
+        let (mut wm, [pip, cam, _]) = corner_desk(Rect { pos: Point::new(0, 0), size: Size::new(3840, 2160) }, 2.0);
+        assert_eq!(
+            mapped_geometry(&mut wm, pip),
+            Rect { pos: Point::new(2560, 86), size: Size::new(1200, 676) },
+            "(1280, 43) and 600x338 logical, twice the pixels"
+        );
+        assert_eq!(
+            mapped_geometry(&mut wm, cam),
+            Rect { pos: Point::new(3414, 1692), size: Size::new(346, 388) },
+            "(1707, 846) and 173x194 logical, twice the pixels"
+        );
+    }
+
+    /// A rule position is relative to the monitor, not the primary: the
+    /// same corner on a second head starts from that head's origin.
+    #[test]
+    fn rule_positions_are_relative_to_the_monitor_the_window_maps_on() {
+        let (mut wm, [pip, _, _]) = corner_desk(Rect { pos: Point::new(2560, 0), size: Size::new(1920, 1080) }, 1.0);
+        assert_eq!(mapped_geometry(&mut wm, pip), Rect { pos: Point::new(2560 + 1280, 43), size: Size::new(600, 338) });
+    }
+
+    /// A rule can never put a frame where it cannot be reached: a bar
+    /// reserving the top of the screen pushes the picture-in-picture
+    /// down to the workarea's edge, and one at the right pulls the
+    /// webcam overlay in.
+    #[test]
+    fn rule_placed_windows_are_clamped_to_the_workarea() {
+        let (mut wm, [pip, cam, _]) = corner_desk(Rect { pos: Point::new(0, 0), size: Size::new(1920, 1080) }, 1.0);
+        wm.set_workareas(vec![Rect { pos: Point::new(0, 64), size: Size::new(1920, 1016) }]);
+        assert_eq!(
+            mapped_geometry(&mut wm, pip),
+            Rect { pos: Point::new(1280, 64), size: Size::new(600, 338) },
+            "y = 43 is under the bar, so the frame sits just below it"
+        );
+        wm.set_workareas(vec![Rect { pos: Point::new(0, 0), size: Size::new(1850, 1080) }]);
+        assert_eq!(
+            mapped_geometry(&mut wm, cam),
+            Rect { pos: Point::new(1850 - 173, 846), size: Size::new(173, 194) },
+            "the rule's x of 1707 would hang 30 pixels off the workarea"
+        );
+    }
+
+    /// A plain `float` plus `center` rule — no expression anywhere —
+    /// keeps the client's own size and centers it, exactly as before.
+    #[test]
+    fn a_plain_float_and_center_rule_still_centers() {
+        let (mut wm, [_, _, about]) = corner_desk(Rect { pos: Point::new(0, 0), size: Size::new(1920, 1080) }, 1.0);
+        assert_eq!(
+            mapped_geometry(&mut wm, about),
+            Rect { pos: Point::new((1920 - 640) / 2, (1080 - 360) / 2), size: Size::new(640, 360) }
+        );
+    }
+
+    /// With a server-side frame it is the frame, chrome included, that
+    /// sits 40 from the edge: the rule's `window_w` is the visual width.
+    #[test]
+    fn a_rule_position_places_the_frame_not_the_content() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(1920, 1080) });
+        let pip = backend.create_window();
+        backend.set_geometry(pip, Rect { pos: Point::new(0, 0), size: Size::new(640, 360) });
+        backend.window_classes.insert(pip, "pip".to_string());
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(CornerRules)));
+        wm.dispatch(BackendEvent::MapRequest(pip));
+        let id = wm.client_for_window(pip).unwrap();
+        let layout = wm.client(id).unwrap().layout.clone();
+        assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(600, 338));
+        let frame = frame_rect(&wm, pip);
+        let visual = Point::new(frame.pos.x + layout.input_margin as i32, frame.pos.y + layout.input_margin as i32);
+        assert_eq!(visual, Point::new(1920 - layout.visual_bounds().size.w as i32 - 40, 43), "{layout:?}");
     }
 
     /// The same window on a scale-2 desk is the same *window*: twice the

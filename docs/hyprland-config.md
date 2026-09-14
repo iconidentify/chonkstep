@@ -145,12 +145,48 @@ windowrulev2 = float, class:^(steam)$, title:^(Steam)$   # v2
 windowrule   = float on, match:class steam               # 0.53+
 ```
 
-The supported properties are `float`, `size`, `center`, `idle_inhibit`,
-`pin`, `no_focus`, `no_initial_focus`, `focus_on_activate`,
-`fullscreen`, `maximize`, `suppress_event`, and `scroll_touchpad`. They match `class` and `title` as regular
+The supported properties are `float`, `size`, `move`, `center`,
+`idle_inhibit`, `pin`, `no_focus`, `no_initial_focus`,
+`focus_on_activate`, `fullscreen`, `maximize`, `suppress_event`, and
+`scroll_touchpad`. They match `class` and `title` as regular
 expressions, matched against the entire class or title, as in Hyprland's
 `RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
+
+`size` and `move` take two values, each a number or one of Hyprland's
+layout expressions — arithmetic over `monitor_w`, `monitor_h`,
+`window_w` and `window_h` with `+ - * /`, unary minus and parentheses,
+in logical pixels:
+
+```lua
+o.window({ tag = "pip" }, {
+  float = true, size = { 600, 338 },
+  move = { "(monitor_w-window_w-40)", "(monitor_h*0.04)" },
+})
+o.window("^WebcamOverlay-small$", {
+  size = { "(monitor_h*4/25)", "(monitor_h*9/50)" },
+  move = { "(monitor_w-monitor_h*4/25-40)", "(monitor_h-monitor_h*9/50-40)" },
+})
+```
+
+The expressions are compiled when the file is read and evaluated when
+the window maps, against the monitor it maps on — the whole monitor,
+not its workarea, which is what Omarchy's rules are written against.
+`size` is evaluated first; `move` then sees the resolved size as
+`window_w`/`window_h`, so `(monitor_w-window_w-40)` means "40 in from
+the right edge of the window this rule just sized". `window_w` and
+`window_h` are the frame's visual size, chrome included. The position is
+relative to the monitor's own origin and is converted with that
+output's scale, so a mixed-DPI desk places the window where the rule
+says on whichever head it opens on. The frame is then pulled inside the
+workarea: a rule can never put a window under a reserved bar or off the
+edge of the screen. An expression longer than 128 bytes or nested more
+than 16 levels deep is refused when the file is read; one that does not
+come out finite (a division by zero) drops that property when the
+window maps, and the rule's `float` still applies. `move` is replaced
+by an explicit `center`; Hyprland's other `move` spellings (`cursor`,
+`onscreen`, percentages) and `keep_aspect_ratio` are reported and not
+read.
 
 `idle_inhibit` reads four modes. `always` (also `on`, `true`, `1`, `yes`)
 inhibits idle while a matching window is visible on the current workspace
@@ -315,9 +351,9 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Gaps, borders, rounding, blur, shadows, animations (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. `general.layout` is the exception, [read above](#workspace-layout); the per-layout tables (`dwindle { … }`, `master { … }`, `scrolling { … }`) are not. |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
 | Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use `focus_follows_mouse` and native [`[input.gestures]`](gestures.md). Arbitrary Hyprland gesture bindings remain declined. Device properties listed below are applied; remaining declined values are logged. |
-| Unsupported window-rule properties | `opacity`, `no_blur`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
+| Unsupported window-rule properties | `opacity`, `no_blur`, `workspace`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
-| A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
+| A `size` or `move` written in a form other than a number or a layout expression (`move cursor 0 0`, `size 50% 50%`, `move onscreen`) | Only the arithmetic Omarchy's rules use is read — see [window rules](#window-rules). The property is skipped with its text; the rule's other properties still apply. |
 | Mouse and wheel bindings (`bindm`, `mouse:272`, `mouse_up`) | Not key chords; this config format cannot express one. [Switch bindings](#switch-bindings) are read. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
 | `submap`, `plugin`, `bezier`, `animation` (Lua `hl.curve`, `hl.animation`) | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
@@ -715,7 +751,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=179 commands=120 env=8 autostart=4
-      float_rules=48 monitors=1 skipped=168
+      float_rules=48 monitors=1 skipped=160
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

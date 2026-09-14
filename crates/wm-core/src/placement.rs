@@ -334,6 +334,40 @@ impl WindowRuleDecision {
     }
 }
 
+/// What a window rule's layout expressions are evaluated against —
+/// Hyprland's `monitor_w`, `monitor_h`, `window_w` and `window_h`, in
+/// the logical pixels those rules are written in.
+///
+/// Omarchy's picture-in-picture rule moves its window to
+/// `(monitor_w-window_w-40)`, and its webcam overlay is sized
+/// `(monitor_h*4/25)`: both are arithmetic on the monitor the window
+/// is mapping onto, which only the window manager knows at map time.
+/// The core measures, the policy calculates, and the answer comes
+/// back as a [`RulePlacement`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuleMetrics {
+    /// The whole monitor the window maps on — not its workarea, which
+    /// is what Omarchy's expressions are written against.
+    pub monitor: Size,
+    /// The content size the client asked for.
+    pub window: Size,
+    /// What the frame adds around the content: zero for a
+    /// client-drawn window, the titlebar and borders for a framed one.
+    /// `window_w`/`window_h` mean the frame's visual size, so a policy
+    /// adds this to whichever content size it evaluates against.
+    pub chrome: Size,
+}
+
+/// A window rule's answer to "how big, and where", both in logical
+/// pixels: the size is the content's, the position is the frame's
+/// top-left relative to the monitor's own origin. Either half may be
+/// absent — a rule that only floats says nothing about either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RulePlacement {
+    pub size: Option<Size>,
+    pub position: Option<Point>,
+}
+
 /// A source of per-window float rules, supplied by the shell.
 ///
 /// A trait rather than a data type because the rules this desktop
@@ -355,6 +389,16 @@ pub trait FloatPolicy: std::fmt::Debug + Send + Sync {
     /// make no such decisions.
     fn window_decision_for(&self, class: &str, _title: &str) -> WindowRuleDecision {
         WindowRuleDecision::for_identity(class)
+    }
+
+    /// The geometry half of the rules, evaluated against the monitor
+    /// the window is mapping onto. A policy that answers here decides
+    /// the size (it wins over [`Self::decision_for`]'s) and, when the
+    /// rule says so, the position — which replaces centering.
+    /// Existing policies keep answering `None` and are placed as
+    /// before.
+    fn placement_for(&self, _class: &str, _title: &str, _metrics: &RuleMetrics) -> Option<RulePlacement> {
+        None
     }
 }
 
@@ -396,12 +440,37 @@ pub fn float_override_for(
 
 /// A logical size scaled and clamped to fit inside `workarea` once
 /// `chrome` has taken its share — the arithmetic [`float_override`]
-/// does, factored out so both callers do it identically.
-fn fit_in(size: Size, workarea: Rect, chrome: Size, scale: f32) -> Size {
-    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+/// does, factored out so every caller does it identically.
+pub(crate) fn fit_in(size: Size, workarea: Rect, chrome: Size, scale: f32) -> Size {
+    let scale = usable_scale(scale);
     let scaled = |edge: u32| (edge as f32 * scale).round().max(1.0) as u32;
     let fits = |want: u32, area: u32, chrome: u32| want.min(area.saturating_sub(chrome)).max(1);
     Size::new(fits(scaled(size.w), workarea.size.w, chrome.w), fits(scaled(size.h), workarea.size.h, chrome.h))
+}
+
+/// A nonsense scale (zero, negative, NaN from a bad config) means "no
+/// scaling" rather than a zero-sized or infinite window.
+fn usable_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
+}
+
+/// A device-pixel size in the logical pixels a window rule is written
+/// in — the inverse of [`fit_in`]'s scaling, for measuring the monitor
+/// and the client's own ask before a rule is evaluated against them.
+pub(crate) fn logical_size(size: Size, scale: f32) -> Size {
+    let scale = usable_scale(scale);
+    let unscaled = |edge: u32| (edge as f32 / scale).round().max(0.0) as u32;
+    Size::new(unscaled(size.w), unscaled(size.h))
+}
+
+/// A rule's monitor-relative logical position as a device-pixel point
+/// on the monitor at `origin`. Saturating on purpose: the expression
+/// came out of a config file, and a position past `i32` is a position
+/// [`clamp_to`] pulls back onto the workarea, not a wrapped one.
+pub(crate) fn device_position(origin: Point, logical: Point, scale: f32) -> Point {
+    let scale = usable_scale(scale);
+    let scaled = |edge: i32| (edge as f32 * scale).round() as i32;
+    Point::new(origin.x.saturating_add(scaled(logical.x)), origin.y.saturating_add(scaled(logical.y)))
 }
 
 fn center_of(workarea: Rect, frame: Size) -> Point {
@@ -800,5 +869,30 @@ mod tests {
             "a nonsense scale is no scale"
         );
         assert_eq!(float_override("org.omarchy.about", area, NO_CHROME, f32::NAN), Some(Size::new(875, 600)));
+    }
+
+    // ------------------------------------------------------------------
+    // The logical/device conversions a rule-placed window goes through.
+
+    #[test]
+    fn logical_size_undoes_the_output_scale_and_survives_nonsense() {
+        assert_eq!(logical_size(Size::new(3840, 2160), 2.0), Size::new(1920, 1080));
+        assert_eq!(logical_size(Size::new(1920, 1080), 1.0), Size::new(1920, 1080));
+        // Fractional scales round to the nearest logical pixel.
+        assert_eq!(logical_size(Size::new(2880, 1800), 1.5), Size::new(1920, 1200));
+        for scale in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(logical_size(Size::new(1920, 1080), scale), Size::new(1920, 1080), "scale {scale}");
+        }
+    }
+
+    #[test]
+    fn device_position_is_monitor_relative_and_scaled() {
+        let origin = Point::new(2560, 0);
+        assert_eq!(device_position(origin, Point::new(1280, 43), 1.0), Point::new(3840, 43));
+        assert_eq!(device_position(origin, Point::new(1280, 43), 2.0), Point::new(5120, 86));
+        assert_eq!(device_position(Point::new(0, 0), Point::new(-10, 7), 1.5), Point::new(-15, 11));
+        // A position no expression should produce still cannot wrap.
+        assert_eq!(device_position(Point::new(i32::MAX, 0), Point::new(i32::MAX, 0), 2.0), Point::new(i32::MAX, 0));
+        assert_eq!(device_position(origin, Point::new(1280, 43), f32::NAN), Point::new(3840, 43));
     }
 }

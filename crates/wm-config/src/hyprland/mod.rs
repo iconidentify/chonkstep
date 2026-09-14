@@ -121,6 +121,7 @@
 pub mod conf;
 pub mod directive;
 pub mod dispatch;
+pub(crate) mod expr;
 pub mod keys;
 pub mod lua;
 pub mod rules;
