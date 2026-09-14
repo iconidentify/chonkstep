@@ -201,6 +201,16 @@ fn the_three_answers_each_land_on_a_real_chord() {
 /// TAB` is `e+1` — the next workspace that has windows, which is a
 /// different verb from stepping by index.
 #[test]
+fn malformed_and_extreme_monitor_bindings_are_refused_without_panicking() {
+    for selector in ["+-2147483648", "--2147483648", "++1", "-+1", "-2147483648", "+2147483647"] {
+        let home = scratch("hostile-monitor-selector");
+        write(&home.join(".config/hypr/hyprland.conf"), &format!("bind = SUPER, F1, focusmonitor, {selector}\n"));
+        let reading = read(&Roots::under(&home));
+        assert_eq!(action_for(&reading, "super+f1"), None, "{selector}");
+    }
+}
+
+#[test]
 fn the_monitor_and_former_workspace_chords_bind_to_real_actions() {
     use wm_core::{FocusDirection, OutputTarget};
     let reading = read(&machine());

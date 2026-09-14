@@ -330,6 +330,39 @@ fn moving_the_workspace_to_a_monitor_needs_separate_spaces_and_is_refused_by_nam
 /// on them, plus the current one, and wrap rather than grow the row.
 /// The plain `+1` keeps stepping by index.
 #[test]
+fn extreme_existing_workspace_steps_wrap_without_overflow() {
+    let mut snapshot = desktop();
+    snapshot.workspaces = (0..3).map(|index| workspace(index, 1)).collect();
+    snapshot.monitors[0].active_workspace = 1;
+    for (selector, expected) in [
+        ("e+9223372036854775807", 2),
+        ("e-9223372036854775808", 2),
+        ("e-9223372036854775807", 0),
+    ] {
+        let wire = format!("/dispatch workspace {selector}");
+        let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
+        assert_eq!(response.trim(), "ok", "{selector}");
+        assert_eq!(actions, vec![Action::FocusWorkspace(expected)], "{selector}");
+    }
+}
+
+#[test]
+fn doubled_signs_in_relative_selectors_are_refused() {
+    for selector in ["e--9223372036854775808", "e+-1", "e++1", "e-+1"] {
+        let wire = format!("/dispatch workspace {selector}");
+        let (response, actions) = answer_payload(wire.as_bytes(), &desktop());
+        assert!(actions.is_empty(), "{selector}");
+        assert!(response.starts_with("Invalid dispatcher"), "{response}");
+    }
+    for selector in ["+-2147483648", "--1", "++1", "-+1"] {
+        let wire = format!("/dispatch focusmonitor {selector}");
+        let (response, actions) = answer_payload(wire.as_bytes(), &desktop());
+        assert!(actions.is_empty(), "{selector}");
+        assert!(response.starts_with("Invalid dispatcher"), "{response}");
+    }
+}
+
+#[test]
 fn workspace_previous_and_existing_steps_resolve_against_the_snapshot() {
     let mut snapshot = desktop();
     let (response, actions) = answer_payload(b"/dispatch workspace previous", &snapshot);

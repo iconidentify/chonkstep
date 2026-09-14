@@ -1698,10 +1698,9 @@ fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> 
     // "the next workspace that exists": only workspaces with windows on
     // them, plus the current one, wrapping and never creating a new one.
     if let Some(existing) = target.strip_prefix('e') {
-        let step = existing
-            .strip_prefix('+')
-            .and_then(|d| d.parse::<i64>().ok())
-            .or_else(|| existing.strip_prefix('-').and_then(|d| d.parse::<i64>().ok()).map(|d| -d));
+        let step = (existing.starts_with('+') || existing.starts_with('-'))
+            .then(|| existing.parse::<i64>().ok())
+            .flatten();
         return match step {
             Some(step) => occupied_workspace_step(step, snapshot),
             None => Err(format!("unrecognised workspace selector {target:?}")),
@@ -1757,7 +1756,9 @@ fn occupied_workspace_step(step: i64, snapshot: &Snapshot) -> Result<usize, Stri
         return in_range(current);
     };
     let count = row.len() as i64;
-    in_range(row[(at as i64 + step).rem_euclid(count) as usize])
+    // Reduce before adding: a valid i64 step can overflow when the
+    // current workspace is not the first stop in the row.
+    in_range(row[(at as i64 + step.rem_euclid(count)).rem_euclid(count) as usize])
 }
 
 /// Parse a `focusmonitor` argument, refusing the whole request while the
@@ -1821,11 +1822,9 @@ fn monitor_target(rest: &str, snapshot: &Snapshot) -> Result<MonitorTarget, Stri
     if target.eq_ignore_ascii_case("current") {
         return Ok(MonitorTarget::Relative(0));
     }
-    if let Some(step) = target.strip_prefix('+').and_then(|d| d.parse::<i32>().ok()) {
-        return Ok(MonitorTarget::Relative(step));
-    }
-    if let Some(step) = target.strip_prefix('-').and_then(|d| d.parse::<i32>().ok()) {
-        return Ok(MonitorTarget::Relative(step.saturating_neg()));
+    if target.starts_with('+') || target.starts_with('-') {
+        return target.parse::<i32>().map(MonitorTarget::Relative)
+            .map_err(|_| format!("invalid relative monitor selector {target:?}"));
     }
     match target.to_ascii_lowercase().as_str() {
         "l" | "left" => return Ok(MonitorTarget::Direction(Direction::Left)),

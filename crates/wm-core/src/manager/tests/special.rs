@@ -5,6 +5,74 @@ fn desk() -> WindowManager<FakeBackend> {
     wm(FakeBackend::new())
 }
 
+#[test]
+fn pinning_a_hidden_special_member_does_not_reveal_it() {
+    let mut wm = desk();
+    let ordinary = map(&mut wm);
+    let member = map(&mut wm);
+    wm.move_client_to_special(member, "scratchpad", false);
+
+    assert!(wm.set_client_pinned(member, true));
+    assert!(!frame_mapped(&wm, member));
+    assert!(!wm.client_visible(member));
+    assert_eq!(wm.focused_client(), Some(ordinary));
+    wm.toggle_special("scratchpad");
+    assert!(frame_mapped(&wm, member));
+    wm.toggle_special("scratchpad");
+    assert!(!frame_mapped(&wm, member));
+}
+
+#[test]
+fn new_dialogs_follow_their_parents_special_visibility() {
+    for shown in [false, true] {
+        let mut wm = desk();
+        let parent = map(&mut wm);
+        wm.move_client_to_special(parent, "scratchpad", shown);
+        let window = wm.backend_mut().create_window();
+        let parent_window = wm.client(parent).unwrap().window;
+        wm.backend_mut().set_window_parent(window, parent_window);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let dialog = wm.client_for_window(window).unwrap();
+
+        assert_eq!(wm.client(dialog).unwrap().special, wm.client(parent).unwrap().special);
+        assert_eq!(frame_mapped(&wm, dialog), shown);
+        assert!(!wm.layout_order(0).contains(&dialog));
+        wm.toggle_special("scratchpad");
+        assert_eq!(frame_mapped(&wm, dialog), !shown);
+        assert_eq!(frame_mapped(&wm, parent), !shown);
+    }
+}
+
+#[test]
+fn late_parenting_moves_dialogs_into_the_parents_hidden_special() {
+    let mut wm = desk();
+    let parent = map(&mut wm);
+    wm.move_client_to_special(parent, "scratchpad", false);
+    let dialog = map(&mut wm);
+    let parent_window = wm.client(parent).unwrap().window;
+    let dialog_window = wm.client(dialog).unwrap().window;
+    wm.backend_mut().set_window_parent(dialog_window, parent_window);
+    wm.dispatch(BackendEvent::ParentChanged(dialog_window));
+
+    assert_eq!(wm.client(dialog).unwrap().special, wm.client(parent).unwrap().special);
+    assert!(!frame_mapped(&wm, dialog));
+    assert!(!wm.layout_order(0).contains(&dialog));
+    wm.toggle_special("scratchpad");
+    assert!(frame_mapped(&wm, dialog));
+}
+
+#[test]
+fn special_members_do_not_keep_their_numbered_home_occupied() {
+    let mut wm = desk();
+    let member = map(&mut wm);
+    wm.move_client_to_special(member, "scratchpad", false);
+    wm.switch_workspace(1);
+    map(&mut wm);
+
+    assert!(!wm.workspace_has_windows(0));
+    assert_eq!(wm.occupied_workspace_step(1), None);
+}
+
 fn map(wm: &mut WindowManager<FakeBackend>) -> ClientId {
     let window = wm.backend_mut().create_window();
     wm.dispatch(BackendEvent::MapRequest(window));

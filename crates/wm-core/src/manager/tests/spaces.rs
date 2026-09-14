@@ -594,6 +594,48 @@ fn fullscreen_entered_while_borrowed_keeps_its_home_and_return_geometry() {
 /// in that direction and its windows go with it, keeping their position
 /// relative to the display. The display it left keeps a Space of its own.
 #[test]
+fn moving_a_numbered_space_does_not_carry_its_special_members() {
+    let mut wm = dual_mac();
+    let ordinary = window_on(&mut wm, 0);
+    let special = window_on(&mut wm, 0);
+    wm.move_client_to_special(special, "scratchpad", true);
+    wm.focus_client(ordinary);
+    let before = wm.client(special).unwrap().geometry;
+    assert_eq!(wm.special_shown_on_output(0), Some(0));
+
+    assert_eq!(wm.move_workspace_to_output(1), Ok(()));
+
+    assert_eq!(wm.special_shown_on_output(0), Some(0));
+    assert_eq!(wm.client(special).unwrap().geometry, before, "the overlay stays on its own display");
+    assert_eq!(wm.client_output_index(special), 0);
+    assert!(visible(&wm, special));
+    assert_eq!(wm.client_output_index(ordinary), 1);
+}
+
+#[test]
+fn a_special_can_move_between_displays_independently_of_its_numbered_home() {
+    let mut wm = dual_mac();
+    let member = window_on(&mut wm, 0);
+    let home = wm.client(member).unwrap().workspace;
+    let before = wm.client(member).unwrap().geometry;
+    wm.move_client_to_special(member, "scratchpad", true);
+    wm.select_output(1);
+    wm.toggle_special("scratchpad");
+    assert_eq!(wm.special_shown_on_output(1), Some(0));
+    assert_eq!(wm.client_output_index(member), 1);
+    let moved = wm.client(member).unwrap().geometry;
+    assert!(moved.pos.x > before.pos.x);
+    wm.reconcile_display_spaces();
+    assert_eq!(wm.client(member).unwrap().geometry, moved);
+    assert_eq!(wm.client_output_index(member), 1);
+
+    wm.move_client_to_workspace(member, home);
+    assert_eq!(wm.client(member).unwrap().special, None);
+    assert_eq!(wm.client_output_index(member), 0);
+    assert_eq!(wm.client(member).unwrap().geometry, before);
+}
+
+#[test]
 fn moving_a_space_to_another_display_carries_its_windows_with_relative_geometry() {
     let mut wm = dual_mac();
     let left = window_on(&mut wm, 0);

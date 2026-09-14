@@ -468,16 +468,11 @@ fn output_target(arg: &str) -> Option<OutputTarget> {
     if arg.is_empty() || arg.len() > 256 || arg.chars().any(char::is_control) {
         return None;
     }
-    if let Some(step) = arg.strip_prefix('+').and_then(|digits| digits.parse::<i32>().ok()) {
-        return (step.abs() <= 64).then_some(OutputTarget::Relative(step));
-    }
-    if let Some(step) = arg.strip_prefix('-').and_then(|digits| digits.parse::<i32>().ok()) {
-        return (step.abs() <= 64).then_some(OutputTarget::Relative(step.saturating_neg()));
-    }
     // A sign that did not read as a step is a malformed step, not an
     // output called `+`.
     if arg.starts_with('+') || arg.starts_with('-') {
-        return None;
+        let step = arg.parse::<i32>().ok()?;
+        return (-64..=64).contains(&step).then_some(OutputTarget::Relative(step));
     }
     Some(match arg.to_ascii_lowercase().as_str() {
         "l" | "left" => OutputTarget::Direction(FocusDirection::Left),

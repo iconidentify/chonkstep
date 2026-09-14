@@ -713,6 +713,7 @@ impl<B: Backend> WindowManager<B> {
             }
             let clients: Vec<_> = self.clients.keys().collect();
             for id in clients {
+                if self.clients[id].special.is_some() { continue; }
                 let mut root = id;
                 for _ in 0..8 {
                     match self.clients.get(root).and_then(|c| c.parent) {
@@ -747,6 +748,12 @@ impl<B: Backend> WindowManager<B> {
         }
         let clients: Vec<_> = self.clients.keys().collect();
         for id in clients {
+            // An overlay has its own output; its numbered home is only
+            // bookkeeping and must not translate or clip its members.
+            if self.clients[id].special.is_some() {
+                self.publish_space_output(id);
+                continue;
+            }
             let workspace = self.clients[id].workspace;
             let Some(output) = self.workspace_output_index(workspace) else {
                 continue;
@@ -827,7 +834,7 @@ impl<B: Backend> WindowManager<B> {
         let members: Vec<ClientId> = self
             .clients
             .iter()
-            .filter(|(_, client)| client.workspace == space)
+            .filter(|(_, client)| client.workspace == space && client.special.is_none())
             .map(|(id, _)| id)
             .collect();
         let state = self.display_spaces.as_mut().unwrap();
@@ -853,10 +860,15 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub(super) fn translate_space_move(&mut self, id: ClientId, workspace: usize) {
-        let Some(old) = self
+        let special_output = self.clients.get(id).filter(|client| client.special.is_some()).map(|_| self.client_output_index(id));
+        self.translate_space_move_from_output(id, workspace, special_output);
+    }
+
+    pub(super) fn translate_space_move_from_output(&mut self, id: ClientId, workspace: usize, special_output: Option<usize>) {
+        let Some(old) = special_output.or_else(|| self
             .clients
             .get(id)
-            .and_then(|c| self.workspace_output_index(c.workspace))
+            .and_then(|c| self.workspace_output_index(c.workspace)))
         else {
             return;
         };
@@ -915,14 +927,18 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get(id) else {
             return;
         };
-        let name = self
-            .workspace_output_index(client.workspace)
+        let output = if client.special.is_some() {
+            Some(self.client_output_index(id))
+        } else {
+            self.workspace_output_index(client.workspace)
+        };
+        let name = output
             .and_then(|i| self.monitors_ref().get(i))
             .map(|m| m.name.clone());
         self.backend
             .set_window_space_output(client.window, name.as_deref());
         if let Some(state) = self.display_spaces.as_mut() {
-            if state.home_geometry.get(&id).is_some_and(|saved| {
+            if client.special.is_some() || state.home_geometry.get(&id).is_some_and(|saved| {
                 state
                     .snapshot
                     .spaces
