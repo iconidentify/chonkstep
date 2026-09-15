@@ -913,6 +913,28 @@ fn bounded_housekeeping_wait(now: Instant, deadline: Option<Instant>) -> Duratio
     deadline.map(|at| at.saturating_duration_since(now)).unwrap_or(MAX_IDLE_HOUSEKEEPING).min(MAX_IDLE_HOUSEKEEPING)
 }
 
+/// What servicing control-socket requests has cost, for the opt-in
+/// Wayland test door. Counting passes and their peak is what lets a
+/// test prove a flood was paced rather than merely answered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ControlLoad {
+    /// Servicing passes that returned at least one command.
+    pub passes: u64,
+    /// Most commands any one pass returned.
+    pub peak: usize,
+    /// Diagnostic dumps built for `debug` requests.
+    pub dumps: u64,
+}
+
+impl ControlLoad {
+    fn note_pass(&mut self, commands: usize) {
+        if commands > 0 {
+            self.passes = self.passes.wrapping_add(1);
+            self.peak = self.peak.max(commands);
+        }
+    }
+}
+
 /// Moves the focused client to `workspace` and follows it there — the
 /// keyboard "carry" gesture — move to the next or previous workspace
 /// with the window in hand. The refocus at the end is load-bearing:
@@ -1045,6 +1067,14 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// distinguish a cheap quiet pass from an allocated diff that emitted
     /// nothing.
     control_snapshot_builds: u64,
+    /// How much the control socket's requests have cost, for the same
+    /// door: proof that a flooding client is paced, not merely answered.
+    control_load: ControlLoad,
+    /// What the event loop recorded for the control descriptors since
+    /// the last pass, handed in by [`Shell::note_control_readable`].
+    /// `None` on a loop that keeps no such record (X11), where the
+    /// socket asks the kernel itself.
+    control_readable: Option<bool>,
     /// Cached-path, cadence-bounded reader for the public
     /// `appearance-request` marker. Client traffic may wake the shell
     /// far faster than a human-visible control needs filesystem probes.
@@ -1351,6 +1381,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             control,
             control_theme_revision: 0,
             control_snapshot_builds: 0,
+            control_load: ControlLoad::default(),
+            control_readable: None,
             appearance_requests: crate::appearance::RequestPoller::new(now),
             transient_escape: false,
             config_reloaded: false,
@@ -1707,6 +1739,21 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// This is diagnostic only; protocol behavior never depends on it.
     pub fn control_snapshot_builds(&self) -> u64 {
         self.control_snapshot_builds
+    }
+
+    /// What servicing control-socket requests has cost so far. Diagnostic
+    /// only, like [`Self::control_snapshot_builds`].
+    pub fn control_load(&self) -> ControlLoad {
+        self.control_load
+    }
+
+    /// Records whether the event loop saw any control descriptor become
+    /// readable since the last tick. Called by a loop that watches those
+    /// descriptors itself (the Wayland compositor's calloop sources), so
+    /// a quiet tick costs the socket no per-client `poll`; a loop that
+    /// never calls it gets the kernel asked instead.
+    pub fn note_control_readable(&mut self, readable: bool) {
+        self.control_readable = Some(readable);
     }
 
     /// Signals every terminal this shell launched to swap to the color
@@ -3249,6 +3296,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// ready. Exact transient deadlines win; otherwise the bounded idle
     /// poll services filesystem markers and worker-thread samples.
     pub fn next_housekeeping_in(&self, now: Instant) -> Duration {
+        // Requests the control socket parked under its per-pass cap are
+        // work already read out of the kernel: no descriptor will wake
+        // the loop for them, so the next pass follows at once rather
+        // than at the idle bound.
+        if self.control.has_backlog() {
+            return Duration::ZERO;
+        }
         let deadline = self
             .desktop
             .next_housekeeping_deadline()
@@ -3282,13 +3336,20 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// A `focus-workspace` a client asked for is applied here and the
     /// result published in the same pass, so the client's answer is
     /// the `workspaces` event the switch produced, not one a tick late.
+    ///
+    /// The socket hands back a bounded number of commands per pass
+    /// (`control::MAX_REQUESTS_PER_PASS` per client, `REQUEST_BUDGET` in
+    /// all) and parks the rest, so a client that packs thousands of
+    /// requests into one write costs the compositor thread a few
+    /// switches per pass, not all of them at once.
     fn service_control(&mut self, wm: &mut WindowManager<B>) {
+        let readable = self.control_readable.take();
         self.control.accept();
         if !self.control.has_clients() {
             return;
         }
         let stamp = self.control_snapshot_stamp(wm);
-        if !self.control.snapshot_needed(stamp) {
+        if !self.control.snapshot_needed(stamp, readable) {
             // A previous non-blocking write may still have bytes queued.
             // Retrying it is socket maintenance, not a reason to rebuild
             // the desktop view it already carries.
@@ -3297,7 +3358,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         let snapshot = self.control_snapshot(wm);
         let commands = self.control.service(&snapshot);
+        self.control_load.note_pass(commands.len());
         let mut publish_after_command = false;
+        // The diagnostic dump walks every window, buffer and layer, and
+        // is built at most once per pass however many `debug` requests
+        // this pass carries: each still gets its own event, from the
+        // same instant.
+        let mut dump: Option<String> = None;
         for command in commands {
             match command {
                 // A switch, never a create — `docs/control-socket.md`
@@ -3320,15 +3387,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     }
                 }
                 control::Command::Debug { client, topic } => {
-                    let data = format!(
-                        "workspace={} focused_window={:?} clients={}\n{}",
-                        wm.current_workspace(),
-                        wm.focused_client().map(|id| id.as_u64()),
-                        wm.iter_clients()
-                            .filter(|(_, client)| client.lifecycle != Lifecycle::Withdrawn)
-                            .count(),
-                        wm.backend().diagnostic_snapshot(),
-                    );
+                    let data = dump.get_or_insert_with(|| {
+                        self.control_load.dumps = self.control_load.dumps.wrapping_add(1);
+                        format!(
+                            "workspace={} focused_window={:?} clients={}\n{}",
+                            wm.current_workspace(),
+                            wm.focused_client().map(|id| id.as_u64()),
+                            wm.iter_clients()
+                                .filter(|(_, client)| client.lifecycle != Lifecycle::Withdrawn)
+                                .count(),
+                            wm.backend().diagnostic_snapshot(),
+                        )
+                    });
                     self.control.answer_debug(client, topic, data);
                 }
             }

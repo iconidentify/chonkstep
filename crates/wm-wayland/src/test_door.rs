@@ -74,6 +74,7 @@
 //! | `activation-tokens` | replies with the number of retained xdg-activation tokens |
 //! | `protocol-ledgers` | replies with retained input-method popup, idle-inhibitor object, and lock-surface counts |
 //! | `protocol-publishes` | replies with native-control and Hyprland event-snapshot, foreign full-sync and foreign dragged-window-sync counters |
+//! | `control-load` | replies with the control socket's command-bearing pass count, the most commands one pass acted on, and the diagnostic dumps built |
 //! | `hyprland-sources` | replies with desired and registered Hyprland IPC calloop-source counts |
 //! | `heap-in-use` | replies with glibc's live allocated bytes (`mallinfo2` in-use plus mmapped chunks) in every build; no payloads |
 //! | `memory-stats` | opt-in memory-profile builds only: Rust, allocator and glyph-cache counters; no payloads |
@@ -907,6 +908,12 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     metrics.foreign_toplevel_drag_syncs,
                 )
                 .as_bytes(),
+            );
+        }
+        Some("control-load") => {
+            let load = comp.shell.control_load();
+            let _ = stream.write_all(
+                format!("control-load passes={} peak={} dumps={}\n", load.passes, load.peak, load.dumps).as_bytes(),
             );
         }
         Some("selection-devices") => {

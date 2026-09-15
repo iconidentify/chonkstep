@@ -35,6 +35,24 @@ pub(crate) const MAX_CLIENTS: usize = 64;
 /// retained client is writing faster than the shell parses.
 const READ_BUDGET: usize = 2 * LINE_CAP;
 
+/// Most requests one client may have acted on in one servicing pass.
+/// Every request is real work for the compositor thread — a
+/// `focus-workspace` is a workspace switch, a `debug` is a walk of the
+/// whole scene — and the byte budget alone lets a client pack a few
+/// thousand of either into one read. Complete lines past this cap stay
+/// parked in the client's inbound buffer and are handled, in order, on
+/// the passes that follow; none is ever dropped, so the spec's one
+/// answer per request holds, only later. A bar sends a handful of
+/// requests a minute and never notices.
+pub(crate) const MAX_REQUESTS_PER_PASS: usize = 16;
+
+/// Most requests all clients together may have acted on in one pass —
+/// the population-wide ceiling that [`READ_BUDGET`] is for bytes, so
+/// sixty-four flooding clients cannot multiply the per-client cap into
+/// a thousand switches. The rotating first reader keeps a client behind
+/// the spent budget from starving.
+pub(crate) const REQUEST_BUDGET: usize = 4 * MAX_REQUESTS_PER_PASS;
+
 // ---------------------------------------------------------------------
 // The wire, as types
 // ---------------------------------------------------------------------
@@ -192,15 +210,42 @@ pub(crate) struct SnapshotStamp {
 }
 
 impl Snapshot {
+    /// One facet as its event, by its position in the §3 order.
+    fn event(&self, index: usize) -> Event {
+        match index {
+            0 => Event::Workspaces(self.workspaces.clone()),
+            1 => Event::Outputs(self.outputs.clone()),
+            2 => Event::Focus(self.focus.clone()),
+            _ => Event::Theme(self.theme.clone()),
+        }
+    }
+
     /// The facets as events, in the order §3 lists them — the order a
-    /// client is promised on accept and on `snapshot`.
+    /// client is promised on accept and on `snapshot`. The wire path
+    /// goes through [`Facets`] instead, which serialises each once.
+    #[cfg(test)]
     fn events(&self) -> [Event; 4] {
-        [
-            Event::Workspaces(self.workspaces.clone()),
-            Event::Outputs(self.outputs.clone()),
-            Event::Focus(self.focus.clone()),
-            Event::Theme(self.theme.clone()),
-        ]
+        std::array::from_fn(|index| self.event(index))
+    }
+}
+
+/// A snapshot's facets as wire lines, each serialised at most once per
+/// servicing pass however many clients are owed it. Lazy, so a pass in
+/// which nothing changed and nobody asked serialises nothing at all;
+/// before this every client cloned and re-encoded every facet for
+/// itself.
+struct Facets<'a> {
+    snapshot: &'a Snapshot,
+    lines: [std::cell::OnceCell<Vec<u8>>; 4],
+}
+
+impl<'a> Facets<'a> {
+    fn new(snapshot: &'a Snapshot) -> Self {
+        Self { snapshot, lines: std::array::from_fn(|_| std::cell::OnceCell::new()) }
+    }
+
+    fn line(&self, index: usize) -> &[u8] {
+        self.lines[index].get_or_init(|| line(&self.snapshot.event(index)))
     }
 }
 
@@ -355,7 +400,9 @@ pub(crate) enum Command {
 struct ControlClient {
     id: u64,
     stream: Stream,
-    /// Bytes received and not yet terminated by a newline.
+    /// Bytes received and not yet handled: complete lines parked by
+    /// [`MAX_REQUESTS_PER_PASS`] for a later pass, then at most one
+    /// partial line still waiting for its newline.
     inbound: Vec<u8>,
     /// Lines queued and not yet accepted by the kernel.
     outbound: Vec<u8>,
@@ -424,7 +471,11 @@ impl ControlClient {
     }
 
     fn queue(&mut self, event: &Event) {
-        self.outbound.extend_from_slice(&line(event));
+        self.queue_line(&line(event));
+    }
+
+    fn queue_line(&mut self, bytes: &[u8]) {
+        self.outbound.extend_from_slice(bytes);
     }
 
     /// One non-blocking read pass: takes what the kernel has (up to
@@ -440,18 +491,33 @@ impl ControlClient {
     /// `send(); close()`) shows `POLLHUP` with its bytes still waiting
     /// in the kernel, and those bytes are the whole reason it
     /// connected. Only a peer already known to have finished writing is
-    /// judged without a read.
+    /// judged without a read — and even that one first gets the lines
+    /// an earlier pass parked, or a burst followed by a half-close
+    /// would lose everything after the first pass's cap.
+    ///
+    /// `requests` is the pass-wide [`REQUEST_BUDGET`]; this client's
+    /// own share is [`MAX_REQUESTS_PER_PASS`]. Reading stops when either
+    /// is spent. What is left in the kernel keeps the descriptor
+    /// readable, and what is parked here is reported by
+    /// [`has_backlog`](Self::has_backlog), so the next pass follows.
     fn read(
         &mut self,
         now: &Snapshot,
         commands: &mut Vec<Command>,
         budget: &mut usize,
+        requests: &mut usize,
     ) -> Option<Farewell> {
+        let mut handled = 0;
+        // Parked lines first: they are older than anything still in
+        // the kernel, and answers go out in the order requests came.
+        if let Some(farewell) = self.drain_lines(now, commands, &mut handled, requests) {
+            return Some(farewell);
+        }
         if self.peer_finished {
             return self.peer_gone().then_some(Farewell::ClosedByPeer);
         }
         let mut buffer = [0u8; 4096];
-        while *budget > 0 {
+        while *budget > 0 && handled < MAX_REQUESTS_PER_PASS && *requests > 0 {
             let want = buffer.len().min(*budget);
             match self.stream.recv(&mut buffer[..want]) {
                 Ok(0) => {
@@ -459,12 +525,14 @@ impl ControlClient {
                     // Whatever arrived before the shutdown still counts;
                     // a request without its newline is dropped, as the
                     // spec's framing says it must be.
-                    return self.drain_lines(now, commands).or_else(|| self.peer_gone().then_some(Farewell::ClosedByPeer));
+                    return self
+                        .drain_lines(now, commands, &mut handled, requests)
+                        .or_else(|| self.peer_gone().then_some(Farewell::ClosedByPeer));
                 }
                 Ok(n) => {
                     *budget -= n;
                     self.inbound.extend_from_slice(&buffer[..n]);
-                    if let Some(farewell) = self.drain_lines(now, commands) {
+                    if let Some(farewell) = self.drain_lines(now, commands, &mut handled, requests) {
                         return Some(farewell);
                     }
                 }
@@ -492,12 +560,23 @@ impl ControlClient {
         ready > 0 && fds.revents & (libc::POLLHUP | libc::POLLERR) != 0
     }
 
-    /// Whether a non-blocking read can make progress or discover the
+    /// Whether a read this pass can make progress or discover the
     /// peer's departure. This is only a readiness query: the real read
     /// remains in [`Self::read`], where framing and budgets are enforced.
-    fn input_pending(&self) -> bool {
+    ///
+    /// `readable` is the event loop's verdict for the whole control
+    /// descriptor set — level-triggered, so it is exactly the question
+    /// a per-client `poll` would ask — or `None` on a loop that keeps
+    /// no such record (X11), which asks the kernel directly. A peer
+    /// that has finished writing is the one exception: its descriptor
+    /// is readable forever (EOF is readable) and has been taken out of
+    /// the wake set, so its full departure is still asked for here.
+    fn input_pending(&self, readable: Option<bool>) -> bool {
         if self.peer_finished {
             return self.peer_gone();
+        }
+        if let Some(readable) = readable {
+            return readable;
         }
         let mut fd = libc::pollfd { fd: self.stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
         // SAFETY: one live descriptor owned by this client, queried with
@@ -507,27 +586,67 @@ impl ControlClient {
         ready > 0 && fd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
     }
 
-    /// Consumes every complete line in `inbound`, then checks what is
-    /// left against the cap: a partial line longer than any legal
-    /// whole line is a client that has lost its framing.
-    fn drain_lines(&mut self, now: &Snapshot, commands: &mut Vec<Command>) -> Option<Farewell> {
-        while let Some(end) = self.inbound.iter().position(|&b| b == b'\n') {
-            if end + 1 > LINE_CAP {
+    /// Whether a complete line is parked for a later pass. Such a line
+    /// is already out of the kernel, so no descriptor will wake the
+    /// loop for it; the shell asks this instead.
+    fn has_backlog(&self) -> bool {
+        self.inbound.contains(&b'\n')
+    }
+
+    /// Whether the event loop should wake for this descriptor. A peer
+    /// that has shut down its writing side never sends another byte,
+    /// and its EOF would keep a level-triggered source firing on every
+    /// pass; its full close is noticed by [`Self::peer_gone`] on the
+    /// housekeeping cadence, or by the first write that fails.
+    fn wants_wakeups(&self) -> bool {
+        !self.peer_finished
+    }
+
+    /// Consumes complete lines from `inbound`, oldest first, until this
+    /// pass's share of requests — this client's `handled` against
+    /// [`MAX_REQUESTS_PER_PASS`], the pass's `requests` against
+    /// [`REQUEST_BUDGET`] — is spent, then checks what is left against
+    /// the cap. Only a *partial* line is judged: one longer than any
+    /// legal whole line is a client that has lost its framing. Complete
+    /// lines parked by the caps are legitimate backlog, not a framing
+    /// error, and are never disconnected for their bulk — which stays
+    /// bounded by the read budget regardless.
+    ///
+    /// The buffer is shifted once at the end rather than per line so a
+    /// flood of blank lines, which cost no request each, is linear in
+    /// the bytes read rather than quadratic.
+    fn drain_lines(
+        &mut self,
+        now: &Snapshot,
+        commands: &mut Vec<Command>,
+        handled: &mut usize,
+        requests: &mut usize,
+    ) -> Option<Farewell> {
+        let mut consumed = 0;
+        while *handled < MAX_REQUESTS_PER_PASS && *requests > 0 {
+            let Some(len) = self.inbound[consumed..].iter().position(|&b| b == b'\n') else { break };
+            if len + 1 > LINE_CAP {
                 return Some(Farewell::LineOverflow);
             }
-            let line: Vec<u8> = self.inbound.drain(..=end).collect();
-            let body = &line[..end];
+            let start = consumed;
+            consumed += len + 1;
             // §1: empty lines are ignored — and "empty" includes the
             // `\r` a telnet-minded client leaves behind.
-            if body.iter().all(u8::is_ascii_whitespace) {
+            if self.inbound[start..start + len].iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            self.handle(body, now, commands);
+            let body = self.inbound[start..start + len].to_vec();
+            self.handle(&body, now, commands);
+            *handled += 1;
+            *requests -= 1;
         }
-        if self.inbound.len() >= LINE_CAP {
-            return Some(Farewell::LineOverflow);
-        }
-        None
+        self.inbound.drain(..consumed);
+        let partial = self
+            .inbound
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(self.inbound.len(), |newline| self.inbound.len() - newline - 1);
+        (partial >= LINE_CAP).then_some(Farewell::LineOverflow)
     }
 
     fn handle(&mut self, body: &[u8], now: &Snapshot, commands: &mut Vec<Command>) {
@@ -564,17 +683,17 @@ impl ControlClient {
     /// plus `workspaces` if it is owed an acknowledgement. Each is
     /// queued at most once per call, so a request whose switch did
     /// change the facet is answered with one line, not two.
-    fn publish(&mut self, now: &Snapshot, changed: &[bool; 4]) {
+    fn publish(&mut self, now: &Facets<'_>, changed: &[bool; 4]) {
         let owed = std::mem::take(&mut self.owed_workspaces);
         if std::mem::take(&mut self.wants_snapshot) {
-            for event in now.events() {
-                self.queue(&event);
+            for index in 0..4 {
+                self.queue_line(now.line(index));
             }
             return;
         }
-        for (index, event) in now.events().iter().enumerate() {
-            if changed[index] || (index == 0 && owed) {
-                self.queue(event);
+        for (index, &differs) in changed.iter().enumerate() {
+            if differs || (index == 0 && owed) {
+                self.queue_line(now.line(index));
             }
         }
     }
@@ -713,16 +832,32 @@ impl ControlSocket {
 
     /// Whether the shell must construct a snapshot this pass.
     ///
-    /// A changed cheap stamp needs a diff. So does readable client data:
+    /// A changed cheap stamp needs a diff. So does client data, whether
+    /// still in the kernel or parked here by the per-pass request cap:
     /// requests are interpreted against the current workspace count, and
     /// a freshly accepted client's `wants_snapshot` is its same-tick
     /// publication guarantee. Quiet clients with only buffered outbound
     /// bytes return false; [`Self::flush_pending`] serves those without a
     /// snapshot.
-    pub(crate) fn snapshot_needed(&self, stamp: SnapshotStamp) -> bool {
+    ///
+    /// `readable` is what the event loop recorded for the control
+    /// descriptors since the last pass, so a quiet pass costs no syscall
+    /// per client; `None` asks the kernel instead, for a loop that keeps
+    /// no such record. See [`ControlClient::input_pending`].
+    pub(crate) fn snapshot_needed(&self, stamp: SnapshotStamp, readable: Option<bool>) -> bool {
         self.has_clients()
             && (self.observed != Some(stamp)
-                || self.clients.iter().any(|client| client.wants_snapshot || client.input_pending()))
+                || self
+                    .clients
+                    .iter()
+                    .any(|client| client.wants_snapshot || client.has_backlog() || client.input_pending(readable)))
+    }
+
+    /// Whether any client has requests parked for a later pass. Those
+    /// wake no descriptor, so the shell schedules the next pass itself
+    /// while this holds.
+    pub(crate) fn has_backlog(&self) -> bool {
+        self.clients.iter().any(ControlClient::has_backlog)
     }
 
     /// Records the cheap inputs represented by a snapshot that was just
@@ -819,9 +954,9 @@ impl ControlSocket {
     /// requested it. The shell builds `data` only after seeing this
     /// command, keeping scene and client enumeration off ordinary bar
     /// snapshot paths.
-    pub(crate) fn answer_debug(&mut self, client: u64, topic: String, data: String) {
+    pub(crate) fn answer_debug(&mut self, client: u64, topic: String, data: &str) {
         if let Some(peer) = self.clients.iter_mut().find(|peer| peer.id == client) {
-            peer.queue(&Event::Debug(DebugEvent { topic, data }));
+            peer.queue(&Event::Debug(DebugEvent { topic, data: data.to_string() }));
         }
     }
 
@@ -836,22 +971,28 @@ impl ControlSocket {
     /// more in the same tick, which is where a `focus-workspace` gets
     /// its `workspaces` answer — *after* the switch, so the line says
     /// what the switch did.
+    ///
+    /// The commands returned are bounded: at most [`MAX_REQUESTS_PER_PASS`]
+    /// from any one client and [`REQUEST_BUDGET`] in all. Requests past
+    /// that wait, in order, for the next pass.
     pub(crate) fn service(&mut self, now: &Snapshot) -> Vec<Command> {
         let mut commands = Vec::new();
         let changed = self.note(now);
+        let facets = Facets::new(now);
         let client_count = self.clients.len();
         let start = self.read_cursor.min(client_count.saturating_sub(1));
         let mut budget = READ_BUDGET;
+        let mut requests = REQUEST_BUDGET;
         for offset in 0..client_count {
             let index = (start + offset) % client_count;
             let client = &mut self.clients[index];
-            client.publish(now, &changed);
-            if let Some(farewell) = client.read(now, &mut commands, &mut budget) {
+            client.publish(&facets, &changed);
+            if let Some(farewell) = client.read(now, &mut commands, &mut budget, &mut requests) {
                 client.doom(farewell);
                 continue;
             }
             if client.wants_snapshot {
-                client.publish(now, &[false; 4]);
+                client.publish(&facets, &[false; 4]);
             }
             if let Some(farewell) = client.flush() {
                 client.doom(farewell);
@@ -873,8 +1014,9 @@ impl ControlSocket {
     /// one `focus` line and nothing else.
     pub(crate) fn publish(&mut self, now: &Snapshot) {
         let changed = self.note(now);
+        let facets = Facets::new(now);
         for client in &mut self.clients {
-            client.publish(now, &changed);
+            client.publish(&facets, &changed);
             if let Some(farewell) = client.flush() {
                 client.doom(farewell);
             }
@@ -901,8 +1043,14 @@ impl ControlSocket {
         changed
     }
 
+    /// The descriptors the event loop should wake for: the listener and
+    /// every client that can still send something. See
+    /// [`ControlClient::wants_wakeups`] for the ones left out.
     pub(crate) fn poll_fds(&self) -> impl Iterator<Item = RawFd> + '_ {
-        self.listener.iter().map(|l| l.as_raw_fd()).chain(self.clients.iter().map(|c| c.stream.as_raw_fd()))
+        self.listener
+            .iter()
+            .map(|l| l.as_raw_fd())
+            .chain(self.clients.iter().filter(|c| c.wants_wakeups()).map(|c| c.stream.as_raw_fd()))
     }
 
     /// Closes every client and unlinks the socket. Dropping does the
@@ -1157,7 +1305,7 @@ mod tests {
 
     fn wait_for_snapshot_need(socket: &ControlSocket, stamp: SnapshotStamp) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !socket.snapshot_needed(stamp) {
+        while !socket.snapshot_needed(stamp, None) {
             assert!(Instant::now() < deadline, "the client request never became readable");
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1175,9 +1323,9 @@ mod tests {
         let stamp = sample_stamp();
         socket.note_snapshot(stamp);
 
-        assert!(!socket.snapshot_needed(stamp));
+        assert!(!socket.snapshot_needed(stamp, None));
         socket.flush_pending();
-        assert!(!socket.snapshot_needed(stamp), "socket maintenance is not a desktop invalidation");
+        assert!(!socket.snapshot_needed(stamp, None), "socket maintenance is not a desktop invalidation");
     }
 
     #[test]
@@ -1187,11 +1335,11 @@ mod tests {
         let mut bar = Bar::connect(&socket);
         wait_for_accept(&mut socket);
         let stamp = sample_stamp();
-        assert!(socket.snapshot_needed(stamp), "accept owes the initial snapshot in this tick");
+        assert!(socket.snapshot_needed(stamp, None), "accept owes the initial snapshot in this tick");
         socket.service(&sample_snapshot());
         socket.note_snapshot(stamp);
         bar.lines(5);
-        assert!(!socket.snapshot_needed(stamp));
+        assert!(!socket.snapshot_needed(stamp, None));
 
         bar.send("{\"request\":\"snapshot\"}\n");
         wait_for_snapshot_need(&socket, stamp);
@@ -1201,7 +1349,7 @@ mod tests {
             bar.lines(4).iter().map(|event| event["event"].as_str().unwrap()).collect::<Vec<_>>(),
             ["workspaces", "outputs", "focus", "theme"]
         );
-        assert!(!socket.snapshot_needed(stamp));
+        assert!(!socket.snapshot_needed(stamp, None));
     }
 
     #[test]
@@ -1212,10 +1360,10 @@ mod tests {
         let stamp = sample_stamp();
         socket.note_snapshot(stamp);
 
-        assert!(socket.snapshot_needed(SnapshotStamp { wm: stamp.wm + 1, ..stamp }));
-        assert!(socket.snapshot_needed(SnapshotStamp { workareas: stamp.workareas + 1, ..stamp }));
-        assert!(socket.snapshot_needed(SnapshotStamp { focused_output: 1, ..stamp }));
-        assert!(socket.snapshot_needed(SnapshotStamp { theme: stamp.theme + 1, ..stamp }));
+        assert!(socket.snapshot_needed(SnapshotStamp { wm: stamp.wm + 1, ..stamp }, None));
+        assert!(socket.snapshot_needed(SnapshotStamp { workareas: stamp.workareas + 1, ..stamp }, None));
+        assert!(socket.snapshot_needed(SnapshotStamp { focused_output: 1, ..stamp }, None));
+        assert!(socket.snapshot_needed(SnapshotStamp { theme: stamp.theme + 1, ..stamp }, None));
     }
 
     #[test]
@@ -1238,7 +1386,7 @@ mod tests {
             scale: 1.0,
         });
         stamp.focused_output = 1;
-        assert!(socket.snapshot_needed(stamp));
+        assert!(socket.snapshot_needed(stamp, None));
         socket.service(&moved);
         socket.note_snapshot(stamp);
         let output = bar.lines(1).pop().unwrap();
@@ -1249,7 +1397,7 @@ mod tests {
         restyled.theme.id = "graphite".to_string();
         restyled.theme.name = "Graphite".to_string();
         stamp.theme += 1;
-        assert!(socket.snapshot_needed(stamp));
+        assert!(socket.snapshot_needed(stamp, None));
         socket.service(&restyled);
         socket.note_snapshot(stamp);
         let theme = bar.lines(1).pop().unwrap();
@@ -1428,7 +1576,7 @@ mod tests {
         let [Command::Debug { client, topic }] = commands.as_slice() else {
             panic!("debug request was not returned to the shell")
         };
-        socket.answer_debug(*client, topic.clone(), "scene=test".to_string());
+        socket.answer_debug(*client, topic.clone(), "scene=test");
         socket.flush_pending();
         let event = bar.lines(1).remove(0);
         assert_eq!(event["event"], "debug");
@@ -1694,6 +1842,222 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         socket.service(&later);
         assert!(!socket.has_clients(), "a full close is still goodbye");
+    }
+
+    // -----------------------------------------------------------------
+    // Flooding: the work one pass does is bounded, the answers are not
+    // -----------------------------------------------------------------
+
+    /// A shell-side client on a socketpair whose far end the test
+    /// writes and reads as it pleases, with no listener in between.
+    fn paired(socket: &mut ControlSocket) -> std::os::unix::net::UnixStream {
+        let (far, near) = std::os::unix::net::UnixStream::pair().unwrap();
+        socket.admit(Stream::from_fd(near.into()));
+        far
+    }
+
+    /// `count` valid `debug` requests whose topics cycle, so the order
+    /// they come back in is checkable.
+    fn debug_requests(count: usize) -> Vec<u8> {
+        (0..count).flat_map(|i| format!("{{\"request\":\"debug\",\"topic\":\"{}\"}}\n", debug_topic(i)).into_bytes()).collect()
+    }
+
+    fn debug_topic(i: usize) -> &'static str {
+        ["scene", "focus", "clients"][i % 3]
+    }
+
+    #[test]
+    fn a_flood_of_requests_is_handled_a_few_per_pass_in_order_and_none_is_dropped() {
+        use std::io::Write as _;
+
+        let snapshot = sample_snapshot();
+        let stamp = sample_stamp();
+        let mut socket = ControlSocket::unbound(PathBuf::new());
+        let far = paired(&mut socket);
+        (&far).write_all(&debug_requests(1_000)).unwrap();
+
+        let mut seen = Vec::new();
+        let mut passes = 0;
+        let mut parked_passes = 0;
+        while seen.len() < 1_000 {
+            assert!(socket.snapshot_needed(stamp, None), "requests were still waiting after {passes} passes");
+            let commands = socket.service(&snapshot);
+            socket.note_snapshot(stamp);
+            passes += 1;
+            assert!(commands.len() <= MAX_REQUESTS_PER_PASS, "pass {passes} acted on {} requests", commands.len());
+            assert!(passes <= 1_000, "the flood never finished");
+            for command in commands {
+                let Command::Debug { topic, .. } = command else { panic!("a debug flood produced {command:?}") };
+                seen.push(topic);
+            }
+            if socket.has_backlog() {
+                parked_passes += 1;
+                // Nothing in the kernel need be readable for a parked
+                // line to be owed a pass.
+                assert!(socket.snapshot_needed(stamp, Some(false)));
+            }
+            assert_eq!(socket.client_count(), 1, "a backlog is not a framing error");
+        }
+        assert_eq!(passes, 1_000usize.div_ceil(MAX_REQUESTS_PER_PASS), "every pass but the last acts on exactly the cap");
+        assert!(parked_passes > 0, "the cap must have parked lines for later passes");
+        for (i, topic) in seen.iter().enumerate() {
+            assert_eq!(topic, debug_topic(i), "request {i} was answered out of order");
+        }
+        assert!(!socket.snapshot_needed(stamp, None), "nothing is left once the last request was acted on");
+        assert!(!socket.snapshot_needed(stamp, Some(false)));
+        assert_eq!(socket.client_count(), 1);
+        drop(far);
+    }
+
+    #[test]
+    fn parked_requests_wake_the_next_pass_without_a_readable_descriptor() {
+        use std::io::Write as _;
+
+        let snapshot = sample_snapshot();
+        let stamp = sample_stamp();
+        let mut socket = ControlSocket::unbound(PathBuf::new());
+        let far = paired(&mut socket);
+        // Small enough for one read to take all of it: after the first
+        // pass the kernel holds nothing and the shell holds the rest.
+        (&far).write_all(&debug_requests(40)).unwrap();
+
+        assert_eq!(socket.service(&snapshot).len(), MAX_REQUESTS_PER_PASS);
+        socket.note_snapshot(stamp);
+        assert_eq!(socket.clients[0].inbound.iter().filter(|&&b| b == b'\n').count(), 40 - MAX_REQUESTS_PER_PASS);
+        assert!(socket.has_backlog());
+        assert!(socket.snapshot_needed(stamp, Some(false)), "the backlog is the shell's to remember, not the kernel's");
+
+        assert_eq!(socket.service(&snapshot).len(), MAX_REQUESTS_PER_PASS);
+        assert!(socket.snapshot_needed(stamp, Some(false)));
+        assert_eq!(socket.service(&snapshot).len(), 40 - 2 * MAX_REQUESTS_PER_PASS);
+        assert!(!socket.has_backlog());
+        assert!(!socket.snapshot_needed(stamp, Some(false)), "an empty backlog on a quiet descriptor is a quiet pass");
+        drop(far);
+    }
+
+    #[test]
+    fn a_client_that_floods_and_half_closes_still_gets_every_answer() {
+        use std::io::{BufRead as _, Write as _};
+
+        let snapshot = sample_snapshot();
+        let mut socket = ControlSocket::unbound(PathBuf::new());
+        let far = paired(&mut socket);
+        (&far).write_all(&debug_requests(1_000)).unwrap();
+        far.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut answered = 0;
+        let mut passes = 0;
+        loop {
+            let commands = socket.service(&snapshot);
+            passes += 1;
+            assert!(passes <= 1_000, "the flood never finished");
+            assert!(commands.len() <= MAX_REQUESTS_PER_PASS);
+            for command in commands {
+                let Command::Debug { client, topic } = command else { panic!("a debug flood produced {command:?}") };
+                socket.answer_debug(client, topic, "x");
+                answered += 1;
+            }
+            socket.flush_pending();
+            assert_eq!(socket.client_count(), 1, "a half-closed peer with a backlog is a listener, not a departure");
+            if !socket.has_backlog() && answered == 1_000 {
+                break;
+            }
+        }
+
+        far.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut reader = std::io::BufReader::new(&far);
+        let mut line = String::new();
+        let mut debug_lines = 0;
+        for i in 0..1_005 {
+            line.clear();
+            assert!(reader.read_line(&mut line).expect("a line from the shell") > 0, "the shell closed after {i} lines");
+            let event: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+            if event["event"] == "debug" {
+                assert_eq!(event["topic"], debug_topic(debug_lines), "answer {debug_lines} is out of order");
+                debug_lines += 1;
+            }
+        }
+        assert_eq!(debug_lines, 1_000, "hello, four facets, then one answer per request");
+    }
+
+    #[test]
+    fn the_request_budget_is_shared_and_the_first_reader_rotates() {
+        use std::io::Write as _;
+
+        let snapshot = sample_snapshot();
+        let mut socket = ControlSocket::unbound(PathBuf::new());
+        let fars: Vec<_> = (0..5)
+            .map(|_| {
+                let far = paired(&mut socket);
+                (&far).write_all(&debug_requests(REQUEST_BUDGET)).unwrap();
+                far
+            })
+            .collect();
+        let ids: Vec<u64> = socket.clients.iter().map(|client| client.id).collect();
+        let served = |commands: &[Command], id: u64| {
+            commands.iter().filter(|command| matches!(command, Command::Debug { client, .. } if *client == id)).count()
+        };
+
+        let first = socket.service(&snapshot);
+        assert_eq!(first.len(), REQUEST_BUDGET, "the pass stops at the shared budget");
+        for &id in &ids[..4] {
+            assert_eq!(served(&first, id), MAX_REQUESTS_PER_PASS, "each client ahead of the spent budget got its own cap");
+        }
+        assert_eq!(served(&first, ids[4]), 0, "the shared budget must stop this pass");
+
+        let second = socket.service(&snapshot);
+        assert_eq!(second.len(), REQUEST_BUDGET);
+        assert_eq!(served(&second, ids[4]), MAX_REQUESTS_PER_PASS, "the rotating first reader keeps the last client from starving");
+        assert_eq!(served(&second, ids[0]), 0);
+        drop(fars);
+    }
+
+    #[test]
+    fn an_unterminated_line_over_the_cap_behind_a_backlog_still_disconnects() {
+        use std::io::Write as _;
+
+        let snapshot = sample_snapshot();
+        let mut socket = ControlSocket::unbound(PathBuf::new());
+        let far = paired(&mut socket);
+        let mut flood = debug_requests(MAX_REQUESTS_PER_PASS + 1);
+        flood.extend(std::iter::repeat_n(b'x', LINE_CAP));
+        (&far).write_all(&flood).unwrap();
+
+        // Whether the shell judges the partial line this pass or the
+        // next depends only on how the reads chunk; either way the
+        // parked seventeenth request is not what disconnects it.
+        let mut commands = Vec::new();
+        for _ in 0..4 {
+            commands.extend(socket.service(&snapshot));
+        }
+        assert_eq!(commands.len(), MAX_REQUESTS_PER_PASS + 1, "every complete line ahead of the bad one is still acted on");
+        assert!(!socket.has_clients(), "a partial line past the cap is a framing violation, backlog or not");
+        drop(far);
+    }
+
+    #[test]
+    fn a_half_closed_client_leaves_the_wake_set_and_is_still_dropped_on_full_close() {
+        let snapshot = sample_snapshot();
+        let stamp = sample_stamp();
+        let (_scratch, mut socket, mut bar) = connected(&snapshot);
+        bar.lines(5);
+        socket.note_snapshot(stamp);
+        assert_eq!(socket.poll_fds().count(), 2);
+        // SAFETY: shutting down the writing side of a socket the test
+        // owns and keeps open for reading.
+        unsafe {
+            libc::shutdown(bar.stream.as_raw_fd(), libc::SHUT_WR);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        socket.service(&snapshot);
+        assert!(socket.has_clients());
+        assert_eq!(socket.poll_fds().count(), 1, "a peer that will never write again would keep a level-triggered loop spinning");
+        assert!(!socket.snapshot_needed(stamp, Some(false)), "and it owes no pass while it merely listens");
+
+        drop(bar);
+        std::thread::sleep(Duration::from_millis(5));
+        socket.service(&snapshot);
+        assert!(!socket.has_clients(), "its full close is still noticed on the housekeeping pass");
     }
 
     #[test]

@@ -3196,6 +3196,10 @@ pub struct Compositor {
     /// on timer-only wakeups; there is no request to answer and no
     /// socket maintenance to perform.
     hyprland_ipc_ready: bool,
+    /// The same, for the shell's control socket: set by the callback
+    /// for its listener or any of its clients, taken by the shell tick,
+    /// so a quiet pass asks no per-client question of the kernel.
+    control_ready: bool,
     /// Whether work since the last publish may have changed anything
     /// represented by the Hyprland event stream. Kept separate from
     /// socket readiness: a desktop mutation must be published even
@@ -3668,6 +3672,7 @@ impl Compositor {
         // drains `take_shell_motion` itself inside `on_motion`, which
         // every coalesced `PointerMotion` above passes through.
 
+        self.shell.note_control_readable(std::mem::take(&mut self.control_ready));
         self.shell.tick(&mut self.wm);
         self.frame_stats.shell.record(phase_started.elapsed());
         let phase_started = Instant::now();
@@ -4176,6 +4181,8 @@ impl Compositor {
             match self.loop_handle.insert_source(source, move |_, _, comp| {
                 if is_hyprland_ipc {
                     comp.hyprland_ipc_ready = true;
+                } else {
+                    comp.control_ready = true;
                 }
                 Ok(PostAction::Continue)
             }) {
@@ -5126,6 +5133,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         hyprland_ipc,
         workspaces,
         hyprland_ipc_ready: false,
+        control_ready: false,
         // A subscriber present on the first pass must receive a
         // baseline even before the desktop produces its first event.
         hyprland_state_dirty: true,

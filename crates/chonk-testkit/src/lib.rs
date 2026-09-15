@@ -1448,6 +1448,16 @@ pub struct ProtocolPublishes {
     pub foreign_drag: u64,
 }
 
+/// What servicing control-socket requests has cost the compositor so
+/// far: passes that carried commands, the most commands one pass acted
+/// on, and diagnostic dumps built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControlLoad {
+    pub passes: u64,
+    pub peak: u64,
+    pub dumps: u64,
+}
+
 /// Per-phase compositor timings returned by the opt-in test door. A read
 /// consumes the current bracket so callers can measure one interaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1812,6 +1822,22 @@ impl Door {
                 .ok_or_else(|| format!("protocol-publishes reply has no full-sync count: {line}"))?,
             foreign_drag: field(&line, "foreign_drag=")
                 .ok_or_else(|| format!("protocol-publishes reply has no drag-sync count: {line}"))?,
+        })
+    }
+
+    /// How much the control socket's requests have cost so far. Unlike
+    /// counting the answers a client reads, this shows how the work was
+    /// spread over compositor passes.
+    pub fn control_load(&mut self) -> Result<ControlLoad, String> {
+        self.send("control-load")?;
+        let line = self.read_line()?;
+        if !line.starts_with("control-load ") {
+            return Err(format!("unexpected control-load reply: {line}"));
+        }
+        Ok(ControlLoad {
+            passes: field(&line, "passes=").ok_or_else(|| format!("control-load reply has no pass count: {line}"))?,
+            peak: field(&line, "peak=").ok_or_else(|| format!("control-load reply has no peak: {line}"))?,
+            dumps: field(&line, "dumps=").ok_or_else(|| format!("control-load reply has no dump count: {line}"))?,
         })
     }
 

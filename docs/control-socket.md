@@ -39,6 +39,13 @@ intended clients (Quickshell's `Socket`, `socat`, a shell script with
 - All clients share one **131,072-byte read budget per shell pass**.
   The first reader rotates between passes, so a permanent writer cannot
   spend the budget before the same later client every time.
+- The shell acts on at most **16 requests per client per pass**, and
+  **64 across all clients**. Requests past that are not dropped: they
+  wait, in the order they were written, for the passes that follow, and
+  every one is still answered. The caps exist so a client that writes
+  a few thousand `focus-workspace` or `debug` lines in one burst costs
+  the desktop a few of them per pass rather than all at once; a bar
+  that sends a request when the user clicks never reaches them.
 - Empty lines are ignored.
 
 ### 1.1 Path
@@ -271,6 +278,8 @@ Returns one `debug` event. The valid topics are `scene`, `focus`, and
 `clients`; they currently share one correlated dump so counts,
 stacking, focus intent, damage state, and live diagnostic switches are
 captured from the same instant. An unknown topic receives `error`.
+Several `debug` requests acted on in the same shell pass share one
+dump — each still receives its own event, all from that one instant.
 
 ## 5. What is deliberately absent
 
