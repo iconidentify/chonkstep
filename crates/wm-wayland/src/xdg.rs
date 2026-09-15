@@ -802,6 +802,23 @@ impl CompositorHandler for Compositor {
         } else {
             self.wm.backend().window_for_surface(&scene_root)
         };
+        // A drag icon's `attach` dx/dy and `wl_surface.offset` are
+        // each relative to its previous buffer's corner, so every
+        // commit's delta accumulates onto the offset the renderer
+        // applies from the hotspot. Drained here rather than read at
+        // draw time: smithay replaces the current delta on each commit,
+        // and a later commit without one would erase it. Saturating,
+        // since the values are the client's to choose.
+        if let Some(icon) =
+            self.wm.backend_mut().dnd_icon.as_mut().filter(|icon| icon.surface == *surface)
+        {
+            let delta = with_states(surface, |states| {
+                states.cached_state.get::<SurfaceAttributes>().current().buffer_delta.take()
+            });
+            if let Some(delta) = delta {
+                icon.shift(delta);
+            }
+        }
         if !xwayland {
             // Tell the surface how densely it should draw. The
             // `wl_surface.enter` half of scale discovery was settled
@@ -1084,8 +1101,9 @@ impl Compositor {
     /// cases: a framed window is visible only when its *frame* is in the
     /// current workspace, a client-decorated one owns a direct stacking
     /// slot, popups inherit their toplevel's visibility, hidden/declined
-    /// layer surfaces do not paint, and a locked session contains only
-    /// lock, cursor, and input-method surfaces. The commit handler
+    /// layer surfaces do not paint, a drag icon paints only while the
+    /// desktop does, and a locked session contains only lock, cursor,
+    /// and input-method surfaces. The commit handler
     /// resolves both arguments once and reuses them
     /// for scale and role handling too; keeping the predicate beside it
     /// makes this the admission gate for the hottest damage source
@@ -1114,6 +1132,14 @@ impl Compositor {
                 .lock_surfaces
                 .iter()
                 .any(|entry| entry.surface.alive() && entry.surface.wl_surface() == scene_root);
+        }
+
+        // The drag icon is drawn under the pointer but yields to the
+        // lock (`renderer::push_dnd_icon`), so it is admitted only on
+        // this side of the branch: locking ends the drag anyway, and a
+        // commit that races the lock must not repaint the lock screen.
+        if backend.dnd_icon.as_ref().is_some_and(|icon| icon.surface == *scene_root) {
+            return true;
         }
 
         if let Some(window) = owner {

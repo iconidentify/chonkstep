@@ -1040,6 +1040,17 @@ fn on_touch_motion<I: InputBackend>(state: &mut Compositor, event: I::TouchMotio
     let focus = client_focus(&hit_at(state.wm.backend(), at, position));
     let slot = event.slot();
     touch.motion(state, focus, &TouchMotion { slot, location: position, time: event.time_msec() });
+    // A touch-started drag's icon follows the finger that carries it
+    // (the pointer is elsewhere); the damage mark below repaints it.
+    if let Some(icon) = state
+        .wm
+        .backend_mut()
+        .dnd_icon
+        .as_mut()
+        .filter(|icon| icon.touch.is_some_and(|(carrier, _)| carrier == slot))
+    {
+        icon.touch = Some((slot, position));
+    }
 
     let route = with_input(&state.seat.clone(), |input| {
         input.active_touches.get_mut(&slot).map(|route| {

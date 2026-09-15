@@ -254,6 +254,9 @@ pub(crate) fn build_scene_into(
     for tool in tablet_cursors {
         push_cursor_elements(elements, renderer, backend, tool.position, &tool.status, cursors, viewport);
     }
+    // Directly beneath the cursors and above everything else: what the
+    // pointer is carrying sits under its tip.
+    push_dnd_icon(elements, renderer, backend, pointer_location, viewport);
 
     // Input-method candidate windows belong above every application
     // surface (including overlay layers) and below only the pointer.
@@ -651,6 +654,12 @@ pub(crate) fn send_frame_callbacks(
             }
         }
     });
+    // The drag icon paces itself like the cursor surface: on the output
+    // its hotspot is over. (The lock returned above; a locked session
+    // carries no drag, and would freeze the icon with everything else.)
+    if let Some(icon) = dnd_icon_on(backend, output_rect, pointer_location) {
+        send_tree(icon);
+    }
     let pointer_location = Point::new(pointer_location.x.floor() as i32, pointer_location.y.floor() as i32);
     if output_rect.contains(pointer_location) {
         if let CursorImageStatus::Surface(surface) = cursor_status {
@@ -662,6 +671,21 @@ pub(crate) fn send_frame_callbacks(
             send_tree(popup.wl_surface());
         }
     }
+}
+
+/// The live drag icon, if its hotspot is inside `output_rect`: the
+/// output that owes it frame callbacks and presentation feedback, the
+/// way the cursor surface's is chosen.
+fn dnd_icon_on(
+    backend: &WaylandBackend,
+    output_rect: Rect,
+    pointer_location: SPoint<f64, Logical>,
+) -> Option<&WlSurface> {
+    let icon = backend.dnd_icon.as_ref().filter(|icon| icon.surface.alive())?;
+    let anchor = icon.anchor(pointer_location);
+    output_rect
+        .contains(Point::new(anchor.x.floor() as i32, anchor.y.floor() as i32))
+        .then_some(&icon.surface)
 }
 
 /// Release a FIFO barrier only once its surface tree has actually appeared at
@@ -764,6 +788,12 @@ pub(crate) fn take_presentation_feedback(
         if let CursorImageStatus::Surface(surface) = cursor_status {
             take_tree(surface);
         }
+    }
+    // Not only for the feedback: this visit is what records the icon's
+    // primary output, and `send_frames_surface_tree` answers a frame
+    // callback only on that output.
+    if let Some(icon) = dnd_icon_on(backend, output_rect, pointer_location) {
+        take_tree(icon);
     }
     feedback
 }
@@ -1928,6 +1958,78 @@ pub(crate) fn push_cursor_elements(
     }
 }
 
+/// Pushes the drag icon of the client drag in flight — the file
+/// thumbnail or link preview a client handed to `start_drag` — at the
+/// drag's hotspot, so it is carried under the pointer (or the finger)
+/// for the life of the drag. See [`crate::state::DndIcon`].
+///
+/// Application pixels never appear over a lock. Locking already ends
+/// the drag (`reset_client_input_focus`'s `unset_grab` reaches
+/// `dropped`, which clears the ledger entry); the check here is the
+/// second line of defence, for a frame assembled before that ran.
+///
+/// `Kind::Unspecified`, never `Kind::Cursor`: the icon is composited
+/// like any surface, so it cannot compete with the pointer for the
+/// KMS cursor plane or disturb the `CHONKSTEP_NO_CURSOR_PLANE` path.
+/// Being ordinary scene content it is part of every capture that
+/// takes this scene — screencopy with or without its cursor overlay,
+/// the screenshot marker, the capture tool — the way a drag looks on
+/// screen; a per-window capture draws one window's tree and no icon.
+///
+/// It is drawn and never hit-tested: `hit_at` does not walk the
+/// pointer band, the protocol ignores a drag icon's input region, and
+/// the drop target smithay's grab computes must be what is under it.
+pub(crate) fn push_dnd_icon(
+    elements: &mut Vec<SceneElement>,
+    renderer: &mut GlesRenderer,
+    backend: &WaylandBackend,
+    pointer_location: SPoint<f64, Logical>,
+    viewport: Rect,
+) {
+    if backend.locked {
+        return;
+    }
+    let Some(icon) = backend.dnd_icon.as_ref().filter(|icon| icon.surface.alive()) else {
+        return;
+    };
+    // The icon is drawn buffer pixel : screen pixel like the client
+    // cursor, at the density it committed, with the integral-fallback
+    // correction every window gets on a fractional output.
+    let factor = crate::xdg::effective_surface_scale(
+        crate::xdg::committed_surface_scale(&icon.surface),
+        backend.scale_at(viewport),
+    );
+    let origin = dnd_icon_origin(icon.anchor(pointer_location), icon.offset, factor);
+    let global = Point::new(origin.x, origin.y);
+    if !surface_tree_reaches_viewport(
+        &icon.surface,
+        global,
+        Rect::new(global, wm_theme_api::Size::default()),
+        factor,
+        viewport,
+    ) {
+        return;
+    }
+    let position = origin - SPoint::<i32, Physical>::from((viewport.pos.x, viewport.pos.y));
+    push_surface_tree(elements, renderer, &icon.surface, position, factor, 1.0, Kind::Unspecified);
+}
+
+/// Where the icon's (0, 0) lands in global physical pixels: the drag's
+/// hotspot plus the accumulated surface-local offset, converted by the
+/// factor the icon's pixels are drawn at — the conversion the client
+/// cursor's hotspot uses, since both are the client's own logical
+/// units pointing into the same buffer, and a 2x icon offset by 6
+/// must move 12 screen pixels or it drifts from where it was designed
+/// to sit against the pointer.
+pub(crate) fn dnd_icon_origin(
+    anchor: SPoint<f64, Logical>,
+    offset: SPoint<i32, Logical>,
+    factor: f64,
+) -> SPoint<i32, Physical> {
+    let offset = SPoint::<f64, Physical>::from((offset.x as f64 * factor, offset.y as f64 * factor));
+    (anchor.to_physical(1.0) + offset).to_i32_round()
+}
+
 fn memory_element_reaches_viewport(
     location: SPoint<i32, Physical>,
     size: wm_theme_api::Size,
@@ -1966,6 +2068,21 @@ mod tests {
         let fullscreen = Rect::new(Point::new(0, 0), Size::new(1920, 1080));
         assert!(fullscreen_rect_occludes_viewport(fullscreen, left));
         assert!(!fullscreen_rect_occludes_viewport(fullscreen, right));
+    }
+
+    #[test]
+    fn drag_icon_offset_converts_by_the_icons_own_scale() {
+        let anchor = SPoint::<f64, Logical>::from((100.4, 200.6));
+        // No offset: the icon's corner sits on the hotspot, rounded to a pixel.
+        assert_eq!(dnd_icon_origin(anchor, (0, 0).into(), 1.0), SPoint::<i32, Physical>::from((100, 201)));
+        // A 1x client's offset moves the same number of screen pixels ...
+        assert_eq!(dnd_icon_origin(anchor, (6, -10).into(), 1.0), SPoint::<i32, Physical>::from((106, 191)));
+        // ... a 2x client's twice as many, and a 1.5x client's by the fraction.
+        assert_eq!(dnd_icon_origin(anchor, (6, -10).into(), 2.0), SPoint::<i32, Physical>::from((112, 181)));
+        assert_eq!(dnd_icon_origin(anchor, (6, -10).into(), 1.5), SPoint::<i32, Physical>::from((109, 186)));
+        // The hotspot moves the icon with it, offset unchanged.
+        let moved = SPoint::<f64, Logical>::from((300.0, 50.0));
+        assert_eq!(dnd_icon_origin(moved, (6, -10).into(), 1.0), SPoint::<i32, Physical>::from((306, 40)));
     }
 
     #[test]

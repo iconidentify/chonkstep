@@ -313,6 +313,57 @@ pub(crate) enum ManagedSurface {
     X11(X11Surface),
 }
 
+/// The surface a client asked to have carried under the pointer for
+/// the life of a drag: `wl_data_device.start_drag`'s icon, holding
+/// smithay's `dnd_icon` role. Set by `selection.rs`'s `started` and
+/// cleared by its `dropped`, which fires on every end of the grab —
+/// drop, cancel, and the `unset_grab` a session lock performs — so
+/// nothing here outlives the drag. Kept in the scene ledger beside the
+/// other surfaces the renderer composes (`ime_popups`,
+/// `lock_surfaces`) because the on-screen frame, every capture and the
+/// frame-callback drain all read the ledger and none of them reads
+/// the `Compositor`.
+///
+/// The icon is drawn and never hit-tested: the protocol ignores a drag
+/// icon's input region, and the drop target smithay's grab computes
+/// must be whatever is *under* the icon.
+#[derive(Debug)]
+pub(crate) struct DndIcon {
+    pub(crate) surface: WlSurface,
+    /// Where the icon's origin sits relative to the drag's hotspot, in
+    /// the icon's own surface-local units. Accumulated from every
+    /// `wl_surface.attach` dx/dy and `wl_surface.offset` the icon
+    /// commits (smithay folds both into `SurfaceAttributes::buffer_delta`,
+    /// which `xdg.rs`'s commit handler drains here), because each is
+    /// relative to the previous buffer's corner, not to the hotspot.
+    pub(crate) offset: SPoint<i32, Logical>,
+    /// The touch point carrying the drag, when a finger started it
+    /// (smithay starts a `DnDGrab` from either the pointer's or the
+    /// touch's implicit grab). `None` anchors the icon to the pointer.
+    /// Slot and its latest global position, kept current by
+    /// `input.rs`'s touch-motion handler.
+    pub(crate) touch: Option<(smithay::backend::input::TouchSlot, SPoint<f64, Logical>)>,
+}
+
+impl DndIcon {
+    /// Where the drag's hotspot is right now: the finger for a touch
+    /// drag, else the pointer.
+    pub(crate) fn anchor(&self, pointer_location: SPoint<f64, Logical>) -> SPoint<f64, Logical> {
+        self.touch.map_or(pointer_location, |(_, position)| position)
+    }
+
+    /// Folds one committed `buffer_delta` into the offset.
+    pub(crate) fn shift(&mut self, delta: SPoint<i32, Logical>) {
+        self.offset = Self::shifted(self.offset, delta);
+    }
+
+    /// `offset` moved by one more commit's delta. Saturating, since
+    /// both values are the client's to choose.
+    pub(crate) fn shifted(offset: SPoint<i32, Logical>, delta: SPoint<i32, Logical>) -> SPoint<i32, Logical> {
+        (offset.x.saturating_add(delta.x), offset.y.saturating_add(delta.y)).into()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InputDeviceRecord {
     pub id: String,
@@ -1018,6 +1069,9 @@ pub struct WaylandBackend {
     /// Live input-method candidate popups. Kept in the scene ledger so
     /// rendering and hit-testing consult the same collection.
     pub(crate) ime_popups: Vec<smithay::wayland::input_method::PopupSurface>,
+    /// The drag icon of the client drag in flight, if it offered one.
+    /// See [`DndIcon`].
+    pub(crate) dnd_icon: Option<DndIcon>,
     /// The union bounding box of [`WaylandBackend::monitors`] — what
     /// `Backend::screen_size` reports, and the space every rect in this
     /// ledger lives in. With one output it is that output's size, which
@@ -1318,6 +1372,7 @@ impl WaylandBackend {
             workspaces_dirty: true,
             input_devices: Vec::new(),
             ime_popups: Vec::new(),
+            dnd_icon: None,
             output_size,
             damage: true,
             full_damage_required: false,
@@ -5629,6 +5684,21 @@ fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32,
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn drag_icon_offsets_accumulate_per_commit_and_saturate() {
+        // Each attach dx/dy is relative to the previous buffer, so two
+        // commits of (6, 10) leave the icon 12, 20 from the hotspot ...
+        let offset = DndIcon::shifted((0, 0).into(), (6, 10).into());
+        assert_eq!(DndIcon::shifted(offset, (6, 10).into()), SPoint::<i32, Logical>::from((12, 20)));
+        // ... a commit back by the same amount returns it, ...
+        assert_eq!(DndIcon::shifted(offset, (-6, -10).into()), SPoint::<i32, Logical>::from((0, 0)));
+        // ... and a client feeding extremes cannot overflow the sum.
+        assert_eq!(
+            DndIcon::shifted((i32::MAX, i32::MIN).into(), (1, -1).into()),
+            SPoint::<i32, Logical>::from((i32::MAX, i32::MIN))
+        );
+    }
 
     #[test]
     fn removing_an_output_unassigns_its_lock_surfaces_and_shifts_later_ones() {
