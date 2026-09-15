@@ -3235,10 +3235,14 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // through this desktop's menu can be noticed *before* the desk
         // follows. A session wearing a built-in with nothing armed
         // never polls.
+        // Theme following also re-reads the entire Hyprland config.
+        // Leave its baseline untouched while the upgrade guard holds
+        // that tree, then catch up after resume.
+        let autoreload_paused = self.autoreload_paused();
         let armed = self.omarchy_adoption_armed.is_some_and(|since| since.elapsed() < ADOPTION_ARM_WINDOW);
         if self.state.following.is_none() && !armed {
             self.omarchy_adoption_armed = None;
-        } else if self.omarchy.changed(now) {
+        } else if !autoreload_paused && self.omarchy.changed(now) {
             if self.state.following.is_some() {
                 tracing::info!("Omarchy's current theme or background changed; re-dressing");
                 // A rejection is logged and recorded by the resolve
@@ -3268,7 +3272,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // `reresolve`, which is the same one path a reload and a theme
         // change take, so the read cannot resolve by different rules
         // than the startup it replaces.
-        let autoreload_paused = self.autoreload_paused();
         if let Some((roots, watch)) = &mut self.hyprland_config {
             if hyprland_config_due(autoreload_paused, watch, std::time::Instant::now()) {
                 tracing::info!("the desktop's Hyprland configuration changed; re-reading it");

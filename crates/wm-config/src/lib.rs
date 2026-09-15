@@ -1874,7 +1874,7 @@ pub fn parse_in_session(
             }
             None => {
                 if let Some(running) = running {
-                    config.interaction.keyboard_mode = running.keyboard_mode;
+                    config.interaction.keyboard_mode = Some(running.keyboard_mode());
                 }
                 refuse!(
                     config.diagnostics,
@@ -4833,6 +4833,17 @@ mod command_tests {
         let startup = parse_in_session(text, &|| None, None).unwrap();
         assert!(!startup.interaction.mac_keyboard());
         assert_eq!(action_for(&startup, "cmd+q"), None);
+
+        // Mac interaction mode implies Mac keys even without an
+        // explicit keyboard_mode. Changing the interaction mode must
+        // not reinterpret the fallback for an invalid keyboard key.
+        let implicit_mac = wm_core::InteractionConfig {
+            mode: wm_core::InteractionMode::Mac, ..Default::default()
+        };
+        let reload = parse_in_session(text, &|| None, Some(&implicit_mac)).unwrap();
+        assert_eq!(reload.interaction.mode, wm_core::InteractionMode::Spaces);
+        assert!(reload.interaction.mac_keyboard());
+        assert_eq!(action_for(&reload, "cmd+q"), Some(Action::QuitApplication));
     }
 
     #[test]

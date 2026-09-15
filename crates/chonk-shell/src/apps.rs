@@ -3,6 +3,7 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::env;
 use std::fs;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -448,7 +449,14 @@ fn read_desktop_sources(dirs: &[PathBuf]) -> Vec<(usize, String, String)> {
 /// steps still cannot be read past the bound.
 fn read_desktop_text(path: &Path) -> Option<String> {
     let mut text = String::new();
-    fs::File::open(path).ok()?.take(MAX_DESKTOP_FILE_BYTES + 1).read_to_string(&mut text).ok()?;
+    // A FIFO named *.desktop must not block startup or monopolize the
+    // only rescan worker. Check the opened file, so replacing a regular
+    // file with a FIFO between stat and open cannot bypass the guard.
+    let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    file.take(MAX_DESKTOP_FILE_BYTES + 1).read_to_string(&mut text).ok()?;
     (text.len() as u64 <= MAX_DESKTOP_FILE_BYTES).then_some(text)
 }
 
@@ -1257,6 +1265,23 @@ mod tests {
         assert_eq!(sources[0].2, "alpha text");
 
         fs::remove_dir_all(&root).expect("clean up fixture tree");
+    }
+
+    #[test]
+    fn a_fifo_cannot_block_the_application_scan_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().to_path_buf();
+        let fifo = dir.join("blocked.desktop");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: path is a live NUL-terminated string; mkfifo retains
+        // no pointer and creates only this test's private fixture.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        fs::write(dir.join("good.desktop"), named_fixture("Good")).unwrap();
+        std::os::unix::fs::symlink(&fifo, dir.join("linked.desktop")).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(read_desktop_sources(&[dir])).unwrap());
+        let sources = receiver.recv_timeout(Duration::from_secs(2)).expect("special files must not stall the scan");
+        assert_eq!(sources.iter().map(|(_, id, _)| id.as_str()).collect::<Vec<_>>(), vec!["good"]);
     }
 
     #[test]

@@ -996,8 +996,16 @@ fn configreloaded_within(events: &mut std::io::BufReader<UnixStream>, window: Du
 #[test]
 #[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
 fn a_paused_auto_reload_holds_edits_for_an_explicit_reload() {
-    let (_omarchy_root, options) = scratch_machine("hyprland-reload-guard", FIRST_SIZE, "SUPER + SHIFT + K");
+    let (_omarchy_root, mut options) = scratch_machine("hyprland-reload-guard", FIRST_SIZE, "SUPER + SHIFT + K");
+    options.config_extra.push_str("theme = \"omarchy\"\n");
+    options.state_root_files = vec![
+        ("omarchy/current/theme/colors.toml".into(),
+            "background = '#1a1b26'\nforeground = '#a9b1d6'\n".into()),
+        ("omarchy/current/theme.name".into(), "before-upgrade\n".into()),
+    ];
     let mut session = Session::boot("hyprland-reload-guard", options).expect("session boots");
+    assert_eq!(session.world().unwrap().theme.following, "omarchy");
+    let initial_theme = session.world().unwrap().theme.name;
     let log_path = session.dir.join("compositor.log");
     let rereads = || {
         std::fs::read_to_string(&log_path).map_or(0, |log| log.matches("Hyprland configuration changed").count())
@@ -1032,9 +1040,12 @@ fn a_paused_auto_reload_holds_edits_for_an_explicit_reload() {
     let seen = rereads();
     std::fs::write(user_config_path(&session), user_hyprland_lua(SECOND_SIZE, "SUPER + SHIFT + J"))
         .expect("rewrite their config");
+    std::fs::write(session.dir.join("state/omarchy/current/theme.name"), "during-upgrade\n").unwrap();
     // Well over two poll intervals: nothing is re-read.
     assert_eq!(configreloaded_within(&mut events, Duration::from_secs(3)), 0, "no re-read while paused");
     assert_eq!(rereads(), seen, "the watch never fired:\n{}", tail(&session.log()));
+    assert_eq!(session.world().unwrap().theme.name, initial_theme,
+        "theme following must not reload a partially replaced Hyprland tree");
 
     // ---- the PostTransaction hook: one reload, then resume ------------
     assert_eq!(hyprland_request(&session, "/eval hl.config({ debug = { suppress_errors = true } })").trim(), "ok");

@@ -24,6 +24,25 @@ use wm_config::preset::Unbound;
 
 const FOCUSED: u64 = 4_294_967_297;
 
+#[test]
+fn lua_window_selectors_keep_spaces_and_commas_through_lowering() {
+    let mut snapshot = desk();
+    let mut target = snapshot.windows[0].clone();
+    target.id = FOCUSED + 1;
+    target.title = "Notes,  Work".into();
+    snapshot.windows.push(target);
+    for (source, expected) in [
+        (r#"hl.dsp.window.set_prop({ window = "title:Notes,  Work", prop = "opaque", value = "toggle" })"#,
+            Action::SetOpaque { window: FOCUSED + 1, opaque: None }),
+        (r#"hl.dsp.window.resize({ window = "title:Notes,  Work", x = 640, y = 480 })"#,
+            Action::ResizeWindow { window: FOCUSED + 1, width: 640, height: 480, relative: false }),
+        (r#"hl.dsp.window.move({ window = "title:Notes,  Work", x = 10, y = 20, relative = true })"#,
+            Action::MoveWindow { window: FOCUSED + 1, x: 10, y: 20, relative: true }),
+    ] {
+        assert_eq!(dispatch::parse(source, &snapshot), Outcome::Run(expected), "{source}");
+    }
+}
+
 /// A desk every served example is served on: one focused window, one
 /// output with a neighbour for the monitor verbs, separate Spaces so a
 /// workspace move has a Space to move, and a reported `chonkstep`

@@ -349,7 +349,13 @@ pub fn flatten(path: &str, call: &impl LuaCall) -> Flattened {
             (Some(x), Some(y)) => format!("exact {x} {y}"),
             _ => String::new(),
         };
-        verb(name, with_window(arg))
+        match call.field("window").filter(|window| !window.trim().is_empty()) {
+            Some(window) => verb(
+                if name == "resizeactive" { "resizewindowpixel" } else { "movewindowpixel" },
+                format!("{arg},{}", window.trim()),
+            ),
+            None => verb(name, arg),
+        }
     };
     match path {
         "exec_cmd" => Flattened::ExecShell(call.field("cmd").or_else(|| call.positional()).unwrap_or_default()),

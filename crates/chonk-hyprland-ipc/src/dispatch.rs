@@ -425,16 +425,21 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
         // Omarchy's transparency toggle falls back to. Any other
         // property is refused by name, exactly as the Lua form is.
         "setprop" => {
-            let mut words = rest.split_whitespace();
-            let (Some(window), Some(prop)) = (words.next(), words.next()) else {
+            // The selector may contain spaces (a Lua title selector is
+            // already decoded). Property and value are the final words;
+            // splitting from the front would change the selected window.
+            let Some((prefix, last)) = rest.trim().rsplit_once(char::is_whitespace) else {
                 return Outcome::Unsupported("setprop takes a window, a property and a value".to_string());
+            };
+            let (window, prop, value) = match prefix.trim_end().rsplit_once(char::is_whitespace) {
+                Some((window, prop)) => (window.trim_end(), prop, last),
+                None => (prefix, last, "toggle"),
             };
             if prop != "opaque" {
                 return Outcome::Unsupported(format!(
                     "window property {prop:?} is not modeled; opaque is the one setprop property ChonkStep serves"
                 ));
             }
-            let value = words.next().unwrap_or("toggle");
             let Some(opaque) = opaque_value(value) else {
                 return Outcome::Unsupported(format!("setprop opaque takes toggle, 1 or 0, not {value:?}"));
             };
