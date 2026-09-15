@@ -263,10 +263,15 @@ pub fn parse(args: &str, snapshot: &Snapshot) -> Outcome {
 /// Split the verb from its arguments on the first whitespace character,
 /// whatever its width; see `Request::parse`, which splits the same way.
 fn split_verb(args: &str) -> (String, &str) {
-    match args.split_once(char::is_whitespace) {
-        Some((verb, rest)) => (verb.to_ascii_lowercase(), rest.trim()),
-        None => (args.to_ascii_lowercase(), ""),
-    }
+    let (verb, rest) = split_word(args);
+    (verb.to_ascii_lowercase(), rest)
+}
+
+/// Keep selector suffixes verbatim: whitespace inside a window title
+/// belongs to its identity, not to the dispatcher's argument separators.
+fn split_word(args: &str) -> (&str, &str) {
+    let args = args.trim();
+    args.split_once(char::is_whitespace).map_or((args, ""), |(word, rest)| (word, rest.trim()))
 }
 
 /// The value of an `opaque` property request: `None` toggles.
@@ -376,16 +381,15 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
         // window as in Hyprland; the Lua form's `window` field arrives
         // as a third word and names another.
         "fullscreenstate" => {
-            let mut words = rest.split_whitespace();
-            let (internal, client) = (words.next(), words.next());
-            let selector = words.collect::<Vec<_>>().join(" ");
+            let (internal, rest) = split_word(rest);
+            let (client, selector) = split_word(rest);
             let level = |name: &str, value: Option<&str>| fullscreen_level("fullscreenstate", name, value);
-            match (level("internal", internal), level("client", client)) {
+            match (level("internal", Some(internal)), level("client", Some(client))) {
                 (Ok(internal), Ok(client)) => {
                     let window = if selector.is_empty() {
                         None
                     } else {
-                        match resolve_window(&selector, snapshot) {
+                        match resolve_window(selector, snapshot) {
                             Some(window) => Some(window.id),
                             None => return Outcome::Unsupported(format!("no window matches {selector:?}")),
                         }
@@ -410,13 +414,11 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             .map(|window| Outcome::Run(Action::CenterWindow(window.id)))
             .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {rest:?}"))),
         "alterzorder" => {
-            let mut fields = rest.split_whitespace();
-            let mode = fields.next().unwrap_or("");
-            let selector = fields.collect::<Vec<_>>().join(" ");
+            let (mode, selector) = split_word(rest);
             if mode != "top" {
                 Outcome::Unsupported(format!("alterzorder mode {mode:?} is not supported; only top is available"))
             } else {
-                selected_window(&selector, snapshot)
+                selected_window(selector, snapshot)
                     .map(|window| Outcome::Run(Action::RaiseWindow(window.id)))
                     .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {selector:?}")))
             }
@@ -431,9 +433,10 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             let Some((prefix, last)) = rest.trim().rsplit_once(char::is_whitespace) else {
                 return Outcome::Unsupported("setprop takes a window, a property and a value".to_string());
             };
-            let (window, prop, value) = match prefix.trim_end().rsplit_once(char::is_whitespace) {
-                Some((window, prop)) => (window.trim_end(), prop, last),
-                None => (prefix, last, "toggle"),
+            let (window, prop, value) = match (last, prefix.trim_end().rsplit_once(char::is_whitespace)) {
+                ("opaque", _) => (prefix.trim_end(), last, "toggle"),
+                (_, Some((window, prop))) => (window.trim_end(), prop, last),
+                (_, None) => (prefix, last, "toggle"),
             };
             if prop != "opaque" {
                 return Outcome::Unsupported(format!(
@@ -1032,10 +1035,9 @@ fn classic_geometry(rest: &str, snapshot: &Snapshot, resize: bool, active_form: 
 }
 
 fn classic_tag(rest: &str, snapshot: &Snapshot) -> Outcome {
-    let mut fields = rest.split_whitespace();
-    let Some(raw_tag) = fields.next() else { return Outcome::Unsupported("tagwindow requires a tag".to_string()) };
-    let selector = fields.collect::<Vec<_>>().join(" ");
-    let Some(window) = selected_window(&selector, snapshot) else {
+    let (raw_tag, selector) = split_word(rest);
+    if raw_tag.is_empty() { return Outcome::Unsupported("tagwindow requires a tag".to_string()); }
+    let Some(window) = selected_window(selector, snapshot) else {
         return Outcome::Unsupported(format!("no window matches {selector:?}"));
     };
     let (present, tag) = raw_tag.strip_prefix('-').map_or((true, raw_tag.trim_start_matches('+')), |tag| (false, tag));

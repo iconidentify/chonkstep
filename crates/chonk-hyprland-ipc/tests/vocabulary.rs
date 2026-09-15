@@ -38,6 +38,12 @@ fn lua_window_selectors_keep_spaces_and_commas_through_lowering() {
             Action::ResizeWindow { window: FOCUSED + 1, width: 640, height: 480, relative: false }),
         (r#"hl.dsp.window.move({ window = "title:Notes,  Work", x = 10, y = 20, relative = true })"#,
             Action::MoveWindow { window: FOCUSED + 1, x: 10, y: 20, relative: true }),
+        (r#"hl.dsp.window.fullscreen_state({ window = "title:Notes,  Work", internal = 0, client = 2 })"#,
+            Action::FullscreenState { window: Some(FOCUSED + 1), internal: 0, client: 2 }),
+        (r#"hl.dsp.window.alter_zorder({ window = "title:Notes,  Work", mode = "top" })"#,
+            Action::RaiseWindow(FOCUSED + 1)),
+        (r#"hl.dsp.window.tag({ window = "title:Notes,  Work", tag = "+chosen" })"#,
+            Action::SetTag { window: FOCUSED + 1, tag: "chosen".into(), present: true }),
     ] {
         assert_eq!(dispatch::parse(source, &snapshot), Outcome::Run(expected), "{source}");
     }

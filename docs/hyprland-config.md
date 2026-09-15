@@ -948,6 +948,8 @@ consulted at all — no `stat`, and no advance of its baseline — so the
 first look after the pause lifts sees whatever changed in between and
 re-reads once, unless a `reload` already applied it: an explicit reload
 re-baselines the watch, so the guard's resume re-reads nothing more.
+Automatic theme following also waits during the pause, since applying
+a theme re-reads the same configuration tree. It catches up on resume.
 The pause is a live session property, written nowhere: a transaction
 killed between the two hooks leaves it paused until logout, which the
 session log says and `hyprctl systeminfo` reports as `autoreload:
