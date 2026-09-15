@@ -29,6 +29,11 @@ pub(crate) const OUTBOUND_CAP: usize = 262_144;
 /// Most simultaneous control subscribers retained by the shell.
 pub(crate) const MAX_CLIENTS: usize = 64;
 
+/// Limit connection churn as well as requests: a process that keeps
+/// refilling the listener must not trap the shell in accept(), even
+/// when every connection is refused because the client list is full.
+const MAX_ACCEPTS_PER_PASS: usize = 8;
+
 /// How much all clients together may hand the shell in one servicing
 /// pass. Requests are drained per line as they arrive, so this is not
 /// a framing limit; it bounds the whole read phase even when every
@@ -877,7 +882,10 @@ impl ControlSocket {
         self.clients.retain(|client| !client.doomed);
     }
 
-    /// Admits everything waiting on the listener. A new client owes
+    /// Admits at most [`MAX_ACCEPTS_PER_PASS`] connections per pass.
+    /// The listener stays readable while more are queued, so the event
+    /// loop returns for them after other desktop work gets a turn.
+    /// A new client owes
     /// nothing yet but `hello`, which is queued here so it is first no
     /// matter what the client sends in the meantime; the snapshot
     /// follows on the next [`publish`](Self::publish) — which the shell
@@ -888,7 +896,7 @@ impl ControlSocket {
         if self.clients.len() < MAX_CLIENTS {
             self.cap_refusing = false;
         }
-        loop {
+        for _ in 0..MAX_ACCEPTS_PER_PASS {
             match listener.accept() {
                 Ok(Some(stream)) => {
                     match stream.peer_is_this_user() {
@@ -1257,6 +1265,23 @@ mod tests {
         assert_eq!(socket.poll_fds().count(), 1 + MAX_CLIENTS);
         assert_eq!(socket.capacity_refusals, 8);
         assert!(socket.cap_refusing);
+    }
+
+    #[test]
+    fn connection_churn_at_capacity_yields_between_accept_batches() {
+        let scratch = Scratch::new();
+        let mut socket = ControlSocket::bind_at(scratch.socket());
+        let _subscribers: Vec<_> = (0..MAX_CLIENTS).map(|_| paired(&mut socket)).collect();
+        let _queued: Vec<_> = (0..2 * MAX_ACCEPTS_PER_PASS).map(|_| Bar::connect(&socket)).collect();
+
+        socket.accept();
+        assert_eq!(socket.client_count(), MAX_CLIENTS);
+        assert_eq!(socket.capacity_refusals, MAX_ACCEPTS_PER_PASS as u64,
+            "refused connections must spend the accept budget too");
+
+        socket.accept();
+        assert_eq!(socket.capacity_refusals, (2 * MAX_ACCEPTS_PER_PASS) as u64,
+            "the remaining connections are refused on the next pass");
     }
 
     #[test]

@@ -525,7 +525,7 @@ mod tests {
         );
         assert_eq!(
             flatten("window.resize", &Call(vec![("x", "25"), ("y", "10"), ("relative", "true"), ("window", "address:0x7")], None)),
-            Flattened::Verb { name: "resizeactive", arg: "25 10 address:0x7".into() }
+            Flattened::Verb { name: "resizewindowpixel", arg: "25 10,address:0x7".into() }
         );
         assert_eq!(
             flatten("window.set_prop", &Call(vec![("prop", "opaque"), ("value", "1")], None)),

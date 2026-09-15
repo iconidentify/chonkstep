@@ -86,7 +86,10 @@ The shell retains at most **64 simultaneous clients**. It still accepts
 connections beyond that limit and closes them immediately, so a client
 gets EOF rather than hanging in a full listener backlog. One warning is
 logged when a continuously-full population starts refusing; another is
-allowed only after a slot has reopened. A connected subscriber is
+allowed only after a slot has reopened. Each pass accepts at most **8
+connections**, counting refusals too, so continuous reconnects cannot
+keep the shell in the accept loop; queued connections wake the next pass.
+A connected subscriber is
 allowed to stay quiet indefinitely — receiving state without sending
 requests is the protocol's ordinary shape, so silence is not an idle
 timeout signal here.
