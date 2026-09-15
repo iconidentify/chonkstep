@@ -536,6 +536,18 @@ pub(crate) struct WindowRecord {
     pub force_opaque: bool,
     /// `no_dim`: `dim_inactive` leaves this window alone.
     pub no_dim: bool,
+    /// `no_screen_share`: every capture the compositor renders (a
+    /// portal screen share, a screencopy recording, a screenshot) shows
+    /// an opaque rectangle where this window and its popups are, while
+    /// the output itself shows the window as usual. From configuration
+    /// only, through `Backend::set_capture_redacted`; no client request
+    /// can clear it.
+    pub capture_redacted: bool,
+    /// Stable id of the rectangle a capture draws in place of a
+    /// redacted window. Minted once so a `copy_with_damage` stream's
+    /// retained damage tracker sees one unchanging element rather than
+    /// a fresh one every frame - the same reason `dim_id` exists.
+    pub capture_redaction_id: smithay::backend::renderer::element::Id,
     /// Stable id of the quad drawn in front of this window while it is
     /// unfocused under `dim_inactive`. Minted once so the damage tracker
     /// sees one retained element that comes and goes rather than a
@@ -640,6 +652,8 @@ impl WindowRecord {
             opacity: None,
             force_opaque: false,
             no_dim: false,
+            capture_redacted: false,
+            capture_redaction_id: smithay::backend::renderer::element::Id::new(),
             dim_id: smithay::backend::renderer::element::Id::new(),
         }
     }

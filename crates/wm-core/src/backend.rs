@@ -702,6 +702,14 @@ pub trait Backend {
         _no_dim: bool,
     ) {
     }
+    /// Tells the backend whether a managed window mapped under a
+    /// `no_screen_share` rule, in which case every capture the backend
+    /// renders (a portal screen share, a recording, a screenshot)
+    /// shows an opaque rectangle in its place while the screen itself
+    /// shows the window as usual. Configuration only: no client
+    /// request reaches this, so a client cannot clear it. Defaulted to
+    /// a no-op for a backend that captures nothing.
+    fn set_capture_redacted(&mut self, _window: Self::WindowId, _redacted: bool) {}
     /// Forces a window opaque for the rest of the session, or lets its
     /// rule apply again: `Some(true)`, `Some(false)`, or `None` to
     /// toggle. Answers whether the backend models the state at all,

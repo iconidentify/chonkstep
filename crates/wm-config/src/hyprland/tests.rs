@@ -2948,6 +2948,57 @@ fn opacity_values_are_read_clamped_and_refused_when_unreadable() {
     assert!(!rules.window_decision_for("dimmed", "", "").no_dim);
 }
 
+/// `no_screen_share` is read in both spellings, last rule winning, and
+/// Omarchy's password-manager rules resolve to it: a 1Password or
+/// Bitwarden window is hidden from every capture the compositor
+/// renders, while nothing else is.
+#[test]
+fn no_screen_share_is_read_and_resolves_for_omarchys_password_managers() {
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = no_screen_share on, match:class ^vault$\n",
+            "windowrule = noscreenshare 1, match:class ^legacy$\n",
+            "windowrule = no_screen_share on, match:class ^shown$\n",
+            "windowrule = no_screen_share off, match:class ^shown$\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    assert!(notes.is_empty(), "no_screen_share is read, not skipped: {notes:?}");
+    assert!(rules.window_decision_for("vault", "", "").no_screen_share);
+    assert!(rules.window_decision_for("legacy", "", "").no_screen_share, "Hyprland's one-word spelling");
+    assert!(!rules.window_decision_for("shown", "", "").no_screen_share, "the later property wins");
+    assert!(!rules.window_decision_for("other", "", "").no_screen_share, "a window no rule names is captured");
+
+    let reading = read(&machine());
+    let policy = reading.float_rules;
+    for class in ["1Password", "1password", "Bitwarden", "chrome-nngceckbapebfimnlniiiahkandclblb-Default"] {
+        assert!(
+            policy.window_decision_for(class, "", "").no_screen_share,
+            "{class} is hidden from capture by Omarchy's rules"
+        );
+    }
+    assert!(
+        !policy.window_decision_for("org.codeberg.dnkl.foot", "", "").no_screen_share,
+        "no_screen_share is the password managers', not everybody's"
+    );
+    assert!(
+        !reading.skipped.iter().any(|skip| skip.what.contains("property no_screen_share")),
+        "no_screen_share is read now: {:?}",
+        reading.skipped.iter().filter(|skip| skip.kind == "window-rule").map(|skip| &skip.what).collect::<Vec<_>>()
+    );
+}
+
 /// `decoration:dim_inactive` and `dim_strength`, in both syntaxes,
 /// with the rest of the decoration table still declined by name.
 #[test]
@@ -4347,7 +4398,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert_eq!(
         reading.float_rules.len(),
-        40,
+        43,
         "window behaviors resolved through Omarchy's tags"
     );
     // The skipped count is quoted too, in the guide's sample log line.
@@ -4356,7 +4407,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        139,
+        136,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -4366,7 +4417,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=189 commands=121 env=8 autostart=4")
-            && GUIDE.contains("float_rules=40 monitors=1 skipped=139"),
+            && GUIDE.contains("float_rules=43 monitors=1 skipped=136"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

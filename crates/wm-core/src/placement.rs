@@ -329,6 +329,11 @@ pub struct WindowRuleDecision {
     /// Leave this window undimmed when `dim_inactive` darkens the
     /// unfocused ones (`no_dim`).
     pub no_dim: bool,
+    /// Never show this window's pixels to a screen share, recording or
+    /// screenshot (`no_screen_share`): every capture the compositor
+    /// renders draws an opaque rectangle where the window is. What the
+    /// user sees on screen is unchanged.
+    pub no_screen_share: bool,
 }
 
 /// A `workspace` window rule: the destination and whether the window

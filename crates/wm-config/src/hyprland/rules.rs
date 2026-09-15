@@ -215,6 +215,7 @@ struct Rule {
     workspace: Option<RuleWorkspace>,
     opacity: Option<wm_core::OpacityRule>,
     no_dim: Option<bool>,
+    no_screen_share: Option<bool>,
 }
 
 impl Rule {
@@ -385,6 +386,7 @@ impl FloatRules {
                     (rule.maximize, "maximized"),
                     (rule.suppress_maximize, "client maximize ignored"),
                     (rule.suppress_fullscreen, "client fullscreen ignored"),
+                    (rule.no_screen_share, "hidden from screen capture"),
                 ] {
                     if enabled == Some(true) {
                         what.push(label.to_string());
@@ -562,6 +564,9 @@ impl FloatPolicy for FloatRules {
             }
             if let Some(value) = rule.no_dim {
                 decision.no_dim = value;
+            }
+            if let Some(value) = rule.no_screen_share {
+                decision.no_screen_share = value;
             }
         }
         decision
@@ -837,6 +842,13 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                 spec.no_dim = Some(truthy(value));
                 any = true;
             }
+            // Omarchy's password managers: the window is drawn on
+            // screen as usual and as an opaque rectangle in every
+            // capture the compositor renders.
+            "no_screen_share" | "noscreenshare" => {
+                spec.no_screen_share = Some(truthy(value));
+                any = true;
+            }
             // `tag +name` is consumed by compile's first pass. A tag
             // matcher likewise participates in resolution, so neither
             // is a silently dropped property.
@@ -869,6 +881,7 @@ struct Spec {
     workspace: Option<RuleWorkspace>,
     opacity: Option<wm_core::OpacityRule>,
     no_dim: Option<bool>,
+    no_screen_share: Option<bool>,
 }
 
 /// Reads a `workspace` rule's value.
@@ -970,6 +983,7 @@ fn push(
         workspace: spec.workspace.clone(),
         opacity: spec.opacity,
         no_dim: spec.no_dim,
+        no_screen_share: spec.no_screen_share,
     });
 }
 

@@ -199,6 +199,11 @@ pub(crate) fn clip_plane(elements: &mut Vec<SceneElement>, start: usize,
 /// target's framebuffer coordinates; its extent lets scene assembly
 /// omit objects wholly owned by another output (see the module docs).
 /// Called once per output per frame.
+///
+/// `purpose` says who the scene is for. Every caller states it, so a
+/// window under a `no_screen_share` rule can neither be redacted on
+/// the user's own screen by accident nor reach a capture by omission.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_scene(
     backend: &WaylandBackend,
     renderer: &mut GlesRenderer,
@@ -207,6 +212,7 @@ pub(crate) fn build_scene(
     tablet_cursors: &[crate::input::TabletCursor],
     cursors: &crate::state::CursorSet,
     viewport: Rect,
+    purpose: ScenePurpose,
 ) -> (Vec<SceneElement>, Color32F) {
     let mut elements = Vec::new();
     let clear_color = build_scene_into(
@@ -218,8 +224,142 @@ pub(crate) fn build_scene(
         tablet_cursors,
         cursors,
         viewport,
+        purpose,
     );
     (elements, clear_color)
+}
+
+/// Who a scene is assembled for.
+///
+/// The one difference between the two is a window under a
+/// `no_screen_share` rule (`WindowRecord::capture_redacted`): the
+/// output shows it, a capture shows an opaque rectangle in its place.
+/// Everything else - stacking, hit-test order, the lock scene - is
+/// identical, which is what lets one scene builder serve both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScenePurpose {
+    /// The output's own frame: everything as the user sees it.
+    Display,
+    /// A screen share, recording or screenshot rendered offscreen:
+    /// screencopy, ext-image-copy-capture, the built-in capture tool.
+    Capture,
+}
+
+impl ScenePurpose {
+    /// Whether a scene for this purpose draws `record` as a redaction
+    /// rectangle instead of its content.
+    pub(crate) fn redacts(self, record: &WindowRecord) -> bool {
+        self == ScenePurpose::Capture && record.capture_redacted
+    }
+}
+
+/// What a capture shows where a redacted window is: an opaque
+/// mid-grey, visibly a placeholder rather than a hole in the picture
+/// or a black window nobody can tell from a crashed one. Its channels
+/// are 51 exactly at 8 bits, so a test can name the colour.
+pub(crate) const CAPTURE_REDACTION_COLOR: Color32F = Color32F::new(0.2, 0.2, 0.2, 1.0);
+
+/// Pushes the single element a capture shows for a redacted window:
+/// one opaque quad over `bounds`, in target coordinates. Its id is the
+/// record's, minted once, and its commit never advances, so a
+/// `copy_with_damage` stream's retained damage tracker sees the same
+/// unchanged element every frame however often the client behind it
+/// commits.
+pub(crate) fn push_capture_redaction(
+    elements: &mut Vec<SceneElement>,
+    record: &WindowRecord,
+    bounds: SRect<i32, Physical>,
+) {
+    if bounds.size.w <= 0 || bounds.size.h <= 0 {
+        return;
+    }
+    elements.push(
+        SolidColorRenderElement::new(
+            record.capture_redaction_id.clone(),
+            bounds,
+            CommitCounter::default(),
+            CAPTURE_REDACTION_COLOR,
+            Kind::Unspecified,
+        )
+        .into(),
+    );
+}
+
+/// The rectangle `record`'s popups would be drawn in, or `None` when it
+/// has none. `origin` is where the window's own surface tree is
+/// anchored, in target coordinates; each popup's surface-local offset
+/// converts by `offset_scale` and its tree by its own committed scale
+/// times `stretch` - the arithmetic `push_window_content` and the
+/// Overview's scaled presentation position popups with, so a
+/// redaction covers exactly what they would have drawn. Widened by a
+/// pixel on every side so rounding can never leave a sliver of a menu
+/// showing at its edge.
+pub(crate) fn popup_extent(
+    backend: &WaylandBackend,
+    record: &WindowRecord,
+    surface: &WlSurface,
+    origin: SPoint<i32, Physical>,
+    offset_scale: Scale<f64>,
+    stretch: Scale<f64>,
+) -> Option<SRect<i32, Physical>> {
+    let mut extent: Option<SRect<i32, Physical>> = None;
+    for (popup, offset) in backend.popups_for_surface(surface) {
+        let popup_surface = popup.wl_surface();
+        let popup_factor = crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(popup_surface),
+            backend.window_output_scale(record),
+        );
+        let at = (
+            origin.x.saturating_add((f64::from(offset.x) * offset_scale.x).round() as i32),
+            origin.y.saturating_add((f64::from(offset.y) * offset_scale.y).round() as i32),
+        );
+        let logical = bbox_from_surface_tree(popup_surface, (0, 0));
+        let (sx, sy) = (popup_factor * stretch.x, popup_factor * stretch.y);
+        let rect = SRect::<i32, Physical>::new(
+            (
+                at.0.saturating_add(crate::xdg::scale_length(logical.loc.x, sx)).saturating_sub(1),
+                at.1.saturating_add(crate::xdg::scale_length(logical.loc.y, sy)).saturating_sub(1),
+            )
+                .into(),
+            (
+                crate::xdg::scale_length(logical.size.w, sx).max(0).saturating_add(2),
+                crate::xdg::scale_length(logical.size.h, sy).max(0).saturating_add(2),
+            )
+                .into(),
+        );
+        extent = Some(extent.map_or(rect, |extent| extent.merge(rect)));
+    }
+    extent
+}
+
+/// The stacking walk's substitute for a redacted window, framed or
+/// not: the redaction quad over `bounds` (the frame's visual rectangle
+/// or the bare content rect, viewport-relative) grown to take in the
+/// window's popups, pushed at the same place in the element list the
+/// content, chrome and popups would have occupied. Nothing of the
+/// window is imported: the rectangle is not drawn *over* it.
+fn push_window_redaction(
+    elements: &mut Vec<SceneElement>,
+    backend: &WaylandBackend,
+    record: &WindowRecord,
+    bounds: Rect,
+    viewport: Rect,
+) {
+    let mut area = SRect::<i32, Physical>::new(
+        (bounds.pos.x, bounds.pos.y).into(),
+        (bounds.size.w.min(i32::MAX as u32) as i32, bounds.size.h.min(i32::MAX as u32) as i32).into(),
+    );
+    if let Some(surface) = record.surface.wl_surface() {
+        let origin = SPoint::<i32, Physical>::from((
+            record.content.pos.x.saturating_sub(record.content_offset.x) - viewport.pos.x,
+            record.content.pos.y.saturating_sub(record.content_offset.y) - viewport.pos.y,
+        ));
+        let factor = backend.window_surface_scale(record);
+        if let Some(popups) = popup_extent(backend, record, &surface, origin, Scale::from(factor), Scale::from(1.0)) {
+            area = area.merge(popups);
+        }
+    }
+    push_capture_redaction(elements, record, area);
 }
 
 /// Rebuilds a scene in caller-owned storage, retaining the vector's
@@ -239,6 +379,7 @@ pub(crate) fn build_scene_into(
     tablet_cursors: &[crate::input::TabletCursor],
     cursors: &crate::state::CursorSet,
     viewport: Rect,
+    purpose: ScenePurpose,
 ) -> Color32F {
     // Elements are assembled FRONT to BACK — the damage tracker's
     // convention (first element occludes later ones) — so this walk is
@@ -311,7 +452,7 @@ pub(crate) fn build_scene_into(
     push_layer_band(elements, renderer, backend, WlrLayer::Overlay, viewport);
 
     if let Some(transition) = backend.gesture_scene.as_ref().filter(|t| t.horizontal() && t.output.is_none_or(|output| output == viewport)) {
-        return crate::gesture_scene::render(elements, renderer, backend, transition, viewport);
+        return crate::gesture_scene::render(elements, renderer, backend, transition, viewport, purpose);
     }
 
     if let Some(overview) = backend
@@ -331,7 +472,7 @@ pub(crate) fn build_scene_into(
         }
         let furniture_alpha = if overview.has_workspace_cards() { 1.0 } else { (1.0 - overview.progress.clamp(0.0, 1.0)) as f32 };
         push_furniture(elements, renderer, backend, viewport, furniture_alpha, true);
-        crate::overview::render(elements, renderer, backend, overview, viewport);
+        crate::overview::render(elements, renderer, backend, overview, viewport, purpose);
         push_furniture(elements, renderer, backend, viewport, furniture_alpha, false);
         return push_background(elements, renderer, backend, viewport);
     }
@@ -350,7 +491,7 @@ pub(crate) fn build_scene_into(
             };
             if record.above && record.mapped {
                 if let Some(overview) = backend.overview.as_ref().filter(|o| o.surface == *id) {
-                    crate::overview::render(elements, renderer, backend, overview, viewport);
+                    crate::overview::render(elements, renderer, backend, overview, viewport, purpose);
                     crate::overview::render_backdrop(elements, renderer, backend, overview, viewport);
                     continue;
                 }
@@ -367,7 +508,7 @@ pub(crate) fn build_scene_into(
         push_layer_band(elements, renderer, backend, WlrLayer::Top, viewport);
     }
 
-    crate::layout_scene::render_feedback(elements, renderer, backend, viewport);
+    crate::layout_scene::render_feedback(elements, renderer, backend, viewport, purpose);
 
     // XWayland override-redirect windows (menus, tooltips —
     // `WindowType::Unmanaged`, so they own no frame and no
@@ -377,7 +518,11 @@ pub(crate) fn build_scene_into(
     for window in backend.scene_index.unmanaged() {
         if let Some(record) = backend.windows.get(&window).filter(|record| record.mapped) {
             let start = elements.len();
-            push_window_content(elements, renderer, backend, record.content, record, viewport, None, 1.0);
+            if purpose.redacts(record) {
+                push_window_redaction(elements, backend, record, viewport_relative(record.content, viewport), viewport);
+            } else {
+                push_window_content(elements, renderer, backend, record.content, record, viewport, None, 1.0);
+            }
             if let Some(name) = backend.space_output_for(record) {
                 if let Some(monitor) = backend.monitors.iter().find(|m| m.name == name) {
                     let mut rect = monitor.geometry;
@@ -392,7 +537,7 @@ pub(crate) fn build_scene_into(
     for entry in backend.stacking.iter().rev() {
         let start = elements.len();
         (|| {
-        if crate::layout_scene::render_window(elements, renderer, backend, entry, viewport) {
+        if crate::layout_scene::render_window(elements, renderer, backend, entry, viewport, purpose) {
             return;
         }
         // A managed window whose client drew its own chrome has no
@@ -408,6 +553,12 @@ pub(crate) fn build_scene_into(
                 return;
             };
             if record.mapped && backend.scene_index.is_presented(*id) {
+                // A capture's redaction stands in for the content, the
+                // dim and the popups alike, at this same stacking slot.
+                if purpose.redacts(record) {
+                    push_window_redaction(elements, backend, record, viewport_relative(record.content, viewport), viewport);
+                    return;
+                }
                 push_dim(elements, renderer, backend.window_dim(*id, record), &record.dim_id,
                     viewport_relative(record.content, viewport), Rect::new(Point::new(0, 0), viewport.size), None);
                 let alpha = backend.window_alpha(*id, record);
@@ -422,6 +573,16 @@ pub(crate) fn build_scene_into(
                 return;
             }
             let window = backend.windows.get(&frame.window);
+            // A redacted window's frame goes with it: the titlebar
+            // names the vault, and a rectangle with a decorated edge
+            // is no less a giveaway than the content was. One quad
+            // over the frame's visual rectangle (and the popups)
+            // replaces content, dim, chrome, border, shadow and fill,
+            // in the slot they would have taken.
+            if let Some(record) = window.filter(|record| purpose.redacts(record)) {
+                push_window_redaction(elements, backend, record, viewport_relative(frame.visual_geometry(), viewport), viewport);
+                return;
+            }
             let shape = crate::rounded::translated_shape(frame.effects.as_ref().and_then(|e|e.shape),
                 frame.geometry.pos, viewport.pos, Point::new(0,0), 1.0, 1.0);
             // The window's body alpha and dim, both read from the same
@@ -999,6 +1160,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
             tablet_cursors,
             cursors,
             Rect::new(Point::new(0, 0), entry.size),
+            ScenePurpose::Display,
         );
         if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
 
@@ -1119,7 +1281,8 @@ fn render_frame_winit_outputs(comp: &mut Compositor, capture_pending: bool) -> b
         for entry in outputs.iter_mut() {
             let viewport = Rect::new(entry.position, entry.size);
             let scene = &mut entry.scene_scratch;
-            build_scene_into(scene, wm.backend(), renderer, *pointer_location, cursor_status, tablet_cursors, cursors, viewport);
+            build_scene_into(scene, wm.backend(), renderer, *pointer_location, cursor_status, tablet_cursors, cursors, viewport,
+                ScenePurpose::Display);
             crate::capture_tool::render(scene, renderer, wm.backend(), viewport);
             // Native output framebuffers enforce this boundary themselves.
             // The shared host framebuffer needs it before translating the head,

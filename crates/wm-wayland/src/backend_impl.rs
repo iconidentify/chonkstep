@@ -2185,6 +2185,12 @@ impl Backend for WaylandBackend {
         }
     }
 
+    fn set_capture_redacted(&mut self, window: Self::WindowId, redacted: bool) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.capture_redacted = redacted;
+        }
+    }
+
     fn set_window_opaque(&mut self, window: Self::WindowId, opaque: Option<bool>) -> bool {
         let Some(record) = self.windows.get_mut(&window) else {
             return false;

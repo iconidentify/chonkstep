@@ -2262,6 +2262,7 @@ impl<B: Backend> WindowManager<B> {
             self.touchpad_scroll_rules.insert(id, factor);
         }
         self.backend.set_window_opacity(window, window_rule.opacity, window_rule.no_dim);
+        self.backend.set_capture_redacted(window, window_rule.no_screen_share);
         self.window_index.insert(window, id);
         if self.spaces_mode() && self.mac_hidden.iter().any(|other| self.same_application(*other, id)) {
             self.mac_hidden.insert(id);

@@ -463,6 +463,7 @@ pub(crate) fn render(
     backend: &WaylandBackend,
     scene: &Transition,
     viewport: Rect,
+    purpose: crate::renderer::ScenePurpose,
 ) -> Color32F {
     if !scene.overview_origin {
         crate::renderer::push_furniture(elements, renderer, backend, viewport, 1.0, true);
@@ -470,7 +471,7 @@ pub(crate) fn render(
             for window in origin.windows.iter().filter(|w| w.sticky) {
                 let rect = Rect::new(Point::new(window.source.pos.x - viewport.pos.x,
                     window.source.pos.y - viewport.pos.y), window.source.size);
-                crate::overview::render_window(elements, renderer, backend, window, rect, 1.0);
+                crate::overview::render_window(elements, renderer, backend, window, rect, 1.0, purpose);
             }
         }
     }
@@ -495,7 +496,7 @@ pub(crate) fn render(
             plane.overview.as_ref()
         };
         if let Some(overview) = overview.filter(|o| o.covers(viewport)) {
-            crate::overview::render(elements, renderer, backend, overview, shifted_view);
+            crate::overview::render(elements, renderer, backend, overview, shifted_view, purpose);
         } else {
             for window in &plane.windows {
                 if window.sticky { continue; }
@@ -509,7 +510,7 @@ pub(crate) fn render(
                     ),
                     window.source.size,
                 );
-                crate::overview::render_window(elements, renderer, backend, window, rect, 1.0);
+                crate::overview::render_window(elements, renderer, backend, window, rect, 1.0, purpose);
             }
         }
         if !scene.overview_origin && plane.workspace == scene.origin {

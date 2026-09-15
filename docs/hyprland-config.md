@@ -157,11 +157,11 @@ windowrule   = float on, match:class steam               # 0.53+
 The supported properties are `float`, `size`, `move`, `center`,
 `idle_inhibit`, `pin`, `no_focus`, `no_initial_focus`,
 `focus_on_activate`, `fullscreen`, `maximize`, `suppress_event`,
-`scroll_touchpad`, `workspace`, `opacity` and `no_dim`. They match `class`, `title` and
-`xdg_tag` as regular expressions, matched against the entire class,
-title or tag, as in Hyprland's `RE2::FullMatch`. Use `.*` when a
-substring is intended. Last matching rule wins independently for each
-property.
+`scroll_touchpad`, `workspace`, `opacity`, `no_dim` and
+`no_screen_share`. They match `class`, `title` and `xdg_tag` as regular
+expressions, matched against the entire class, title or tag, as in
+Hyprland's `RE2::FullMatch`. Use `.*` when a substring is intended.
+Last matching rule wins independently for each property.
 
 `xdg_tag` (`match:xdg_tag`, `xdgTag:` in the v2 form, `xdg_tag =` in a
 Lua `match` table) reads the window's `xdg_toplevel_tag_v1` tag: the
@@ -270,6 +270,24 @@ of Hyprland's `decoration` table this desktop reads: `dim_inactive = true`
 with `dim_strength` (Hyprland's default `0.5`) darkens every unfocused
 window by drawing one black quad in front of it. The window itself stays
 opaque, which is what makes dimming the cheaper focus cue of the two.
+
+`no_screen_share` is what Omarchy writes for 1Password and Bitwarden:
+the window is drawn on your screen as usual, and every capture the
+compositor renders shows an opaque grey rectangle where the window,
+its titlebar and its popups are. That covers the portal screen share
+in a call (`xdg-desktop-portal-wlr`, over `zwlr_screencopy`), a
+recording by `wf-recorder` or by this desktop's own recorder, a
+`grim` screenshot, this desktop's own region and window screenshots,
+and "share this window" through `ext-image-copy-capture`, which is
+answered with a solid image of the window's size rather than refused.
+Only a rule sets it; nothing a client asks for clears it. Two things
+are outside its reach. A recorder that reads the scanned-out
+framebuffer from KMS directly - gpu-screen-recorder's default backend,
+which Omarchy's screen recording uses unless
+`OMARCHY_SCREENRECORD_USE_PORTAL=true` - never asks the compositor
+for a picture, so it records the window exactly as the screen shows
+it; no compositor can redact that path. And a capture that asks for
+the pointer still gets it drawn over the rectangle.
 
 Every unsupported property produces its own `Skipped` line naming both
 the property and matcher. A rule with an unsupported matcher is refused
@@ -922,7 +940,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=189 commands=121 env=8 autostart=4
-      float_rules=40 monitors=1 skipped=139
+      float_rules=43 monitors=1 skipped=136
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

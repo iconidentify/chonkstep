@@ -3401,6 +3401,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             tablet_cursors,
             cursors,
             viewport,
+            crate::renderer::ScenePurpose::Display,
         );
         if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
         stats.stage(0, scene_started.elapsed());

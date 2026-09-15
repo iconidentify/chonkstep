@@ -3,7 +3,7 @@
 //! textures and sparse frame buffers; only small captions own new pixels.
 
 use crate::backend_impl::import_buffer;
-use crate::renderer::{push_surface_tree_alpha, SceneElement};
+use crate::renderer::{push_surface_tree_alpha, SceneElement, ScenePurpose};
 use crate::state::{FrameSolid, RootBackground, WaylandBackend, WlFrameId, WlShellId, WlWindowId};
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
@@ -443,9 +443,10 @@ pub(crate) fn render(
     backend: &WaylandBackend,
     overview: &Overview,
     viewport: Rect,
+    purpose: ScenePurpose,
 ) {
     if let Some(cards)=overview.chrome.and_then(|chrome|chrome.cards) {
-        render_cards(elements,renderer,backend,overview,viewport,cards);
+        render_cards(elements,renderer,backend,overview,viewport,cards,purpose);
         return;
     }
     let offset = Point::new(
@@ -484,7 +485,7 @@ pub(crate) fn render(
             // Frontmost, translucent and bounded: the destination remains
             // visible through the live image. No capture or client configure.
             if let Some(ids) = &window.border { outline(elements, ids, rect, edge, ink(0.82)); }
-            render_window(elements, renderer, backend, window, rect, 0.82);
+            render_window(elements, renderer, backend, window, rect, 0.82, purpose);
             solid(elements, &window.shadow, shadow_rect(rect),
                 if overview.chrome.is_some() { ink(0.82) } else { Color32F::new(0.0, 0.0, 0.0, 0.24) });
         }
@@ -500,7 +501,7 @@ pub(crate) fn render(
         if index != overview.selected || overview.drag.is_some() {
             if let Some(ids) = &window.border { outline(elements, ids, rect, edge, ink(alpha)); }
         }
-        render_window(elements, renderer, backend, window, rect, if window.desktop_visible { 1.0 } else { alpha });
+        render_window(elements, renderer, backend, window, rect, if window.desktop_visible { 1.0 } else { alpha }, purpose);
         solid(elements, &window.shadow, shadow_rect(rect),
             if overview.chrome.is_some() { ink(alpha) } else { Color32F::new(0.0, 0.0, 0.0, 0.28 * alpha) });
     }
@@ -538,7 +539,7 @@ pub(crate) fn render(
                 .map_or(record.content, |frame| frame.visual_geometry());
             let destination = thumbnail_rect(source, overview.geometry, rect);
             let start = elements.len();
-            render_window_scaled(elements, renderer, backend, window, destination, alpha, false, None, Some(source));
+            render_window_scaled(elements, renderer, backend, window, destination, alpha, false, None, Some(source), purpose);
             crate::renderer::clip_plane(elements, start, rect, &space.background);
         }
         space_background_alpha(elements, renderer, backend, overview.geometry, rect, &space.background, alpha);
@@ -567,7 +568,7 @@ fn label_at(elements:&mut Vec<SceneElement>,renderer:&mut GlesRenderer,label:&La
 }
 
 fn render_cards(elements:&mut Vec<SceneElement>,renderer:&mut GlesRenderer,backend:&WaylandBackend,
-    overview:&Overview,viewport:Rect,cards:wm_core::OverviewCards) {
+    overview:&Overview,viewport:Rect,cards:wm_core::OverviewCards,purpose:ScenePurpose) {
     let offset=Point::new(overview.geometry.pos.x-viewport.pos.x,overview.geometry.pos.y-viewport.pos.y);
     let local=|rect:Rect|Rect::new(Point::new(rect.pos.x+offset.x,rect.pos.y+offset.y),rect.size);
     let progress=overview.progress;
@@ -580,7 +581,7 @@ fn render_cards(elements:&mut Vec<SceneElement>,renderer:&mut GlesRenderer,backe
         if let Some(window)=overview.windows.get(drag.index) {
             let rect=local(drag.destination);
             outline(elements,&overview.ring,rect,edge,ink);
-            render_window(elements,renderer,backend,window,rect,0.82);
+            render_window(elements,renderer,backend,window,rect,0.82,purpose);
         }
     }
     // Current-workspace windows move directly from their desktop positions to
@@ -595,7 +596,7 @@ fn render_cards(elements:&mut Vec<SceneElement>,renderer:&mut GlesRenderer,backe
                 window.source.size),local(window.destination),progress);
             let start=elements.len();
             if index==overview.selected {outline(elements,&overview.ring,rect,edge,ink);}
-            render_window(elements,renderer,backend,window,rect,if window.desktop_visible {1.0}else{alpha});
+            render_window(elements,renderer,backend,window,rect,if window.desktop_visible {1.0}else{alpha},purpose);
             crate::renderer::clip_plane(elements,start,clip,&space.background);
         }
     }
@@ -616,7 +617,7 @@ fn render_cards(elements:&mut Vec<SceneElement>,renderer:&mut GlesRenderer,backe
             let source=window.frame.and_then(|id|backend.frames.get(&id)).map_or(record.content,|frame|frame.visual_geometry());
             let destination=wm_theme_api::overview_thumbnail(source,space.preview_source,preview);
             let before=elements.len();
-            render_window_scaled(elements,renderer,backend,window,destination,alpha,false,None,Some(source));
+            render_window_scaled(elements,renderer,backend,window,destination,alpha,false,None,Some(source),purpose);
             crate::renderer::clip_plane(elements,before,preview,&space.background);
         }
         if let Some(card)=&space.card {
@@ -665,6 +666,7 @@ pub(crate) fn render_window(
     window: &Window,
     destination: Rect,
     alpha: f32,
+    purpose: ScenePurpose,
 ) {
     render_window_scaled(
         elements,
@@ -676,6 +678,7 @@ pub(crate) fn render_window(
         false,
         None,
         None,
+        purpose,
     );
 }
 
@@ -686,6 +689,7 @@ pub(crate) fn render_layout_window(
     window: &Window,
     destination: Rect,
     viewport: Rect,
+    purpose: ScenePurpose,
 ) {
     // A tiled window is drawn on its presentation transform rather than
     // through the stacking walk's frame branch, so `dim_inactive`'s quad
@@ -722,7 +726,7 @@ pub(crate) fn render_layout_window(
             crate::renderer::push_dim(elements, renderer, Some(strength), &record.dim_id, rect, viewport, shape);
         }
     }
-    render_window_scaled(elements, renderer, backend, window, destination, 1.0, true, Some(viewport), None);
+    render_window_scaled(elements, renderer, backend, window, destination, 1.0, true, Some(viewport), None, purpose);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -736,6 +740,7 @@ fn render_window_scaled(
     stretch: bool,
     viewport: Option<Rect>,
     source_override: Option<Rect>,
+    purpose: ScenePurpose,
 ) {
     let source = source_override.unwrap_or(window.source);
     let Some(record) = backend
@@ -774,6 +779,47 @@ fn render_window_scaled(
         destination.pos.y + ((record.content.pos.y - source.pos.y) as f64 * sy).round() as i32),
         Size::new((record.content.size.w as f64 * sx).round() as u32,
             (record.content.size.h as f64 * sy).round() as u32));
+    // A capture of the Overview, a workspace slide or a layout
+    // transition shows a redacted window as the same opaque quad the
+    // desktop capture does, on this presentation's transform: over the
+    // frame's visual rectangle (or the bare content), plus the popups
+    // a stretched presentation would have drawn. Nothing of the
+    // window - content, fallback icon, chrome, shadow - is imported.
+    if purpose.redacts(record) {
+        let bounds = match frame {
+            Some(frame) => {
+                let visual = frame.visual_geometry();
+                let local = Rect::new(
+                    Point::new(visual.pos.x - frame.geometry.pos.x, visual.pos.y - frame.geometry.pos.y),
+                    visual.size,
+                );
+                scaled_chrome_rect(local, frame.geometry.pos, source.pos, destination.pos, sx, sy)
+            }
+            None => requested,
+        };
+        let mut area = SRect::<i32, Physical>::new(
+            (bounds.pos.x, bounds.pos.y).into(),
+            (bounds.size.w.min(i32::MAX as u32) as i32, bounds.size.h.min(i32::MAX as u32) as i32).into(),
+        );
+        if let Some(surface) = record.surface.wl_surface().filter(|_| stretch) {
+            let factor = backend.window_surface_scale(record);
+            let origin = SPoint::<i32, Physical>::from((
+                destination.pos.x
+                    + ((record.content.pos.x - record.content_offset.x - source.pos.x) as f64 * sx).round() as i32,
+                destination.pos.y
+                    + ((record.content.pos.y - record.content_offset.y - source.pos.y) as f64 * sy).round() as i32,
+            ));
+            if let Some(popups) = crate::renderer::popup_extent(
+                backend, record, &surface, origin,
+                smithay::utils::Scale::from((factor * sx, factor * sy)),
+                smithay::utils::Scale::from((sx, sy)),
+            ) {
+                area = area.merge(popups);
+            }
+        }
+        crate::renderer::push_capture_redaction(elements, record, area);
+        return;
+    }
     let mut opaque_client = false;
     let mut lower_border_drawn = false;
     let before = elements.len();

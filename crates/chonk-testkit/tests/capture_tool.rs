@@ -64,6 +64,13 @@ fn assert_keyframe_spacing(path: &Path) {
 }
 
 fn boot(name: &str, scale: f32) -> Session {
+    boot_with_rules(name, scale, "")
+}
+
+/// [`boot`] with `hyprland` appended to the session's planted
+/// `hyprland.conf`: how a test gives the windows it opens a window
+/// rule, in the file an Omarchy user would write it in.
+fn boot_with_rules(name: &str, scale: f32, hyprland: &str) -> Session {
     let root = session_dir(name);
     let dir = root.join("exports");
     let fixture_bin = root.join("config/chonkstep/fixture-bin");
@@ -83,7 +90,7 @@ fn boot(name: &str, scale: f32) -> Session {
             config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into(),
             config_root_files: vec![(
                 "hypr/hyprland.conf".into(),
-                "bind = SUPER, F12, workspace, 1\nbind = , PRINT, exec, omarchy-capture-screenshot\n".into(),
+                format!("bind = SUPER, F12, workspace, 1\nbind = , PRINT, exec, omarchy-capture-screenshot\n{hyprland}"),
             )],
             config_files: ["imv", "omacut"]
                 .into_iter()
@@ -1003,6 +1010,78 @@ fn window_capture_excludes_occluding_windows() {
         image.pixel((x as i32 - source.0) as u32, (y as i32 - source.1) as u32),
         baseline.pixel(x, y)
     );
+}
+
+/// The built-in tool's own captures honour `no_screen_share` too: a
+/// region screenshot across the window and a window screenshot of it
+/// both come out as one solid rectangle, saved and published like any
+/// other, while the window stays red on the screen the tool was used
+/// on.
+#[test]
+#[ignore = "needs nested Wayland; scripts/e2e.sh --headless --test capture_tool"]
+fn no_screen_share_window_is_solid_in_region_and_window_screenshots() {
+    const REDACTION_RGB: [u8; 3] = [51, 51, 51];
+    let mut session = boot_with_rules(
+        "capture-no-screen-share",
+        1.0,
+        "windowrule = no_screen_share on, match:class ^vault-probe$\n",
+    );
+    let exports = session.dir.join("exports");
+    let color = session.dir.join("vault-rgb");
+    std::fs::write(&color, [255, 0, 0]).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+    session
+        .launch_isolated(
+            "env",
+            &[&format!("CHONKSTEP_PROBE_COLOR_FILE={}", color.display()), probe.to_str().unwrap(), "Vault", "vault-probe"],
+        )
+        .unwrap();
+    let window = session.wait_for_window("Vault").unwrap();
+    let (cx, cy) = (window.x + window.w as i32 / 2, window.y + window.h as i32 / 2);
+    let shown = diagnostic(&mut session, "vault-on-screen");
+    assert_eq!(shown.pixel(cx as u32, cy as u32)[..3], [255, 0, 0], "the output shows the vault: {}", shown.path.display());
+    let assert_solid = |image: &Screenshot, what: &str| {
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let [r, g, b, _] = image.pixel(x, y);
+                assert_eq!([r, g, b], REDACTION_RGB, "{what}: pixel ({x}, {y}) of {}", image.path.display());
+            }
+        }
+    };
+
+    // A region inside the window's body.
+    shortcut(&mut session, 4);
+    session
+        .door()
+        .drag_to(
+            (f64::from(window.x + 10), f64::from(window.y + 10)),
+            (f64::from(window.x + 110), f64::from(window.y + 90)),
+        )
+        .unwrap();
+    session.door().button("left", false).unwrap();
+    session.door().barrier().unwrap();
+    let area = Screenshot::load(&saved(&exports, 1, "png")).unwrap();
+    assert_eq!((area.width, area.height), (100, 80));
+    assert_solid(&area, "region screenshot");
+
+    // The window itself, frame included.
+    shortcut(&mut session, 4);
+    session.door().tap_key(57).unwrap(); // Space -> window
+    session.door().motion(f64::from(cx), f64::from(cy)).unwrap();
+    session.door().barrier().unwrap();
+    let world = session.world().unwrap();
+    let frame = world.frame_of(window.id).unwrap();
+    let expected = (frame.w, frame.h);
+    session.door().tap_key(28).unwrap();
+    let shot = Screenshot::load(&saved(&exports, 2, "png")).unwrap();
+    assert_eq!((shot.width, shot.height), expected, "the window screenshot is the frame's size");
+    assert_solid(&shot, "window screenshot");
+
+    // Read near the corner: the pointer, and so the cursor the marker
+    // draws, was left in the middle of the window by the tool.
+    let still_shown = diagnostic(&mut session, "vault-still-on-screen");
+    assert_eq!(still_shown.pixel(window.x as u32 + 8, window.y as u32 + 8)[..3], [255, 0, 0], "{}", still_shown.path.display());
+    assert!(session.compositor_alive());
 }
 
 #[test]
