@@ -969,6 +969,45 @@ fn boot_with_redacted_probe(name: &str) -> (Session, WindowInfo) {
     (session, window)
 }
 
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn no_screen_share_pixels_do_not_escape_through_shell_thumbnails() {
+    let (mut session, _) = boot_with_redacted_probe("image-capture-private-switcher");
+    let color = session.dir.join("public-rgb");
+    std::fs::write(&color, [0, 255, 0]).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+    session.launch_isolated("env", &[
+        &format!("CHONKSTEP_PROBE_COLOR_FILE={}", color.display()),
+        probe.to_str().unwrap(), "Public", "public-probe", "animate",
+    ]).unwrap();
+    session.wait_for_window("Public").unwrap();
+
+    // Reopening asks for the latest cached previews. The public green
+    // thumbnail is the positive control that the cache and panel work.
+    poll_until(Duration::from_secs(10), "a public preview without private pixels", || {
+        session.door().key(chonk_testkit::keys::LEFTALT, true).unwrap();
+        session.door().tap_key(15).unwrap();
+        session.door().barrier().unwrap();
+        let world = session.world().unwrap();
+        let panel = world.shells.iter().find(|shell| shell.above && shell.mapped && shell.buffer_bytes > 0)
+            .expect("Alt-Tab panel");
+        let shot = session.screenshot("private-switcher").unwrap();
+        let mut green = 0;
+        let mut red = 0;
+        for y in panel.y.max(0) as u32..(panel.y.max(0) as u32 + panel.h).min(shot.height) {
+            for x in panel.x.max(0) as u32..(panel.x.max(0) as u32 + panel.w).min(shot.width) {
+                let pixel = shot.pixel(x, y);
+                green += usize::from(pixel[1] > 220 && pixel[0] < 30 && pixel[2] < 30);
+                red += usize::from(pixel[0] > 220 && pixel[1] < 30 && pixel[2] < 30);
+            }
+        }
+        session.door().key(chonk_testkit::keys::LEFTALT, false).unwrap();
+        session.door().barrier().unwrap();
+        assert_eq!(red, 0, "the protected window leaked into the captured switcher");
+        (green > 100).then_some(())
+    }).unwrap();
+}
+
 /// What the output itself shows, through the diagnostic screenshot
 /// marker: the one image rendered for display rather than capture, so
 /// the one that can vouch for the window still being on screen.

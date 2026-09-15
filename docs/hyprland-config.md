@@ -282,7 +282,11 @@ recording by `wf-recorder` or by this desktop's own recorder, a
 `grim` screenshot, this desktop's own region and window screenshots,
 and "share this window" through `ext-image-copy-capture`, which is
 answered with a solid image of the window's size rather than refused.
-Only a rule sets it; nothing a client asks for clears it. Two things
+Only a rule sets it; nothing a client asks for clears it.
+Shell thumbnails (including Alt-Tab) use the application's icon instead
+of cached window pixels, so those previews cannot expose the window in
+a capture either. Drag icons from protected windows are omitted from
+captures while remaining visible on screen. Two things
 are outside its reach. A recorder that reads the scanned-out
 framebuffer from KMS directly - gpu-screen-recorder's default backend,
 which Omarchy's screen recording uses unless

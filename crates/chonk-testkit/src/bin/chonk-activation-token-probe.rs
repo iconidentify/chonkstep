@@ -77,7 +77,7 @@ enum Trigger {
 enum Mode {
     Hoard,
     SelfActivate(Trigger),
-    MintOnKey(PathBuf),
+    MintOnKey(PathBuf, bool),
     ActivateFromFile(PathBuf),
     SingleInstance(PathBuf),
     TaskbarActivate(String),
@@ -93,7 +93,10 @@ fn parse_args() -> Mode {
             (Some("--on-file"), Some(path)) => Mode::SelfActivate(Trigger::File(path.into())),
             _ => fatal("self-activate wants --on-blur or --on-file PATH"),
         },
-        Some("mint-on-key") => Mode::MintOnKey(arg(1).unwrap_or_else(|| fatal("mint-on-key wants PATH")).into()),
+        Some("mint-on-key") => Mode::MintOnKey(
+            arg(1).unwrap_or_else(|| fatal("mint-on-key wants PATH")).into(),
+            arg(2) == Some("--future-serial"),
+        ),
         Some("activate-from-file") => {
             Mode::ActivateFromFile(arg(1).unwrap_or_else(|| fatal("activate-from-file wants PATH")).into())
         }
@@ -510,7 +513,7 @@ fn main() {
             say("**activated own window with a serial-less token**");
             linger(&mut queue, &mut probe, &mut window);
         }
-        Mode::MintOnKey(path) => {
+        Mode::MintOnKey(path, future_serial) => {
             let seat = probe.seat.clone().expect("wl_seat global");
             let mut window = Window::map(&connection, &mut queue, &mut probe, "activation-mint");
             let serial = loop {
@@ -519,6 +522,7 @@ fn main() {
                 }
                 tick(&mut queue, &mut probe, &mut window);
             };
+            let serial = if future_serial { serial.wrapping_add(1_000_000) } else { serial };
             let token = activation.get_activation_token(&qh, ());
             token.set_serial(serial, &seat);
             token.set_surface(&window.surface);

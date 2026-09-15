@@ -230,6 +230,36 @@ fn the_escape_chord_suspends_a_grant_across_recreation_and_focus_until_pressed_a
 
 #[test]
 #[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn suspending_a_second_window_keeps_the_first_suspended() {
+    let (mut session, marker) = boot("shortcuts-inhibit-two-suspended", "", &[]);
+    let first = probe(&mut session, &[]);
+    wait_lines(&session, "shortcut-inhibitor active", 1);
+    escape_chord(&mut session);
+    wait_lines(&session, "shortcut-inhibitor inactive", 1);
+
+    let binary = profile_binary(PROBE).unwrap();
+    session.launch("sh", &["-c", &format!(
+        "exec {} 1 inhibit --app-id=second-inhibitor", binary.display()
+    )]).unwrap();
+    session.wait_for_window("second-inhibitor").unwrap();
+    poll_until(EVENT, "second inhibitor active", || {
+        systeminfo(&session).contains("active holder=second-inhibitor").then_some(())
+    }).unwrap();
+    escape_chord(&mut session);
+    assert!(systeminfo(&session).contains("suspended holder=second-inhibitor"));
+
+    focus(&mut session, &first);
+    settle(&mut session);
+    assert_eq!(count(&session, "shortcut-inhibitor active"), 1,
+        "suspending a second surface must not erase the first surface's suspension");
+    super_r(&mut session);
+    wait_ran(&marker, 1);
+    escape_chord(&mut session);
+    wait_lines(&session, "shortcut-inhibitor active", 2);
+}
+
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
 fn allow_shortcut_inhibit_false_denies_every_grant() {
     let (mut session, marker) = boot("shortcuts-inhibit-off", "allow_shortcut_inhibit = false", &[]);
     probe(&mut session, &[]);

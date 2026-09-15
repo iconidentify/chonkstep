@@ -67,9 +67,15 @@ struct Drag {
 
 impl Drag {
     fn boot(name: &str, scale: f32) -> Drag {
+        Self::boot_options(name, scale, SessionOptions {
+            config_extra: "show_dock = false\n".into(), ..Default::default()
+        })
+    }
+
+    fn boot_options(name: &str, scale: f32, options: SessionOptions) -> Drag {
         let mut session = Session::boot(
             name,
-            SessionOptions { scale: Some(scale), config_extra: "show_dock = false\n".into(), ..SessionOptions::default() },
+            SessionOptions { scale: Some(scale), ..options },
         )
         .expect("nested compositor");
         let binary = profile_binary(PROBE).expect("input probe built");
@@ -185,6 +191,31 @@ fn icon_follows_the_pointer_at(scale: f32) {
     wait_event(&drag.session, last, &["dnd-drop"]);
     let shot = drag.screenshot("icon-dropped");
     drag.assert_no_icon_at(&shot, CARRY, CONTENT);
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest inside"]
+fn a_protected_windows_drag_icon_stays_on_screen_but_out_of_captures() {
+    let mut drag = Drag::boot_options("dnd-icon-private", 1.0, SessionOptions {
+        config_extra: "show_dock = false\nhyprland_config = true\n".into(),
+        config_root_files: vec![("hypr/hyprland.conf".into(),
+            "windowrule = no_screen_share on, match:class ^input-probe$\n".into())],
+        ..Default::default()
+    });
+    drag.start();
+    let (x, y) = drag.global(START);
+    drag.session.door().motion(f64::from(x), f64::from(y)).unwrap();
+    wait_event(&drag.session, 0, &["dnd-enter"]);
+    wait_line(&drag.session, "icon frame done");
+    let path = drag.session.dir.join("display-icon.png");
+    std::fs::write(drag.session.dir.join("state/chonkstep/screenshot"), path.display().to_string()).unwrap();
+    let display = poll_until(EVENT, "display capture", || Screenshot::load(&path).ok()).unwrap();
+    let (left, top, width, height) = drag.icon_rect(START);
+    assert!(close_to(display.pixel((left + width / 2) as u32, (top + height / 2) as u32), ICON),
+        "the private icon must remain visible on screen");
+    let capture = drag.screenshot("private-icon");
+    drag.assert_no_icon_at(&capture, START, [51, 51, 51]);
+    drag.session.door().button("right", false).unwrap();
 }
 
 #[test]

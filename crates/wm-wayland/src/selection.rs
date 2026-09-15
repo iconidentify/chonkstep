@@ -181,13 +181,26 @@ impl ClientDndGrabHandler for Compositor {
         // back from the seat: a grabbed pointer means a button-held
         // drag, and only otherwise does the touch's own grab — whose
         // start data names the finger — make this a touch drag.
-        let touch = if seat.get_pointer().is_some_and(|pointer| pointer.is_grabbed()) {
-            None
+        let (touch, origin) = if let Some(start) = seat.get_pointer().and_then(|pointer| pointer.grab_start_data()) {
+            (None, start.focus.map(|(focus, _)| focus.surface().clone()))
         } else {
-            seat.get_touch()
-                .and_then(|touch| touch.grab_start_data())
-                .map(|start| (start.slot, start.location))
+            let start = seat.get_touch().and_then(|touch| touch.grab_start_data());
+            (start.as_ref().map(|start| (start.slot, start.location)),
+                start.and_then(|start| start.focus.map(|(focus, _)| focus.surface().clone())))
         };
+        let capture_redacted = origin.is_some_and(|mut root| {
+            while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+                root = parent;
+            }
+            if let Some(popup_root) = self.popups.find_popup(&root)
+                .and_then(|popup| smithay::desktop::find_popup_root_surface(&popup).ok())
+            {
+                root = popup_root;
+            }
+            let backend = self.wm.backend();
+            backend.window_for_surface(&root).and_then(|id| backend.windows.get(&id))
+                .is_some_and(|record| record.capture_redacted)
+        });
         // A client may commit the icon, offset included, before the
         // `start_drag` that gives it its role; that delta is still in
         // the surface's current state until its next commit, which is
@@ -197,7 +210,7 @@ impl ClientDndGrabHandler for Compositor {
         })
         .unwrap_or_default();
         let backend = self.wm.backend_mut();
-        backend.dnd_icon = Some(DndIcon { surface, offset, touch });
+        backend.dnd_icon = Some(DndIcon { surface, capture_redacted, offset, touch });
         backend.mark_damaged();
     }
 

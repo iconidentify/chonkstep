@@ -1060,7 +1060,11 @@ impl Backend for WaylandBackend {
         // and a caller that needs more pixels than the default
         // snapshots carry hints it through `set_preview_edge` and
         // re-asks when `preview_generation` moves.
-        self.windows.get(&window).and_then(|record| record.snapshot.clone())
+        // Shell previews are flattened into ordinary shell buffers, so
+        // capture scene redaction cannot recover their window identity.
+        // Use the shell's icon fallback for protected windows.
+        self.windows.get(&window).filter(|record| !record.capture_redacted)
+            .and_then(|record| record.snapshot.clone())
     }
 
     fn set_preview_edge(&mut self, edge: Option<u32>) {
