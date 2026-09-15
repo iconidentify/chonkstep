@@ -38,7 +38,7 @@ use smithay::{
 
 use wm_core::BackendEvent;
 
-use crate::state::Compositor;
+use crate::state::{Compositor, WaylandBackend};
 
 impl smithay::wayland::security_context::SecurityContextHandler for Compositor {
     fn context_created(
@@ -64,7 +64,19 @@ impl smithay::wayland::security_context::SecurityContextHandler for Compositor {
 /// Five minutes leaves ample room for a cold application start without
 /// retaining a client that requested tokens and then disappeared forever.
 const ACTIVATION_TOKEN_TTL: Duration = Duration::from_secs(5 * 60);
-const ACTIVATION_TOKEN_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const ACTIVATION_TOKEN_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+/// How long after its minting a token may still move the keyboard.
+/// A second, shorter clock than the TTL: the TTL says when an abandoned
+/// token is forgotten, this says when a redeemed one has gone stale.
+/// The two things a token legitimately does happen quickly — a running
+/// single-instance application raises its window the moment its second
+/// process hands the token over, and a terminal's link opens in a
+/// browser that is already up — while a process that sits on its token
+/// and redeems it minutes later is the shape of a focus steal. Thirty
+/// seconds covers a loaded machine's D-Bus round trip with room to
+/// spare; a cold start that maps a *new* window gets focus from the
+/// map-time policy and never needed the token for it.
+const ACTIVATION_FOCUS_WINDOW: Duration = Duration::from_secs(30);
 const MAX_ACTIVATION_TOKENS_PER_CLIENT: usize = 256;
 /// The per-client ceiling prevents one connection from growing the pool;
 /// this second ceiling also covers an attacker cycling connections.
@@ -132,8 +144,6 @@ smithay::delegate_xwayland_keyboard_grab!(Compositor);
 /// State retained for the globals whose helpers need a getter or whose
 /// `GlobalId` lifetime is tied to the state value.
 pub(crate) struct CoreProtocols {
-    pub activation: XdgActivationState,
-    next_activation_token_sweep: Instant,
     rejected_activation_tokens: u64,
     rejected_ime_popups: u64,
     pub xdg_foreign: XdgForeignState,
@@ -174,8 +184,6 @@ pub(crate) struct CoreProtocols {
 
 pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
     CoreProtocols {
-        activation: XdgActivationState::new::<Compositor>(display),
-        next_activation_token_sweep: Instant::now() + ACTIVATION_TOKEN_SWEEP_INTERVAL,
         rejected_activation_tokens: 0,
         rejected_ime_popups: 0,
         xdg_foreign: XdgForeignState::new::<Compositor>(display),
@@ -217,7 +225,14 @@ pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
     }
 }
 
-impl CoreProtocols {
+/// Marker in a token's user data: the compositor minted this token for
+/// a command it launched itself (`Backend::create_activation_token`).
+/// Such a token carries no client and no serial — there was no Wayland
+/// client behind the request, only a keybinding or a menu pick — and it
+/// is the one kind of serial-less token `request_activation` honours.
+pub(crate) struct CompositorIssued;
+
+impl WaylandBackend {
     /// Discards abandoned activation tokens on a bounded housekeeping
     /// cadence. This is called every compositor dispatch pass, but the
     /// deadline keeps the ordinary no-op path to one timestamp comparison.
@@ -234,6 +249,17 @@ impl CoreProtocols {
             tracing::debug!(removed, "expired abandoned xdg-activation tokens");
         }
     }
+
+    /// A fresh single-use token for a command the desktop launches,
+    /// marked [`CompositorIssued`]. Not routed through `token_created`,
+    /// so it is not counted against any client's admission quota; it
+    /// still expires with every other token at the TTL.
+    pub(crate) fn mint_activation_token(&mut self) -> String {
+        let data = XdgActivationTokenData::default();
+        data.user_data.insert_if_missing(|| CompositorIssued);
+        let (token, _) = self.activation.create_external_token(data);
+        token.as_str().to_string()
+    }
 }
 
 fn activation_token_is_fresh(now: Instant, created: Instant) -> bool {
@@ -241,15 +267,68 @@ fn activation_token_is_fresh(now: Instant, created: Instant) -> bool {
         .is_none_or(|age| age < ACTIVATION_TOKEN_TTL)
 }
 
+/// What one `xdg_activation_v1.activate` request looks like once the
+/// token and the seat have been consulted, reduced to the facts the
+/// policy needs so the verdict itself is a pure function.
+#[derive(Clone, Copy, Debug)]
+struct ActivationRequest {
+    /// The token came from [`WaylandBackend::mint_activation_token`].
+    compositor_issued: bool,
+    /// The token's creator holds the keyboard right now, and the serial
+    /// it named is no older than the keyboard's entry into that client:
+    /// the token was made while the user was in that client, and the
+    /// user still is.
+    from_focused_input: bool,
+    /// How long ago the token was created.
+    age: Duration,
+    /// `misc:focus_on_activate`, read live.
+    focus_on_activate: bool,
+    /// A session lock covers the desktop.
+    locked: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationVerdict {
+    /// Reveal, raise and focus the window, as a taskbar click would.
+    Focus,
+    /// Leave the keyboard where it is and mark the window urgent.
+    Urgent,
+}
+
+/// The policy `misc:focus_on_activate` names. Off, a request moves the
+/// keyboard only when the user is known to be behind it: the compositor
+/// minted the token for a command the user ran, or the client the user
+/// is typing in made the token from one of that user's own input
+/// events — and either way it is redeemed while still fresh. A token a
+/// background client made for its own window has neither property and
+/// earns an urgency hint instead. On, every request is honoured, which
+/// is what Omarchy's shipped configuration asks for.
+///
+/// The lock screen wins over both: keyboard focus is parked until
+/// unlock anyway, and revealing the window would switch the workspace
+/// under a desk the user cannot see. Urgent is the one answer that
+/// stays visible on the bar and costs the user nothing they did not do.
+fn activation_verdict(request: &ActivationRequest) -> ActivationVerdict {
+    if request.locked {
+        return ActivationVerdict::Urgent;
+    }
+    let fresh = request.age < ACTIVATION_FOCUS_WINDOW;
+    if request.focus_on_activate || ((request.compositor_issued || request.from_focused_input) && fresh) {
+        ActivationVerdict::Focus
+    } else {
+        ActivationVerdict::Urgent
+    }
+}
+
 impl XdgActivationHandler for Compositor {
     fn activation_state(&mut self) -> &mut XdgActivationState {
-        &mut self.core_protocols.activation
+        &mut self.wm.backend_mut().activation
     }
 
     fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
         let mut total = 0;
         let mut for_client = 0;
-        for (_, known) in self.core_protocols.activation.tokens() {
+        for (_, known) in self.wm.backend().activation.tokens() {
             total += 1;
             if known.client_id == data.client_id {
                 for_client += 1;
@@ -278,22 +357,82 @@ impl XdgActivationHandler for Compositor {
         false
     }
 
+    /// The one activation route that carries a token, and so the one
+    /// place the `misc:focus_on_activate` policy lives. The user-driven
+    /// routes — a taskbar's foreign-toplevel `activate`, a pager's
+    /// `_NET_ACTIVE_WINDOW`, Alt-Tab, IPC `focuswindow` — dispatch
+    /// `ActivateRequested` directly and stay unconditional.
+    ///
+    /// The check is on the token's *creator*: who held the keyboard
+    /// when it was made and whether it named one of that client's
+    /// input serials. Who redeems it is deliberately not checked — a
+    /// terminal handing its token to the browser it just started is
+    /// exactly what the protocol is for.
     fn request_activation(
         &mut self,
         token: XdgActivationToken,
-        _token_data: XdgActivationTokenData,
+        data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
+        // Tokens are single-use on this desktop. Retaining an already
+        // consumed token would let an unrelated later request steal focus.
+        self.wm.backend_mut().activation.remove_token(&token);
         let mut root = surface;
         while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
             root = parent;
         }
-        if let Some(window) = self.wm.backend().window_for_surface(&root) {
-            self.wm.dispatch(BackendEvent::ActivateRequested(window));
+        let Some(window) = self.wm.backend().window_for_surface(&root) else {
+            return;
+        };
+        let Some(id) = self.wm.client_for_window(window) else {
+            return;
+        };
+        let locked = self.wm.backend().locked;
+        if self.wm.focused_client() == Some(id) {
+            // Nothing to steal: the window already has the keyboard.
+            // Honouring the request keeps today's reveal-and-raise for
+            // a client activating itself; behind the lock even that is
+            // deferred focus work, so it is dropped rather than turned
+            // into an urgency hint on the window the user is in.
+            if !locked {
+                self.wm.dispatch(BackendEvent::ActivateRequested(window));
+            }
+            return;
         }
-        // Tokens are single-use on this desktop. Retaining an already
-        // consumed token would let an unrelated later request steal focus.
-        self.core_protocols.activation.remove_token(&token);
+        let compositor_issued = data.user_data.get::<CompositorIssued>().is_some();
+        let from_focused_input = self.seat.get_keyboard().is_some_and(|keyboard| {
+            let focused_client = keyboard
+                .current_focus()
+                .and_then(|focus| focus.surface().client())
+                .map(|client| client.id());
+            let serial_ok = match (&data.serial, keyboard.last_enter()) {
+                (Some((serial, _)), Some(enter)) => serial.is_no_older_than(&enter),
+                _ => false,
+            };
+            serial_ok && focused_client.is_some() && focused_client == data.client_id
+        });
+        let request = ActivationRequest {
+            compositor_issued,
+            from_focused_input,
+            age: data.timestamp.elapsed(),
+            focus_on_activate: self.wm.focus_on_activate(),
+            locked,
+        };
+        match activation_verdict(&request) {
+            ActivationVerdict::Focus => self.wm.dispatch(BackendEvent::ActivateRequested(window)),
+            ActivationVerdict::Urgent => {
+                tracing::info!(
+                    ?id,
+                    compositor_issued,
+                    from_focused_input,
+                    has_serial = data.serial.is_some(),
+                    age_ms = request.age.as_millis() as u64,
+                    locked,
+                    "activation request refused the keyboard; window marked urgent"
+                );
+                self.wm.set_urgent(id, true);
+            }
+        }
     }
 }
 
@@ -905,5 +1044,92 @@ mod tests {
         assert_eq!(budget.admit(start + INHIBIT_LOG_WINDOW), Some(0));
         // A clock that went backwards is a fresh window, not a panic.
         assert_eq!(budget.admit(start - Duration::from_secs(1)), Some(0));
+    }
+
+    fn request() -> ActivationRequest {
+        ActivationRequest {
+            compositor_issued: false,
+            from_focused_input: false,
+            age: Duration::from_millis(50),
+            focus_on_activate: false,
+            locked: false,
+        }
+    }
+
+    /// A background client minting a token for its own window — no
+    /// serial, not the focused client — gets urgency, not the keyboard.
+    /// That is the whole point of reading the token at all.
+    #[test]
+    fn a_self_made_token_from_a_background_client_earns_urgency_not_focus() {
+        assert_eq!(activation_verdict(&request()), ActivationVerdict::Urgent);
+    }
+
+    /// The two provenances that prove the user is behind the request.
+    #[test]
+    fn compositor_issued_and_focused_input_tokens_move_focus_while_fresh() {
+        assert_eq!(
+            activation_verdict(&ActivationRequest { compositor_issued: true, ..request() }),
+            ActivationVerdict::Focus
+        );
+        assert_eq!(
+            activation_verdict(&ActivationRequest { from_focused_input: true, ..request() }),
+            ActivationVerdict::Focus
+        );
+    }
+
+    /// The focus window is a second, shorter clock than the token TTL:
+    /// a token hoarded past it is still forgotten at the TTL, but no
+    /// longer moves the keyboard.
+    #[test]
+    fn a_stale_token_stops_moving_focus_before_the_ttl_forgets_it() {
+        let stale = ACTIVATION_FOCUS_WINDOW;
+        assert!(stale < ACTIVATION_TOKEN_TTL);
+        assert_eq!(
+            activation_verdict(&ActivationRequest { compositor_issued: true, age: stale, ..request() }),
+            ActivationVerdict::Urgent
+        );
+        assert_eq!(
+            activation_verdict(&ActivationRequest { from_focused_input: true, age: stale, ..request() }),
+            ActivationVerdict::Urgent
+        );
+        assert_eq!(
+            activation_verdict(&ActivationRequest {
+                from_focused_input: true,
+                age: stale - Duration::from_millis(1),
+                ..request()
+            }),
+            ActivationVerdict::Focus
+        );
+    }
+
+    /// `misc:focus_on_activate = true` is today's unconditional
+    /// behaviour, provenance and age notwithstanding.
+    #[test]
+    fn focus_on_activate_restores_unconditional_focus() {
+        assert_eq!(
+            activation_verdict(&ActivationRequest {
+                focus_on_activate: true,
+                age: ACTIVATION_TOKEN_TTL,
+                ..request()
+            }),
+            ActivationVerdict::Focus
+        );
+    }
+
+    /// Behind the lock every request is an urgency hint: even the ones
+    /// that would otherwise switch workspace or park a focus change.
+    #[test]
+    fn the_lock_screen_downgrades_every_activation_to_urgency() {
+        for allowed in [
+            ActivationRequest { compositor_issued: true, ..request() },
+            ActivationRequest { from_focused_input: true, ..request() },
+            ActivationRequest { focus_on_activate: true, ..request() },
+        ] {
+            assert_eq!(
+                activation_verdict(&ActivationRequest { locked: true, ..allowed }),
+                ActivationVerdict::Urgent,
+                "{allowed:?}"
+            );
+        }
     }
 }

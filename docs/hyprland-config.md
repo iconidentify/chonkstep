@@ -232,7 +232,9 @@ window's unchanged state. ChonkStep's own verbs, the window menu and IPC
 still apply, and an application may still leave a state it did not ask
 for. `activate` and `activatefocus` stop activation requests from
 focusing the window, like `focus_on_activate = false`. Any other event is
-reported by name.
+reported by name. Whether an activation request that no rule refuses
+moves the keyboard at all is `misc.focus_on_activate`'s decision, under
+*Input and binding behavior* below.
 
 `workspace` maps the window somewhere other than the current
 workspace: a number (`workspace = "3"`), `special` for the default
@@ -607,6 +609,24 @@ default, as in Hyprland, and `allow_shortcut_inhibit` in your own
 table is Hyprland's own binding behaviour and is reported rather than
 carried.
 
+`misc.focus_on_activate` (also `misc:focus_on_activate = …`) decides
+what an application's own `xdg_activation_v1` request may do. Off —
+Hyprland's own default — the request moves the keyboard only when the
+user is known to be behind it: the token was minted by this desktop for
+a command it launched (an `exec` bind, a launcher pick, `hyprctl
+dispatch exec`), or it was made by the client the user is typing in
+from one of that user's own input events, and either way it is
+redeemed within thirty seconds. Any other request — a background
+client minting a token for its own window — marks the window urgent
+instead, which the bar shows and a click clears. On, which is what
+Omarchy ships, every request is honoured as before. A `focus_on_activate
+off` window rule still refuses per window whatever the key says, a
+taskbar's `activate` and a pager's `_NET_ACTIVE_WINDOW` are the user's
+own acts and never consult it, and behind the session lock every
+request becomes an urgency hint. The key is read live, so a reload
+applies it. The rest of the `misc` table is Hyprland's own housekeeping
+and is reported rather than carried.
+
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
 build the seat's xkb keymap. A value Hyprland would compute as it runs,
 such as Omarchy 4's `kb_layout = vconsole.XKBLAYOUT or "us"`, is logged
@@ -948,7 +968,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=189 commands=121 env=8 autostart=4
-      float_rules=43 monitors=1 skipped=136
+      float_rules=43 monitors=1 skipped=144
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

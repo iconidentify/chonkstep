@@ -377,7 +377,12 @@ fn spawn_foot(args: Vec<String>, scale: f32) -> Option<spawn::SpawnedChild> {
     spawn::spawn_supervised("foot", &arg_refs, &env, &[])
 }
 
-fn run_named_command(name: &str, argv: &[String], scale: f32) {
+/// Runs a `[commands]` entry — the target of every `exec` bind. The
+/// activation token, when the backend mints one, rides along in the
+/// environment so that a single-instance application launched a second
+/// time can raise the window it already has (see
+/// `spawn::activation_env`).
+fn run_named_command(name: &str, argv: &[String], scale: f32, activation_token: Option<String>) {
     let Some((program, args)) = argv.split_first() else {
         // `argv_from_value` rejects empty command lines, so reaching
         // here means the invariant broke upstream rather than that the
@@ -386,7 +391,8 @@ fn run_named_command(name: &str, argv: &[String], scale: f32) {
         return;
     };
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let env: Vec<(String, String)> = crate::startup::xcursor_size_env(scale).into_iter().collect();
+    let mut env: Vec<(String, String)> = crate::startup::xcursor_size_env(scale).into_iter().collect();
+    env.extend(spawn::activation_env(activation_token));
     match spawn::spawn_detached_with_env(program, &arg_refs, &env, &[]) {
         Some(pid) => tracing::info!(command = %name, program = %program, pid, "ran command"),
         None => tracing::warn!(command = %name, program = %program, "command failed to start"),
@@ -399,6 +405,7 @@ fn launch_app(
     theme: &Theme,
     font_px: f32,
     screen: Size,
+    activation_token: Option<String>,
 ) -> Option<spawn::SpawnedChild> {
     // Scale recovered from the already-scaled theme (titlebar font is
     // 12px at 1x) — the same trick `terminal_args` uses, so launch
@@ -487,12 +494,9 @@ fn launch_app(
         argv.extend(spawn::chromium_platform_args(stack));
     }
     let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    spawn::spawn_detached_with_env(
-        program,
-        &arg_refs,
-        &launch_env(&theme.id, crate::appearance::load_published(), scale),
-        &[],
-    );
+    let mut env = launch_env(&theme.id, crate::appearance::load_published(), scale);
+    env.extend(spawn::activation_env(activation_token));
+    spawn::spawn_detached_with_env(program, &arg_refs, &env, &[]);
     None
 }
 
@@ -541,16 +545,13 @@ pub(crate) fn launch_env(
 /// that an abandoned pick cannot re-dress the desk much later.
 const ADOPTION_ARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(180);
 
-fn run_omarchy_command(command: &str, theme: &Theme) {
+fn run_omarchy_command(command: &str, theme: &Theme, activation_token: Option<String>) {
     let scale = theme.titlebar.font.size / 12.0;
     let (program, args) = crate::omarchy_menu::action_argv(command);
     tracing::info!(command, "running omarchy menu command");
-    spawn::spawn_detached_with_env(
-        program,
-        &args,
-        &launch_env(&theme.id, crate::appearance::load_published(), scale),
-        &[],
-    );
+    let mut env = launch_env(&theme.id, crate::appearance::load_published(), scale);
+    env.extend(spawn::activation_env(activation_token));
+    spawn::spawn_detached_with_env(program, &args, &env, &[]);
 }
 
 /// Starts Omarchy's shell if this session is one that should host it
@@ -1221,8 +1222,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 RelaunchPlan::Terminal => {
                     spawn_terminal(state.terminal.as_deref(), &theme, state.terminal_font_px, primary.size)
                 }
+                // No activation token: a restore re-creates the
+                // previous desk, it is not the user asking for one
+                // application to be raised over the others.
                 RelaunchPlan::App(entry) => {
-                    launch_app(state.terminal.as_deref(), &entry, &theme, state.terminal_font_px, primary.size)
+                    launch_app(state.terminal.as_deref(), &entry, &theme, state.terminal_font_px, primary.size, None)
                 }
             };
             terminals.extend(terminal);
@@ -1242,8 +1246,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // Nothing waits and nothing is retried: an autostart entry that
         // fails costs the user that entry, never the session.
         if crate::startup::autostart_runs(crate::startup::session_continues(), spawn::current_display_stack()) {
+            // No activation token: nobody asked for any one of these to
+            // be raised over the rest, and a session starting up has
+            // no focus worth guarding yet.
             for argv in &state.autostart {
-                run_named_command("autostart", argv, state.scale);
+                run_named_command("autostart", argv, state.scale, None);
             }
         }
 
@@ -1353,6 +1360,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         wm.set_focus_policy(next.focus);
         wm.set_raise_on_focus(next.autoraise);
         wm.set_hide_special_on_workspace_change(next.hide_special_on_workspace_change);
+        wm.set_focus_on_activate(next.focus_on_activate);
         wm.set_placement_policy(next.placement);
         wm.set_snap_threshold(next.edge_resistance);
         wm.set_drag_modifier(next.drag_modifier);
@@ -2114,7 +2122,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     if wm.backend().supports_native_capture() && argv.as_slice() == ["omarchy-capture-screenshot"] {
                         return ShellOutcome::Capture(wm_config::CaptureMode::Area);
                     }
-                    run_named_command(name, argv, self.state.scale);
+                    run_named_command(name, argv, self.state.scale, wm.backend_mut().create_activation_token());
                 }
                 None => tracing::warn!(
                     command = %name,
@@ -2709,6 +2717,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                         &self.theme,
                         self.state.terminal_font_px,
                         terminal_screen(self),
+                        wm.backend_mut().create_activation_token(),
                     );
                     self.terminals.extend(terminal);
                 } else {
@@ -2728,7 +2737,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                         if command.contains("omarchy-theme-set") && self.state.following.is_none() {
                             self.omarchy_adoption_armed = Some(std::time::Instant::now());
                         }
-                        run_omarchy_command(&command, &self.theme);
+                        run_omarchy_command(&command, &self.theme, wm.backend_mut().create_activation_token());
                         self.desktop.note_omarchy_action_fired();
                     }
                     // Not a bug to shout about: the menu was open

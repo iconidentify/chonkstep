@@ -112,6 +112,18 @@ pub trait Backend {
     /// workspace the user finds on unlock.
     fn session_locked(&self) -> bool { false }
 
+    /// A fresh, single-use `xdg_activation_v1` token for a command this
+    /// desktop is about to launch on the user's behalf — an `exec`
+    /// bind, a launcher pick, a menu action. Handed to the child as
+    /// `XDG_ACTIVATION_TOKEN`, it lets an already-running single-instance
+    /// application raise its window when re-launched: the compositor
+    /// minted the token, so the activation is known to be the user's
+    /// own doing and is honoured where a client's self-made token would
+    /// only mark the window urgent. `None` on a backend with no
+    /// activation protocol of its own, in which case the child is
+    /// launched without one, as before.
+    fn create_activation_token(&mut self) -> Option<String> { None }
+
     /// Establish output clipping before staging final geometry, then animate
     /// live surfaces from the old frame without intermediate configures.
     /// `clip` confines managed windows to their output workarea. Backends without native transforms settle

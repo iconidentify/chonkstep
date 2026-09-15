@@ -1064,13 +1064,22 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
                 false
             }
         },
-        Action::ExecShell(command) => chonk_shell::spawn::spawn_detached("sh", &["-c", &command]).is_some(),
+        // `dispatch exec` is how Omarchy's launch-or-focus scripts start
+        // an application that is not yet running, so the launch carries
+        // an activation token the same way an `exec` bind's does: the
+        // token is what lets a single-instance application raise the
+        // window it already has when the script's guess was wrong.
+        Action::ExecShell(command) => {
+            let env = chonk_shell::spawn::activation_env(wm.backend_mut().create_activation_token());
+            chonk_shell::spawn::spawn_detached_with_env("sh", &["-c", &command], &env, &[]).is_some()
+        }
         Action::ExecArgv(argv) => {
             let Some((program, args)) = argv.split_first() else {
                 return false;
             };
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            chonk_shell::spawn::spawn_detached(program, &args).is_some()
+            let env = chonk_shell::spawn::activation_env(wm.backend_mut().create_activation_token());
+            chonk_shell::spawn::spawn_detached_with_env(program, &args, &env, &[]).is_some()
         }
     }
 }

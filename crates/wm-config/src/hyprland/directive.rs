@@ -53,6 +53,8 @@ pub enum Directive {
     Cursor { name: String, value: String },
     /// One key from Hyprland's `binds {}` table.
     Binds { name: String, value: String },
+    /// One key from Hyprland's `misc {}` table.
+    Misc { name: String, value: String },
     /// One of the two keys read from Hyprland's `decoration {}` table,
     /// `dim_inactive` and `dim_strength`. The rest of the table is
     /// Hyprland's look and stays declined.

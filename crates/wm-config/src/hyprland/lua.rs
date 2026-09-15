@@ -1487,10 +1487,37 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
         }),
         None => {}
     }
-    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor" | "binds" | "animations" | "decoration"))) {
+    // `misc.focus_on_activate` is the one `misc` key with a meaning
+    // here: whether an application's own activation request may take
+    // the keyboard. The rest of the table is reported key by key, the
+    // way `binds` is.
+    match root.iter().find(|(key, _)| key.as_deref() == Some("misc")).map(|(_, value)| value) {
+        Some(Value::Table(fields)) => {
+            for (key, value) in fields {
+                let Some(key) = key else { continue };
+                out.push(match (value, property_text(value)) {
+                    (Value::Table(_), _) => Directive::Ignored {
+                        kind: "misc",
+                        detail: format!("nested misc setting {key} is not implemented"),
+                    },
+                    (_, Some(value)) => Directive::Misc { name: key.clone(), value },
+                    (_, None) => Directive::Ignored {
+                        kind: "misc",
+                        detail: format!("{key} = {}: computed at runtime, not carried over", describe(value)),
+                    },
+                });
+            }
+        }
+        Some(_) => out.push(Directive::Ignored {
+            kind: "misc",
+            detail: "hl.config misc table is unreadable".into(),
+        }),
+        None => {}
+    }
+    if root.iter().any(|(key, _)| !matches!(key.as_deref(), Some("input" | "cursor" | "binds" | "misc" | "animations" | "decoration"))) {
         out.push(Directive::Ignored {
             kind: "config",
-            detail: "hl.config settings outside input, cursor, binds, animations, decoration and general.layout are not carried over".into(),
+            detail: "hl.config settings outside input, cursor, binds, misc, animations, decoration and general.layout are not carried over".into(),
         });
     }
 }

@@ -341,6 +341,12 @@ pub struct WindowManager<B: Backend> {
     /// Whether a workspace switch hides the special shown on the output
     /// it lands on — Omarchy's `binds.hide_special_on_workspace_change`.
     hide_special_on_workspace_change: bool,
+    /// Whether an application's own activation request may take the
+    /// keyboard with no input of the user's behind it — Hyprland's
+    /// `misc:focus_on_activate`. Read by the backend at the protocol
+    /// edge that carries a token; the user-driven activation routes
+    /// (taskbar, pager, Alt-Tab, IPC) never consult it.
+    focus_on_activate: bool,
     layout_drop: Option<(ClientId, ClientId)>,
     layout_resize_snapshot: Option<crate::spatial::ResizeSnapshot>,
     layout_statistics: crate::LayoutStatistics,
@@ -446,6 +452,7 @@ impl<B: Backend> WindowManager<B> {
             specials: Vec::new(),
             special_shown: HashMap::new(),
             hide_special_on_workspace_change: false,
+            focus_on_activate: false,
             layout_drop: None,
             layout_resize_snapshot: None,
             layout_statistics: crate::LayoutStatistics::default(),

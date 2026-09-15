@@ -832,6 +832,14 @@ pub struct Config {
     /// [`DEFAULT_SHORTCUTS_INHIBIT_ESCAPE`], which no preset keymap
     /// binds.
     pub shortcuts_inhibit_escape: Option<KeyCombo>,
+    /// Whether an application's own `xdg_activation_v1` request takes
+    /// the keyboard even when no input of the user's stands behind it —
+    /// Hyprland's `misc:focus_on_activate`, which Omarchy turns on.
+    /// Off by default, as in Hyprland: a request the user did not
+    /// cause marks the window urgent instead of stealing the keys the
+    /// user is typing. A `focus_on_activate` window rule still refuses
+    /// per window whatever this says.
+    pub focus_on_activate: bool,
     /// Relaunch the previous session's windows at startup, restoring
     /// each one's geometry, workspace and shape flags from the layout
     /// file the shell keeps. Off by default — a session that spawns
@@ -1015,6 +1023,7 @@ impl Config {
             hide_special_on_workspace_change: false,
             allow_shortcut_inhibit: true,
             shortcuts_inhibit_escape: parse_key(DEFAULT_SHORTCUTS_INHIBIT_ESCAPE),
+            focus_on_activate: false,
             scale: None,
             theme: None,
             appearance: None,

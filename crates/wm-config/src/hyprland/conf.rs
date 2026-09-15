@@ -90,6 +90,7 @@ pub fn read(
                 } else if !name.eq_ignore_ascii_case("input")
                     && !name.eq_ignore_ascii_case("cursor")
                     && !name.eq_ignore_ascii_case("binds")
+                    && !name.eq_ignore_ascii_case("misc")
                     && !name.eq_ignore_ascii_case("animations")
                     && !name.eq_ignore_ascii_case("decoration")
                 {
@@ -116,6 +117,11 @@ pub fn read(
                 out.push(Directive::Ignored {
                     kind: "binds",
                     detail: format!("nested binds block {name} {{ … }} is not implemented"),
+                });
+            } else if block.first().is_some_and(|root| root.eq_ignore_ascii_case("misc")) {
+                out.push(Directive::Ignored {
+                    kind: "misc",
+                    detail: format!("nested misc block {name} {{ … }} is not implemented"),
                 });
             } else if block.first().is_some_and(|root| root.eq_ignore_ascii_case("decoration")) {
                 // `blur { … }`, `shadow { … }`: Hyprland's look, which
@@ -165,6 +171,17 @@ pub fn read(
                     }),
                     None => out.push(Directive::Ignored {
                         kind: "binds",
+                        detail: truncate(line),
+                    }),
+                }
+            } else if block.len() == 1 && block[0].eq_ignore_ascii_case("misc") {
+                match line.split_once('=') {
+                    Some((name, value)) => out.push(Directive::Misc {
+                        name: name.trim().to_ascii_lowercase(),
+                        value: substitute(value.trim(), vars),
+                    }),
+                    None => out.push(Directive::Ignored {
+                        kind: "misc",
                         detail: truncate(line),
                     }),
                 }
@@ -400,6 +417,12 @@ fn directive(keyword: &str, value: &str, out: &mut Vec<Directive>) {
         "workspace" => workspace_rule(value, out),
         // The colon spelling of `general { layout = … }`.
         "general:layout" => out.push(Directive::DefaultLayout { layout: value.to_string() }),
+        // The colon spelling of `misc { focus_on_activate = … }`, the
+        // one `misc` key with a meaning here.
+        "misc:focus_on_activate" => out.push(Directive::Misc {
+            name: "focus_on_activate".into(),
+            value: value.to_string(),
+        }),
         // Handled by `read`, which must retain scope between lines.
         "submap" => {}
         // The file graph, emitted in place so the loader splices the

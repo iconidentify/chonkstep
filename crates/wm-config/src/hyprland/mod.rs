@@ -317,6 +317,10 @@ pub struct Reading {
     /// `zwp_keyboard_shortcuts_inhibit_v1` request, which is
     /// `allow_shortcut_inhibit = false` here.
     pub disable_keybind_grabbing: Option<bool>,
+    /// `misc:focus_on_activate`, when the configuration says either
+    /// way: whether an application's own `xdg_activation_v1` request
+    /// may take the keyboard without the user's input behind it.
+    pub focus_on_activate: Option<bool>,
     /// `decoration:dim_inactive` at `decoration:dim_strength`: how much
     /// to darken every unfocused window, or `None` to leave them alone.
     pub dim_inactive: Option<f32>,
@@ -368,7 +372,7 @@ impl Reading {
         // future category cannot silently disappear at this loading boundary.
         let Self {
             keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
-            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, disable_keybind_grabbing, dim_inactive, files: _, skipped: _, motion,
+            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, disable_keybind_grabbing, focus_on_activate, dim_inactive, files: _, skipped: _, motion,
         } = self;
         keybindings.is_empty()
             && dim_inactive.is_none()
@@ -386,6 +390,7 @@ impl Reading {
             && workspace_layouts.is_empty()
             && hide_special_on_workspace_change.is_none()
             && disable_keybind_grabbing.is_none()
+            && focus_on_activate.is_none()
             && *motion == wm_core::MotionPolicy::default()
     }
 
@@ -608,6 +613,9 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
     }
     if let Some(disable) = reading.disable_keybind_grabbing {
         config.allow_shortcut_inhibit = !disable;
+    }
+    if let Some(focus) = reading.focus_on_activate {
+        config.focus_on_activate = focus;
     }
     config.monitor_rules = reading.monitors.lines.clone();
     config.autostart = reading.autostart.clone();
@@ -1016,6 +1024,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
             Directive::Input { name, value } => input(&mut reading, &name, &value),
             Directive::Cursor { name, value } => cursor(&mut reading, &name, &value),
             Directive::Binds { name, value } => binds(&mut reading, &name, &value),
+            Directive::Misc { name, value } => misc(&mut reading, &name, &value),
             Directive::Decoration { name, value } => decoration(&mut dim, &mut reading, &name, &value),
             Directive::Device { name, settings } => device(&mut reading, name, settings),
             Directive::ExecOnce { command } => autostart(&mut reading, &command),
@@ -1503,6 +1512,33 @@ fn binds(reading: &mut Reading, name: &str, value: &str) {
     };
     reading.skipped.push(Skipped {
         kind: "binds".into(),
+        what: format!("{name} = {value}"),
+        why: why.into(),
+    });
+}
+
+/// One key of the `misc` table. The one carried is
+/// `focus_on_activate`, Hyprland's word for whether an application that
+/// asks to be focused through `xdg_activation_v1` gets its way without
+/// the user's own input behind the request. Off is Hyprland's default;
+/// Omarchy turns it on. Everything else in the table is Hyprland's own
+/// housekeeping — its logo, its splash, its ANR pings — which this
+/// desktop has no counterpart for.
+fn misc(reading: &mut Reading, name: &str, value: &str) {
+    let value = value.trim().trim_matches(['\"', '\'']);
+    let name = name.trim().to_ascii_lowercase();
+    let why = match name.as_str() {
+        "focus_on_activate" => match toggle(value) {
+            Some(focus) => {
+                reading.focus_on_activate = Some(focus);
+                return;
+            }
+            None => "focus_on_activate must be true or false",
+        },
+        _ => "misc setting is not implemented",
+    };
+    reading.skipped.push(Skipped {
+        kind: "misc".into(),
         what: format!("{name} = {value}"),
         why: why.into(),
     });

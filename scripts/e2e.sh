@@ -38,6 +38,10 @@
 #   wayland-info  the registry enumeration probe
 #   hyprsunset the night-light integration (see CI_CANNOT_INSTALL)
 #   qs         real Qt lock-surface sizing (see CI_CANNOT_INSTALL)
+#   uwsm       the exec-bind activation token through Omarchy's launcher
+#              wrapper; needs a live session's user manager, so it also
+#              records itself as not run under --headless (see
+#              CI_CANNOT_INSTALL)
 #
 # `--headless` starts an isolated Weston host first.  It is useful on a
 # CI runner, over SSH, or while the real desktop is locked: a hidden

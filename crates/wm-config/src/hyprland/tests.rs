@@ -529,6 +529,47 @@ fn hide_special_on_workspace_change_is_read_from_either_syntax() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `misc.focus_on_activate`, the one `misc` key with a meaning here:
+/// Omarchy's shipped `looknfeel.lua` turns it on, so a desk reading
+/// Omarchy's files keeps honouring every activation request; a file
+/// that says `false`, or says nothing, leaves the default refusal.
+#[test]
+fn focus_on_activate_is_read_from_either_syntax() {
+    let reading = read(&machine());
+    assert_eq!(reading.focus_on_activate, Some(true), "{:?}", reading.skipped);
+    let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&machine()))).unwrap();
+    assert!(config.focus_on_activate);
+    assert!(!crate::parse("").unwrap().focus_on_activate, "off by default, as in Hyprland");
+
+    let root = scratch("misc-conf");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "misc {\n    focus_on_activate = false\n    disable_hyprland_logo = true\n}\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.focus_on_activate, Some(false));
+    assert!(
+        skipped_why(&reading, "disable_hyprland_logo").is_some(),
+        "the rest of the table is reported: {:?}",
+        reading.skipped
+    );
+
+    // The colon spelling, and a later line winning.
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "misc:focus_on_activate = false\nmisc:focus_on_activate = yes\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.focus_on_activate, Some(true));
+
+    // A value that is not a toggle is reported, not guessed at.
+    write(&root.join(".config/hypr/hyprland.conf"), "misc {\n    focus_on_activate = sometimes\n}\n");
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.focus_on_activate, None);
+    assert!(skipped_why(&reading, "focus_on_activate").is_some(), "{:?}", reading.skipped);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The conditional Omarchy gates its preinstalled application chords
 /// on is a file-system question, and answering it is a strict
 /// improvement on the baked preset — which had to write off twenty-odd
@@ -4439,7 +4480,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        136,
+        144,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -4449,7 +4490,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=189 commands=121 env=8 autostart=4")
-            && GUIDE.contains("float_rules=43 monitors=1 skipped=136"),
+            && GUIDE.contains("float_rules=43 monitors=1 skipped=144"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

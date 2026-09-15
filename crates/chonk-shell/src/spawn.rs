@@ -55,6 +55,33 @@ pub fn declare_control_socket(path: std::path::PathBuf) {
     let _ = CONTROL_SOCKET.set(path);
 }
 
+/// The environment that hands a launched application its
+/// `xdg_activation_v1` token: `XDG_ACTIVATION_TOKEN`, the name the
+/// protocol specifies, and `DESKTOP_STARTUP_ID`, the startup-notification
+/// name GTK 3 and older toolkits still read the same token from on
+/// Wayland. Empty for `None`, which is a backend with no activation
+/// protocol of its own (X11), and then the child is launched exactly as
+/// it was before tokens existed here.
+///
+/// The token is what lets an already-running single-instance
+/// application raise its window when it is launched a second time: the
+/// new process hands the token to the old one, the old one activates
+/// its window with it, and the compositor — which minted the token for
+/// this very launch — treats that as the user's own request. Under
+/// `uwsm app` the token survives the trip: the default scope unit is
+/// forked from the launching process and inherits its environment.
+/// (A `-t service` unit does not: `systemd-run` starts it from the user
+/// manager's environment, and uwsm forwards only its session variables.)
+pub fn activation_env(token: Option<String>) -> Vec<(String, String)> {
+    let Some(token) = token else {
+        return Vec::new();
+    };
+    vec![
+        ("XDG_ACTIVATION_TOKEN".to_string(), token.clone()),
+        ("DESKTOP_STARTUP_ID".to_string(), token),
+    ]
+}
+
 pub fn spawn_detached_with_env(
     program: &str,
     args: &[&str],
@@ -625,6 +652,19 @@ fn reap_failed_command(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_activation_token_reaches_the_child_under_both_names_and_no_token_adds_nothing() {
+        let env = activation_env(Some("abc123".to_string()));
+        assert_eq!(
+            env,
+            vec![
+                ("XDG_ACTIVATION_TOKEN".to_string(), "abc123".to_string()),
+                ("DESKTOP_STARTUP_ID".to_string(), "abc123".to_string()),
+            ]
+        );
+        assert!(activation_env(None).is_empty(), "a backend without tokens launches the child unchanged");
+    }
 
     #[test]
     fn qt_scale_factor_carries_the_exact_requested_scale() {

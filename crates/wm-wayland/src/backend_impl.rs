@@ -353,6 +353,7 @@ impl WaylandBackend {
 impl Backend for WaylandBackend {
     fn supports_mac_interaction(&self) -> bool { true }
     fn session_locked(&self) -> bool { self.locked }
+    fn create_activation_token(&mut self) -> Option<String> { Some(self.mint_activation_token()) }
     type WindowId = WlWindowId;
     type FrameId = WlFrameId;
     type ShellId = WlShellId;

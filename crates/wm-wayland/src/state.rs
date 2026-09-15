@@ -1286,6 +1286,16 @@ pub struct WaylandBackend {
     pub(crate) locked: bool,
     /// The lock client's surfaces, one per output it has covered.
     pub(crate) lock_surfaces: Vec<crate::lock::LockSurfaceEntry>,
+    /// `xdg_activation_v1`'s token ledger. On the backend rather than in
+    /// `CoreProtocols` because the shell mints tokens for the commands
+    /// it launches through `Backend::create_activation_token`, and the
+    /// backend is the only compositor state the shell can reach. The
+    /// policy that admits and redeems tokens stays in
+    /// `core_protocols.rs`.
+    pub(crate) activation: smithay::wayland::xdg_activation::XdgActivationState,
+    /// When the abandoned-token sweep next runs; see
+    /// `WaylandBackend::sweep_activation_tokens`.
+    pub(crate) next_activation_token_sweep: Instant,
     /// Buffered EWMH publishes waiting for `dispatch_pending` to flush
     /// them to the XWayland root — the record-now/act-later detour the
     /// `Backend::publish_*` verbs take for the reason `pending_focus`
@@ -1355,6 +1365,7 @@ impl WaylandBackend {
         let output_size = union_size(&monitors);
         let monitor_scales = vec![scale.max(0.125) as f64; monitors.len()];
         let monitor_outputs = vec![MonitorOutput::default(); monitors.len()];
+        let activation = smithay::wayland::xdg_activation::XdgActivationState::new::<Compositor>(&display_handle);
         Self {
             next_id: 1,
             windows: HashMap::new(),
@@ -1437,6 +1448,8 @@ impl WaylandBackend {
             layer_layout_dirty: true,
             idle_policy_dirty: true,
             locked: false,
+            activation,
+            next_activation_token_sweep: Instant::now() + crate::core_protocols::ACTIVATION_TOKEN_SWEEP_INTERVAL,
             lock_surfaces: Vec::new(),
             ewmh: crate::xewmh::EwmhLedger::default(),
         }
@@ -3674,7 +3687,7 @@ impl Compositor {
         self.popups.cleanup();
         self.wm.backend_mut().reconcile_popup_roots();
         self.reconcile_cursor_visibility();
-        self.core_protocols.sweep_activation_tokens(Instant::now());
+        self.wm.backend_mut().sweep_activation_tokens(Instant::now());
         self.apply_pending_focus();
         // Beside the focus intent and for the same reason: a drag that
         // began or ended anywhere above has to reach the seat, and only

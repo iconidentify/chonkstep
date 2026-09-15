@@ -263,6 +263,12 @@ const CI_CANNOT_INSTALL: &[(&str, &str)] = &[
     // https://packages.ubuntu.com/noble/qt6-base-dev
     // https://github.com/quickshell-mirror/quickshell/blob/master/CMakeLists.txt
     ("qs", "Quickshell is unavailable on Ubuntu 24.04's Qt 6.4; direct session-lock protocol tests still run"),
+    // Omarchy's launcher wrapper. Not packaged for Ubuntu, and it
+    // launches into the systemd user manager over the session bus,
+    // which the headless harness's private `dbus-run-session` bus
+    // does not carry; activation_tokens.rs's direct exec-bind test
+    // covers the same token hand-off without it.
+    ("uwsm", "not packaged for Ubuntu, and needs a systemd user manager the headless harness's private session bus lacks"),
 ];
 
 /// Where [`require_client`] records a client it did not find, so a run
