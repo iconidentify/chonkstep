@@ -1040,6 +1040,17 @@ fn on_touch_motion<I: InputBackend>(state: &mut Compositor, event: I::TouchMotio
     let focus = client_focus(&hit_at(state.wm.backend(), at, position));
     let slot = event.slot();
     touch.motion(state, focus, &TouchMotion { slot, location: position, time: event.time_msec() });
+    // A touch-started drag's icon follows the finger that carries it
+    // (the pointer is elsewhere); the damage mark below repaints it.
+    if let Some(icon) = state
+        .wm
+        .backend_mut()
+        .dnd_icon
+        .as_mut()
+        .filter(|icon| icon.touch.is_some_and(|(carrier, _)| carrier == slot))
+    {
+        icon.touch = Some((slot, position));
+    }
 
     let route = with_input(&state.seat.clone(), |input| {
         input.active_touches.get_mut(&slot).map(|route| {
@@ -1399,6 +1410,10 @@ pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key
     let dragging = state.wm.interactive_drag_active();
     let mut physical_modifiers = ModifiersState::default();
     let mut physical_combo = KeyCombo { keysym: 0, modifiers: Modifiers::empty() };
+    // Set by the escape chord below when an XWayland grab was in force;
+    // the grab is unset after the filter returns, on the handle that
+    // is running it.
+    let mut release_xwayland_grab = false;
     let eligible = !state.wm.backend().locked && !shortcuts_inhibited
         && state.wm.backend().xwayland_keyboard_grab.as_ref()
             .is_none_or(|grab| !smithay::reexports::wayland_server::Resource::is_alive(grab));
@@ -1470,6 +1485,33 @@ pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key
                 if backend.locked && !works_locked {
                     return FilterResult::Forward;
                 }
+                // The user's way back from a client that holds every
+                // chord: the escape chord suspends a shortcut inhibitor
+                // (a second press on the same window resumes it) and
+                // releases an XWayland keyboard grab. Checked before
+                // the two forwards below, which is the whole point —
+                // it is the one chord that works while every other is
+                // forwarded — and after the lock, which it must not
+                // work under: a locker gets every key. When nothing is
+                // inhibited it is an ordinary key. The press is
+                // swallowed with its release, so the client never sees
+                // half a chord.
+                if backend.shortcut_inhibit_policy.escape == Some(combo) {
+                    let grab_alive = backend
+                        .xwayland_keyboard_grab
+                        .as_ref()
+                        .is_some_and(smithay::reexports::wayland_server::Resource::is_alive);
+                    if grab_alive {
+                        backend.xwayland_keyboard_grab = None;
+                        release_xwayland_grab = true;
+                    }
+                    let toggled = data.shortcut_inhibit_escape_pressed();
+                    if grab_alive || toggled {
+                        with_input(&seat, |input| input.suppressed_keys.push(keycode));
+                        return FilterResult::Intercept(());
+                    }
+                }
+                let backend = data.wm.backend_mut();
                 if shortcuts_inhibited || (passthrough && !modal_owns_keyboard && !works_locked) {
                     return FilterResult::Forward;
                 }
@@ -1562,6 +1604,15 @@ pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key
             }
         }
     });
+    if release_xwayland_grab {
+        // The grab object stays alive on the client's side (an X client
+        // that called `XGrabKeyboard` still believes it holds the X
+        // server's grab) but stops being the seat's: focus is free to
+        // move and the binding gate above no longer sees it. A client
+        // that grabs again gets a fresh grab, and the chord again.
+        keyboard.unset_grab(state);
+        tracing::info!("keyboard shortcuts restored by the user: the XWayland keyboard grab was released");
+    }
     // A press that reaches a client is typing; one the compositor consumed
     // as a binding is not, and neither is a bare modifier.
     if matches!(route, FilterResult::Forward)

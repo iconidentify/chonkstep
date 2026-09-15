@@ -157,10 +157,23 @@ windowrule   = float on, match:class steam               # 0.53+
 The supported properties are `float`, `size`, `move`, `center`,
 `idle_inhibit`, `pin`, `no_focus`, `no_initial_focus`,
 `focus_on_activate`, `fullscreen`, `maximize`, `suppress_event`,
-`scroll_touchpad`, `workspace`, `opacity` and `no_dim`. They match `class` and `title` as regular
-expressions, matched against the entire class or title, as in Hyprland's
-`RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
-rule wins independently for each property.
+`scroll_touchpad`, `workspace`, `opacity`, `no_dim` and
+`no_screen_share`. They match `class`, `title` and `xdg_tag` as regular
+expressions, matched against the entire class, title or tag, as in
+Hyprland's `RE2::FullMatch`. Use `.*` when a substring is intended.
+Last matching rule wins independently for each property.
+
+`xdg_tag` (`match:xdg_tag`, `xdgTag:` in the v2 form, `xdg_tag =` in a
+Lua `match` table) reads the window's `xdg_toplevel_tag_v1` tag: the
+application's own stable, untranslated name for one of its windows
+(`main`, `preferences`, `quake`), which unlike the title does not change
+with the document and unlike the class tells one of an application's
+windows from another. Rules are evaluated once, when the window maps,
+against the tag it carried then — a client tags a window before its
+first commit, so that is the tag the protocol means. A tag set or
+changed after the map reaches `hyprctl clients` at once but does not
+re-run the rules, exactly as a later title change does not. A window
+whose client never tagged it has an empty tag, which only `^$` matches.
 
 `size` and `move` take two values, each a number or one of Hyprland's
 layout expressions — arithmetic over `monitor_w`, `monitor_h`,
@@ -219,7 +232,9 @@ window's unchanged state. ChonkStep's own verbs, the window menu and IPC
 still apply, and an application may still leave a state it did not ask
 for. `activate` and `activatefocus` stop activation requests from
 focusing the window, like `focus_on_activate = false`. Any other event is
-reported by name.
+reported by name. Whether an activation request that no rule refuses
+moves the keyboard at all is `misc.focus_on_activate`'s decision, under
+*Input and binding behavior* below.
 
 `workspace` maps the window somewhere other than the current
 workspace: a number (`workspace = "3"`), `special` for the default
@@ -257,6 +272,28 @@ of Hyprland's `decoration` table this desktop reads: `dim_inactive = true`
 with `dim_strength` (Hyprland's default `0.5`) darkens every unfocused
 window by drawing one black quad in front of it. The window itself stays
 opaque, which is what makes dimming the cheaper focus cue of the two.
+
+`no_screen_share` is what Omarchy writes for 1Password and Bitwarden:
+the window is drawn on your screen as usual, and every capture the
+compositor renders shows an opaque grey rectangle where the window,
+its titlebar and its popups are. That covers the portal screen share
+in a call (`xdg-desktop-portal-wlr`, over `zwlr_screencopy`), a
+recording by `wf-recorder` or by this desktop's own recorder, a
+`grim` screenshot, this desktop's own region and window screenshots,
+and "share this window" through `ext-image-copy-capture`, which is
+answered with a solid image of the window's size rather than refused.
+Only a rule sets it; nothing a client asks for clears it.
+Shell thumbnails (including Alt-Tab) use the application's icon instead
+of cached window pixels, so those previews cannot expose the window in
+a capture either. Drag icons from protected windows are omitted from
+captures while remaining visible on screen. Two things
+are outside its reach. A recorder that reads the scanned-out
+framebuffer from KMS directly - gpu-screen-recorder's default backend,
+which Omarchy's screen recording uses unless
+`OMARCHY_SCREENRECORD_USE_PORTAL=true` - never asks the compositor
+for a picture, so it records the window exactly as the screen shows
+it; no compositor can redact that path. And a capture that asks for
+the pointer still gets it drawn over the rectangle.
 
 Every unsupported property produces its own `Skipped` line naming both
 the property and matcher. A rule with an unsupported matcher is refused
@@ -565,8 +602,34 @@ do is not what you are asking for:
 `binds.hide_special_on_workspace_change`, which Omarchy turns on, makes
 a workspace switch hide the special workspace shown on the output the
 switch lands on. Off — Hyprland's own default — the scratchpad stays
-shown across the switch. The rest of the `binds` table is Hyprland's
-own binding behaviour and is reported rather than carried.
+shown across the switch. `binds.disable_keybind_grabbing = true` is
+`allow_shortcut_inhibit = false`: no client is granted a
+`zwp_keyboard_shortcuts_inhibit_v1` inhibitor, so a VM console or
+remote-desktop viewer never takes the desktop's chords (see
+[keybindings.md](keybindings.md#taking-the-shortcuts-back-from-a-client-that-inhibits-them)
+for the escape chord that takes them back when it is allowed). Off by
+default, as in Hyprland, and `allow_shortcut_inhibit` in your own
+`config.toml` has the last word over it. The rest of the `binds`
+table is Hyprland's own binding behaviour and is reported rather than
+carried.
+
+`misc.focus_on_activate` (also `misc:focus_on_activate = …`) decides
+what an application's own `xdg_activation_v1` request may do. Off —
+Hyprland's own default — the request moves the keyboard only when the
+user is known to be behind it: the token was minted by this desktop for
+a command it launched (an `exec` bind, a launcher pick, `hyprctl
+dispatch exec`), or it was made by the client the user is typing in
+from one of that user's own input events, and either way it is
+redeemed within thirty seconds. Any other request — a background
+client minting a token for its own window — marks the window urgent
+instead, which the bar shows and a click clears. On, which is what
+Omarchy ships, every request is honoured as before. A `focus_on_activate
+off` window rule still refuses per window whatever the key says, a
+taskbar's `activate` and a pager's `_NET_ACTIVE_WINDOW` are the user's
+own acts and never consult it, and behind the session lock every
+request becomes an urgency hint. The key is read live, so a reload
+applies it. The rest of the `misc` table is Hyprland's own housekeeping
+and is reported rather than carried.
 
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
 build the seat's xkb keymap. A value Hyprland would compute as it runs,
@@ -909,7 +972,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=189 commands=121 env=8 autostart=4
-      float_rules=40 monitors=1 skipped=139
+      float_rules=43 monitors=1 skipped=144
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
       why="requires window groups or a feature ChonkStep does not provide"
 ```

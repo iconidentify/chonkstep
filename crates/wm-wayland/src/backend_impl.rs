@@ -353,6 +353,7 @@ impl WaylandBackend {
 impl Backend for WaylandBackend {
     fn supports_mac_interaction(&self) -> bool { true }
     fn session_locked(&self) -> bool { self.locked }
+    fn create_activation_token(&mut self) -> Option<String> { Some(self.mint_activation_token()) }
     type WindowId = WlWindowId;
     type FrameId = WlFrameId;
     type ShellId = WlShellId;
@@ -884,6 +885,13 @@ impl Backend for WaylandBackend {
         }
     }
 
+    fn window_xdg_tag(&self, window: Self::WindowId) -> Option<String> {
+        // The record's copy, not Smithay's `XdgToplevelTagSurfaceData`:
+        // the handler already bounded it, and the record is what the
+        // IPC reports, so a rule and `hyprctl clients` read one value.
+        self.windows.get(&window)?.xdg_tag.clone()
+    }
+
     fn window_class(&self, window: Self::WindowId) -> Option<WmClass> {
         let record = self.windows.get(&window)?;
         match &record.surface {
@@ -1052,7 +1060,11 @@ impl Backend for WaylandBackend {
         // and a caller that needs more pixels than the default
         // snapshots carry hints it through `set_preview_edge` and
         // re-asks when `preview_generation` moves.
-        self.windows.get(&window).and_then(|record| record.snapshot.clone())
+        // Shell previews are flattened into ordinary shell buffers, so
+        // capture scene redaction cannot recover their window identity.
+        // Use the shell's icon fallback for protected windows.
+        self.windows.get(&window).filter(|record| !record.capture_redacted)
+            .and_then(|record| record.snapshot.clone())
     }
 
     fn set_preview_edge(&mut self, edge: Option<u32>) {
@@ -2151,6 +2163,17 @@ impl Backend for WaylandBackend {
         self.pending_keyboard = Some(config);
     }
 
+    fn set_shortcut_inhibit_policy(&mut self, policy: wm_core::ShortcutInhibitPolicy) {
+        // Staged like the keyboard config: the grants live on
+        // `Compositor`, and a policy that turns them off has the grant
+        // in force to withdraw. Only a change is staged, so a reload
+        // that leaves the policy alone leaves the grant alone too.
+        if self.shortcut_inhibit_policy != policy {
+            self.shortcut_inhibit_policy = policy;
+            self.shortcut_inhibit_policy_changed = true;
+        }
+    }
+
     fn set_pointer_config(&mut self, mut config: wm_core::PointerConfig) {
         // Live `hl.device` requests ride along with the configured rules;
         // `input::devices` decides which of the two is the newer word.
@@ -2175,6 +2198,12 @@ impl Backend for WaylandBackend {
         if let Some(record) = self.windows.get_mut(&window) {
             record.opacity = opacity;
             record.no_dim = no_dim;
+        }
+    }
+
+    fn set_capture_redacted(&mut self, window: Self::WindowId, redacted: bool) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.capture_redacted = redacted;
         }
     }
 

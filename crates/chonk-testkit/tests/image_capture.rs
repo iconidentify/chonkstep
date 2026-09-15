@@ -920,3 +920,250 @@ fn toplevel_capture_of_a_shadowed_client_matches_the_screen_at_1x() {
 fn toplevel_capture_of_a_shadowed_client_matches_the_screen_at_fractional_scale() {
     toplevel_capture_matches_the_window_on_screen(1.5);
 }
+
+#[path = "support/screencopy.rs"]
+mod screencopy;
+
+/// The redacted probe's app id, the class a `no_screen_share` rule
+/// names.
+const VAULT_APP: &str = "vault-probe";
+
+/// What `renderer::CAPTURE_REDACTION_COLOR` comes out as at 8 bits.
+const REDACTION_RGB: [u8; 3] = [51, 51, 51];
+
+/// Boots a session whose Hyprland configuration hides `VAULT_APP` from
+/// capture, and opens one solid red probe window of that class in it.
+/// Red on purpose, like the opacity tests: the redaction has to be
+/// read from the pixels, and a solid body makes "shown" one exact
+/// colour and "redacted" another.
+///
+/// The probe runs in its `animate` mode, recommitting its buffer at
+/// about 60 Hz for the whole test, so every capture below is of a
+/// window whose content keeps changing as far as the compositor can
+/// tell - the case a recorder's `copy_with_damage` stream exists for.
+fn boot_with_redacted_probe(name: &str) -> (Session, WindowInfo) {
+    let mut session = Session::boot(
+        name,
+        SessionOptions {
+            scale: Some(1.0),
+            config_extra: "omarchy_menu = false\nhyprland_config = true\nshow_dock = false\n".into(),
+            config_root_files: vec![(
+                "hypr/hyprland.conf".into(),
+                format!("windowrule = no_screen_share on, match:class ^{VAULT_APP}$\n"),
+            )],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let color = session.dir.join("vault-rgb");
+    std::fs::write(&color, [255, 0, 0]).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+    session
+        .launch_isolated(
+            "env",
+            &[&format!("CHONKSTEP_PROBE_COLOR_FILE={}", color.display()), probe.to_str().unwrap(), "Vault", VAULT_APP, "animate"],
+        )
+        .unwrap();
+    let window = session.wait_for_window("Vault").unwrap();
+    session.door().barrier().unwrap();
+    (session, window)
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn no_screen_share_pixels_do_not_escape_through_shell_thumbnails() {
+    let (mut session, _) = boot_with_redacted_probe("image-capture-private-switcher");
+    let color = session.dir.join("public-rgb");
+    std::fs::write(&color, [0, 255, 0]).unwrap();
+    let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+    session.launch_isolated("env", &[
+        &format!("CHONKSTEP_PROBE_COLOR_FILE={}", color.display()),
+        probe.to_str().unwrap(), "Public", "public-probe", "animate",
+    ]).unwrap();
+    session.wait_for_window("Public").unwrap();
+
+    // Reopening asks for the latest cached previews. The public green
+    // thumbnail is the positive control that the cache and panel work.
+    poll_until(Duration::from_secs(10), "a public preview without private pixels", || {
+        session.door().key(chonk_testkit::keys::LEFTALT, true).unwrap();
+        session.door().tap_key(15).unwrap();
+        session.door().barrier().unwrap();
+        let world = session.world().unwrap();
+        let panel = world.shells.iter().find(|shell| shell.above && shell.mapped && shell.buffer_bytes > 0)
+            .expect("Alt-Tab panel");
+        let shot = session.screenshot("private-switcher").unwrap();
+        let mut green = 0;
+        let mut red = 0;
+        for y in panel.y.max(0) as u32..(panel.y.max(0) as u32 + panel.h).min(shot.height) {
+            for x in panel.x.max(0) as u32..(panel.x.max(0) as u32 + panel.w).min(shot.width) {
+                let pixel = shot.pixel(x, y);
+                green += usize::from(pixel[1] > 220 && pixel[0] < 30 && pixel[2] < 30);
+                red += usize::from(pixel[0] > 220 && pixel[1] < 30 && pixel[2] < 30);
+            }
+        }
+        session.door().key(chonk_testkit::keys::LEFTALT, false).unwrap();
+        session.door().barrier().unwrap();
+        assert_eq!(red, 0, "the protected window leaked into the captured switcher");
+        (green > 100).then_some(())
+    }).unwrap();
+}
+
+/// What the output itself shows, through the diagnostic screenshot
+/// marker: the one image rendered for display rather than capture, so
+/// the one that can vouch for the window still being on screen.
+fn on_screen(session: &mut Session, name: &str) -> Screenshot {
+    session.door().barrier().unwrap();
+    let path = session.dir.join(format!("{name}.png"));
+    let marker = session.dir.join("state/chonkstep/screenshot");
+    let pending = marker.with_extension("pending");
+    std::fs::write(&pending, path.display().to_string()).unwrap();
+    std::fs::rename(pending, marker).unwrap();
+    poll_until(Duration::from_secs(10), "the diagnostic screenshot", || Screenshot::load(&path).ok()).unwrap()
+}
+
+/// Every pixel of the `w` by `h` rectangle at (`x`, `y`) is the
+/// redaction colour, `rgb` reading one pixel of the image under test.
+fn assert_redacted(what: &str, (x, y, w, h): (u32, u32, u32, u32), rgb: impl Fn(u32, u32) -> [u8; 3]) {
+    for py in y..y + h {
+        for px in x..x + w {
+            let pixel = rgb(px, py);
+            assert_eq!(pixel, REDACTION_RGB, "{what}: pixel ({px}, {py}) shows {pixel:?}, not the redaction");
+        }
+    }
+}
+
+/// A window under `no_screen_share` is drawn on the output and drawn
+/// as one opaque rectangle - frame, titlebar and all - in every capture
+/// the compositor renders: a `zwlr_screencopy` output capture (grim's
+/// and wf-recorder's path), an `ext-image-copy-capture` output source
+/// (the portal's) and a toplevel source of the window itself ("share
+/// this window"), which is delivered solid rather than refused. A
+/// `copy_with_damage` stream over the window keeps being answered as
+/// the client behind it commits, and every answer is the same
+/// rectangle.
+#[test]
+#[ignore = "needs nested Wayland: scripts/e2e.sh --headless --test image_capture"]
+fn a_no_screen_share_window_is_redacted_in_every_capture_and_shown_on_screen() {
+    let (mut session, window) = boot_with_redacted_probe("image-capture-no-screen-share");
+    let (frame_x, frame_y, frame_w, frame_h, margin) = {
+        let world = session.world().unwrap();
+        let frame = world.frame_of(window.id).expect("the probe is server-decorated");
+        (frame.x, frame.y, frame.w, frame.h, frame.input_margin)
+    };
+    // The frame's visual rectangle: its ledger rectangle less the
+    // transparent input margin, which is where the redaction's edge is.
+    let visual = (
+        (frame_x + margin as i32) as u32,
+        (frame_y + margin as i32) as u32,
+        frame_w - margin * 2,
+        frame_h - margin * 2,
+    );
+    let content = (window.x as u32, window.y as u32, window.w, window.h);
+    let (cx, cy) = (content.0 + content.2 / 2, content.1 + content.3 / 2);
+    // Park the pointer in the middle of the vault. The display readback
+    // draws the cursor, so the body is read near the window's corner
+    // and the desktop at the output's far corner, both well clear of it.
+    session.door().motion(f64::from(cx), f64::from(cy)).unwrap();
+    session.door().barrier().unwrap();
+    let body = (content.0 + 8, content.1 + 8);
+    let desktop = {
+        let world = session.world().unwrap();
+        (world.output_w - 3, world.output_h - 3)
+    };
+
+    // -- the output shows the vault ------------------------------------------
+    let shown = on_screen(&mut session, "vault-on-screen");
+    assert_eq!(shown.pixel(body.0, body.1)[..3], [255, 0, 0], "the output shows the vault itself: {}", shown.path.display());
+
+    // -- zwlr_screencopy: the whole frame is one rectangle -------------------
+    let shot = session.screenshot("vault-screencopy").unwrap();
+    assert_redacted(&format!("screencopy output capture {}", shot.path.display()), visual, |x, y| {
+        let [r, g, b, _] = shot.pixel(x, y);
+        [r, g, b]
+    });
+    assert_eq!(
+        shot.pixel(desktop.0, desktop.1)[..3],
+        shown.pixel(desktop.0, desktop.1)[..3],
+        "the rest of the desktop is captured as shown: {} vs {}",
+        shot.path.display(),
+        shown.path.display()
+    );
+
+    // -- ext-image-copy-capture: output and toplevel sources -----------------
+    let mut client = Client::connect_for_toplevels(&session);
+    let plain = ext_image_copy_capture_manager_v1::Options::empty();
+    let (screen_copy, screen_size) = client.output_session(plain);
+    let screen = client.frame(&screen_copy, screen_size);
+    client.capture(&screen);
+    let output = screen.bgrx();
+    assert_redacted("ext-image-copy-capture output capture", visual, |x, y| {
+        let at = (y * screen.size.0 + x) as usize * 4;
+        [output[at + 2], output[at + 1], output[at]]
+    });
+    let (window_copy, window_size) = client.toplevel_session(VAULT_APP, plain);
+    assert_eq!(window_size, (content.2, content.3), "the toplevel capture keeps the window's size");
+    let toplevel = client.frame(&window_copy, window_size);
+    client.capture(&toplevel);
+    let image = toplevel.bgrx();
+    assert_redacted("ext-image-copy-capture toplevel capture", (0, 0, window_size.0, window_size.1), |x, y| {
+        let at = (y * window_size.0 + x) as usize * 4;
+        [image[at + 2], image[at + 1], image[at]]
+    });
+    // With cursors asked for, the pointer is painted over the rectangle
+    // and nothing else of the window comes back with it.
+    let cursors = ext_image_copy_capture_manager_v1::Options::PaintCursors;
+    let (cursor_copy, _) = client.toplevel_session(VAULT_APP, cursors);
+    let with_cursor = client.frame(&cursor_copy, window_size);
+    client.capture(&with_cursor);
+    let painted = with_cursor.bgrx();
+    let origin = (cx - content.0, cy - content.1);
+    let strays: Vec<(u32, u32)> = (0..window_size.1)
+        .flat_map(|y| (0..window_size.0).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let at = (y * window_size.0 + x) as usize * 4;
+            [painted[at + 2], painted[at + 1], painted[at]] != REDACTION_RGB
+                && !((origin.0..origin.0 + 96).contains(&x) && (origin.1..origin.1 + 96).contains(&y))
+        })
+        .collect();
+    assert!(strays.is_empty(), "only the cursor is painted over the redacted toplevel: {:?}", strays.first());
+
+    // -- copy_with_damage: answered as the probe commits, always solid -------
+    let mut recorder = screencopy::Client::connect(&session);
+    let first = recorder.region(visual.0 as i32, visual.1 as i32, visual.2 as i32, visual.3 as i32);
+    let storage = recorder.storage(&first);
+    let first_buffer = recorder.buffer(&storage, &first);
+    first.resource.copy_with_damage(&first_buffer);
+    recorder.until("the first damage-paced frame of the vault", |p| p.ready.contains(&first.id) || p.failed.contains(&first.id));
+    assert!(!recorder.probe.failed.contains(&first.id), "a damage-paced frame of a redacted window is answered");
+    let first_pixels = first.pixels(&storage);
+    assert_redacted("copy_with_damage frame", (0, 0, visual.2, visual.3), |x, y| {
+        let [r, g, b, _] = first_pixels[(y * visual.2 + x) as usize];
+        [r, g, b]
+    });
+    let second = recorder.region(visual.0 as i32, visual.1 as i32, visual.2 as i32, visual.3 as i32);
+    let second_buffer = recorder.buffer(&storage, &second);
+    second.resource.copy_with_damage(&second_buffer);
+    recorder.until("the next damage-paced frame of the vault", |p| p.ready.contains(&second.id) || p.failed.contains(&second.id));
+    assert!(!recorder.probe.failed.contains(&second.id));
+    assert_eq!(second.pixels(&storage), first_pixels, "the probe's commits change nothing a recorder sees");
+    for frame in [first, second] {
+        frame.resource.destroy();
+    }
+    first_buffer.destroy();
+    second_buffer.destroy();
+    storage.pool.destroy();
+    recorder.sync();
+
+    // -- and the output still shows the vault --------------------------------
+    let still_shown = on_screen(&mut session, "vault-still-on-screen");
+    assert_eq!(still_shown.pixel(body.0, body.1)[..3], [255, 0, 0], "{}", still_shown.path.display());
+
+    for frame in [screen, toplevel, with_cursor] {
+        frame.destroy();
+    }
+    for copy in [screen_copy, window_copy, cursor_copy] {
+        copy.destroy();
+    }
+    client.sync();
+    assert!(session.compositor_alive());
+}

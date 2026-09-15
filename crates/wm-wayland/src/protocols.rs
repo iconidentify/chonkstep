@@ -163,7 +163,7 @@ use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut, Buff
 use wm_core::{Backend, BackendEvent, ClientFlags, Lifecycle, NetState, NetStateAction};
 use wm_theme_api::{Point, Rect, Size};
 
-use crate::renderer::{build_scene_into, SceneElement};
+use crate::renderer::{build_scene_into, SceneElement, ScenePurpose};
 use crate::state::{Compositor, Graphics, ManagedSurface, WaylandBackend, WlFrameId, WlWindowId};
 
 type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
@@ -1607,6 +1607,7 @@ fn prepare_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) -> 
         tools,
         cursors,
         first.region,
+        ScenePurpose::Capture,
     );
     if first.include_overlays {
         crate::capture_tool::render_capture(&mut target.scene_scratch, renderer, wm.backend(), first.region, first.overlay_cursor);
@@ -1790,6 +1791,7 @@ pub(crate) fn capture_region(
         tools,
         cursors,
         region,
+        ScenePurpose::Capture,
     );
     if include_overlays {
         crate::capture_tool::render_capture(&mut target.scene_scratch, renderer, wm.backend(), region, overlay_cursor);

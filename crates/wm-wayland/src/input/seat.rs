@@ -7,7 +7,6 @@ use smithay::delegate_seat;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::Resource;
-use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
 use smithay::wayland::selection::data_device::set_data_device_focus;
 use smithay::wayland::selection::primary_selection::set_primary_focus;
 use smithay::wayland::text_input::TextInputSeat;
@@ -46,15 +45,11 @@ impl SeatHandler for Compositor {
         // Only the focused surface may suppress compositor shortcuts.
         // Move the active grant with keyboard focus and explicitly
         // revoke the old one so a background VM cannot retain raw keys.
-        if let Some(active) = self.core_protocols.active_shortcut_inhibitor.take() {
-            active.inactivate();
-        }
-        if let Some(surface) = target {
-            if let Some(inhibitor) = seat.keyboard_shortcuts_inhibitor_for_surface(surface) {
-                inhibitor.activate();
-                self.core_protocols.active_shortcut_inhibitor = Some(inhibitor);
-            }
-        }
+        // Whether the new focus is granted one at all is policy — the
+        // sandbox, the config, and a suspension the user pressed the
+        // escape chord for — and lives with the grants in
+        // `core_protocols.rs`.
+        self.sync_shortcut_inhibitor_to_focus(target);
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {

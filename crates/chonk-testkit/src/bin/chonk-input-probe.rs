@@ -7,6 +7,10 @@
 //! enter, the way GTK 4, Qt 6 and Chromium set their cursors, and reports
 //! `cursor-shape applied <serial>` once the compositor has processed it.
 //! `resizable` drops the fixed maximum size so the frame offers resize edges.
+//! `dnd` starts an internal drag on a right press; with `icon` the drag
+//! carries a solid orange icon surface, committed with an `attach` offset
+//! after `start_drag`, and reports `icon frame done` when the compositor
+//! answers its frame callback.
 //! `--kde-bind-only` binds `org_kde_kwin_server_decoration_manager` and
 //! creates no decoration object, which is how a GTK4 header-bar window says
 //! it draws its own titlebar.
@@ -14,6 +18,12 @@
 //! old 400x300 buffer. `stale-geometry-fullscreen` pins a 400x300 window
 //! geometry, answers the fullscreen configure with a buffer of the full size,
 //! then asks to be maximized and leaves every later configure unacknowledged.
+//! `inhibit` asks for a keyboard-shortcuts inhibitor on the toplevel and
+//! reports `shortcut-inhibitor active` / `inactive`; F5 then minimizes the
+//! window and F6 destroys the inhibitor and creates a new one, the way a
+//! client trying to get a withdrawn grant back would. `--socket=PATH`
+//! connects through that socket instead of `WAYLAND_DISPLAY` — a
+//! security-context listener's, for the sandboxed-client tests.
 
 #[path = "chonk-input-probe/constraints.rs"]
 mod constraints;
@@ -94,6 +104,8 @@ struct Probe {
     shortcuts_manager: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
     toplevel: Option<XdgToplevel>,
     inhibit: bool,
+    /// The live inhibitor under `inhibit`, held here so F6 can replace it.
+    inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
     keymap_count: u64,
     touch: Option<wl_touch::WlTouch>,
     touches: HashMap<i32, (f64, f64)>,
@@ -103,6 +115,13 @@ struct Probe {
     surface: Option<WlSurface>,
     pointer_surface: Option<WlSurface>,
     drag_mode: bool,
+    /// `dnd icon`: the drag also carries a solid orange icon surface,
+    /// committed with [`ICON_OFFSET`] after `start_drag`, and asks it
+    /// for one frame callback. Kept alive here for the drag's life.
+    icon_mode: bool,
+    icon: Option<(WlSurface, Option<WpViewport>, std::fs::File, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer)>,
+    /// The scale the probe draws at, for buffers created after map.
+    scale: f64,
     cursor_shape: Option<Shape>,
     cursor_shape_manager: Option<WpCursorShapeManagerV1>,
     cursor_shape_device: Option<WpCursorShapeDeviceV1>,
@@ -125,6 +144,19 @@ struct Probe {
 /// The enter serial a `set_shape` used. The sync sent after it is
 /// answered only once the compositor has processed that request.
 struct CursorShapeApplied(u32);
+
+/// The drag icon's frame callback: answered only if the compositor
+/// treats the icon as visible content.
+struct IconFrame;
+
+/// The drag icon's logical size and its ARGB8888 little-endian fill,
+/// orange (`R=0xF0 G=0xA0 B=0x20`): unlike the probe's red content, its
+/// green stale-geometry buffer, and the wallpaper.
+const ICON_SIZE: (i32, i32) = (40, 30);
+const ICON_PIXEL: [u8; 4] = [0x20, 0xA0, 0xF0, 0xFF];
+/// Where the icon's corner sits relative to the pointer, in its own
+/// logical units, given as the `attach` dx/dy of its first commit.
+const ICON_OFFSET: (i32, i32) = (6, 10);
 
 /// A configure serial answered by committing the old buffer. The sync sent
 /// after that commit returns once the compositor has processed it.
@@ -301,6 +333,20 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Probe {
                         .expect("mapped toplevel")
                         .set_minimized();
                 }
+                if probe.inhibit && pressed && key == 64 {
+                    if let Some(old) = probe.inhibitor.take() {
+                        old.destroy();
+                    }
+                    probe.inhibitor = Some(
+                        probe.shortcuts_manager.as_ref().expect("shortcuts-inhibit").inhibit_shortcuts(
+                            probe.surface.as_ref().expect("mapped surface"),
+                            probe.seat.as_ref().expect("seat"),
+                            qh,
+                            (),
+                        ),
+                    );
+                    say("shortcut-inhibitor recreated");
+                }
             }
             _ => {}
         }
@@ -415,13 +461,41 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
                         .create_data_source(qh, ());
                     source.offer("text/plain;charset=utf-8".into());
                     source.set_actions(DndAction::Copy);
+                    let icon = probe
+                        .icon_mode
+                        .then(|| probe.compositor.as_ref().expect("compositor").create_surface(qh, ()));
                     probe.data_device.as_ref().expect("data device").start_drag(
                         Some(&source),
                         probe.pointer_surface.as_ref().expect("pointer surface"),
-                        None,
+                        icon.as_ref(),
                         serial,
                     );
                     say("started internal drag");
+                    if let Some(surface) = icon {
+                        // Committed after `start_drag`, as a toolkit does once
+                        // the surface wears the icon role, at the probe's own
+                        // density: an integer buffer scale, or a viewport
+                        // destination for the fractional case.
+                        let scale = probe.scale;
+                        let (width, height) = ((ICON_SIZE.0 as f64 * scale) as i32, (ICON_SIZE.1 as f64 * scale) as i32);
+                        let shm = probe.shm.clone().expect("wl_shm");
+                        let (file, pool, buffer) = solid_buffer(&shm, qh, width, height, ICON_PIXEL);
+                        let viewport = if scale.fract() != 0.0 {
+                            let viewport =
+                                probe.viewporter.as_ref().expect("wp_viewporter").get_viewport(&surface, qh, ());
+                            viewport.set_destination(ICON_SIZE.0, ICON_SIZE.1);
+                            Some(viewport)
+                        } else {
+                            surface.set_buffer_scale(scale as i32);
+                            None
+                        };
+                        surface.attach(Some(&buffer), ICON_OFFSET.0, ICON_OFFSET.1);
+                        surface.damage_buffer(0, 0, width, height);
+                        surface.frame(qh, IconFrame);
+                        surface.commit();
+                        say("icon committed");
+                        probe.icon = Some((surface, viewport, file, pool, buffer));
+                    }
                 }
             }
             wl_pointer::Event::Leave { .. } => probe.report("leave"),
@@ -441,6 +515,21 @@ impl Dispatch<wl_callback::WlCallback, CursorShapeApplied> for Probe {
     ) {
         if let wl_callback::Event::Done { .. } = event {
             say(&format!("cursor-shape applied {}", applied.0));
+        }
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, IconFrame> for Probe {
+    fn event(
+        _: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _: &IconFrame,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            say("icon frame done");
         }
     }
 }
@@ -532,7 +621,12 @@ impl Dispatch<WlDataSource, ()> for Probe {
             wl_data_source::Event::Send { fd, .. } => {
                 let _ = std::fs::File::from(fd).write_all(b"input probe\n");
             }
-            wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished => {
+            wl_data_source::Event::Cancelled => {
+                say("drag cancelled");
+                source.destroy()
+            }
+            wl_data_source::Event::DndFinished => {
+                say("drag finished");
                 source.destroy()
             }
             _ => {}
@@ -652,7 +746,7 @@ impl Dispatch<XdgSurface, ()> for Probe {
                 // stays pending while the buffer already answers the resize.
                 let (width, height) = probe.toplevel_size;
                 let shm = probe.shm.clone().expect("wl_shm");
-                let full = solid_buffer(&shm, qh, width, height);
+                let full = solid_buffer(&shm, qh, width, height, [0x40, 0xC0, 0x40, 0xFF]);
                 if let Some(root) = &probe.surface {
                     root.attach(Some(&full.2), 0, 0);
                     root.damage_buffer(0, 0, width, height);
@@ -703,11 +797,13 @@ impl Dispatch<XdgToplevel, ()> for Probe {
 
 /// An opaque shm buffer of `width` by `height` pixels. The file behind the
 /// pool is returned with it and must outlive the buffer.
+/// A `width`x`height` ARGB8888 buffer filled with `pixel`'s little-endian bytes.
 fn solid_buffer(
     shm: &wl_shm::WlShm,
     qh: &QueueHandle<Probe>,
     width: i32,
     height: i32,
+    pixel: [u8; 4],
 ) -> (std::fs::File, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer) {
     let path = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("private runtime"))
         .join(format!("chonk-input-probe-{}-{width}x{height}", std::process::id()));
@@ -718,7 +814,7 @@ fn solid_buffer(
         .open(&path)
         .expect("exclusive scratch buffer");
     std::fs::remove_file(&path).expect("unlink scratch buffer");
-    let bytes: Vec<u8> = std::iter::repeat_n([0x40u8, 0xC0, 0x40, 0xFF], (width * height) as usize)
+    let bytes: Vec<u8> = std::iter::repeat_n(pixel, (width * height) as usize)
         .flatten()
         .collect();
     file.write_all(&bytes).expect("fill buffer");
@@ -807,7 +903,13 @@ fn main() {
         [1.0, 1.5, 2.0].contains(&scale),
         "supported test scales: 1, 1.5, 2"
     );
-    let connection = Connection::connect_to_env().expect("private Wayland connection");
+    let connection = match std::env::args().find_map(|arg| arg.strip_prefix("--socket=").map(str::to_owned)) {
+        Some(path) => Connection::from_socket(
+            std::os::unix::net::UnixStream::connect(&path).expect("the named Wayland socket accepts"),
+        )
+        .expect("Wayland connection over the named socket"),
+        None => Connection::connect_to_env().expect("private Wayland connection"),
+    };
     let mut queue = connection.new_event_queue::<Probe>();
     let qh = queue.handle();
     connection.display().get_registry(&qh, ());
@@ -816,6 +918,8 @@ fn main() {
         interactive: interactive::State::from_args(),
         inhibit: std::env::args().any(|arg| arg == "inhibit"),
         drag_mode: std::env::args().any(|arg| arg == "dnd"),
+        icon_mode: std::env::args().any(|arg| arg == "icon"),
+        scale,
         cursor_shape: cursor_shape_arg(),
         seat_version: if std::env::args().any(|arg| arg == "legacy-keyboard") {
             5
@@ -861,7 +965,7 @@ fn main() {
         .get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg.get_toplevel(&qh, ());
     probe.toplevel = Some(toplevel.clone());
-    let _inhibitor = probe.inhibit.then(|| {
+    probe.inhibitor = probe.inhibit.then(|| {
         probe
             .shortcuts_manager
             .as_ref()

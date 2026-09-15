@@ -165,7 +165,7 @@ impl<D: XdgToplevelTagHandler> Dispatch<XdgToplevelTagManagerV1, (), D> for XdgT
                     let data = states
                         .data_map
                         .get_or_insert_threadsafe(XdgToplevelTagSurfaceData::default);
-                    *data.tag.lock().unwrap() = Some(description.clone().into());
+                    *data.description.lock().unwrap() = Some(description.clone().into());
                 });
 
                 state.set_description(toplevel, description);

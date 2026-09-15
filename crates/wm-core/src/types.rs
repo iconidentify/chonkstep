@@ -273,6 +273,15 @@ pub enum BackendEvent<Win, Frame> {
     ///
     /// [`Backend::client_chrome`]: crate::Backend::client_chrome
     ChromeChanged(Win),
+    /// Metadata only the protocol publishers read changed: the
+    /// window's `xdg_toplevel_tag_v1` tag or description. Nothing the
+    /// window manager draws depends on either, so this is deliberately
+    /// not `TitleChanged`: that one repaints a titlebar, and returns
+    /// before bumping the protocol-state revision when the title is
+    /// unchanged, which it always is here. This only advances the
+    /// revision, so the IPC and foreign-toplevel publishers re-read a
+    /// window they had already published.
+    MetadataChanged(Win),
     /// Committed minimum/maximum sizes or resize increments changed.
     SizeHintsChanged(Win),
     /// The toplevel's transient parent changed. Backends emit this for
@@ -502,6 +511,33 @@ pub struct KeyboardConfig {
     /// installed, not on every reload. A user who turns it off keeps it
     /// off until the keymap itself is replaced.
     pub numlock_by_default: Option<bool>,
+}
+
+/// What the compositor does with `zwp_keyboard_shortcuts_inhibit_v1`:
+/// whether a focused client may take every chord at all, and which
+/// chord the user presses to take them back from one that has.
+///
+/// `escape` is `None` when the user unbound it; the compositor then
+/// has no keyboard route out of an inhibiting client and says so at
+/// startup. The default spelling lives with the other config
+/// defaults in `wm-config`, which is also what checks it against the
+/// preset keymaps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShortcutInhibitPolicy {
+    /// `allow_shortcut_inhibit`: whether any client is granted an
+    /// inhibitor. `false` answers every request with silence, which
+    /// the protocol reads as "not granted".
+    pub allow: bool,
+    /// `shortcuts_inhibit_escape`: the chord that suspends the active
+    /// inhibitor (and releases an XWayland keyboard grab), and resumes
+    /// a suspended one on its next press.
+    pub escape: Option<KeyCombo>,
+}
+
+impl Default for ShortcutInhibitPolicy {
+    fn default() -> Self {
+        Self { allow: true, escape: None }
+    }
 }
 
 /// When the compositor hides the pointer on its own: while the user types

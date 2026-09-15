@@ -72,6 +72,19 @@ impl<B: Backend> WindowManager<B> {
         self.hide_special_on_workspace_change = hide;
     }
 
+    /// Hyprland's `misc:focus_on_activate`: whether an application's
+    /// own `xdg_activation_v1` request is honoured without the user's
+    /// input behind it. Off, such a request marks the window urgent.
+    pub fn set_focus_on_activate(&mut self, focus: bool) {
+        self.focus_on_activate = focus;
+    }
+
+    /// The live `misc:focus_on_activate` value; see
+    /// [`Self::set_focus_on_activate`].
+    pub fn focus_on_activate(&self) -> bool {
+        self.focus_on_activate
+    }
+
     /// Every special workspace this session has created, by index and
     /// name. Indices are stable for the session: a special is never
     /// destroyed, so the wire can derive a lasting id from one.

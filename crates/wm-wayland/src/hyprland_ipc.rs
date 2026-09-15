@@ -128,12 +128,16 @@ pub(crate) fn init() -> Option<Server> {
 /// passed in. It reaches clients as `LOCK` in every monitor's
 /// `solitaryBlockedBy`, the one field Hyprland's IPC exposes lock
 /// state through and the one Omarchy's tooling reads.
+/// `shortcut_inhibit` is `Compositor::shortcut_inhibit_report`, which
+/// lives beside the grants for the same reason and is served only by
+/// `systeminfo`.
 pub(crate) fn snapshot(
     wm: &WindowManager<WaylandBackend>,
     locked: bool,
     session: &chonk_shell::startup::SessionState,
+    shortcut_inhibit: &str,
 ) -> Snapshot {
-    build_snapshot(wm, locked, session, true)
+    build_snapshot(wm, locked, session, Some(shortcut_inhibit))
 }
 
 /// Snapshot retained only by the event differ. Bindings are request-only:
@@ -144,16 +148,19 @@ pub(crate) fn event_snapshot(
     locked: bool,
     session: &chonk_shell::startup::SessionState,
 ) -> Snapshot {
-    build_snapshot(wm, locked, session, false)
+    build_snapshot(wm, locked, session, None)
 }
 
+/// `system_info` is the request-only half: `Some` carries the
+/// shortcut-inhibit report into it and asks for the bindings too.
 fn build_snapshot(
     wm: &WindowManager<WaylandBackend>,
     locked: bool,
     session: &chonk_shell::startup::SessionState,
-    include_bindings: bool,
+    system_info: Option<&str>,
 ) -> Snapshot {
     tracing::trace!("constructing Hyprland IPC snapshot");
+    let include_bindings = system_info.is_some();
     let monitors_info = wm.monitors();
 
     let monitors: Vec<Monitor> = monitors_info
@@ -266,6 +273,7 @@ fn build_snapshot(
         }
 
         let output_index = wm.client_output_index(id);
+        let record = wm.backend().windows.get(&client.window);
         let coordinates = OutputCoordinates::for_output(wm.backend(), output_index);
         let geometry = Rect::new(coordinates.logical_position(client.geometry.pos), coordinates.logical_size(client.geometry.size));
         let monitor = i32::try_from(output_index).unwrap_or(0);
@@ -292,8 +300,7 @@ fn build_snapshot(
             // gap would let a script signal the wrong process.
             pid: wm.backend().window_pid(client.window).and_then(|pid| i32::try_from(pid).ok()).unwrap_or(0),
             floating: !wm.is_layout_managed(id),
-            xwayland: wm.backend().windows.get(&client.window)
-                .is_some_and(|record| matches!(record.surface, ManagedSurface::X11(_))),
+            xwayland: record.is_some_and(|record| matches!(record.surface, ManagedSurface::X11(_))),
             fullscreen,
             maximized: client
                 .flags
@@ -307,8 +314,11 @@ fn build_snapshot(
             // stays awake, and a windowed Steam library does not.
             inhibiting_idle: wm.client_inhibits_idle(id),
             tags: client.tags.clone(),
-            xdg_tag: String::new(),
-            xdg_description: String::new(),
+            // `xdg_toplevel_tag_v1`, as the client set it and the
+            // backend bounded it; empty for a window that never set
+            // one, which is every XWayland window.
+            xdg_tag: record.and_then(|record| record.xdg_tag.clone()).unwrap_or_default(),
+            xdg_description: record.and_then(|record| record.xdg_description.clone()).unwrap_or_default(),
             focus_history_id,
         });
     }
@@ -460,15 +470,19 @@ fn build_snapshot(
         bindings,
         config_errors: session.config_diagnostics.clone(),
         devices,
-        system_info: if include_bindings {
+        system_info: if let Some(shortcut_inhibit) = system_info {
+            // The inhibitor line is the first clue for "my shortcuts
+            // stopped working": which client holds them, or that the
+            // user suspended a grant, or that grants are off.
             format!(
-                "ChonkStep {}\nsource: {}\nconfig: {}\nworkspace: {}\noutputs: {}\n{}",
+                "ChonkStep {}\nsource: {}\nconfig: {}\nworkspace: {}\noutputs: {}\nshortcut_inhibitor: {}\n{}",
                 env!("CARGO_PKG_VERSION"),
                 chonk_build_info::SOURCE_ID,
                 wm_config::config_path()
                     .map_or_else(|| "defaults (HOME unavailable)".to_string(), |path| path.display().to_string()),
                 wm.current_workspace() + 1,
                 monitors_info.len(),
+                shortcut_inhibit,
                 wm.backend().system_snapshot(),
             )
         } else {
@@ -1050,13 +1064,22 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
                 false
             }
         },
-        Action::ExecShell(command) => chonk_shell::spawn::spawn_detached("sh", &["-c", &command]).is_some(),
+        // `dispatch exec` is how Omarchy's launch-or-focus scripts start
+        // an application that is not yet running, so the launch carries
+        // an activation token the same way an `exec` bind's does: the
+        // token is what lets a single-instance application raise the
+        // window it already has when the script's guess was wrong.
+        Action::ExecShell(command) => {
+            let env = chonk_shell::spawn::activation_env(wm.backend_mut().create_activation_token());
+            chonk_shell::spawn::spawn_detached_with_env("sh", &["-c", &command], &env, &[]).is_some()
+        }
         Action::ExecArgv(argv) => {
             let Some((program, args)) = argv.split_first() else {
                 return false;
             };
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            chonk_shell::spawn::spawn_detached(program, &args).is_some()
+            let env = chonk_shell::spawn::activation_env(wm.backend_mut().create_activation_token());
+            chonk_shell::spawn::spawn_detached_with_env(program, &args, &env, &[]).is_some()
         }
     }
 }

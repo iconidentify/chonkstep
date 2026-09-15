@@ -74,7 +74,7 @@ use smithay::utils::{Size as SSize, Transform};
 use wm_core::WindowType;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
-use crate::renderer::{build_scene, SceneElement};
+use crate::renderer::{build_scene, SceneElement, ScenePurpose};
 use crate::state::{Compositor, Graphics, WaylandBackend, WindowRecord, WlWindowId};
 
 /// Longest edge of a stored snapshot when nobody has asked for more.
@@ -300,6 +300,13 @@ fn capture_output(comp: &mut Compositor) -> Result<PendingImage, String> {
         // No viewport offset: the capture *is* the global space, so
         // every element stays at the coordinate the ledger holds it at.
         Rect::new(Point::new(0, 0), size),
+        // The marker is the on-screen readback: a `no_screen_share`
+        // window appears in it exactly as it does on the output, which
+        // is what makes it the one image a headless verifier can hold
+        // the redaction against. Reaching it takes a write into the
+        // user's own state directory, so it hides nothing a capture
+        // client could not already read.
+        ScenePurpose::Display,
     );
     // Diagnostic marker captures what the user sees, including capture chrome.
     // User exports and protocol screencopy deliberately do not add this layer.
@@ -335,6 +342,14 @@ pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window:
         let record = backend.windows.get(&window).filter(|r| r.mapped)?;
         let surface = record.surface.wl_surface()?;
         let mut elements = Vec::new();
+        // A window screenshot of a `no_screen_share` window is a solid
+        // image of the frame's size - delivered, not refused, so the
+        // tool saves and publishes it like any other and nothing has
+        // to explain a failure.
+        if record.capture_redacted {
+            crate::renderer::push_capture_redaction(&mut elements, record, whole_target(viewport.size));
+            return render_offscreen_pending(renderer, &mut elements, viewport.size, 1.0, Color32F::new(0.0, 0.0, 0.0, 0.0));
+        }
         let frame = backend.frames.values().find(|f|f.window==window && f.mapped);
         let effects = frame.and_then(|f|f.effects.as_ref());
         let shape = crate::rounded::translated_shape(effects.and_then(|e|e.shape),
@@ -366,9 +381,16 @@ pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window:
         }
         (elements, Color32F::new(0.0, 0.0, 0.0, 0.0))
     } else {
-        build_scene(wm.backend(), renderer, *pointer_location, &smithay::input::pointer::CursorImageStatus::Hidden, &[], cursors, viewport)
+        build_scene(wm.backend(), renderer, *pointer_location, &smithay::input::pointer::CursorImageStatus::Hidden, &[], cursors, viewport,
+            ScenePurpose::Capture)
     };
     render_offscreen_pending(renderer, &mut elements, viewport.size, 1.0, clear_color)
+}
+
+/// A capture target's whole area, for the one quad a single-window
+/// capture of a redacted window consists of.
+fn whole_target(size: Size) -> smithay::utils::Rectangle<i32, Physical> {
+    smithay::utils::Rectangle::from_size((size.w.min(i32::MAX as u32) as i32, size.h.min(i32::MAX as u32) as i32).into())
 }
 
 /// The windows whose snapshot is stale - at most
@@ -527,14 +549,14 @@ pub(crate) fn capture_window_full(
     window: WlWindowId,
     paint_cursor: bool,
 ) -> Option<PendingImage> {
-    let (surface, viewport, offset, factor) = {
+    let (surface, viewport, offset, factor, redacted) = {
         let backend = comp.wm.backend();
         let record = backend.windows.get(&window)?;
         if !record.mapped || !record.surface.alive() {
             return None;
         }
         let (offset, factor) = presentation_offset(backend, window, record);
-        (record.surface.wl_surface()?, record.content, offset, factor)
+        (record.surface.wl_surface()?, record.content, offset, factor, record.capture_redacted)
     };
     let Compositor { wm, graphics, pointer_location, cursor_status, cursors, .. } = comp;
     let renderer = graphics_renderer(graphics);
@@ -550,19 +572,30 @@ pub(crate) fn capture_window_full(
             viewport,
         );
     }
-    let surface_element_start = elements.len();
-    crate::renderer::push_surface_tree_alpha(
-        &mut elements,
-        renderer,
-        &surface,
-        scaled_offset(offset, 1.0),
-        factor,
-        1.0,
-        Kind::Unspecified,
-        1.0,
-    );
-    if elements.len() == surface_element_start {
-        return None;
+    // "Share this window" on a `no_screen_share` window delivers a
+    // solid image of the window's size rather than failing the frame:
+    // a sharing client reports a failure and retries, and would keep
+    // retrying for as long as the window is up. The cursor, when
+    // asked for, is still drawn over it - the pointer is not a secret.
+    if redacted {
+        if let Some(record) = wm.backend().windows.get(&window) {
+            crate::renderer::push_capture_redaction(&mut elements, record, whole_target(viewport.size));
+        }
+    } else {
+        let surface_element_start = elements.len();
+        crate::renderer::push_surface_tree_alpha(
+            &mut elements,
+            renderer,
+            &surface,
+            scaled_offset(offset, 1.0),
+            factor,
+            1.0,
+            Kind::Unspecified,
+            1.0,
+        );
+        if elements.len() == surface_element_start {
+            return None;
+        }
     }
     render_offscreen_pending(
         renderer,

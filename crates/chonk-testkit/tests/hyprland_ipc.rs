@@ -822,6 +822,60 @@ fn a_real_window_appears_in_the_stream_and_the_client_list() {
     assert_eq!(entry["size"].as_array().map(Vec::len), Some(2), "size is [w, h]");
 }
 
+/// `xdg_toplevel_tag_v1` reaches `j/clients`. The probe tags its
+/// window and then describes it before the first commit, the way a
+/// real client does, and both come back under Hyprland's names — the
+/// global was advertised for a long time while every value was thrown
+/// away. A retag after the map is protocol-only metadata: nothing
+/// repaints, but the publishers must still notice it on the next pass.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn an_xdg_toplevel_tag_reaches_the_client_list_and_follows_a_retag() {
+    let mut session = boot("hypr-ipc-xdg-tag");
+    let dir = socket_dir(&session);
+    let probe = profile_binary("chonk-fullscreen-probe").expect("cargo build -p chonk-testkit builds the probe");
+    session
+        .launch(probe.to_str().unwrap(), &["xdg-tag-probe", "chonk-fullscreen-probe", "xdg-tag"])
+        .expect("the probe launches");
+    let window = session.wait_for_window("xdg-tag-probe").expect("the probe maps");
+    let probe_entry = |dir: &Path| {
+        let clients = json(dir, "j/clients");
+        clients
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|client| client["title"].as_str() == Some("xdg-tag-probe"))
+            .cloned()
+            .unwrap_or_else(|| panic!("the probe is missing from j/clients: {clients}"))
+    };
+
+    let entry = probe_entry(&dir);
+    assert_eq!(entry["xdgTag"].as_str(), Some("probe-main"), "the tag set before the first commit: {entry}");
+    assert_eq!(
+        entry["xdgDescription"].as_str(),
+        Some("Probe window"),
+        "the description set after the tag, without displacing it: {entry}"
+    );
+
+    // Retag the mapped window through the probe's control. The click
+    // puts the seat's keyboard focus where the injected key goes.
+    let door = session.door();
+    door.click(window.x as f64 + window.w as f64 / 2.0, window.y as f64 + window.h as f64 / 2.0)
+        .expect("a click lands on the probe");
+    door.barrier().expect("the click settles");
+    door.tap_key(keys::T).expect("the retag key reaches the probe");
+    poll_until(EVENT, "the probe to send the retag", || {
+        session.client_log("chonk-fullscreen-probe").contains("xdg tag set to \"probe-retagged\"").then_some(())
+    })
+    .expect("the probe retags on t");
+    poll_until(EVENT, "the retag to reach j/clients", || {
+        (probe_entry(&dir)["xdgTag"].as_str() == Some("probe-retagged")).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}: {}", probe_entry(&dir)));
+    let entry = probe_entry(&dir);
+    assert_eq!(entry["xdgDescription"].as_str(), Some("Probe window"), "a retag leaves the description alone: {entry}");
+}
+
 #[test]
 #[ignore = "needs a Wayland session to nest inside"]
 fn foreign_toplevel_mapping_returns_the_same_live_ipc_address() {

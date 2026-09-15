@@ -883,7 +883,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             let _ = stream.write_all(reply.as_bytes());
         }
         Some("activation-tokens") => {
-            let count = comp.core_protocols.activation.tokens().count();
+            let count = comp.wm.backend().activation.tokens().count();
             let _ = stream.write_all(format!("activation-tokens {count}\n").as_bytes());
         }
         Some("protocol-ledgers") => {

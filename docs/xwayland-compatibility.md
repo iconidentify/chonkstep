@@ -353,10 +353,18 @@ of a bridge — so dragging a file from an X11 file manager into a Wayland
 application, or the reverse, does nothing. Dragging between two X11
 applications works, because that is the X server's own business and chonkstep
 is not in the path. Dragging between two native Wayland clients works through
-smithay's grab machinery, with one visible defect: **the drag icon is not
-drawn**, so the pointer carries nothing visible while the drag is in flight
-(`crates/wm-wayland/src/xdg.rs` — the icon surface arrives and is currently
-unused).
+smithay's grab machinery, and the icon a client passes to `start_drag` (a file
+thumbnail, a link preview) is carried under the pointer for the life of the
+drag, at the offset its `attach` dx/dy and `wl_surface.offset` commits ask
+for, and removed on drop, on cancel and when the session locks. The icon
+arrives in `crates/wm-wayland/src/selection.rs`'s `started` handler and is
+drawn by `renderer.rs`'s `push_dnd_icon` directly beneath the cursor; it is
+never hit-tested, so the drop lands on whatever is under it. A drag started by
+touch carries its icon under the finger instead. Like the cursor surface, the
+icon is included in every output capture — screencopy with or without its
+cursor overlay, the capture tool — because it is what the screen shows;
+per-window captures draw only that window. An X11 drag's icon is an X window
+and is drawn like any other.
 
 ## Cursors
 
@@ -474,7 +482,8 @@ shows minimize and maximize because the session publishes GNOME's
 `button-layout` as `appmenu:minimize,maximize,close` wherever the stock
 `appmenu:close` is still in place. See `crates/wm-wayland/src/decoration.rs`.
 
-**Drag icons.** Not drawn during a native Wayland drag.
+**Drag icons.** Drawn under the pointer during a native Wayland drag, offset
+as committed, and removed when the drag ends (see "Drag and drop" above).
 
 **Input methods.** No `text-input`/`input-method` protocols and nothing sets
 `XMODIFIERS`, so ibus and fcitx do not work for any client. CJK and compose-

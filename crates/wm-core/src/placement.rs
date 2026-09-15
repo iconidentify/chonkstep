@@ -329,6 +329,11 @@ pub struct WindowRuleDecision {
     /// Leave this window undimmed when `dim_inactive` darkens the
     /// unfocused ones (`no_dim`).
     pub no_dim: bool,
+    /// Never show this window's pixels to a screen share, recording or
+    /// screenshot (`no_screen_share`): every capture the compositor
+    /// renders draws an opaque rectangle where the window is. What the
+    /// user sees on screen is unchanged.
+    pub no_screen_share: bool,
 }
 
 /// A `workspace` window rule: the destination and whether the window
@@ -420,16 +425,19 @@ pub struct RulePlacement {
 /// the question and the moment it is asked, and somebody else owns the
 /// answer.
 ///
-/// `class` and `title` are the window's identity at map time, both
-/// possibly empty. An implementation must be total and cheap: it is
-/// called once per mapped window, on the compositor's own thread.
+/// `class`, `title` and `xdg_tag` are the window's identity at map
+/// time, each possibly empty — the tag is `xdg_toplevel_tag_v1`'s,
+/// the application's own name for one of its windows, and is empty
+/// for every window whose client never set one. An implementation
+/// must be total and cheap: it is called once per mapped window, on
+/// the compositor's own thread.
 pub trait FloatPolicy: std::fmt::Debug + Send + Sync {
-    fn decision_for(&self, class: &str, title: &str) -> Option<FloatDecision>;
+    fn decision_for(&self, class: &str, title: &str, xdg_tag: &str) -> Option<FloatDecision>;
 
     /// Answers the non-placement half of the same identity rules.
     /// Existing/custom policies remain source-compatible and simply
     /// make no such decisions.
-    fn window_decision_for(&self, class: &str, _title: &str) -> WindowRuleDecision {
+    fn window_decision_for(&self, class: &str, _title: &str, _xdg_tag: &str) -> WindowRuleDecision {
         WindowRuleDecision::for_identity(class)
     }
 
@@ -439,7 +447,13 @@ pub trait FloatPolicy: std::fmt::Debug + Send + Sync {
     /// rule says so, the position — which replaces centering.
     /// Existing policies keep answering `None` and are placed as
     /// before.
-    fn placement_for(&self, _class: &str, _title: &str, _metrics: &RuleMetrics) -> Option<RulePlacement> {
+    fn placement_for(
+        &self,
+        _class: &str,
+        _title: &str,
+        _xdg_tag: &str,
+        _metrics: &RuleMetrics,
+    ) -> Option<RulePlacement> {
         None
     }
 }
@@ -458,16 +472,18 @@ pub trait FloatPolicy: std::fmt::Debug + Send + Sync {
 /// any `Some` as "this window is placed by rule, not by the client",
 /// so returning its own size is how "move it, do not resize it" is
 /// said in this signature.
+#[allow(clippy::too_many_arguments)] // The three identity strings the policy matches on, then the geometry.
 pub fn float_override_for(
     policy: Option<&dyn FloatPolicy>,
     class: &str,
     title: &str,
+    xdg_tag: &str,
     workarea: Rect,
     chrome: Size,
     own: Size,
     scale: f32,
 ) -> Option<Size> {
-    let Some(decision) = policy.and_then(|policy| policy.decision_for(class, title)) else {
+    let Some(decision) = policy.and_then(|policy| policy.decision_for(class, title, xdg_tag)) else {
         return float_override(class, workarea, chrome, scale);
     };
     match decision.size {

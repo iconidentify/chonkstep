@@ -112,6 +112,18 @@ pub trait Backend {
     /// workspace the user finds on unlock.
     fn session_locked(&self) -> bool { false }
 
+    /// A fresh, single-use `xdg_activation_v1` token for a command this
+    /// desktop is about to launch on the user's behalf — an `exec`
+    /// bind, a launcher pick, a menu action. Handed to the child as
+    /// `XDG_ACTIVATION_TOKEN`, it lets an already-running single-instance
+    /// application raise its window when re-launched: the compositor
+    /// minted the token, so the activation is known to be the user's
+    /// own doing and is honoured where a client's self-made token would
+    /// only mark the window urgent. `None` on a backend with no
+    /// activation protocol of its own, in which case the child is
+    /// launched without one, as before.
+    fn create_activation_token(&mut self) -> Option<String> { None }
+
     /// Establish output clipping before staging final geometry, then animate
     /// live surfaces from the old frame without intermediate configures.
     /// `clip` confines managed windows to their output workarea. Backends without native transforms settle
@@ -365,6 +377,15 @@ pub trait Backend {
     // -- properties (ICCCM reads) ------------------------------------------
     fn window_title(&self, window: Self::WindowId) -> Option<String>;
     fn window_class(&self, window: Self::WindowId) -> Option<WmClass>;
+    /// The window's `xdg_toplevel_tag_v1` tag: an application's own
+    /// stable, untranslated name for one of its windows (`main`,
+    /// `preferences`), which is what a `match:xdg_tag` window rule
+    /// reads. `None` for a window that never set one — every X11
+    /// window, since the protocol has no X11 counterpart, which is why
+    /// the default answers for backends that cannot see one.
+    fn window_xdg_tag(&self, _window: Self::WindowId) -> Option<String> {
+        None
+    }
     /// `_NET_WM_PID` — lets the shell correlate a freshly mapped window
     /// with the specific process it just spawned (e.g. to apply a
     /// default size only to *that* window, not any other window of the
@@ -650,6 +671,11 @@ pub trait Backend {
     /// this verb existed the reload path answered `ok` and changed
     /// nothing.
     fn set_keyboard_config(&mut self, _config: KeyboardConfig) {}
+    /// The shortcut-inhibit policy: whether a focused client may take
+    /// every chord, and the chord that takes them back. Defaulted to a
+    /// no-op because only the Wayland session implements the inhibit
+    /// protocol; X11 has its own grab semantics and no such request.
+    fn set_shortcut_inhibit_policy(&mut self, _policy: crate::ShortcutInhibitPolicy) {}
     /// Applies libinput-owned pointer settings where the backend owns
     /// those devices. X11 leaves them to its display server.
     fn set_pointer_config(&mut self, _config: crate::PointerConfig) {}
@@ -693,6 +719,14 @@ pub trait Backend {
         _no_dim: bool,
     ) {
     }
+    /// Tells the backend whether a managed window mapped under a
+    /// `no_screen_share` rule, in which case every capture the backend
+    /// renders (a portal screen share, a recording, a screenshot)
+    /// shows an opaque rectangle in its place while the screen itself
+    /// shows the window as usual. Configuration only: no client
+    /// request reaches this, so a client cannot clear it. Defaulted to
+    /// a no-op for a backend that captures nothing.
+    fn set_capture_redacted(&mut self, _window: Self::WindowId, _redacted: bool) {}
     /// Forces a window opaque for the rest of the session, or lets its
     /// rule apply again: `Some(true)`, `Some(false)`, or `None` to
     /// toggle. Answers whether the backend models the state at all,

@@ -817,6 +817,29 @@ pub struct Config {
     /// Off by default, as in Hyprland: the scratchpad stays where it
     /// was dropped until the same chord takes it away.
     pub hide_special_on_workspace_change: bool,
+    /// Whether a focused client may take every chord through
+    /// `zwp_keyboard_shortcuts_inhibit_v1` — a VM console or a remote
+    /// desktop viewer asking to receive the chords the host would
+    /// otherwise take. On by default; `false` answers every request
+    /// with no grant, which is Hyprland's
+    /// `binds:disable_keybind_grabbing = true`.
+    pub allow_shortcut_inhibit: bool,
+    /// The chord that takes the shortcuts back from a client holding an
+    /// inhibitor (and releases an XWayland keyboard grab), and hands
+    /// them back to that client on its next press. `None` unbinds it —
+    /// then nothing on the keyboard but a VT switch leaves an
+    /// inhibiting fullscreen client. Defaults to
+    /// [`DEFAULT_SHORTCUTS_INHIBIT_ESCAPE`], which no preset keymap
+    /// binds.
+    pub shortcuts_inhibit_escape: Option<KeyCombo>,
+    /// Whether an application's own `xdg_activation_v1` request takes
+    /// the keyboard even when no input of the user's stands behind it —
+    /// Hyprland's `misc:focus_on_activate`, which Omarchy turns on.
+    /// Off by default, as in Hyprland: a request the user did not
+    /// cause marks the window urgent instead of stealing the keys the
+    /// user is typing. A `focus_on_activate` window rule still refuses
+    /// per window whatever this says.
+    pub focus_on_activate: bool,
     /// Relaunch the previous session's windows at startup, restoring
     /// each one's geometry, workspace and shape flags from the layout
     /// file the shell keeps. Off by default — a session that spawns
@@ -963,6 +986,14 @@ pub const DEFAULT_TERMINAL_FONT_PX: f32 = 18.0;
 /// says nothing: Alt, as Window Maker has always bound it.
 pub const DEFAULT_DRAG_MODIFIER: Modifiers = Modifiers::ALT;
 
+/// The chord that takes the keyboard shortcuts back from a client
+/// holding a `zwp_keyboard_shortcuts_inhibit_v1` grant, when the
+/// config says nothing. Chosen to be free in every preset keymap:
+/// Omarchy has the system menu on `super+escape`, chonkstep stops a
+/// recording on `super+ctrl+escape`, and the Mac profile force-quits
+/// on `cmd+opt+escape`; `preset_doc.rs` keeps it that way.
+pub const DEFAULT_SHORTCUTS_INHIBIT_ESCAPE: &str = "super+shift+escape";
+
 /// The range a `terminal_font_px` value has to land in. Below the floor
 /// the terminal is unreadable; above the ceiling a default-sized window
 /// has room for almost no columns. Both ends are rejected loudly rather
@@ -990,6 +1021,9 @@ impl Config {
             focus_follows_mouse: false,
             autoraise: true,
             hide_special_on_workspace_change: false,
+            allow_shortcut_inhibit: true,
+            shortcuts_inhibit_escape: parse_key(DEFAULT_SHORTCUTS_INHIBIT_ESCAPE),
+            focus_on_activate: false,
             scale: None,
             theme: None,
             appearance: None,
@@ -1108,6 +1142,8 @@ impl Config {
             "terminal_font_px",
             "decorations",
             "drag_modifier",
+            "allow_shortcut_inhibit",
+            "shortcuts_inhibit_escape",
             "restore_session",
             "lock_command",
             "commands",
@@ -1354,6 +1390,17 @@ pub fn parse_key(spec: &str) -> Option<KeyCombo> {
     }
     // Modifier-only specs ("alt+shift") fall through with no keysym.
     keysym.map(|keysym| KeyCombo { keysym, modifiers })
+}
+
+/// `shortcuts_inhibit_escape`'s value: `Some(None)` for `"none"`,
+/// `Some(Some(combo))` for a chord that parses, `None` for anything
+/// else — the same three-way answer `drag_modifier_from_name` gives,
+/// so the caller can tell "unbound on purpose" from "typo".
+fn shortcuts_inhibit_escape_from_spec(spec: &str) -> Option<Option<KeyCombo>> {
+    if spec.trim().eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    parse_key(spec).map(Some)
 }
 
 /// Applies a `[keybindings]` table on top of the current binding list,
@@ -1997,6 +2044,30 @@ pub fn parse_with(
                     "config: drag_modifier must be a string, keeping default"
                 ),
             },
+            "allow_shortcut_inhibit" => match value {
+                toml::Value::Boolean(allow) => config.allow_shortcut_inhibit = *allow,
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: allow_shortcut_inhibit must be a boolean, keeping default"
+                ),
+            },
+            // A chord, or `"none"` to have no keyboard route out of an
+            // inhibiting client at all. A spec that does not parse
+            // keeps the default rather than silently unbinding the
+            // one chord that works while every other is inhibited.
+            "shortcuts_inhibit_escape" => match value {
+                toml::Value::String(spec) => match shortcuts_inhibit_escape_from_spec(spec) {
+                    Some(escape) => config.shortcuts_inhibit_escape = escape,
+                    None => tracing::warn!(
+                        value = %spec,
+                        "config: shortcuts_inhibit_escape must be a key spec or \"none\", keeping default"
+                    ),
+                },
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: shortcuts_inhibit_escape must be a string, keeping default"
+                ),
+            },
             "decorations" => match value {
                 toml::Value::Table(entries) => {
                     for (key, value) in entries {
@@ -2139,9 +2210,15 @@ pub fn parse_with(
             | "minimized_previews"
             | "hyprland_config"
             | "window_opacity"
+            | "allow_shortcut_inhibit"
                 if value.is_bool() =>
             {
                 Some(key.as_str())
+            }
+            "shortcuts_inhibit_escape"
+                if value.as_str().and_then(shortcuts_inhibit_escape_from_spec).is_some() =>
+            {
+                Some("shortcuts_inhibit_escape")
             }
             "scale" if scale_from_value(value).is_some() => Some("scale"),
             "theme" if value.is_str() => Some("theme"),
@@ -2376,6 +2453,8 @@ pub fn effective_config_report(config: &Config) -> String {
     line("edge_resistance", config.edge_resistance.to_string());
     line("terminal_font_px", config.terminal_font_px.to_string());
     line("drag_modifier", format!("{:?}", config.drag_modifier));
+    line("allow_shortcut_inhibit", config.allow_shortcut_inhibit.to_string());
+    line("shortcuts_inhibit_escape", format!("{:?}", config.shortcuts_inhibit_escape));
     line("restore_session", config.restore_session.to_string());
     line("omarchy_bar", format!("{:?}", config.omarchy_bar));
     line("input", format!("{:?}", config.input));
@@ -3102,6 +3181,35 @@ numlock_by_default = false
         // Wrong type keeps the default rather than breaking startup,
         // the same contract `focus_follows_mouse` has.
         assert!(parse("autoraise = \"no\"").unwrap().autoraise);
+    }
+
+    /// The inhibit policy: granted by default with a way back on the
+    /// keyboard, each half independently settable, and a spec that
+    /// does not parse keeps the default rather than unbinding the one
+    /// chord that works while every other is inhibited.
+    #[test]
+    fn shortcut_inhibit_policy_defaults_and_overrides() {
+        let config = parse("").unwrap();
+        assert!(config.allow_shortcut_inhibit);
+        assert_eq!(config.shortcuts_inhibit_escape, parse_key(DEFAULT_SHORTCUTS_INHIBIT_ESCAPE));
+        assert!(config.shortcuts_inhibit_escape.is_some(), "the default escape chord must parse");
+
+        assert!(!parse("allow_shortcut_inhibit = false").unwrap().allow_shortcut_inhibit);
+        assert!(parse("allow_shortcut_inhibit = \"no\"").unwrap().allow_shortcut_inhibit, "wrong type keeps the default");
+
+        let rebound = parse("shortcuts_inhibit_escape = \"super+alt+backspace\"").unwrap();
+        assert_eq!(rebound.shortcuts_inhibit_escape, parse_key("super+alt+backspace"));
+        assert_eq!(rebound.provenance.get("shortcuts_inhibit_escape").map(String::as_str), Some("config file"));
+        assert_eq!(parse("shortcuts_inhibit_escape = \"none\"").unwrap().shortcuts_inhibit_escape, None);
+        assert_eq!(parse("shortcuts_inhibit_escape = \"NONE\"").unwrap().shortcuts_inhibit_escape, None);
+        let typo = parse("shortcuts_inhibit_escape = \"super+nosuchkey\"").unwrap();
+        assert_eq!(typo.shortcuts_inhibit_escape, parse_key(DEFAULT_SHORTCUTS_INHIBIT_ESCAPE));
+        assert_eq!(typo.provenance.get("shortcuts_inhibit_escape").map(String::as_str), Some("built-in"));
+        assert_eq!(parse("shortcuts_inhibit_escape = 7").unwrap().shortcuts_inhibit_escape, parse_key(DEFAULT_SHORTCUTS_INHIBIT_ESCAPE));
+
+        let report = effective_config_report(&parse("allow_shortcut_inhibit = false").unwrap());
+        assert!(report.contains("allow_shortcut_inhibit = false\t# config file"), "{report}");
+        assert!(report.contains("shortcuts_inhibit_escape = Some("), "{report}");
     }
 
     #[test]

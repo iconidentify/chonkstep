@@ -313,6 +313,59 @@ pub(crate) enum ManagedSurface {
     X11(X11Surface),
 }
 
+/// The surface a client asked to have carried under the pointer for
+/// the life of a drag: `wl_data_device.start_drag`'s icon, holding
+/// smithay's `dnd_icon` role. Set by `selection.rs`'s `started` and
+/// cleared by its `dropped`, which fires on every end of the grab —
+/// drop, cancel, and the `unset_grab` a session lock performs — so
+/// nothing here outlives the drag. Kept in the scene ledger beside the
+/// other surfaces the renderer composes (`ime_popups`,
+/// `lock_surfaces`) because the on-screen frame, every capture and the
+/// frame-callback drain all read the ledger and none of them reads
+/// the `Compositor`.
+///
+/// The icon is drawn and never hit-tested: the protocol ignores a drag
+/// icon's input region, and the drop target smithay's grab computes
+/// must be whatever is *under* the icon.
+#[derive(Debug)]
+pub(crate) struct DndIcon {
+    pub(crate) surface: WlSurface,
+    /// A drag preview can contain the originating window's secrets too.
+    pub(crate) capture_redacted: bool,
+    /// Where the icon's origin sits relative to the drag's hotspot, in
+    /// the icon's own surface-local units. Accumulated from every
+    /// `wl_surface.attach` dx/dy and `wl_surface.offset` the icon
+    /// commits (smithay folds both into `SurfaceAttributes::buffer_delta`,
+    /// which `xdg.rs`'s commit handler drains here), because each is
+    /// relative to the previous buffer's corner, not to the hotspot.
+    pub(crate) offset: SPoint<i32, Logical>,
+    /// The touch point carrying the drag, when a finger started it
+    /// (smithay starts a `DnDGrab` from either the pointer's or the
+    /// touch's implicit grab). `None` anchors the icon to the pointer.
+    /// Slot and its latest global position, kept current by
+    /// `input.rs`'s touch-motion handler.
+    pub(crate) touch: Option<(smithay::backend::input::TouchSlot, SPoint<f64, Logical>)>,
+}
+
+impl DndIcon {
+    /// Where the drag's hotspot is right now: the finger for a touch
+    /// drag, else the pointer.
+    pub(crate) fn anchor(&self, pointer_location: SPoint<f64, Logical>) -> SPoint<f64, Logical> {
+        self.touch.map_or(pointer_location, |(_, position)| position)
+    }
+
+    /// Folds one committed `buffer_delta` into the offset.
+    pub(crate) fn shift(&mut self, delta: SPoint<i32, Logical>) {
+        self.offset = Self::shifted(self.offset, delta);
+    }
+
+    /// `offset` moved by one more commit's delta. Saturating, since
+    /// both values are the client's to choose.
+    pub(crate) fn shifted(offset: SPoint<i32, Logical>, delta: SPoint<i32, Logical>) -> SPoint<i32, Logical> {
+        (offset.x.saturating_add(delta.x), offset.y.saturating_add(delta.y)).into()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InputDeviceRecord {
     pub id: String,
@@ -381,6 +434,16 @@ pub(crate) struct WindowRecord {
     /// reports so per-app shell behavior (dock matching, opacity
     /// rules) works identically on both stacks.
     pub app_id: Option<String>,
+    /// `xdg_toplevel_tag_v1`'s tag and description: the application's
+    /// own stable name for this window (`main`, `preferences`) and a
+    /// human-readable description of it. ChonkStep's own copies, kept
+    /// from the handler arguments and bounded before storage
+    /// (`core_protocols::MAX_TOPLEVEL_TAG_BYTES`); the Hyprland IPC
+    /// reports them as `xdgTag`/`xdgDescription`, and window rules
+    /// read the tag at map time. Always `None` for an XWayland window,
+    /// which has no such protocol.
+    pub xdg_tag: Option<String>,
+    pub xdg_description: Option<String>,
     /// Decoration policy class, decided at map time exactly as the X11
     /// backend decides it from `_NET_WM_WINDOW_TYPE`: override-redirect
     /// XWayland windows (menus, tooltips) come through as `Unmanaged`
@@ -475,6 +538,18 @@ pub(crate) struct WindowRecord {
     pub force_opaque: bool,
     /// `no_dim`: `dim_inactive` leaves this window alone.
     pub no_dim: bool,
+    /// `no_screen_share`: every capture the compositor renders (a
+    /// portal screen share, a screencopy recording, a screenshot) shows
+    /// an opaque rectangle where this window and its popups are, while
+    /// the output itself shows the window as usual. From configuration
+    /// only, through `Backend::set_capture_redacted`; no client request
+    /// can clear it.
+    pub capture_redacted: bool,
+    /// Stable id of the rectangle a capture draws in place of a
+    /// redacted window. Minted once so a `copy_with_damage` stream's
+    /// retained damage tracker sees one unchanging element rather than
+    /// a fresh one every frame - the same reason `dim_id` exists.
+    pub capture_redaction_id: smithay::backend::renderer::element::Id,
     /// Stable id of the quad drawn in front of this window while it is
     /// unfocused under `dim_inactive`. Minted once so the damage tracker
     /// sees one retained element that comes and goes rather than a
@@ -562,6 +637,8 @@ impl WindowRecord {
             space_clip_id: smithay::backend::renderer::element::Id::new(),
             title: None,
             app_id: None,
+            xdg_tag: None,
+            xdg_description: None,
             window_type: WindowType::Normal,
             parent: None,
             modal: false,
@@ -577,6 +654,8 @@ impl WindowRecord {
             opacity: None,
             force_opaque: false,
             no_dim: false,
+            capture_redacted: false,
+            capture_redaction_id: smithay::backend::renderer::element::Id::new(),
             dim_id: smithay::backend::renderer::element::Id::new(),
         }
     }
@@ -875,6 +954,16 @@ pub struct WaylandBackend {
     /// drains it on the next pass — the same shape every other
     /// deferred backend request in this file takes.
     pub(crate) pending_keyboard: Option<wm_core::KeyboardConfig>,
+    /// The shortcut-inhibit policy the shell last applied: whether a
+    /// focused client may take every chord, and the chord that takes
+    /// them back. Read by the inhibit handler in `core_protocols.rs`
+    /// and the key filter in `input.rs`. A ledger like
+    /// `pending_keyboard`, and for the same reason: the grants live on
+    /// `Compositor`, so a reload that turns grants off has an active
+    /// one to withdraw — `apply_shortcut_inhibit_policy` does that at
+    /// the top of the next dispatch pass when `_changed` says to.
+    pub(crate) shortcut_inhibit_policy: wm_core::ShortcutInhibitPolicy,
+    pub(crate) shortcut_inhibit_policy_changed: bool,
     pub(crate) pending_pointer: Option<wm_core::PointerConfig>,
     pub(crate) pointer_config: wm_core::PointerConfig,
     /// Which input devices are switched off by name, from the configuration
@@ -1018,6 +1107,9 @@ pub struct WaylandBackend {
     /// Live input-method candidate popups. Kept in the scene ledger so
     /// rendering and hit-testing consult the same collection.
     pub(crate) ime_popups: Vec<smithay::wayland::input_method::PopupSurface>,
+    /// The drag icon of the client drag in flight, if it offered one.
+    /// See [`DndIcon`].
+    pub(crate) dnd_icon: Option<DndIcon>,
     /// The union bounding box of [`WaylandBackend::monitors`] — what
     /// `Backend::screen_size` reports, and the space every rect in this
     /// ledger lives in. With one output it is that output's size, which
@@ -1196,6 +1288,16 @@ pub struct WaylandBackend {
     pub(crate) locked: bool,
     /// The lock client's surfaces, one per output it has covered.
     pub(crate) lock_surfaces: Vec<crate::lock::LockSurfaceEntry>,
+    /// `xdg_activation_v1`'s token ledger. On the backend rather than in
+    /// `CoreProtocols` because the shell mints tokens for the commands
+    /// it launches through `Backend::create_activation_token`, and the
+    /// backend is the only compositor state the shell can reach. The
+    /// policy that admits and redeems tokens stays in
+    /// `core_protocols.rs`.
+    pub(crate) activation: smithay::wayland::xdg_activation::XdgActivationState,
+    /// When the abandoned-token sweep next runs; see
+    /// `WaylandBackend::sweep_activation_tokens`.
+    pub(crate) next_activation_token_sweep: Instant,
     /// Buffered EWMH publishes waiting for `dispatch_pending` to flush
     /// them to the XWayland root — the record-now/act-later detour the
     /// `Backend::publish_*` verbs take for the reason `pending_focus`
@@ -1265,6 +1367,7 @@ impl WaylandBackend {
         let output_size = union_size(&monitors);
         let monitor_scales = vec![scale.max(0.125) as f64; monitors.len()];
         let monitor_outputs = vec![MonitorOutput::default(); monitors.len()];
+        let activation = smithay::wayland::xdg_activation::XdgActivationState::new::<Compositor>(&display_handle);
         Self {
             next_id: 1,
             windows: HashMap::new(),
@@ -1307,6 +1410,8 @@ impl WaylandBackend {
             stacking_dirty: false,
             xwayland_keyboard_grab: None,
             pending_keyboard: None,
+            shortcut_inhibit_policy: wm_core::ShortcutInhibitPolicy::default(),
+            shortcut_inhibit_policy_changed: false,
             pending_pointer: None,
             pointer_config: wm_core::PointerConfig::default(),
             input_device_states: Default::default(),
@@ -1318,6 +1423,7 @@ impl WaylandBackend {
             workspaces_dirty: true,
             input_devices: Vec::new(),
             ime_popups: Vec::new(),
+            dnd_icon: None,
             output_size,
             damage: true,
             full_damage_required: false,
@@ -1344,6 +1450,8 @@ impl WaylandBackend {
             layer_layout_dirty: true,
             idle_policy_dirty: true,
             locked: false,
+            activation,
+            next_activation_token_sweep: Instant::now() + crate::core_protocols::ACTIVATION_TOKEN_SWEEP_INTERVAL,
             lock_surfaces: Vec::new(),
             ewmh: crate::xewmh::EwmhLedger::default(),
         }
@@ -3386,6 +3494,7 @@ impl Compositor {
         crate::gesture_scene::tick(self);
         crate::layout_scene::tick(self);
         self.apply_pending_keyboard();
+        self.apply_shortcut_inhibit_policy();
         if self.wm.backend_mut().cursor_visibility.tick(dispatch_started) {
             self.wm.backend_mut().mark_damaged();
         }
@@ -3580,7 +3689,7 @@ impl Compositor {
         self.popups.cleanup();
         self.wm.backend_mut().reconcile_popup_roots();
         self.reconcile_cursor_visibility();
-        self.core_protocols.sweep_activation_tokens(Instant::now());
+        self.wm.backend_mut().sweep_activation_tokens(Instant::now());
         self.apply_pending_focus();
         // Beside the focus intent and for the same reason: a drag that
         // began or ended anywhere above has to reach the seat, and only
@@ -3928,10 +4037,12 @@ impl Compositor {
 
         let mut first_event_baselined = false;
         if socket_ready && server.has_request_clients() {
+            let shortcut_inhibit = self.shortcut_inhibit_report();
             let before = crate::hyprland_ipc::snapshot(
                 &self.wm,
                 self.session_lock.machine.locked(),
                 self.shell.session_state(),
+                &shortcut_inhibit,
             );
             if first_event_client {
                 // The event and request listeners can become readable
@@ -5629,6 +5740,21 @@ fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32,
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn drag_icon_offsets_accumulate_per_commit_and_saturate() {
+        // Each attach dx/dy is relative to the previous buffer, so two
+        // commits of (6, 10) leave the icon 12, 20 from the hotspot ...
+        let offset = DndIcon::shifted((0, 0).into(), (6, 10).into());
+        assert_eq!(DndIcon::shifted(offset, (6, 10).into()), SPoint::<i32, Logical>::from((12, 20)));
+        // ... a commit back by the same amount returns it, ...
+        assert_eq!(DndIcon::shifted(offset, (-6, -10).into()), SPoint::<i32, Logical>::from((0, 0)));
+        // ... and a client feeding extremes cannot overflow the sum.
+        assert_eq!(
+            DndIcon::shifted((i32::MAX, i32::MIN).into(), (1, -1).into()),
+            SPoint::<i32, Logical>::from((i32::MAX, i32::MIN))
+        );
+    }
 
     #[test]
     fn removing_an_output_unassigns_its_lock_surfaces_and_shifts_later_ones() {

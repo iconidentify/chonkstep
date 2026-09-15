@@ -10,6 +10,9 @@ use persistence::SelectionData;
 use std::os::fd::OwnedFd;
 
 use smithay::input::Seat;
+use smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::wayland::compositor::{with_states, SurfaceAttributes};
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
@@ -19,7 +22,7 @@ use smithay::wayland::selection::primary_selection::{
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::{delegate_data_device, delegate_primary_selection};
 
-use crate::state::Compositor;
+use crate::state::{Compositor, DndIcon};
 
 /// Reconcile existing native ownership once the asynchronous XWM is ready.
 /// Read the seat's authoritative source; do not retain duplicate MIME lists or
@@ -161,10 +164,67 @@ impl PrimarySelectionHandler for Compositor {
     }
 }
 
-// Defaults throughout: client-to-client DnD works through the seat's
-// own grab machinery; a rendered drag icon is a follow-up for the
-// renderer (the icon surface arrives in `started`, unused for now).
-impl ClientDndGrabHandler for Compositor {}
+/// Client-to-client DnD works through the seat's own grab machinery;
+/// what the compositor adds is the icon. The surface a client passes
+/// to `start_drag` arrives here with smithay's `dnd_icon` role and
+/// nothing else: drawing it under the pointer, damaging on its
+/// commits and answering its frame callbacks are all the renderer's
+/// job, keyed off the ledger entry these two hooks maintain.
+impl ClientDndGrabHandler for Compositor {
+    fn started(&mut self, _source: Option<WlDataSource>, icon: Option<WlSurface>, seat: Seat<Self>) {
+        let Some(surface) = icon else {
+            return;
+        };
+        // Smithay hands the drag to whichever implicit grab the serial
+        // names, the pointer's first (`data_device/device.rs`). The
+        // serial is not passed on, so the same preference is read
+        // back from the seat: a grabbed pointer means a button-held
+        // drag, and only otherwise does the touch's own grab — whose
+        // start data names the finger — make this a touch drag.
+        let (touch, origin) = if let Some(start) = seat.get_pointer().and_then(|pointer| pointer.grab_start_data()) {
+            (None, start.focus.map(|(focus, _)| focus.surface().clone()))
+        } else {
+            let start = seat.get_touch().and_then(|touch| touch.grab_start_data());
+            (start.as_ref().map(|start| (start.slot, start.location)),
+                start.and_then(|start| start.focus.map(|(focus, _)| focus.surface().clone())))
+        };
+        let capture_redacted = origin.is_some_and(|mut root| {
+            while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+                root = parent;
+            }
+            if let Some(popup_root) = self.popups.find_popup(&root)
+                .and_then(|popup| smithay::desktop::find_popup_root_surface(&popup).ok())
+            {
+                root = popup_root;
+            }
+            let backend = self.wm.backend();
+            backend.window_for_surface(&root).and_then(|id| backend.windows.get(&id))
+                .is_some_and(|record| record.capture_redacted)
+        });
+        // A client may commit the icon, offset included, before the
+        // `start_drag` that gives it its role; that delta is still in
+        // the surface's current state until its next commit, which is
+        // when `xdg.rs`'s commit handler takes over the accumulation.
+        let offset = with_states(&surface, |states| {
+            states.cached_state.get::<SurfaceAttributes>().current().buffer_delta.take()
+        })
+        .unwrap_or_default();
+        let backend = self.wm.backend_mut();
+        backend.dnd_icon = Some(DndIcon { surface, capture_redacted, offset, touch });
+        backend.mark_damaged();
+    }
+
+    /// Every end of a client drag lands here — the drop itself, the
+    /// cancel, and the `unset_grab` a session lock or a replaced grab
+    /// performs (`DnDGrab::unset` calls its `drop`) — so this is the
+    /// one place the icon leaves the scene.
+    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
+        let backend = self.wm.backend_mut();
+        if backend.dnd_icon.take().is_some() {
+            backend.mark_damaged();
+        }
+    }
+}
 impl ServerDndGrabHandler for Compositor {}
 
 delegate_data_device!(Compositor);

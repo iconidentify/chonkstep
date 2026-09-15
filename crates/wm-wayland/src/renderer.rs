@@ -199,6 +199,11 @@ pub(crate) fn clip_plane(elements: &mut Vec<SceneElement>, start: usize,
 /// target's framebuffer coordinates; its extent lets scene assembly
 /// omit objects wholly owned by another output (see the module docs).
 /// Called once per output per frame.
+///
+/// `purpose` says who the scene is for. Every caller states it, so a
+/// window under a `no_screen_share` rule can neither be redacted on
+/// the user's own screen by accident nor reach a capture by omission.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_scene(
     backend: &WaylandBackend,
     renderer: &mut GlesRenderer,
@@ -207,6 +212,7 @@ pub(crate) fn build_scene(
     tablet_cursors: &[crate::input::TabletCursor],
     cursors: &crate::state::CursorSet,
     viewport: Rect,
+    purpose: ScenePurpose,
 ) -> (Vec<SceneElement>, Color32F) {
     let mut elements = Vec::new();
     let clear_color = build_scene_into(
@@ -218,8 +224,142 @@ pub(crate) fn build_scene(
         tablet_cursors,
         cursors,
         viewport,
+        purpose,
     );
     (elements, clear_color)
+}
+
+/// Who a scene is assembled for.
+///
+/// The one difference between the two is a window under a
+/// `no_screen_share` rule (`WindowRecord::capture_redacted`): the
+/// output shows it, a capture shows an opaque rectangle in its place.
+/// Everything else - stacking, hit-test order, the lock scene - is
+/// identical, which is what lets one scene builder serve both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScenePurpose {
+    /// The output's own frame: everything as the user sees it.
+    Display,
+    /// A screen share, recording or screenshot rendered offscreen:
+    /// screencopy, ext-image-copy-capture, the built-in capture tool.
+    Capture,
+}
+
+impl ScenePurpose {
+    /// Whether a scene for this purpose draws `record` as a redaction
+    /// rectangle instead of its content.
+    pub(crate) fn redacts(self, record: &WindowRecord) -> bool {
+        self == ScenePurpose::Capture && record.capture_redacted
+    }
+}
+
+/// What a capture shows where a redacted window is: an opaque
+/// mid-grey, visibly a placeholder rather than a hole in the picture
+/// or a black window nobody can tell from a crashed one. Its channels
+/// are 51 exactly at 8 bits, so a test can name the colour.
+pub(crate) const CAPTURE_REDACTION_COLOR: Color32F = Color32F::new(0.2, 0.2, 0.2, 1.0);
+
+/// Pushes the single element a capture shows for a redacted window:
+/// one opaque quad over `bounds`, in target coordinates. Its id is the
+/// record's, minted once, and its commit never advances, so a
+/// `copy_with_damage` stream's retained damage tracker sees the same
+/// unchanged element every frame however often the client behind it
+/// commits.
+pub(crate) fn push_capture_redaction(
+    elements: &mut Vec<SceneElement>,
+    record: &WindowRecord,
+    bounds: SRect<i32, Physical>,
+) {
+    if bounds.size.w <= 0 || bounds.size.h <= 0 {
+        return;
+    }
+    elements.push(
+        SolidColorRenderElement::new(
+            record.capture_redaction_id.clone(),
+            bounds,
+            CommitCounter::default(),
+            CAPTURE_REDACTION_COLOR,
+            Kind::Unspecified,
+        )
+        .into(),
+    );
+}
+
+/// The rectangle `record`'s popups would be drawn in, or `None` when it
+/// has none. `origin` is where the window's own surface tree is
+/// anchored, in target coordinates; each popup's surface-local offset
+/// converts by `offset_scale` and its tree by its own committed scale
+/// times `stretch` - the arithmetic `push_window_content` and the
+/// Overview's scaled presentation position popups with, so a
+/// redaction covers exactly what they would have drawn. Widened by a
+/// pixel on every side so rounding can never leave a sliver of a menu
+/// showing at its edge.
+pub(crate) fn popup_extent(
+    backend: &WaylandBackend,
+    record: &WindowRecord,
+    surface: &WlSurface,
+    origin: SPoint<i32, Physical>,
+    offset_scale: Scale<f64>,
+    stretch: Scale<f64>,
+) -> Option<SRect<i32, Physical>> {
+    let mut extent: Option<SRect<i32, Physical>> = None;
+    for (popup, offset) in backend.popups_for_surface(surface) {
+        let popup_surface = popup.wl_surface();
+        let popup_factor = crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(popup_surface),
+            backend.window_output_scale(record),
+        );
+        let at = (
+            origin.x.saturating_add((f64::from(offset.x) * offset_scale.x).round() as i32),
+            origin.y.saturating_add((f64::from(offset.y) * offset_scale.y).round() as i32),
+        );
+        let logical = bbox_from_surface_tree(popup_surface, (0, 0));
+        let (sx, sy) = (popup_factor * stretch.x, popup_factor * stretch.y);
+        let rect = SRect::<i32, Physical>::new(
+            (
+                at.0.saturating_add(crate::xdg::scale_length(logical.loc.x, sx)).saturating_sub(1),
+                at.1.saturating_add(crate::xdg::scale_length(logical.loc.y, sy)).saturating_sub(1),
+            )
+                .into(),
+            (
+                crate::xdg::scale_length(logical.size.w, sx).max(0).saturating_add(2),
+                crate::xdg::scale_length(logical.size.h, sy).max(0).saturating_add(2),
+            )
+                .into(),
+        );
+        extent = Some(extent.map_or(rect, |extent| extent.merge(rect)));
+    }
+    extent
+}
+
+/// The stacking walk's substitute for a redacted window, framed or
+/// not: the redaction quad over `bounds` (the frame's visual rectangle
+/// or the bare content rect, viewport-relative) grown to take in the
+/// window's popups, pushed at the same place in the element list the
+/// content, chrome and popups would have occupied. Nothing of the
+/// window is imported: the rectangle is not drawn *over* it.
+fn push_window_redaction(
+    elements: &mut Vec<SceneElement>,
+    backend: &WaylandBackend,
+    record: &WindowRecord,
+    bounds: Rect,
+    viewport: Rect,
+) {
+    let mut area = SRect::<i32, Physical>::new(
+        (bounds.pos.x, bounds.pos.y).into(),
+        (bounds.size.w.min(i32::MAX as u32) as i32, bounds.size.h.min(i32::MAX as u32) as i32).into(),
+    );
+    if let Some(surface) = record.surface.wl_surface() {
+        let origin = SPoint::<i32, Physical>::from((
+            record.content.pos.x.saturating_sub(record.content_offset.x) - viewport.pos.x,
+            record.content.pos.y.saturating_sub(record.content_offset.y) - viewport.pos.y,
+        ));
+        let factor = backend.window_surface_scale(record);
+        if let Some(popups) = popup_extent(backend, record, &surface, origin, Scale::from(factor), Scale::from(1.0)) {
+            area = area.merge(popups);
+        }
+    }
+    push_capture_redaction(elements, record, area);
 }
 
 /// Rebuilds a scene in caller-owned storage, retaining the vector's
@@ -239,6 +379,7 @@ pub(crate) fn build_scene_into(
     tablet_cursors: &[crate::input::TabletCursor],
     cursors: &crate::state::CursorSet,
     viewport: Rect,
+    purpose: ScenePurpose,
 ) -> Color32F {
     // Elements are assembled FRONT to BACK — the damage tracker's
     // convention (first element occludes later ones) — so this walk is
@@ -254,6 +395,9 @@ pub(crate) fn build_scene_into(
     for tool in tablet_cursors {
         push_cursor_elements(elements, renderer, backend, tool.position, &tool.status, cursors, viewport);
     }
+    // Directly beneath the cursors and above everything else: what the
+    // pointer is carrying sits under its tip.
+    push_dnd_icon(elements, renderer, backend, pointer_location, viewport, purpose);
 
     // Input-method candidate windows belong above every application
     // surface (including overlay layers) and below only the pointer.
@@ -308,7 +452,7 @@ pub(crate) fn build_scene_into(
     push_layer_band(elements, renderer, backend, WlrLayer::Overlay, viewport);
 
     if let Some(transition) = backend.gesture_scene.as_ref().filter(|t| t.horizontal() && t.output.is_none_or(|output| output == viewport)) {
-        return crate::gesture_scene::render(elements, renderer, backend, transition, viewport);
+        return crate::gesture_scene::render(elements, renderer, backend, transition, viewport, purpose);
     }
 
     if let Some(overview) = backend
@@ -328,7 +472,7 @@ pub(crate) fn build_scene_into(
         }
         let furniture_alpha = if overview.has_workspace_cards() { 1.0 } else { (1.0 - overview.progress.clamp(0.0, 1.0)) as f32 };
         push_furniture(elements, renderer, backend, viewport, furniture_alpha, true);
-        crate::overview::render(elements, renderer, backend, overview, viewport);
+        crate::overview::render(elements, renderer, backend, overview, viewport, purpose);
         push_furniture(elements, renderer, backend, viewport, furniture_alpha, false);
         return push_background(elements, renderer, backend, viewport);
     }
@@ -347,7 +491,7 @@ pub(crate) fn build_scene_into(
             };
             if record.above && record.mapped {
                 if let Some(overview) = backend.overview.as_ref().filter(|o| o.surface == *id) {
-                    crate::overview::render(elements, renderer, backend, overview, viewport);
+                    crate::overview::render(elements, renderer, backend, overview, viewport, purpose);
                     crate::overview::render_backdrop(elements, renderer, backend, overview, viewport);
                     continue;
                 }
@@ -364,7 +508,7 @@ pub(crate) fn build_scene_into(
         push_layer_band(elements, renderer, backend, WlrLayer::Top, viewport);
     }
 
-    crate::layout_scene::render_feedback(elements, renderer, backend, viewport);
+    crate::layout_scene::render_feedback(elements, renderer, backend, viewport, purpose);
 
     // XWayland override-redirect windows (menus, tooltips —
     // `WindowType::Unmanaged`, so they own no frame and no
@@ -374,7 +518,11 @@ pub(crate) fn build_scene_into(
     for window in backend.scene_index.unmanaged() {
         if let Some(record) = backend.windows.get(&window).filter(|record| record.mapped) {
             let start = elements.len();
-            push_window_content(elements, renderer, backend, record.content, record, viewport, None, 1.0);
+            if purpose.redacts(record) {
+                push_window_redaction(elements, backend, record, viewport_relative(record.content, viewport), viewport);
+            } else {
+                push_window_content(elements, renderer, backend, record.content, record, viewport, None, 1.0);
+            }
             if let Some(name) = backend.space_output_for(record) {
                 if let Some(monitor) = backend.monitors.iter().find(|m| m.name == name) {
                     let mut rect = monitor.geometry;
@@ -389,7 +537,7 @@ pub(crate) fn build_scene_into(
     for entry in backend.stacking.iter().rev() {
         let start = elements.len();
         (|| {
-        if crate::layout_scene::render_window(elements, renderer, backend, entry, viewport) {
+        if crate::layout_scene::render_window(elements, renderer, backend, entry, viewport, purpose) {
             return;
         }
         // A managed window whose client drew its own chrome has no
@@ -405,6 +553,12 @@ pub(crate) fn build_scene_into(
                 return;
             };
             if record.mapped && backend.scene_index.is_presented(*id) {
+                // A capture's redaction stands in for the content, the
+                // dim and the popups alike, at this same stacking slot.
+                if purpose.redacts(record) {
+                    push_window_redaction(elements, backend, record, viewport_relative(record.content, viewport), viewport);
+                    return;
+                }
                 push_dim(elements, renderer, backend.window_dim(*id, record), &record.dim_id,
                     viewport_relative(record.content, viewport), Rect::new(Point::new(0, 0), viewport.size), None);
                 let alpha = backend.window_alpha(*id, record);
@@ -419,6 +573,16 @@ pub(crate) fn build_scene_into(
                 return;
             }
             let window = backend.windows.get(&frame.window);
+            // A redacted window's frame goes with it: the titlebar
+            // names the vault, and a rectangle with a decorated edge
+            // is no less a giveaway than the content was. One quad
+            // over the frame's visual rectangle (and the popups)
+            // replaces content, dim, chrome, border, shadow and fill,
+            // in the slot they would have taken.
+            if let Some(record) = window.filter(|record| purpose.redacts(record)) {
+                push_window_redaction(elements, backend, record, viewport_relative(frame.visual_geometry(), viewport), viewport);
+                return;
+            }
             let shape = crate::rounded::translated_shape(frame.effects.as_ref().and_then(|e|e.shape),
                 frame.geometry.pos, viewport.pos, Point::new(0,0), 1.0, 1.0);
             // The window's body alpha and dim, both read from the same
@@ -651,6 +815,12 @@ pub(crate) fn send_frame_callbacks(
             }
         }
     });
+    // The drag icon paces itself like the cursor surface: on the output
+    // its hotspot is over. (The lock returned above; a locked session
+    // carries no drag, and would freeze the icon with everything else.)
+    if let Some(icon) = dnd_icon_on(backend, output_rect, pointer_location) {
+        send_tree(icon);
+    }
     let pointer_location = Point::new(pointer_location.x.floor() as i32, pointer_location.y.floor() as i32);
     if output_rect.contains(pointer_location) {
         if let CursorImageStatus::Surface(surface) = cursor_status {
@@ -662,6 +832,21 @@ pub(crate) fn send_frame_callbacks(
             send_tree(popup.wl_surface());
         }
     }
+}
+
+/// The live drag icon, if its hotspot is inside `output_rect`: the
+/// output that owes it frame callbacks and presentation feedback, the
+/// way the cursor surface's is chosen.
+fn dnd_icon_on(
+    backend: &WaylandBackend,
+    output_rect: Rect,
+    pointer_location: SPoint<f64, Logical>,
+) -> Option<&WlSurface> {
+    let icon = backend.dnd_icon.as_ref().filter(|icon| icon.surface.alive())?;
+    let anchor = icon.anchor(pointer_location);
+    output_rect
+        .contains(Point::new(anchor.x.floor() as i32, anchor.y.floor() as i32))
+        .then_some(&icon.surface)
 }
 
 /// Release a FIFO barrier only once its surface tree has actually appeared at
@@ -764,6 +949,12 @@ pub(crate) fn take_presentation_feedback(
         if let CursorImageStatus::Surface(surface) = cursor_status {
             take_tree(surface);
         }
+    }
+    // Not only for the feedback: this visit is what records the icon's
+    // primary output, and `send_frames_surface_tree` answers a frame
+    // callback only on that output.
+    if let Some(icon) = dnd_icon_on(backend, output_rect, pointer_location) {
+        take_tree(icon);
     }
     feedback
 }
@@ -969,6 +1160,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
             tablet_cursors,
             cursors,
             Rect::new(Point::new(0, 0), entry.size),
+            ScenePurpose::Display,
         );
         if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
 
@@ -1089,7 +1281,8 @@ fn render_frame_winit_outputs(comp: &mut Compositor, capture_pending: bool) -> b
         for entry in outputs.iter_mut() {
             let viewport = Rect::new(entry.position, entry.size);
             let scene = &mut entry.scene_scratch;
-            build_scene_into(scene, wm.backend(), renderer, *pointer_location, cursor_status, tablet_cursors, cursors, viewport);
+            build_scene_into(scene, wm.backend(), renderer, *pointer_location, cursor_status, tablet_cursors, cursors, viewport,
+                ScenePurpose::Display);
             crate::capture_tool::render(scene, renderer, wm.backend(), viewport);
             // Native output framebuffers enforce this boundary themselves.
             // The shared host framebuffer needs it before translating the head,
@@ -1928,6 +2121,82 @@ pub(crate) fn push_cursor_elements(
     }
 }
 
+/// Pushes the drag icon of the client drag in flight — the file
+/// thumbnail or link preview a client handed to `start_drag` — at the
+/// drag's hotspot, so it is carried under the pointer (or the finger)
+/// for the life of the drag. See [`crate::state::DndIcon`].
+///
+/// Application pixels never appear over a lock. Locking already ends
+/// the drag (`reset_client_input_focus`'s `unset_grab` reaches
+/// `dropped`, which clears the ledger entry); the check here is the
+/// second line of defence, for a frame assembled before that ran.
+///
+/// `Kind::Unspecified`, never `Kind::Cursor`: the icon is composited
+/// like any surface, so it cannot compete with the pointer for the
+/// KMS cursor plane or disturb the `CHONKSTEP_NO_CURSOR_PLANE` path.
+/// Being ordinary scene content it is part of every capture that
+/// takes this scene — screencopy with or without its cursor overlay,
+/// the screenshot marker, the capture tool — the way a drag looks on
+/// screen; a per-window capture draws one window's tree and no icon.
+///
+/// It is drawn and never hit-tested: `hit_at` does not walk the
+/// pointer band, the protocol ignores a drag icon's input region, and
+/// the drop target smithay's grab computes must be what is under it.
+pub(crate) fn push_dnd_icon(
+    elements: &mut Vec<SceneElement>,
+    renderer: &mut GlesRenderer,
+    backend: &WaylandBackend,
+    pointer_location: SPoint<f64, Logical>,
+    viewport: Rect,
+    purpose: ScenePurpose,
+) {
+    if backend.locked {
+        return;
+    }
+    let Some(icon) = backend.dnd_icon.as_ref().filter(|icon| icon.surface.alive()) else {
+        return;
+    };
+    if purpose == ScenePurpose::Capture && icon.capture_redacted {
+        return;
+    }
+    // The icon is drawn buffer pixel : screen pixel like the client
+    // cursor, at the density it committed, with the integral-fallback
+    // correction every window gets on a fractional output.
+    let factor = crate::xdg::effective_surface_scale(
+        crate::xdg::committed_surface_scale(&icon.surface),
+        backend.scale_at(viewport),
+    );
+    let origin = dnd_icon_origin(icon.anchor(pointer_location), icon.offset, factor);
+    let global = Point::new(origin.x, origin.y);
+    if !surface_tree_reaches_viewport(
+        &icon.surface,
+        global,
+        Rect::new(global, wm_theme_api::Size::default()),
+        factor,
+        viewport,
+    ) {
+        return;
+    }
+    let position = origin - SPoint::<i32, Physical>::from((viewport.pos.x, viewport.pos.y));
+    push_surface_tree(elements, renderer, &icon.surface, position, factor, 1.0, Kind::Unspecified);
+}
+
+/// Where the icon's (0, 0) lands in global physical pixels: the drag's
+/// hotspot plus the accumulated surface-local offset, converted by the
+/// factor the icon's pixels are drawn at — the conversion the client
+/// cursor's hotspot uses, since both are the client's own logical
+/// units pointing into the same buffer, and a 2x icon offset by 6
+/// must move 12 screen pixels or it drifts from where it was designed
+/// to sit against the pointer.
+pub(crate) fn dnd_icon_origin(
+    anchor: SPoint<f64, Logical>,
+    offset: SPoint<i32, Logical>,
+    factor: f64,
+) -> SPoint<i32, Physical> {
+    let offset = SPoint::<f64, Physical>::from((offset.x as f64 * factor, offset.y as f64 * factor));
+    (anchor.to_physical(1.0) + offset).to_i32_round()
+}
+
 fn memory_element_reaches_viewport(
     location: SPoint<i32, Physical>,
     size: wm_theme_api::Size,
@@ -1966,6 +2235,21 @@ mod tests {
         let fullscreen = Rect::new(Point::new(0, 0), Size::new(1920, 1080));
         assert!(fullscreen_rect_occludes_viewport(fullscreen, left));
         assert!(!fullscreen_rect_occludes_viewport(fullscreen, right));
+    }
+
+    #[test]
+    fn drag_icon_offset_converts_by_the_icons_own_scale() {
+        let anchor = SPoint::<f64, Logical>::from((100.4, 200.6));
+        // No offset: the icon's corner sits on the hotspot, rounded to a pixel.
+        assert_eq!(dnd_icon_origin(anchor, (0, 0).into(), 1.0), SPoint::<i32, Physical>::from((100, 201)));
+        // A 1x client's offset moves the same number of screen pixels ...
+        assert_eq!(dnd_icon_origin(anchor, (6, -10).into(), 1.0), SPoint::<i32, Physical>::from((106, 191)));
+        // ... a 2x client's twice as many, and a 1.5x client's by the fraction.
+        assert_eq!(dnd_icon_origin(anchor, (6, -10).into(), 2.0), SPoint::<i32, Physical>::from((112, 181)));
+        assert_eq!(dnd_icon_origin(anchor, (6, -10).into(), 1.5), SPoint::<i32, Physical>::from((109, 186)));
+        // The hotspot moves the icon with it, offset unchanged.
+        let moved = SPoint::<f64, Logical>::from((300.0, 50.0));
+        assert_eq!(dnd_icon_origin(moved, (6, -10).into(), 1.0), SPoint::<i32, Physical>::from((306, 40)));
     }
 
     #[test]

@@ -385,6 +385,47 @@ give them keys in your config:
   virtual terminals; the session hands back its devices and comes
   alive again on the way in.
 
+## Taking the shortcuts back from a client that inhibits them
+
+A VM console or a remote-desktop viewer can ask, through
+`zwp_keyboard_shortcuts_inhibit_v1`, to receive every chord the
+desktop would otherwise take — so the guest gets its own Super+Space,
+its own workspace keys. While that grant is in force **every** binding
+above goes to the client, `locked = true` ones included; clicking
+another window gives them back, and so does this chord, which is the
+only one that works while the rest are being forwarded:
+
+| Binding              | What it does                                                   |
+|----------------------|----------------------------------------------------------------|
+| `super+shift+escape` | Suspend the focused client's inhibitor; press again to resume  |
+
+The chord is swallowed — the client never sees half of it. Suspension
+belongs to the window, not to the inhibitor object: the client cannot
+get its grant back by destroying and recreating the inhibitor, or by
+losing and regaining focus; only a second press with that window
+focused resumes it. The same chord releases the keyboard grab an X11
+client took with `XGrabKeyboard` (there is nothing to resume there —
+the client grabs again if it wants to). When nothing is inhibited the
+chord is an ordinary key.
+
+It is a setting, not a `[keybindings]` entry, because it has to work
+under every keymap — none of the presets bind it, and a test keeps it
+that way:
+
+```toml
+shortcuts_inhibit_escape = "super+alt+backspace"   # any key spec
+shortcuts_inhibit_escape = "none"                  # no way back but a VT switch
+allow_shortcut_inhibit = false                     # never grant one at all
+```
+
+`allow_shortcut_inhibit = false` — Hyprland's
+`binds:disable_keybind_grabbing = true`, which the live Hyprland
+configuration also sets — answers every request with no grant.
+Sandboxed clients (`wp_security_context_v1`) never receive one either
+way. Grants, refusals and suspensions are logged, and `hyprctl
+systeminfo` reports the current holder on its `shortcut_inhibitor:`
+line. The session lock and **Ctrl+Alt+F1..F12** outrank all of it.
+
 ## Mouse, for completeness
 
 - Right-click the desktop: the root menu — `Terminal`, `Applications`,

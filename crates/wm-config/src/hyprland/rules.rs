@@ -46,10 +46,21 @@
 //! One level, not arbitrarily many. A rule that tags on the strength
 //! of another tag (`match:tag chromium-based-browser` →
 //! `tag -default-opacity`, as Omarchy's browser file writes it) is
-//! followed when that other tag is carried directly by class or
-//! title; a tag whose carriers are themselves tag-matched is refused
+//! followed when that other tag is carried directly by class, title
+//! or xdg tag; a tag whose carriers are themselves tag-matched is refused
 //! with a log line, because chasing arbitrary chains is a rule engine
 //! in a config reader, for a case Omarchy does not write.
+//!
+//! # The xdg tag
+//!
+//! `match:xdg_tag` reads `xdg_toplevel_tag_v1`: the application's own
+//! stable, untranslated name for one of its windows (`main`,
+//! `preferences`, `quake`). It is a regular expression like `class`
+//! and `title`, and is matched against the tag the window carried
+//! when it mapped — a client tags a window before its first commit,
+//! so the same map-time identity the other two matchers see. A window
+//! whose client never tagged it has an empty tag, which only `^$`
+//! matches.
 //!
 //! # Refusing a rule whole
 //!
@@ -156,11 +167,24 @@ fn to_size(w: f64, h: f64) -> Option<Size> {
     (w >= 1.0 && h >= 1.0 && w <= u32::MAX as f64 && h <= u32::MAX as f64).then(|| Size::new(w as u32, h as u32))
 }
 
+/// The identity a rule is matched against: the three strings the
+/// window manager reads at map time. Bundled so the tag ledger's
+/// recursion and the rules do not thread three `&str`s apiece.
+#[derive(Clone, Copy)]
+struct Subject<'a> {
+    class: &'a str,
+    title: &'a str,
+    /// The `xdg_toplevel_tag_v1` tag, empty for a window whose client
+    /// never set one.
+    xdg_tag: &'a str,
+}
+
 /// One resolved float rule: who it matches and what it says.
 #[derive(Clone, Debug)]
 struct Rule {
     class: Option<Pattern>,
     title: Option<Pattern>,
+    xdg_tag: Option<Pattern>,
     /// The tags the rule matches on, every one of which the window
     /// must carry at this rule's position in the file.
     tags: Vec<String>,
@@ -191,21 +215,23 @@ struct Rule {
     workspace: Option<RuleWorkspace>,
     opacity: Option<wm_core::OpacityRule>,
     no_dim: Option<bool>,
+    no_screen_share: Option<bool>,
 }
 
 impl Rule {
-    fn matches(&self, tags: &TagLedger, class: &str, title: &str) -> bool {
+    fn matches(&self, tags: &TagLedger, subject: Subject<'_>) -> bool {
         // A rule with no matcher at all matches everything — which is
         // what `o.window(".*", …)` means and is why Omarchy's
         // `suppress_event` and `tag +default-opacity` rules are written
         // that way. Correct, and harmless here: neither carries a
         // float property.
-        self.class.as_ref().is_none_or(|p| p.matches(class))
-            && self.title.as_ref().is_none_or(|p| p.matches(title))
+        self.class.as_ref().is_none_or(|p| p.matches(subject.class))
+            && self.title.as_ref().is_none_or(|p| p.matches(subject.title))
+            && self.xdg_tag.as_ref().is_none_or(|p| p.matches(subject.xdg_tag))
             && self
                 .tags
                 .iter()
-                .all(|tag| tags.carries(tag, self.index, class, title, 0))
+                .all(|tag| tags.carries(tag, self.index, subject, 0))
     }
 
     fn describe(&self) -> String {
@@ -215,6 +241,9 @@ impl Rule {
         }
         if let Some(p) = &self.title {
             parts.push(format!("title {}", p.source));
+        }
+        if let Some(p) = &self.xdg_tag {
+            parts.push(format!("xdg_tag {}", p.source));
         }
         for tag in &self.tags {
             parts.push(format!("tag {tag}"));
@@ -246,19 +275,21 @@ struct TagEvent {
     add: bool,
     class: Option<Pattern>,
     title: Option<Pattern>,
+    xdg_tag: Option<Pattern>,
     /// The tags the rule itself matched on — the one level of
     /// chaining this reader follows.
     via: Vec<String>,
 }
 
 impl TagEvent {
-    fn applies(&self, ledger: &TagLedger, class: &str, title: &str, depth: u8) -> bool {
-        self.class.as_ref().is_none_or(|p| p.matches(class))
-            && self.title.as_ref().is_none_or(|p| p.matches(title))
+    fn applies(&self, ledger: &TagLedger, subject: Subject<'_>, depth: u8) -> bool {
+        self.class.as_ref().is_none_or(|p| p.matches(subject.class))
+            && self.title.as_ref().is_none_or(|p| p.matches(subject.title))
+            && self.xdg_tag.as_ref().is_none_or(|p| p.matches(subject.xdg_tag))
             && self
                 .via
                 .iter()
-                .all(|tag| depth == 0 && ledger.carries(tag, self.index, class, title, depth + 1))
+                .all(|tag| depth == 0 && ledger.carries(tag, self.index, subject, depth + 1))
     }
 }
 
@@ -278,14 +309,14 @@ impl TagLedger {
     /// above the line that adds its tag still sees the tag on the
     /// second pass, while a removal written between an add and the
     /// rule is honoured on every pass.
-    fn carries(&self, tag: &str, at: usize, class: &str, title: &str, depth: u8) -> bool {
+    fn carries(&self, tag: &str, at: usize, subject: Subject<'_>, depth: u8) -> bool {
         let Some(events) = self.0.get(tag) else {
             return false;
         };
         let mut before = None;
         let mut overall = None;
         for event in events {
-            if !event.applies(self, class, title, depth) {
+            if !event.applies(self, subject, depth) {
                 continue;
             }
             if event.index < at {
@@ -355,6 +386,7 @@ impl FloatRules {
                     (rule.maximize, "maximized"),
                     (rule.suppress_maximize, "client maximize ignored"),
                     (rule.suppress_fullscreen, "client fullscreen ignored"),
+                    (rule.no_screen_share, "hidden from screen capture"),
                 ] {
                     if enabled == Some(true) {
                         what.push(label.to_string());
@@ -397,12 +429,13 @@ impl FloatPolicy for FloatRules {
     /// Hyprland's own ordering: `apps/system.lua` floats every
     /// `floating-window` at 875×600 and then `apps/steam.lua`, read
     /// after it, gives Steam 1100×700.
-    fn decision_for(&self, class: &str, title: &str) -> Option<FloatDecision> {
+    fn decision_for(&self, class: &str, title: &str, xdg_tag: &str) -> Option<FloatDecision> {
+        let subject = Subject { class, title, xdg_tag };
         let mut float = None;
         let mut center = None;
         let mut size = None;
         for rule in &self.rules {
-            if !rule.matches(&self.tags, class, title) {
+            if !rule.matches(&self.tags, subject) {
                 continue;
             }
             float = rule.float.or(float);
@@ -432,13 +465,14 @@ impl FloatPolicy for FloatRules {
     /// resolved size as the window's — so `(monitor_w-window_w-40)`
     /// means "40 from the right edge of the window this rule just
     /// sized", which is what Omarchy wrote.
-    fn placement_for(&self, class: &str, title: &str, metrics: &RuleMetrics) -> Option<RulePlacement> {
+    fn placement_for(&self, class: &str, title: &str, xdg_tag: &str, metrics: &RuleMetrics) -> Option<RulePlacement> {
+        let subject = Subject { class, title, xdg_tag };
         let mut float = None;
         let mut center = None;
         let mut size = None;
         let mut position = None;
         for rule in &self.rules {
-            if !rule.matches(&self.tags, class, title) {
+            if !rule.matches(&self.tags, subject) {
                 continue;
             }
             float = rule.float.or(float);
@@ -485,10 +519,11 @@ impl FloatPolicy for FloatRules {
         Some(RulePlacement { size, position })
     }
 
-    fn window_decision_for(&self, class: &str, title: &str) -> WindowRuleDecision {
+    fn window_decision_for(&self, class: &str, title: &str, xdg_tag: &str) -> WindowRuleDecision {
+        let subject = Subject { class, title, xdg_tag };
         let mut decision = WindowRuleDecision::for_identity(class);
         for rule in &self.rules {
-            if !rule.matches(&self.tags, class, title) {
+            if !rule.matches(&self.tags, subject) {
                 continue;
             }
             if let Some(value) = rule.idle_inhibit {
@@ -530,6 +565,9 @@ impl FloatPolicy for FloatRules {
             if let Some(value) = rule.no_dim {
                 decision.no_dim = value;
             }
+            if let Some(value) = rule.no_screen_share {
+                decision.no_screen_share = value;
+            }
         }
         decision
     }
@@ -556,17 +594,18 @@ pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
                 // Hyprland reads a bare name as an add.
                 _ => (true, value.as_str()),
             };
-            let (class, title, refused) = split_matchers(&rule.matchers);
-            if let Some(refused) = refused {
+            let matchers = split_matchers(&rule.matchers);
+            if let Some(refused) = matchers.refused {
                 notes.push(format!(
                     "window rule tagging {tag} carries {refused}, which this reader does not implement: rule skipped"
                 ));
                 continue;
             }
             let via = tag_matchers(rule);
-            let (Some(class), Some(title)) = (
-                compile_pattern(class, "class", &mut notes),
-                compile_pattern(title, "title", &mut notes),
+            let (Some(class), Some(title), Some(xdg_tag)) = (
+                compile_pattern(matchers.class, "class", &mut notes),
+                compile_pattern(matchers.title, "title", &mut notes),
+                compile_pattern(matchers.xdg_tag, "xdg_tag", &mut notes),
             ) else {
                 continue;
             };
@@ -574,11 +613,12 @@ pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
                 .0
                 .entry(tag.to_string())
                 .or_default()
-                .push(TagEvent { index, add, class, title, via });
+                .push(TagEvent { index, add, class, title, xdg_tag, via });
         }
     }
     // A tag event that hangs on another tag is followed exactly one
-    // level: the tag it hangs on has to be carried by class or title.
+    // level: the tag it hangs on has to be carried by class, title or
+    // xdg tag.
     // Deciding that needs the whole ledger, so it is a second look.
     let direct: std::collections::BTreeSet<String> = ledger
         .0
@@ -591,7 +631,7 @@ pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
             for via in &event.via {
                 if !direct.contains(via) {
                     notes.push(format!(
-                        "window rule tags {tag} based on tag {via}, which is not carried by class or title: chained tags are not followed"
+                        "window rule tags {tag} based on tag {via}, which is not carried by class, title or xdg_tag: chained tags are not followed"
                     ));
                     return false;
                 }
@@ -606,8 +646,8 @@ pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
         let Some(spec) = rule_spec(rule, &mut notes) else {
             continue;
         };
-        let (class, title, refused) = split_matchers(&rule.matchers);
-        if let Some(refused) = refused {
+        let matchers = split_matchers(&rule.matchers);
+        if let Some(refused) = matchers.refused {
             notes.push(format!(
                 "float rule carries {refused}, which this reader does not implement: rule skipped"
             ));
@@ -620,7 +660,7 @@ pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
             ));
             continue;
         }
-        push(&mut out, &mut notes, class, title, tags, index, &spec);
+        push(&mut out, &mut notes, matchers, tags, index, &spec);
     }
     out.tags = ledger;
     (out, notes)
@@ -802,6 +842,13 @@ fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
                 spec.no_dim = Some(truthy(value));
                 any = true;
             }
+            // Omarchy's password managers: the window is drawn on
+            // screen as usual and as an opaque rectangle in every
+            // capture the compositor renders.
+            "no_screen_share" | "noscreenshare" => {
+                spec.no_screen_share = Some(truthy(value));
+                any = true;
+            }
             // `tag +name` is consumed by compile's first pass. A tag
             // matcher likewise participates in resolution, so neither
             // is a silently dropped property.
@@ -834,6 +881,7 @@ struct Spec {
     workspace: Option<RuleWorkspace>,
     opacity: Option<wm_core::OpacityRule>,
     no_dim: Option<bool>,
+    no_screen_share: Option<bool>,
 }
 
 /// Reads a `workspace` rule's value.
@@ -898,21 +946,24 @@ fn opacity_rule(value: &str) -> Option<wm_core::OpacityRule> {
 fn push(
     out: &mut FloatRules,
     notes: &mut Vec<String>,
-    class: Option<String>,
-    title: Option<String>,
+    matchers: Matchers,
     tags: Vec<String>,
     index: usize,
     spec: &Spec,
 ) {
-    let Some(class) = compile_pattern(class, "class", notes) else {
+    let Some(class) = compile_pattern(matchers.class, "class", notes) else {
         return;
     };
-    let Some(title) = compile_pattern(title, "title", notes) else {
+    let Some(title) = compile_pattern(matchers.title, "title", notes) else {
+        return;
+    };
+    let Some(xdg_tag) = compile_pattern(matchers.xdg_tag, "xdg_tag", notes) else {
         return;
     };
     out.rules.push(Rule {
         class,
         title,
+        xdg_tag,
         tags,
         index,
         float: spec.float,
@@ -932,6 +983,7 @@ fn push(
         workspace: spec.workspace.clone(),
         opacity: spec.opacity,
         no_dim: spec.no_dim,
+        no_screen_share: spec.no_screen_share,
     });
 }
 
@@ -942,6 +994,7 @@ fn describe_matchers(rule: &WindowRule) -> String {
         .map(|matcher| match matcher {
             Matcher::Class(value) => format!("match:class {value}"),
             Matcher::Title(value) => format!("match:title {value}"),
+            Matcher::XdgTag(value) => format!("match:xdg_tag {value}"),
             Matcher::Tag(value) => format!("match:tag {value}"),
             Matcher::Other { key, value } => format!("match:{key} {value}"),
         })
@@ -953,22 +1006,36 @@ fn describe_matchers(rule: &WindowRule) -> String {
     }
 }
 
-/// Splits a rule's matchers into the class and title patterns this
-/// reader implements, and the name of the first one it does not.
-fn split_matchers(matchers: &[Matcher]) -> (Option<String>, Option<String>, Option<String>) {
-    let mut class = None;
-    let mut title = None;
+/// The pattern matchers of one rule, still as text, as
+/// [`split_matchers`] sorts them.
+#[derive(Default)]
+struct Matchers {
+    class: Option<String>,
+    title: Option<String>,
+    xdg_tag: Option<String>,
+    /// The first matcher this reader does not implement, named for
+    /// the log; a rule carrying one is refused whole.
+    refused: Option<String>,
+}
+
+/// Splits a rule's matchers into the class, title and xdg tag
+/// patterns this reader implements, and the name of the first one it
+/// does not.
+fn split_matchers(matchers: &[Matcher]) -> Matchers {
+    let mut out = Matchers::default();
     for matcher in matchers {
         match matcher {
-            Matcher::Class(pattern) => class = Some(pattern.clone()),
-            Matcher::Title(pattern) => title = Some(pattern.clone()),
+            Matcher::Class(pattern) => out.class = Some(pattern.clone()),
+            Matcher::Title(pattern) => out.title = Some(pattern.clone()),
+            Matcher::XdgTag(pattern) => out.xdg_tag = Some(pattern.clone()),
             Matcher::Tag(_) => {}
             Matcher::Other { key, value } => {
-                return (class, title, Some(format!("match:{key} {value}")))
+                out.refused = Some(format!("match:{key} {value}"));
+                return out;
             }
         }
     }
-    (class, title, None)
+    out
 }
 
 /// The `idle_inhibit` modes. The boolean spellings stay accepted, but

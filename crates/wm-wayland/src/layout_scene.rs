@@ -321,6 +321,7 @@ pub(crate) fn render_window(
     backend: &WaylandBackend,
     entry: &StackEntry,
     viewport: Rect,
+    purpose: crate::renderer::ScenePurpose,
 ) -> bool {
     let id = match entry {
         StackEntry::Window(id) => *id,
@@ -363,6 +364,7 @@ pub(crate) fn render_window(
         &p.window,
         destination,
         visible,
+        purpose,
     );
     if let Some(mut clip) = p.clip {
         clip.pos.x -= viewport.pos.x;
@@ -385,6 +387,7 @@ pub(crate) fn render_feedback(
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     viewport: Rect,
+    purpose: crate::renderer::ScenePurpose,
 ) {
     use smithay::backend::renderer::element::{memory::MemoryRenderBufferRenderElement, Kind};
     let scene = &backend.layout_scene;
@@ -392,7 +395,7 @@ pub(crate) fn render_feedback(
         let mut destination = drag.destination;
         destination.pos.x -= viewport.pos.x;
         destination.pos.y -= viewport.pos.y;
-        crate::overview::render_window(elements, renderer, backend, drag, destination, 0.82);
+        crate::overview::render_window(elements, renderer, backend, drag, destination, 0.82, purpose);
     }
     if let Some(caption) = &scene.caption {
         if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(

@@ -59,6 +59,6 @@ pub use spatial::{LayoutMode, LayoutStatistics, WindowPlacement};
 pub use types::{
     BackendEvent, ClientChrome, DecorationRules, DragHandle, FullscreenMode, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetState,
     CursorBehaviour, DeviceRule, MultiFingerDrag, PointerConfig, ScrollClass, ScrollMethod, TapButtonMap, MAX_SCROLL_BUTTON,
-    NetStateAction, NetStateSnapshot, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
+    NetStateAction, NetStateSnapshot, ScrollDelta, ShortcutInhibitPolicy, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };
 pub use wm_theme_api::{Point, Rect, Size};

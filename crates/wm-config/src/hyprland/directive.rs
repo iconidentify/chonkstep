@@ -53,6 +53,8 @@ pub enum Directive {
     Cursor { name: String, value: String },
     /// One key from Hyprland's `binds {}` table.
     Binds { name: String, value: String },
+    /// One key from Hyprland's `misc {}` table.
+    Misc { name: String, value: String },
     /// One of the two keys read from Hyprland's `decoration {}` table,
     /// `dim_inactive` and `dim_strength`. The rest of the table is
     /// Hyprland's look and stays declined.
@@ -160,6 +162,10 @@ pub enum Matcher {
     Class(String),
     /// `match:title X` / `title:X`.
     Title(String),
+    /// `match:xdg_tag X` / `xdgTag:X`: the window's
+    /// `xdg_toplevel_tag_v1` tag, an application's own stable name for
+    /// one of its windows. A regular expression like the two above.
+    XdgTag(String),
     /// `match:tag X`. Resolved through the rules that *add* that tag —
     /// see `super::rules`.
     Tag(String),
