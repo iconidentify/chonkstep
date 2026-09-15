@@ -570,6 +570,46 @@ fn focus_on_activate_is_read_from_either_syntax() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `misc.disable_autoreload`, the other `misc` key with a meaning here:
+/// the configuration's own baseline for the switch Omarchy's upgrade
+/// hooks throw live over the IPC. Off unless the file says so, as in
+/// Hyprland, in every spelling the file can use.
+#[test]
+fn disable_autoreload_is_read_from_either_syntax() {
+    let root = scratch("autoreload-conf");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "misc {\n    disable_autoreload = true\n    disable_hyprland_logo = true\n}\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.disable_autoreload, Some(true), "{:?}", reading.skipped);
+    assert!(skipped_why(&reading, "disable_autoreload").is_none(), "{:?}", reading.skipped);
+    let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+    assert!(config.disable_autoreload);
+    assert!(!crate::parse("").unwrap().disable_autoreload, "off by default, as in Hyprland");
+
+    // The colon spelling, and a later line winning.
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "misc:disable_autoreload = true\nmisc:disable_autoreload = 0\n",
+    );
+    assert_eq!(read(&Roots::under(&root)).disable_autoreload, Some(false));
+
+    // Omarchy 4's Lua spelling.
+    let lua = scratch("autoreload-lua");
+    write(&lua.join(".config/hypr/hyprland.lua"), "hl.config({ misc = { disable_autoreload = true } })\n");
+    let reading = read(&Roots::under(&lua));
+    assert_eq!(reading.disable_autoreload, Some(true), "{:?}", reading.skipped);
+
+    // A value that is not a toggle is reported, not guessed at.
+    write(&root.join(".config/hypr/hyprland.conf"), "misc {\n    disable_autoreload = later\n}\n");
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.disable_autoreload, None);
+    assert!(skipped_why(&reading, "disable_autoreload").is_some(), "{:?}", reading.skipped);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&lua);
+}
+
 /// The conditional Omarchy gates its preinstalled application chords
 /// on is a file-system question, and answering it is a strict
 /// improvement on the baked preset — which had to write off twenty-odd
@@ -3248,7 +3288,7 @@ fn chonksteps_own_config_still_wins_over_the_read() {
     let table: toml::Table = "\"super+w\" = \"overview\"\n\"super+f\" = \"none\"\n"
         .parse()
         .unwrap();
-    crate::apply_keybindings(&mut config.keybindings, &table);
+    crate::apply_keybindings(&mut config.keybindings, &table, &mut config.diagnostics);
     let action = |spec: &str| {
         let combo = crate::parse_key(spec).unwrap();
         config
@@ -3292,6 +3332,31 @@ fn unchanged_watch_polls_do_not_allocate() {
     assert!(!changed);
     eprintln!("256 files, 20 unchanged polls: {stats:?}");
     assert_eq!(stats, chonk_test_support::AllocationStats::default());
+}
+
+/// What the reload guard's pause rests on: a watch that is simply not
+/// asked for a while keeps the baseline it had, so an edit made in the
+/// meantime — an upgrade replacing the tree file by file — is seen
+/// exactly once when asking resumes, and never while it is off.
+#[test]
+fn an_edit_made_while_the_watch_is_not_consulted_is_seen_once_afterwards() {
+    let root = scratch("watch-withheld");
+    let entry = root.join(".config/hypr/hyprland.conf");
+    write(&entry, "bind = SUPER, W, killactive,\n");
+    let roots = Roots::under(&root);
+    let mut watch = Watch::new(&roots, &read(&roots));
+    let t0 = std::time::Instant::now();
+    assert!(!watch.changed(t0), "the first look is a baseline");
+
+    // Replaced the way a package transaction replaces it, while nobody
+    // is asking.
+    let staged = root.join(".config/hypr/hyprland.conf.new");
+    write(&staged, "bind = SUPER, Q, killactive,\n");
+    std::fs::rename(&staged, &entry).unwrap();
+
+    assert!(watch.changed(t0 + std::time::Duration::from_secs(9)), "seen on the first look afterwards");
+    assert!(!watch.changed(t0 + std::time::Duration::from_secs(11)), "and only once");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The live-edit path: a change to a watched file is seen, once.
@@ -4416,9 +4481,18 @@ fn every_reason_a_binding_can_be_refused_for_is_explained_somewhere() {
         crate::preset::Unbound::NotAKey,
         crate::preset::Unbound::Conditional,
         crate::preset::Unbound::Declined,
+        crate::preset::Unbound::Selector,
+        crate::preset::Unbound::NotBindableYet,
     ];
     let scripts = dispatch::UNSERVED_OMARCHY_SCRIPTS.iter().map(|(_, reason)| *reason);
-    for reason in named.into_iter().chain(scripts) {
+    // The shared table's reasons reach the guide through the rendered
+    // dispatcher table, which `chonk-hyprland-ipc`'s vocabulary test
+    // keeps current; here they only have to be findable.
+    let shared = hypr_dispatch::CLASSIC.iter().filter_map(|entry| match entry.support {
+        hypr_dispatch::Support::Unsupported(why) => Some(crate::preset::Unbound::Unsupported(why)),
+        _ => None,
+    });
+    for reason in named.into_iter().chain(scripts).chain(shared) {
         let text = reason.reason();
         assert!(
             GUIDE.contains(text) || CARD.contains(text) || explained_in_prose(GUIDE, reason),
@@ -4440,8 +4514,95 @@ fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
         crate::preset::Unbound::NotAKey => "Not key chords; this config format cannot express one",
         crate::preset::Unbound::Conditional => "answered by asking the file system",
         crate::preset::Unbound::Declined => "declined on purpose",
+        // The dispatcher table quotes each of these verbatim.
+        crate::preset::Unbound::Unsupported(text) => text,
+        crate::preset::Unbound::Selector | crate::preset::Unbound::NotBindableYet => reason.reason(),
     };
     guide.contains(phrase)
+}
+
+/// The dispatchers that used to be refused as bindings for a reason
+/// `hyprctl dispatch` contradicted — `pin` "needs window groups",
+/// `dpms` "commands Hyprland, which is not running" — bind, or say the
+/// reason the shared table gives. The two-sided proof is
+/// `chonk-hyprland-ipc`'s vocabulary test; this pins the binding side
+/// where its users look.
+#[test]
+fn drifted_dispatchers_bind_or_report_the_shared_reason() {
+    let verb = |name: &str, arg: &str| {
+        dispatch::verb_for(&directive::Dispatcher::Verb { name: name.into(), arg: arg.into() })
+    };
+    assert_eq!(verb("pin", ""), dispatch::Verb::Action(Action::TogglePin));
+    assert_eq!(verb("centerwindow", ""), dispatch::Verb::Action(Action::Center));
+    assert_eq!(verb("togglelayout", ""), dispatch::Verb::Action(Action::ToggleLayout));
+    assert_eq!(verb("layout", "mosaic"), dispatch::Verb::Action(Action::Layout(wm_core::LayoutMode::Mosaic)));
+    assert_eq!(verb("layout", "scrolling"), dispatch::Verb::Action(Action::Layout(wm_core::LayoutMode::Flow)));
+    assert_eq!(verb("layout", "master"), dispatch::Verb::Unbound(crate::preset::Unbound::NoVerb));
+    assert_eq!(verb("dpms", "off"), dispatch::Verb::Unbound(crate::preset::Unbound::NotBindableYet));
+    assert_eq!(verb("tagwindow", "+pop"), dispatch::Verb::Unbound(crate::preset::Unbound::NotBindableYet));
+    assert_eq!(verb("cyclenext", ""), dispatch::Verb::Unbound(crate::preset::Unbound::Declined));
+    assert_eq!(verb("chonkstep", "overview"), dispatch::Verb::Action(Action::Overview));
+    assert_eq!(verb("chonkstep", "run lock"), dispatch::Verb::Unbound(crate::preset::Unbound::NoVerb));
+    for name in ["togglegroup", "moveintogroup", "lockactivegroup"] {
+        assert_eq!(
+            verb(name, ""),
+            dispatch::Verb::Unbound(crate::preset::Unbound::Unsupported("chonkstep has no window groups")),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        verb("pin", "class:foot"),
+        dispatch::Verb::Unbound(crate::preset::Unbound::Selector),
+        "a selector is the socket's to resolve"
+    );
+    // The two config spellings the new verbs answer to.
+    let config = crate::parse("[keybindings]\n\"super+p\" = \"toggle-pin\"\n\"super+c\" = \"center\"\n").expect("parses");
+    assert!(config.keybindings.iter().any(|(_, action)| *action == Action::TogglePin));
+    assert!(config.keybindings.iter().any(|(_, action)| *action == Action::Center));
+    assert_eq!(Action::TogglePin.config_name().as_deref(), Some("toggle-pin"));
+    assert_eq!(Action::Center.config_name().as_deref(), Some("center"));
+}
+
+/// The Lua spellings read as the classic dispatcher they stand for,
+/// through the shared flattening: `window.float` honours its `action`,
+/// `window.move` with a position is the geometry verb rather than a
+/// workspace move with no workspace, and a `window` field is a selector
+/// a binding refuses.
+#[test]
+fn lua_dispatchers_flatten_onto_the_classic_vocabulary() {
+    let facts = lua::Facts { path: Vec::new(), home: None, state_home: None };
+    let dispatcher_of = |call: &str| {
+        let mut out = Vec::new();
+        lua::read(&format!("hl.bind(\"SUPER + F12\", {call})\n"), &facts, &mut lua::Globals::default(), &mut out);
+        match out.as_slice() {
+            [Directive::Bind { dispatcher, .. }] => dispatcher.clone(),
+            other => panic!("{call}: {other:?}"),
+        }
+    };
+    let verb = |name: &str, arg: &str| directive::Dispatcher::Verb { name: name.into(), arg: arg.into() };
+    for (call, expected) in [
+        ("hl.dsp.window.float({ action = \"on\" })", verb("setfloating", "")),
+        ("hl.dsp.window.float({ action = \"toggle\" })", verb("togglefloating", "")),
+        ("hl.dsp.window.move({ x = 40, y = 30 })", verb("moveactive", "exact 40 30")),
+        ("hl.dsp.window.move({ workspace = \"3\", follow = false })", verb("movetoworkspacesilent", "3")),
+        ("hl.dsp.window.resize({ x = -100, y = 0, relative = true })", verb("resizeactive", "-100 0")),
+        ("hl.dsp.window.pin({ window = \"address:0x7\" })", verb("pin", "address:0x7")),
+        ("hl.dsp.window.cycle_next({ next = false })", verb("cyclenext", "prev")),
+        ("hl.dsp.dpms({ state = \"off\" })", verb("dpms", "off")),
+        ("hl.dsp.window.tag({ tag = \"+pop\" })", verb("tagwindow", "+pop")),
+        ("hl.dsp.window.drag()", verb("window.drag", "")),
+    ] {
+        assert_eq!(dispatcher_of(call), expected, "{call}");
+    }
+    assert_eq!(dispatcher_of("hl.dsp.exec_cmd(\"foot\")"), directive::Dispatcher::Exec("foot".into()));
+    assert_eq!(
+        dispatch::verb_for(&dispatcher_of("hl.dsp.window.pin({ window = \"address:0x7\" })")),
+        dispatch::Verb::Unbound(crate::preset::Unbound::Selector)
+    );
+    assert_eq!(
+        dispatch::verb_for(&dispatcher_of("hl.dsp.window.move({ x = 40, y = 30 })")),
+        dispatch::Verb::Unbound(crate::preset::Unbound::NotBindableYet)
+    );
 }
 
 /// The counts the documents quote off this machine are the counts this

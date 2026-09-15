@@ -449,6 +449,7 @@ name = "chonk-hyprland-ipc"
 version = "0.6.0"
 dependencies = [
  "chonk-ipc",
+ "hypr-dispatch",
  "serde",
  "serde_json",
  "tracing",
@@ -1195,6 +1196,10 @@ checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
 dependencies = [
  "typenum",
 ]
+
+[[package]]
+name = "hypr-dispatch"
+version = "0.6.0"
 
 [[package]]
 name = "image"
@@ -3366,6 +3371,7 @@ name = "wm-config"
 version = "0.6.0"
 dependencies = [
  "chonk-test-support",
+ "hypr-dispatch",
  "regex",
  "serde",
  "toml",

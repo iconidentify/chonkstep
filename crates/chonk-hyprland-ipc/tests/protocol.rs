@@ -106,6 +106,7 @@ fn desktop() -> Snapshot {
         system_info: "test system".into(),
         separate_spaces: false,
         previous_workspace: None,
+        autoreload_paused: false,
     }
 }
 
@@ -1195,7 +1196,8 @@ fn fullscreen_arguments_map() {
 }
 
 /// `fullscreenstate` carries two axes, and both reach the action in
-/// either spelling; the Lua form also takes a window selector.
+/// either spelling; a window selector — the Lua form's `window`, or a
+/// third classic word — names a window other than the focused one.
 #[test]
 fn fullscreen_state_parses_both_axes_in_both_spellings() {
     let snapshot = desktop();
@@ -1205,25 +1207,25 @@ fn fullscreen_state_parses_both_axes_in_both_spellings() {
         ("/dispatch fullscreenstate 0 0", 0, 0),
         ("/dispatch fullscreenstate 2 1", 2, 1),
         ("/dispatch fullscreenstate  1   2 ", 1, 2),
+        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })", 0, 2),
+        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })", 0, 0),
+        ("/dispatch hl.dsp.window.fullscreen_state({ client = 1, internal = 2 })", 2, 1),
     ] {
         let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
         assert_eq!(response, "ok", "{wire}");
         assert_eq!(actions, vec![Action::FullscreenState { window: None, internal, client }], "{wire}");
     }
-    for (wire, internal, client) in [
-        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })", 0, 2),
-        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })", 0, 0),
-        ("/dispatch hl.dsp.window.fullscreen_state({ client = 1, internal = 2 })", 2, 1),
-        (
-            "/dispatch hl.dsp.window.fullscreen_state({ window = \"address:0x100000001\", internal = 1, client = 1 })",
-            1,
-            1,
-        ),
+    for wire in [
+        "/dispatch hl.dsp.window.fullscreen_state({ window = \"address:0x100000001\", internal = 1, client = 1 })",
+        "/dispatch fullscreenstate 1 1 address:0x100000001",
     ] {
         let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
         assert_eq!(response, "ok", "{wire}");
-        assert_eq!(actions, vec![Action::FullscreenState { window: Some(focused), internal, client }], "{wire}");
+        assert_eq!(actions, vec![Action::FullscreenState { window: Some(focused), internal: 1, client: 1 }], "{wire}");
     }
+    assert!(
+        matches!(dispatch::parse("fullscreenstate 1 1 address:0x9", &snapshot), Outcome::Unsupported(why) if why.contains("no window matches"))
+    );
 }
 
 /// A mode outside 0..=2, a missing axis, or a non-number is refused by
@@ -2182,4 +2184,89 @@ fn hl_monitor_defers_the_mode_check_when_the_snapshot_lists_no_modes() {
         })
     );
     assert!(matches!(eval(r#"hl.monitor({ output = "eDP-1", mode = "wide" })"#), Outcome::Unsupported(why) if why.contains("wide")));
+}
+
+/// Omarchy's reload guard reads `misc.disable_autoreload` and
+/// `debug.suppress_errors` with `jq -r '.bool'` before a pause and
+/// writes the words back on resume, so both must be set and truthful in
+/// its dotted spelling as well as `hyprctl`'s colon one. Every other
+/// option keeps the unset shape `Style.qml` relies on.
+#[test]
+fn getoption_answers_the_reload_guards_options_truthfully_in_both_spellings() {
+    let running = desktop();
+    let paused = Snapshot { autoreload_paused: true, ..desktop() };
+    for option in ["misc.disable_autoreload", "misc:disable_autoreload"] {
+        let value = ask_json(&format!("j/getoption {option}"), &running);
+        assert_eq!(value["set"], serde_json::json!(true), "{option}");
+        assert_eq!(value["bool"], serde_json::json!(false), "{option}");
+        assert_eq!(value["int"], serde_json::json!(0), "{option}");
+        let value = ask_json(&format!("j/getoption {option}"), &paused);
+        assert_eq!(value["set"], serde_json::json!(true), "{option}");
+        assert_eq!(value["bool"], serde_json::json!(true), "{option}");
+        assert_eq!(value["int"], serde_json::json!(1), "{option}");
+    }
+    for option in ["debug.suppress_errors", "debug:suppress_errors"] {
+        let value = ask_json(&format!("j/getoption {option}"), &running);
+        assert_eq!(value["set"], serde_json::json!(true), "{option}");
+        assert_eq!(value["bool"], serde_json::json!(true), "{option}");
+    }
+    assert_eq!(
+        ask("getoption misc:disable_autoreload", &paused).trim_end(),
+        "option misc:disable_autoreload\n\tint: 1\n\tset: true",
+        "the plain form is Hyprland's block"
+    );
+    let value = ask_json("j/getoption decoration:rounding", &paused);
+    assert_eq!(value["set"], serde_json::json!(false), "everything else stays unset");
+    assert!(value.get("bool").is_none() && value.get("int").is_none());
+}
+
+/// `omarchy-hyprland-reload-guard`, verbatim: the pause, the two resume
+/// lines, and the resume it sends after a read that failed — `null`,
+/// refused by name and as a whole, so the guard never gets `ok` for a
+/// restore it did not get. `debug.suppress_errors = true` rides along
+/// as a named no-op because it asks for what is already the case;
+/// `false` asks for a surface chonkstep does not have.
+#[test]
+fn omarchys_reload_guard_parses_verbatim_and_a_null_is_refused_whole() {
+    for (request, action) in [
+        (
+            "eval hl.config({ misc = { disable_autoreload = true }, debug = { suppress_errors = true } })",
+            Action::SetAutoreload { paused: true },
+        ),
+        ("eval hl.config({ debug = { suppress_errors = true } })", Action::SuppressConfigErrors),
+        (
+            "eval hl.config({ misc = { disable_autoreload = false }, debug = { suppress_errors = true } })",
+            Action::SetAutoreload { paused: false },
+        ),
+        ("keyword misc:disable_autoreload true", Action::SetAutoreload { paused: true }),
+        ("keyword misc:disable_autoreload false", Action::SetAutoreload { paused: false }),
+    ] {
+        let (response, actions) = answer_payload(request.as_bytes(), &desktop());
+        assert_eq!(response.trim(), "ok", "{request}");
+        assert_eq!(actions, vec![action], "{request}");
+    }
+    for (request, names) in [
+        (
+            "eval hl.config({ misc = { disable_autoreload = null }, debug = { suppress_errors = null } })",
+            "misc.disable_autoreload requires true or false",
+        ),
+        (
+            "eval hl.config({ misc = { disable_autoreload = true }, debug = { suppress_errors = null } })",
+            "debug.suppress_errors requires true or false",
+        ),
+        ("eval hl.config({ debug = { suppress_errors = false } })", "configerrors"),
+        ("eval hl.config({ misc = { disable_autoreload = true, disable_hyprland_logo = true } })", "misc.disable_hyprland_logo"),
+        ("eval hl.config({ general = { gaps_in = 5 } })", "general.gaps_in"),
+        ("eval hl.config({ misc = true })", "misc must be a table"),
+        ("eval hl.config({ cursor = { invisible = true }, misc = { disable_autoreload = true } })", "not both"),
+        ("eval hl.config({})", "no property"),
+        ("keyword misc:disable_autoreload later", "requires true or false"),
+    ] {
+        let (response, actions) = answer_payload(request.as_bytes(), &desktop());
+        assert!(
+            response.starts_with("Invalid dispatcher:") && response.contains(names),
+            "{request} answered {response:?}"
+        );
+        assert!(actions.is_empty(), "{request} must apply nothing: {actions:?}");
+    }
 }

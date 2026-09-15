@@ -36,6 +36,11 @@ tracing = "0.1"
 # later `fcntl`. Writing a second copy of that would mean maintaining a
 # second copy of its bugs.
 chonk-ipc = { path = "../chonk-ipc" }
+# The dispatcher vocabulary, shared with `wm-config`'s binding reader
+# so a keybinding and a `hyprctl dispatch` of the same name get one
+# verdict. A leaf crate with no dependencies, which keeps the promise
+# above: nothing of chonkstep's own comes in with it.
+hypr-dispatch = { path = "../hypr-dispatch" }
 
 [dev-dependencies]
 # Test-only, and pointing the permitted way. `wm-config` decides which

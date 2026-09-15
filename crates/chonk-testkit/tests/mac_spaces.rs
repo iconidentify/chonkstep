@@ -518,6 +518,35 @@ fn geometry(w: &WindowInfo) -> (i32, i32, u32, u32) {
     (w.x, w.y, w.w, w.h)
 }
 
+/// One typo in `interaction_mode` on a live reload costs that key and
+/// nothing else. The running mode is the fallback, not the default, so
+/// the Spaces session stays one — each display keeps its own Space —
+/// while the rest of the edit applies and `configerrors` names the
+/// refusal. Before, the whole file was rejected and the session kept
+/// everything, the refusal reaching only the log.
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn a_refused_interaction_mode_on_reload_keeps_spaces_and_is_listed() {
+    let mut s = boot_with_config("spaces-refused-mode", "interaction_mode = 'spaces'\n");
+    assert_eq!(heads(&s), (1, 2));
+    s.rewrite_config("interaction_mode = 'spcaes'\nshow_dock = false\nhyprland_config = false\nedge_resistance = 0\n")
+        .unwrap();
+    assert_eq!(request(&s, "/reload").trim(), "ok", "a file that parses applies what it can");
+    s.door().barrier().unwrap();
+    let errors = json(&s, "configerrors");
+    let lines: Vec<&str> = errors.as_array().unwrap().iter().map(|e| e["error"].as_str().unwrap()).collect();
+    assert!(
+        lines.iter().any(|line| line.contains("interaction_mode must be") && line.contains("keeping spaces")),
+        "{lines:?}"
+    );
+    assert_eq!(heads(&s), (1, 2), "the running mode is the fallback for a refused mode key");
+    // Still a Spaces session in behaviour, not only in the report: a
+    // switch on one display leaves the other where it was.
+    s.door().motion(250.0, 200.0).unwrap();
+    dispatch(&mut s, "workspace 3");
+    assert_eq!(heads(&s), (3, 2));
+}
+
 fn reload_spaces(s: &mut Session, separate: bool) {
     let reloads = s.log().matches("reload requested").count();
     s.rewrite_config(&format!("interaction_mode = 'mac'\nshow_dock = false\nhyprland_config = false\n[mac]\nseparate_spaces = {separate}\n")).unwrap();

@@ -547,6 +547,58 @@ starts are refused with the piece they need:
 
 ### Bindings this desktop has no verb for
 
+A dispatcher gets one verdict here and over `hyprctl dispatch`. Both
+readers consult one table, `crates/hypr-dispatch`, before their own
+lowering, so a binding of `pin` or `togglelayout` binds exactly as the
+socket serves it, and a dispatcher the socket refuses is refused here
+with the same words. Where a binding and the socket differ, the table
+says why, and the reasons are three: the dispatcher names a window by
+selector, which a config file cannot resolve, so bind the same
+dispatcher without the selector; chonkstep has no binding verb for it
+yet, and the socket reaches it through its own request table; or it is
+Alt-Tab, declined on purpose below. Every other name in the table is
+served on both sides, and `docs/hyprland-ipc.md` lists them all. The
+rows below are the ones a binding does not reach, rendered from the
+table by `crates/chonk-hyprland-ipc/tests/vocabulary.rs`, which fails
+when this text and the table disagree:
+
+<!-- hypr-dispatch: bindings begin -->
+| Dispatcher | Keybinding | `hyprctl dispatch` |
+|---|---|---|
+| `moveactive 10 0` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `resizewindowpixel 10 0,activewindow` | refused: names a window by selector; a binding acts on the focused window | served |
+| `movewindowpixel 10 0,activewindow` | refused: names a window by selector; a binding acts on the focused window | served |
+| `alterzorder top` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `tagwindow +pop` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `focuswindow activewindow` | refused: names a window by selector; a binding acts on the focused window | served |
+| `cyclenext` | refused: declined on purpose: the window switcher owns Alt-Tab | served |
+| `bringactivetotop` | refused: declined on purpose: the window switcher owns Alt-Tab | served |
+| `focuscurrentorlast` | refused: chonkstep has no verb for the previously focused window | refused: chonkstep has no verb for the previously focused window |
+| `focuswindowbyclass foot` | refused: is not a Hyprland dispatcher; focuswindow class:NAME is served | refused: is not a Hyprland dispatcher; focuswindow class:NAME is served |
+| `workspaceopt allfloat` | refused: chonkstep has no per-workspace layout options | refused: chonkstep has no per-workspace layout options |
+| `togglegroup` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `changegroupactive f` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `moveintogroup l` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `moveoutofgroup` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `lockgroups toggle` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `lockactivegroup toggle` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `denywindowfromgroup toggle` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `moveworkspacetomonitor 3 l` | refused: names a workspace other than the active one; movecurrentworkspacetomonitor moves the active Space | refused: names a workspace other than the active one; movecurrentworkspacetomonitor moves the active Space |
+| `swapactiveworkspaces l r` | refused: swaps the workspaces of two displays, which the shared desktop does not have | refused: swaps the workspaces of two displays, which the shared desktop does not have |
+| `renameworkspace 3 mail` | refused: names a workspace; chonkstep workspaces are numbered | refused: names a workspace; chonkstep workspaces are numbered |
+| `global app:id` | served | refused: fires a portal global shortcut from its key, which the socket does not press |
+| `movecursor 10 20` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `dpms off` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `sendshortcut CTRL, c,` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `sendkeystate CTRL, c, down,` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `send_key_state` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `sendkey` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `submap resize` | refused: chonkstep's keybindings do not have submaps | refused: chonkstep's keybindings do not have submaps |
+| `exit` | refused: ends the compositor, which chonkstep does not do for a dispatcher | refused: ends the compositor, which chonkstep does not do for a dispatcher |
+| `forcerendererreload` | refused: reloads Hyprland's renderer, which is not running | refused: reloads Hyprland's renderer, which is not running |
+| `exec-shutdown true` | refused: runs a command as Hyprland exits, which is not running | refused: runs a command as Hyprland exits, which is not running |
+<!-- hypr-dispatch: bindings end -->
+
 One additional chord family remains unbound and
 is worth knowing about:
 
@@ -567,6 +619,12 @@ exact-size forms (`resizeactive exact w h`, and the Lua call without
 as a delta.
 `fullscreen 0` toggles real fullscreen; `fullscreen 1` toggles maximize within
 the workarea. Floating windows retain traditional movement and resizing.
+`pin` is the native `toggle-pin` and `centerwindow` the native `center`;
+`togglelayout` and `layout freeform|mosaic|flow` (also Hyprland's
+`dwindle` and `scrolling`) are `toggle-layout` and `layout-*`; and
+`toggleopaque`, or `setprop activewindow opaque toggle`, is
+`toggle-opaque`. `swapnext` and `swapnext prev` move the window right
+and left in the layout.
 
 Silent workspace sends (`movetoworkspacesilent 1..99`) are native too:
 the active window moves without changing the current workspace, and an
@@ -628,8 +686,16 @@ off` window rule still refuses per window whatever the key says, a
 taskbar's `activate` and a pager's `_NET_ACTIVE_WINDOW` are the user's
 own acts and never consult it, and behind the session lock every
 request becomes an urgency hint. The key is read live, so a reload
-applies it. The rest of the `misc` table is Hyprland's own housekeeping
-and is reported rather than carried.
+applies it.
+
+`misc.disable_autoreload` (also `misc:disable_autoreload = …`) switches
+off the one-second watch described under
+[Following your edits](#following-your-edits) until an explicit
+`reload`, as it does in Hyprland. Omarchy's upgrade hooks throw the same
+switch live over the IPC for the length of a package transaction, and
+the live word stands over the file's for the rest of the session. The
+rest of the `misc` table is Hyprland's own housekeeping and is reported
+rather than carried.
 
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
 build the seat's xkb keymap. A value Hyprland would compute as it runs,
@@ -867,6 +933,28 @@ move whole trees; an inotify watch on a path that is unlinked and
 recreated has to be re-armed by exactly the kind of code that goes
 wrong at 3 a.m., where a signature comparison simply sees a different
 inode. Watching the directories too is what notices a *new* file.
+
+**Upgrades pause it.** Omarchy's pacman hooks run
+`omarchy-hyprland-reload-guard` around every `omarchy-settings`
+transaction. Before it, `hyprctl eval 'hl.config({ misc = {
+disable_autoreload = true }, debug = { suppress_errors = true } })'`
+pauses the watch, so a tree that is half replaced — a new
+`bindings.lua` beside a file it `require`s that has not landed yet — is
+never read; after it, one `hyprctl reload` applies the finished tree and
+the setting the guard read beforehand is written back. Both run as
+root, which the request socket admits for exactly this (see
+[hyprland-ipc.md](hyprland-ipc.md)). While paused the watch is not
+consulted at all — no `stat`, and no advance of its baseline — so the
+first look after the pause lifts sees whatever changed in between and
+re-reads once, unless a `reload` already applied it: an explicit reload
+re-baselines the watch, so the guard's resume re-reads nothing more.
+Automatic theme following also waits during the pause, since applying
+a theme re-reads the same configuration tree. It catches up on resume.
+The pause is a live session property, written nowhere: a transaction
+killed between the two hooks leaves it paused until logout, which the
+session log says and `hyprctl systeminfo` reports as `autoreload:
+paused`. `misc.disable_autoreload` in the configuration itself sets the
+same switch from the file.
 
 When it fires, the whole session re-resolves through the same one path
 a `reload` binding takes, so a session that has followed a dozen edits

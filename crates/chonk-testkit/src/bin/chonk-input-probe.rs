@@ -11,6 +11,8 @@
 //! carries a solid orange icon surface, committed with an `attach` offset
 //! after `start_drag`, and reports `icon frame done` when the compositor
 //! answers its frame callback.
+//! `dnd-touch` starts the same drag on touch-down, including while a mouse
+//! button is held, so the icon must follow the serial's input device.
 //! `--kde-bind-only` binds `org_kde_kwin_server_decoration_manager` and
 //! creates no decoration object, which is how a GTK4 header-bar window says
 //! it draws its own titlebar.
@@ -115,6 +117,7 @@ struct Probe {
     surface: Option<WlSurface>,
     pointer_surface: Option<WlSurface>,
     drag_mode: bool,
+    touch_drag_mode: bool,
     /// `dnd icon`: the drag also carries a solid orange icon surface,
     /// committed with [`ICON_OFFSET`] after `start_drag`, and asks it
     /// for one frame callback. Kept alive here for the drag's life.
@@ -163,6 +166,51 @@ const ICON_OFFSET: (i32, i32) = (6, 10);
 struct ConfigureAnswered(u32);
 
 impl Probe {
+    fn start_drag(&mut self, serial: u32, origin: WlSurface, qh: &QueueHandle<Self>) {
+        let source = self
+            .data_manager
+            .as_ref()
+            .expect("data manager")
+            .create_data_source(qh, ());
+        source.offer("text/plain;charset=utf-8".into());
+        source.set_actions(DndAction::Copy);
+        let icon = self
+            .icon_mode
+            .then(|| self.compositor.as_ref().expect("compositor").create_surface(qh, ()));
+        self.data_device.as_ref().expect("data device").start_drag(
+            Some(&source),
+            &origin,
+            icon.as_ref(),
+            serial,
+        );
+        say("started internal drag");
+        if let Some(surface) = icon {
+            // Committed after `start_drag`, as a toolkit does once
+            // the surface wears the icon role, at the probe's own
+            // density: an integer buffer scale, or a viewport
+            // destination for the fractional case.
+            let scale = self.scale;
+            let (width, height) = ((ICON_SIZE.0 as f64 * scale) as i32, (ICON_SIZE.1 as f64 * scale) as i32);
+            let shm = self.shm.clone().expect("wl_shm");
+            let (file, pool, buffer) = solid_buffer(&shm, qh, width, height, ICON_PIXEL);
+            let viewport = if scale.fract() != 0.0 {
+                let viewport =
+                    self.viewporter.as_ref().expect("wp_viewporter").get_viewport(&surface, qh, ());
+                viewport.set_destination(ICON_SIZE.0, ICON_SIZE.1);
+                Some(viewport)
+            } else {
+                surface.set_buffer_scale(scale as i32);
+                None
+            };
+            surface.attach(Some(&buffer), ICON_OFFSET.0, ICON_OFFSET.1);
+            surface.damage_buffer(0, 0, width, height);
+            surface.frame(qh, IconFrame);
+            surface.commit();
+            say("icon committed");
+            self.icon = Some((surface, viewport, file, pool, buffer));
+        }
+    }
+
     fn report(&mut self, kind: &str) {
         self.report_at(kind, self.position);
     }
@@ -360,11 +408,11 @@ impl Dispatch<wl_touch::WlTouch, ()> for Probe {
         event: wl_touch::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         match event {
             wl_touch::Event::Down {
-                serial, id, x, y, ..
+                serial, id, surface, x, y, ..
             } => {
                 probe.interactive.touch_down(serial);
                 assert!(
@@ -372,6 +420,9 @@ impl Dispatch<wl_touch::WlTouch, ()> for Probe {
                     "touch ID reused while held"
                 );
                 probe.report_at(&format!("touch-down-{id}"), (x, y));
+                if probe.touch_drag_mode {
+                    probe.start_drag(serial, surface, qh);
+                }
             }
             wl_touch::Event::Motion { id, x, y, .. } => {
                 *probe.touches.get_mut(&id).expect("motion after touch-down") = (x, y);
@@ -454,48 +505,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
                     && button == 0x111
                     && matches!(state.into_result(), Ok(wl_pointer::ButtonState::Pressed))
                 {
-                    let source = probe
-                        .data_manager
-                        .as_ref()
-                        .expect("data manager")
-                        .create_data_source(qh, ());
-                    source.offer("text/plain;charset=utf-8".into());
-                    source.set_actions(DndAction::Copy);
-                    let icon = probe
-                        .icon_mode
-                        .then(|| probe.compositor.as_ref().expect("compositor").create_surface(qh, ()));
-                    probe.data_device.as_ref().expect("data device").start_drag(
-                        Some(&source),
-                        probe.pointer_surface.as_ref().expect("pointer surface"),
-                        icon.as_ref(),
-                        serial,
-                    );
-                    say("started internal drag");
-                    if let Some(surface) = icon {
-                        // Committed after `start_drag`, as a toolkit does once
-                        // the surface wears the icon role, at the probe's own
-                        // density: an integer buffer scale, or a viewport
-                        // destination for the fractional case.
-                        let scale = probe.scale;
-                        let (width, height) = ((ICON_SIZE.0 as f64 * scale) as i32, (ICON_SIZE.1 as f64 * scale) as i32);
-                        let shm = probe.shm.clone().expect("wl_shm");
-                        let (file, pool, buffer) = solid_buffer(&shm, qh, width, height, ICON_PIXEL);
-                        let viewport = if scale.fract() != 0.0 {
-                            let viewport =
-                                probe.viewporter.as_ref().expect("wp_viewporter").get_viewport(&surface, qh, ());
-                            viewport.set_destination(ICON_SIZE.0, ICON_SIZE.1);
-                            Some(viewport)
-                        } else {
-                            surface.set_buffer_scale(scale as i32);
-                            None
-                        };
-                        surface.attach(Some(&buffer), ICON_OFFSET.0, ICON_OFFSET.1);
-                        surface.damage_buffer(0, 0, width, height);
-                        surface.frame(qh, IconFrame);
-                        surface.commit();
-                        say("icon committed");
-                        probe.icon = Some((surface, viewport, file, pool, buffer));
-                    }
+                    probe.start_drag(serial, probe.pointer_surface.clone().expect("pointer surface"), qh);
                 }
             }
             wl_pointer::Event::Leave { .. } => probe.report("leave"),
@@ -918,6 +928,7 @@ fn main() {
         interactive: interactive::State::from_args(),
         inhibit: std::env::args().any(|arg| arg == "inhibit"),
         drag_mode: std::env::args().any(|arg| arg == "dnd"),
+        touch_drag_mode: std::env::args().any(|arg| arg == "dnd-touch"),
         icon_mode: std::env::args().any(|arg| arg == "icon"),
         scale,
         cursor_shape: cursor_shape_arg(),

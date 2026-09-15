@@ -40,7 +40,11 @@ chonkstep-wayland --print-config
 ```
 
 `--print-config` includes the effective Mac system shortcuts, disabled defaults,
-and application overrides. An invalid reload retains the working configuration.
+and application overrides. An invalid reload retains the working configuration:
+a file that is not TOML is rejected whole (`hyprctl reload` is refused and
+`hyprctl configerrors` says why), and a misspelt `interaction_mode`,
+`keyboard_mode` or `[mac]` value costs only that key — the running mode stays
+in force, the rest of the edit applies, and `configerrors` lists the refusal.
 Set `keyboard_mode = "desktop"` to turn off Mac keys while preserving Spaces.
 Changing keyboard mode does not close fullscreen Spaces or link displays.
 `interaction_mode = "desktop"` disables the expanded Spaces desktop behavior;

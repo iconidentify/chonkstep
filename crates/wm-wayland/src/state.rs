@@ -3198,6 +3198,10 @@ pub struct Compositor {
     /// on timer-only wakeups; there is no request to answer and no
     /// socket maintenance to perform.
     hyprland_ipc_ready: bool,
+    /// The same, for the shell's control socket: set by the callback
+    /// for its listener or any of its clients, taken by the shell tick,
+    /// so a quiet pass asks no per-client question of the kernel.
+    control_ready: bool,
     /// Whether work since the last publish may have changed anything
     /// represented by the Hyprland event stream. Kept separate from
     /// socket readiness: a desktop mutation must be published even
@@ -3670,6 +3674,7 @@ impl Compositor {
         // drains `take_shell_motion` itself inside `on_motion`, which
         // every coalesced `PointerMotion` above passes through.
 
+        self.shell.note_control_readable(std::mem::take(&mut self.control_ready));
         self.shell.tick(&mut self.wm);
         self.frame_stats.shell.record(phase_started.elapsed());
         let phase_started = Instant::now();
@@ -4043,6 +4048,7 @@ impl Compositor {
                 self.session_lock.machine.locked(),
                 self.shell.session_state(),
                 &shortcut_inhibit,
+                self.shell.autoreload_paused(),
             );
             if first_event_client {
                 // The event and request listeners can become readable
@@ -4082,6 +4088,7 @@ impl Compositor {
                     &self.wm,
                     self.session_lock.machine.locked(),
                     self.shell.session_state(),
+                    self.shell.autoreload_paused(),
                 );
                 server.publish_owned(after);
             }
@@ -4176,6 +4183,8 @@ impl Compositor {
             match self.loop_handle.insert_source(source, move |_, _, comp| {
                 if is_hyprland_ipc {
                     comp.hyprland_ipc_ready = true;
+                } else {
+                    comp.control_ready = true;
                 }
                 Ok(PostAction::Continue)
             }) {
@@ -5126,6 +5135,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         hyprland_ipc,
         workspaces,
         hyprland_ipc_ready: false,
+        control_ready: false,
         // A subscriber present on the first pass must receive a
         // baseline even before the desktop produces its first event.
         hyprland_state_dirty: true,
@@ -5290,7 +5300,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             // key apply exactly the same set. They did not: the
             // decoration policy was assigned here and nowhere else, so
             // the key silently skipped it.
-            comp.shell.reload_config(&mut comp.wm);
+            // The marker has nobody to answer; the shell logs and
+            // records a rejection itself.
+            let _ = comp.shell.reload_config(&mut comp.wm);
             comp.hyprland_state_dirty = true;
             comp.foreign_toplevel_dirty = true;
         }

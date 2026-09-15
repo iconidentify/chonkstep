@@ -130,6 +130,11 @@ pub struct SessionState {
     /// Whether an application's own activation request takes the
     /// keyboard with no user input behind it — `misc:focus_on_activate`.
     pub focus_on_activate: bool,
+    /// Whether the configuration itself switched off the one-second
+    /// re-read of the desktop's Hyprland files —
+    /// `misc:disable_autoreload`. The baseline the live IPC switch
+    /// stands over; see `Shell::autoreload_paused`.
+    pub disable_autoreload: bool,
     pub placement: PlacementPolicy,
     pub edge_resistance: u32,
     pub terminal_font_px: f32,
@@ -282,6 +287,7 @@ impl SessionState {
                 escape: config.shortcuts_inhibit_escape,
             },
             focus_on_activate: config.focus_on_activate,
+            disable_autoreload: config.disable_autoreload,
             placement: config.placement,
             edge_resistance: config.edge_resistance,
             terminal_font_px: config.terminal_font_px,
@@ -923,6 +929,19 @@ pub fn clear_inherited_gtk_scale_env() {
 mod tests {
     use super::*;
 
+    /// `--check-config` counts `Config::diagnostics`; `configerrors`
+    /// serves the session's copy of it. Same list, same count.
+    #[test]
+    fn configerrors_carries_every_diagnostic_check_config_counts() {
+        let config = wm_config::parse(
+            "minimized_previews = 1\ninteraction_mode = \"tiling\"\nbogus = true\n[input]\ntap_to_click = 3\n",
+        )
+        .expect("individually bad keys never fail the parse");
+        assert_eq!(config.diagnostics.len(), 4, "{:?}", config.diagnostics);
+        let state = SessionState::resolve(&config);
+        assert_eq!(state.config_diagnostics, config.diagnostics);
+    }
+
     #[test]
     fn session_markers_are_probed_only_when_their_deadline_is_due() {
         let start = Instant::now();
@@ -1038,6 +1057,7 @@ mod tests {
             hide_special_on_workspace_change: false,
             shortcut_inhibit: wm_core::ShortcutInhibitPolicy::default(),
             focus_on_activate: false,
+            disable_autoreload: false,
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: 20.0,

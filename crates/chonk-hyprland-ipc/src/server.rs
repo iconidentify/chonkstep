@@ -198,24 +198,40 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
         //    made-up number would restyle the user's bar to match a
         //    compositor they are not running. Answering with the
         //    documented "does not exist" shape leaves Style.qml's
-        //    `catch` to keep its previous value, which is right.
+        //    `catch` to keep its previous value, which is right. The
+        //    options chonkstep does carry live — `modelled_option` —
+        //    answer with their real value, which Omarchy's reload guard
+        //    reads before a pause and writes back after.
         //  - `keyword` would claim to have changed a Hyprland config;
         //    `reload` instead reloads chonkstep's live configuration.
         //  - `binds` and `devices` below report chonkstep's real seat.
-        "getoption" => (
-            if json {
-                // Value fields are deliberately absent. QML's
-                // `Number(undefined)` is NaN and `undefined || fallback`
-                // selects the fallback; JSON null would coerce to zero
-                // and recreate the bug this shape prevents.
-                serde_json::json!({
-                    "option": request.args, "set": false
-                }).to_string()
-            } else {
-                "no such option".to_string()
-            },
-            None,
-        ),
+        "getoption" => match modelled_option(&request.args, snapshot) {
+            Some(value) => (
+                if json {
+                    serde_json::json!({
+                        "option": request.args, "int": i64::from(value), "bool": value, "set": true
+                    })
+                    .to_string()
+                } else {
+                    format!("option {}\n\tint: {}\n\tset: true", request.args.trim(), i64::from(value))
+                },
+                None,
+            ),
+            None => (
+                if json {
+                    // Value fields are deliberately absent. QML's
+                    // `Number(undefined)` is NaN and `undefined || fallback`
+                    // selects the fallback; JSON null would coerce to zero
+                    // and recreate the bug this shape prevents.
+                    serde_json::json!({
+                        "option": request.args, "set": false
+                    }).to_string()
+                } else {
+                    "no such option".to_string()
+                },
+                None,
+            ),
+        },
         // `keyword` stays a refusal for Hyprland's broad configuration
         // namespace. `cursor:invisible` is the one named exception:
         // Omarchy's screensaver ships it as the fallback for the
@@ -652,7 +668,7 @@ impl Server {
         }
         if let Some(listener) = &self.requests {
             while let Ok(Some(stream)) = listener.accept() {
-                if !accepted_from_this_user(&stream) {
+                if !accepted_from_this_user_or_root(&stream) {
                     continue;
                 }
                 if self.request_clients.len() >= MAX_REQUEST_CLIENTS {
@@ -986,6 +1002,36 @@ fn tracing_warn(message: &str) {
 /// `SO_PEERCRED`, restating what the directory mode already enforces.
 fn accepted_from_this_user(stream: &Stream) -> bool {
     stream.peer_is_this_user().unwrap_or(false)
+}
+
+/// `SO_PEERCRED` on the request socket: this user, or root.
+///
+/// Root is past the `0700` directory regardless and can read or kill
+/// the process outright, so refusing its connection protects nothing;
+/// what it did do was answer Omarchy's pacman hooks — which pause and
+/// resume the configuration watch through a root-run `hyprctl` — and
+/// any `sudo hyprctl reload` with silence. Root gets exactly the verbs
+/// this user gets and nothing more. Every other uid stays refused, and
+/// the event socket stays this-user-only: nothing of root's subscribes
+/// to it.
+fn accepted_from_this_user_or_root(stream: &Stream) -> bool {
+    stream.peer_is_this_user_or_root().unwrap_or(false)
+}
+
+/// The options chonkstep carries live, by either of Hyprland's
+/// spellings: `misc:disable_autoreload` as `hyprctl` documents it and
+/// `misc.disable_autoreload` as Omarchy's reload guard sends it.
+///
+/// `debug.suppress_errors` is always set and true: chonkstep has no
+/// on-screen configuration-error surface, so there is never anything
+/// shown that it could suppress. Every other option keeps the unset
+/// shape — a value here is a value some script will act on.
+fn modelled_option(name: &str, snapshot: &Snapshot) -> Option<bool> {
+    match name.trim().replacen('.', ":", 1).as_str() {
+        "misc:disable_autoreload" => Some(snapshot.autoreload_paused),
+        "debug:suppress_errors" => Some(true),
+        _ => None,
+    }
 }
 
 impl RequestClient {

@@ -167,10 +167,13 @@ impl Keymap {
 /// walk would replace the table the user's own `[keybindings]` entries
 /// had already merged into.
 pub fn base(table: &toml::Table) -> Config {
-    let desktop = preset_name(table, "desktop", Desktop::from_name).unwrap_or_default();
-    let keymap =
-        preset_name(table, "keymap", Keymap::from_name).unwrap_or_else(|| desktop.keymap());
+    let mut diagnostics = Vec::new();
+    let desktop =
+        preset_name(table, "desktop", Desktop::from_name, &mut diagnostics).unwrap_or_default();
+    let keymap = preset_name(table, "keymap", Keymap::from_name, &mut diagnostics)
+        .unwrap_or_else(|| desktop.keymap());
     let mut config = Config::default_config();
+    config.diagnostics = diagnostics;
     config.desktop = desktop;
     config.keymap = keymap;
     apply_desktop(&mut config, desktop);
@@ -204,32 +207,33 @@ pub fn base(table: &toml::Table) -> Config {
     config
 }
 
-/// One preset key's value, warning exactly once about a value that is
-/// not a string or not a name we know. The warning lives here rather
-/// than in `parse`'s walk so the key is diagnosed once, in the place
-/// that acts on it, instead of twice from two readers.
+/// One preset key's value, refusing exactly once a value that is not a
+/// string or not a name we know. The refusal lives here rather than in
+/// `parse`'s walk so the key is diagnosed once, in the place that acts
+/// on it, instead of twice from two readers — and it goes through
+/// [`crate::refuse`] like every other, so a misspelt `desktop` reaches
+/// `hyprctl configerrors` and not only the log.
 fn preset_name<T>(
     table: &toml::Table,
     key: &str,
     from_name: impl Fn(&str) -> Option<T>,
+    diagnostics: &mut Vec<String>,
 ) -> Option<T> {
     match table.get(key)? {
         toml::Value::String(name) => match from_name(name) {
             Some(value) => Some(value),
             None => {
-                tracing::warn!(
-                    key = %key,
-                    value = %name,
-                    "config: unknown preset name, keeping the chonkstep default"
+                crate::refuse(
+                    diagnostics,
+                    format!("config: unknown {key} preset name {name:?}, keeping the chonkstep default"),
                 );
                 None
             }
         },
         other => {
-            tracing::warn!(
-                key = %key,
-                value = ?other,
-                "config: preset must be a name string, keeping the chonkstep default"
+            crate::refuse(
+                diagnostics,
+                format!("config: {key} preset must be a name string, keeping the chonkstep default (got {other})"),
             );
             None
         }
@@ -700,6 +704,19 @@ pub enum Unbound {
     /// Chonkstep *could* bind it and declines to, because what it would
     /// do here is not what the user pressing it is asking for.
     Declined,
+    /// A dispatcher `hypr_dispatch::CLASSIC` lists as outside
+    /// chonkstep's model, with the one reason both the binding reader
+    /// and the Hyprland IPC report for it, so a chord and a `hyprctl
+    /// dispatch` of the same name never disagree about why.
+    Unsupported(&'static str),
+    /// A dispatcher `hyprctl dispatch` serves that names a window by
+    /// selector. A binding acts on the focused window; the same
+    /// dispatcher without the selector is the one to bind.
+    Selector,
+    /// A dispatcher `hyprctl dispatch` serves that chonkstep has no
+    /// binding verb for yet. Accurate rather than wrong: the old
+    /// answer told a user `pin` needed window groups.
+    NotBindableYet,
 }
 
 impl Unbound {
@@ -720,6 +737,9 @@ impl Unbound {
             Self::NotAKey => "not a key chord this config format can express",
             Self::Conditional => "Omarchy binds it conditionally; a table of constants cannot",
             Self::Declined => "declined on purpose -- see the note under the table",
+            Self::Unsupported(why) => why,
+            Self::Selector => hypr_dispatch::BindingGap::Selector.reason(),
+            Self::NotBindableYet => hypr_dispatch::BindingGap::NotBindableYet.reason(),
         }
     }
 }

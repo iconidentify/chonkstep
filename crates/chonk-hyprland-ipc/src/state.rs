@@ -342,6 +342,12 @@ pub struct Snapshot {
     /// The 0-based workspace the desktop was on before the last switch:
     /// what `workspace previous` names, absent before the first switch.
     pub previous_workspace: Option<usize>,
+    /// Whether the session's one-second watch over its Hyprland
+    /// configuration is paused — `misc:disable_autoreload`, set live
+    /// through `hl.config` or `keyword`, or by the configuration
+    /// itself. What `getoption misc.disable_autoreload` answers, and
+    /// so what Omarchy's reload guard records to restore afterwards.
+    pub autoreload_paused: bool,
 }
 
 /// One keybinding in the subset `hyprctl binds` exposes to menus.

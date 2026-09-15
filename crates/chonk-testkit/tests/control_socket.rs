@@ -244,6 +244,64 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
     assert!(session.compositor_alive(), "nothing above may have cost the session");
 }
 
+/// §1's request caps, from the client's side. A client that packs a
+/// thousand `debug` requests into one write — a bar with a retry loop,
+/// a script in a `for` — gets a thousand answers, in order, followed by
+/// the answer to what it asked next; the desktop pays for them a few
+/// per compositor pass, builds the scene dump once per pass rather than
+/// once per request, and is still answering the door at the end.
+#[test]
+#[ignore = "needs a live Wayland session to nest inside"]
+fn a_flood_of_debug_requests_is_paced_and_every_one_is_answered() {
+    /// The document's per-client cap, §1.
+    const CAP: u64 = 16;
+    const FLOOD: u64 = 1_000;
+
+    let mut session = Session::boot("control-socket-flood", SessionOptions::default()).expect("session boots");
+    let path = control_socket_path(&session);
+    let mut bar = Bar::connect(&path);
+    for _ in 0..5 {
+        bar.next(); // hello and the four facets
+    }
+    let before = session.door().control_load().expect("read the control load before the flood");
+
+    let flood: String = (0..FLOOD).map(|_| "{\"request\":\"debug\",\"topic\":\"scene\"}\n").collect();
+    bar.writer.write_all(flood.as_bytes()).expect("write the flood in one go");
+    // Queued behind the flood: answered after every debug line, neither
+    // dropped nor reordered. Naming the active workspace is what makes
+    // the answer this client's alone (§4.2).
+    bar.send(r#"{"request":"focus-workspace","index":0}"#);
+
+    let mut answers = 0;
+    let acknowledged = bar.wait_for("the workspaces acknowledgement after every debug answer", |e| {
+        if e["event"] == "debug" {
+            assert!(e["data"].as_str().is_some_and(|data| data.contains("state locked=")), "every answer carries a dump: {e}");
+            answers += 1;
+            return false;
+        }
+        e["event"] == "workspaces"
+    });
+    assert_eq!(answers, FLOOD, "one debug event per request, all before the request that followed them");
+    assert_eq!(acknowledged["active"], 0);
+
+    let after = session.door().control_load().expect("read the control load after the flood");
+    let passes = after.passes - before.passes;
+    let dumps = after.dumps - before.dumps;
+    assert!(after.peak <= CAP, "one pass acted on {} requests, past the cap of {CAP}", after.peak);
+    assert!(passes >= FLOOD / CAP, "{FLOOD} requests were acted on in only {passes} passes");
+    assert!(dumps >= 1 && dumps <= passes, "{dumps} dumps were built over {passes} passes; at most one per pass is allowed");
+
+    // Still a working connection, and still a responsive compositor.
+    bar.send(r#"{"request":"snapshot"}"#);
+    let mut order = Vec::new();
+    for _ in 0..4 {
+        order.push(bar.next()["event"].as_str().unwrap().to_string());
+    }
+    assert_eq!(order, ["workspaces", "outputs", "focus", "theme"]);
+    session.door().barrier().expect("the compositor still completes a pass on request");
+    assert!(session.compositor_alive(), "the flood must not have cost the session");
+}
+
 /// A stopped shell is EOF on the client's side — the first half of the
 /// reconnect story §1.2 tells a client to rely on. (The second half,
 /// that the next shell on the same display binds the same path, is

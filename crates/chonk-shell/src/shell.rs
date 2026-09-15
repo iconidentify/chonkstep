@@ -743,7 +743,7 @@ fn root_action_outcome(action: &RootMenuAction) -> ShellOutcome {
         RootMenuAction::LaunchTerminal
         | RootMenuAction::LaunchAbout
         | RootMenuAction::Help
-        | RootMenuAction::LaunchApp(_)
+        | RootMenuAction::LaunchApp { .. }
         | RootMenuAction::OmarchyCommand { .. }
         | RootMenuAction::ToggleOmarchyBar
         | RootMenuAction::SetWallpaper(_) => ShellOutcome::Continue,
@@ -913,6 +913,28 @@ fn bounded_housekeeping_wait(now: Instant, deadline: Option<Instant>) -> Duratio
     deadline.map(|at| at.saturating_duration_since(now)).unwrap_or(MAX_IDLE_HOUSEKEEPING).min(MAX_IDLE_HOUSEKEEPING)
 }
 
+/// What servicing control-socket requests has cost, for the opt-in
+/// Wayland test door. Counting passes and their peak is what lets a
+/// test prove a flood was paced rather than merely answered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ControlLoad {
+    /// Servicing passes that returned at least one command.
+    pub passes: u64,
+    /// Most commands any one pass returned.
+    pub peak: usize,
+    /// Diagnostic dumps built for `debug` requests.
+    pub dumps: u64,
+}
+
+impl ControlLoad {
+    fn note_pass(&mut self, commands: usize) {
+        if commands > 0 {
+            self.passes = self.passes.wrapping_add(1);
+            self.peak = self.peak.max(commands);
+        }
+    }
+}
+
 /// Moves the focused client to `workspace` and follows it there — the
 /// keyboard "carry" gesture — move to the next or previous workspace
 /// with the window in hand. The refocus at the end is load-bearing:
@@ -953,7 +975,13 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     miniwindows: crate::miniwindows::Miniwindows<B>,
     help: crate::help::HelpPanel<B>,
     help_key: Option<KeyCombo>,
-    apps: Vec<AppEntry>,
+    /// Keeps the desktop's application index current: a directory poll
+    /// from `tick` and a walk on its own thread when one moves, so an
+    /// app installed during the session reaches the Applications
+    /// submenu without a restart — and no `.desktop` file is ever read
+    /// on this thread after startup. The index itself lives in
+    /// `Desktop`, the one place a pick is resolved.
+    app_rescan: apps::Rescanner,
     /// Everything a live change can alter, as resolved — the source
     /// `theme` below is derived from, and the base every later
     /// [`Shell::apply_session_state`] diffs against.
@@ -1039,6 +1067,14 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// distinguish a cheap quiet pass from an allocated diff that emitted
     /// nothing.
     control_snapshot_builds: u64,
+    /// How much the control socket's requests have cost, for the same
+    /// door: proof that a flooding client is paced, not merely answered.
+    control_load: ControlLoad,
+    /// What the event loop recorded for the control descriptors since
+    /// the last pass, handed in by [`Shell::note_control_readable`].
+    /// `None` on a loop that keeps no such record (X11), where the
+    /// socket asks the kernel itself.
+    control_readable: Option<bool>,
     /// Cached-path, cadence-bounded reader for the public
     /// `appearance-request` marker. Client traffic may wake the shell
     /// far faster than a human-visible control needs filesystem probes.
@@ -1084,6 +1120,16 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// else's configuration, which is most of them — see
     /// `wm_config::hyprland::wanted`.
     hyprland_config: Option<(wm_config::hyprland::Roots, wm_config::hyprland::Watch)>,
+    /// The reload guard's live switch — `hl.config({ misc = {
+    /// disable_autoreload = BOOL } })`, `keyword misc:disable_autoreload`
+    /// — standing over the configuration's own
+    /// `SessionState::disable_autoreload`. `None` until the IPC says
+    /// either way, so until then a reload that changes the file's line
+    /// is followed; after that the live word holds for the session. It
+    /// is written nowhere, so a package transaction killed between
+    /// Omarchy's pause and resume hooks leaves the watch paused only
+    /// until logout — see [`Shell::set_autoreload_paused`].
+    autoreload_live: Option<bool>,
     /// The per-workspace layout rules the last pass installed, so the
     /// next pass applies only what changed — see
     /// [`apply_workspace_layouts`].
@@ -1147,6 +1193,16 @@ fn hyprland_watch(state: &SessionState) -> Option<(wm_config::hyprland::Roots, w
     Some((roots, watch))
 }
 
+/// Whether the tick should re-read the desktop's Hyprland configuration
+/// now. While auto-reload is paused the watch is not consulted at all —
+/// no `stat`, and no advance of its baseline — so the first look after
+/// the pause lifts compares against the signature from before it and
+/// re-reads once if anything moved in between. The pause only removes
+/// filesystem work from the compositor thread; it never adds any.
+fn hyprland_config_due(paused: bool, watch: &mut wm_config::hyprland::Watch, now: Instant) -> bool {
+    !paused && watch.changed(now)
+}
+
 /// A bound `Action::Resize` on one window: a layout-managed window
 /// moves its shared boundary or its Flow width, and any other window
 /// resizes its content.
@@ -1190,8 +1246,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // wherever the outermost heads happen to be.
         let primary = primary_rect(&backend.monitors(), screen);
 
-        let apps = apps::scan_applications();
-        tracing::info!(count = apps.len(), "application entries scanned");
+        let now = Instant::now();
+        // The startup walk is the one synchronous read of the
+        // application directories: it runs before the first frame, and
+        // session restore below needs the index in hand to plan its
+        // relaunches. Every later walk is the rescanner's, off-thread.
+        let scan = apps::scan_applications();
+        tracing::info!(count = scan.entries().len(), "application entries scanned");
+        let app_rescan = apps::Rescanner::new(&scan, now);
+        let apps = scan.into_index();
 
         // Both chrome owners get handles to the caller's font state —
         // the one `FontSystem` this session ever builds. They used to
@@ -1213,9 +1276,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // gets the same scale/platform fixups a hand-launched one
         // would; the windows are then matched and re-placed as they
         // map, in `on_notification`.
-        let now = Instant::now();
         let restore = state.restore_session && !crate::startup::session_continues();
-        let (layout, relaunch) = SessionLayout::start(restore, &apps, now);
+        let (layout, relaunch) = SessionLayout::start(restore, apps.entries(), now);
         let mut terminals = Vec::new();
         for plan in relaunch {
             let terminal = match plan {
@@ -1289,7 +1351,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             miniwindows: crate::miniwindows::Miniwindows::default(),
             help: crate::help::HelpPanel::default(),
             help_key: None,
-            apps,
+            app_rescan,
             keymap: build_keymap(&state.keybindings),
             release_keymap: state
                 .bindings
@@ -1319,6 +1381,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             control,
             control_theme_revision: 0,
             control_snapshot_builds: 0,
+            control_load: ControlLoad::default(),
+            control_readable: None,
             appearance_requests: crate::appearance::RequestPoller::new(now),
             transient_escape: false,
             config_reloaded: false,
@@ -1329,6 +1393,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // else's configuration; on every other session this is
             // `None` and the poll in `tick` never touches the disk.
             hyprland_config: hyprland_watch(state),
+            autoreload_live: None,
             applied_workspace_layouts: std::collections::BTreeMap::new(),
         }
     }
@@ -1468,6 +1533,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // a reload is the user's way of saying "look again".
         if reload_menu {
             self.desktop.set_omarchy_menu(omarchy_menu_for(&next));
+            // The application index gets the same "look again": the
+            // walk runs on the rescanner's thread and lands in `tick`,
+            // so the reload itself stays as quick as it was.
+            self.app_rescan.request();
         }
 
         // 2. Metrics.
@@ -1541,8 +1610,24 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// it — what a reload does, and what following Omarchy does when
     /// Omarchy's theme changes. One function so the two cannot resolve
     /// by different rules.
-    fn reresolve(&mut self, wm: &mut WindowManager<B>) {
-        self.apply_session_state(wm, self.resolve_live_config());
+    ///
+    /// `Err` is a file that could not be read at all (unreadable, or
+    /// not TOML): the working configuration stays, and the rejection
+    /// is recorded where `hyprctl configerrors` reads so the edit that
+    /// did not apply is not answered with the diagnostics of the one
+    /// before it. A file that parses applies whatever it could and is
+    /// `Ok` — its per-item refusals travel in the new state.
+    fn reresolve(&mut self, wm: &mut WindowManager<B>) -> Result<(), String> {
+        match self.resolve_live_config() {
+            Ok(next) => {
+                self.apply_session_state(wm, next);
+                Ok(())
+            }
+            Err(error) => {
+                self.apply_session_state(wm, self.state.clone());
+                Err(error)
+            }
+        }
     }
 
     /// Resolve a live configuration edit without forgetting the
@@ -1551,22 +1636,78 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// fallback whenever neither `CHONKSTEP_SCALE` nor `scale` is an
     /// explicit override. This also retains a scale selected through
     /// Omarchy's monitor UI across its subsequent theme-file rewrite.
-    fn resolve_live_config(&self) -> SessionState {
-        match wm_config::inspect(None) {
-            Ok(config) => SessionState::resolve_with_scale_default(&config, self.state.scale),
+    ///
+    /// The running interaction settings go in for the same reason the
+    /// scale does: a refused `interaction_mode` or `keyboard_mode`
+    /// keeps the mode in force rather than the default, so one typo in
+    /// that key cannot drop a Spaces session to desktop mode
+    /// (`wm_config::parse_in_session`).
+    ///
+    /// On `Err` the rejection is recorded into the working state's
+    /// diagnostics — replacing any earlier one, so repeated failed
+    /// reloads do not pile up — and the caller keeps that state. The
+    /// next successful resolve rebuilds the list from the file.
+    fn resolve_live_config(&mut self) -> Result<SessionState, String> {
+        match wm_config::inspect_in_session(None, Some(&self.state.interaction)) {
+            Ok(config) => Ok(SessionState::resolve_with_scale_default(&config, self.state.scale)),
             Err(error) => {
                 tracing::warn!(%error, "config reload rejected; retaining working configuration");
-                self.state.clone()
+                record_reload_rejection(&mut self.state.config_diagnostics, &error);
+                Err(error)
             }
         }
     }
 
     /// Re-read the complete configuration and remember that IPC
     /// clients need a `configreloaded` event after the apply settles.
-    pub fn reload_config(&mut self, wm: &mut WindowManager<B>) {
-        self.reresolve(wm);
+    ///
+    /// `Err` means the file could not be read and nothing was applied;
+    /// the IPC's `reload` answers with a refusal rather than `ok`, and
+    /// `configerrors` carries the reason. The `configreloaded` event
+    /// still goes out: the diagnostics a bar may be showing changed.
+    pub fn reload_config(&mut self, wm: &mut WindowManager<B>) -> Result<(), String> {
+        let outcome = self.reresolve(wm);
+        // The read just applied is the one the watch is measured
+        // against from here, exactly as the tick re-points it after
+        // its own re-read. It matters most for a reload issued while
+        // auto-reload is paused — Omarchy's resume hook reloads and
+        // then lifts the pause — which must not be followed by a
+        // second re-read of the same files the moment the watch is
+        // consulted again. A rejected reload applied nothing, so the
+        // watch keeps measuring against what is in force.
+        if outcome.is_ok() {
+            if let Some((roots, watch)) = &mut self.hyprland_config {
+                watch.follow(&wm_config::hyprland::read(roots));
+            }
+        }
         self.config_reloaded = true;
         self.monitor_rules_pending = true;
+        outcome
+    }
+
+    /// Whether the one-second watch over the desktop's Hyprland
+    /// configuration is paused: the live IPC word if one was given,
+    /// else what the configuration says. An explicit reload re-reads
+    /// regardless. What `getoption misc.disable_autoreload` answers.
+    pub fn autoreload_paused(&self) -> bool {
+        self.autoreload_live.unwrap_or(self.state.disable_autoreload)
+    }
+
+    /// `misc:disable_autoreload` from the IPC — Omarchy's reload guard
+    /// pauses around every `omarchy-settings` upgrade so a tree that
+    /// is half replaced is never read, and resumes after one explicit
+    /// reload. Session-local and not persisted, which is why the
+    /// transition is logged and `systeminfo` reports it: a user whose
+    /// edits stopped landing can see why.
+    pub fn set_autoreload_paused(&mut self, paused: bool) {
+        if self.autoreload_paused() != paused {
+            if paused {
+                tracing::info!("Hyprland configuration auto-reload paused; edits wait for an explicit reload");
+            } else {
+                tracing::info!("Hyprland configuration auto-reload resumed");
+            }
+        }
+        self.autoreload_live = Some(paused);
     }
 
     pub fn take_config_reloaded(&mut self) -> bool {
@@ -1635,6 +1776,21 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// This is diagnostic only; protocol behavior never depends on it.
     pub fn control_snapshot_builds(&self) -> u64 {
         self.control_snapshot_builds
+    }
+
+    /// What servicing control-socket requests has cost so far. Diagnostic
+    /// only, like [`Self::control_snapshot_builds`].
+    pub fn control_load(&self) -> ControlLoad {
+        self.control_load
+    }
+
+    /// Records whether the event loop saw any control descriptor become
+    /// readable since the last tick. Called by a loop that watches those
+    /// descriptors itself (the Wayland compositor's calloop sources), so
+    /// a quiet tick costs the socket no per-client `poll`; a loop that
+    /// never calls it gets the kernel asked instead.
+    pub fn note_control_readable(&mut self, readable: bool) {
+        self.control_readable = Some(readable);
     }
 
     /// Signals every terminal this shell launched to swap to the color
@@ -1927,6 +2083,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.set_client_opaque(id, None);
                 }
             }
+            Action::TogglePin => {
+                if let Some(id) = wm.focused_client() {
+                    let pinned = wm.client(id).is_some_and(|client| client.flags.contains(wm_core::ClientFlags::STICKY));
+                    wm.set_client_pinned(id, !pinned);
+                }
+            }
+            Action::Center => {
+                if let Some(id) = wm.focused_client() {
+                    wm.center_client(id);
+                }
+            }
             Action::Floating(value) => {
                 if let Some(id) = wm.focused_client() {
                     if let Some(value) = value {
@@ -2101,7 +2268,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.carry_focused_to_workspace(wm.current_workspace() + 1);
                 }
             }
-            Action::Reload => self.reresolve(wm),
+            // A key has nobody to answer: the resolve logs and records
+            // a rejection itself, where `configerrors` reads.
+            Action::Reload => {
+                let _ = self.reresolve(wm);
+            }
             // Re-exec the on-disk binary. Since `Action::Reload` exists
             // this is no longer the config hot-reload gesture; it is
             // how a session picks up a *new build* of itself, which is
@@ -2704,13 +2875,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 let env = launch_env(&self.theme.id, Some(self.state.appearance), self.state.scale);
                 spawn::spawn_detached_with_env(&about_binary_path(), &[], &env, &[]);
             }
-            // Indexes the same apps vec the desktop's menu was built
-            // from, so `i` means the same entry on both sides; the
-            // bounds-safe get covers the impossible desync anyway —
-            // menus fire `Kill`-grade commands, so "impossible" still
-            // doesn't get to panic.
-            RootMenuAction::LaunchApp(i) => {
-                if let Some(entry) = self.apps.get(i) {
+            // Resolved by the desktop against the index its menu was
+            // built from — both the position and the generation have
+            // to match; the bounds-safe get covers the impossible
+            // desync anyway — menus fire `Kill`-grade commands, so
+            // "impossible" still doesn't get to panic.
+            RootMenuAction::LaunchApp { index, generation } => {
+                if let Some(entry) = self.desktop.app_entry(index, generation) {
                     let terminal = launch_app(
                         self.state.terminal.as_deref(),
                         entry,
@@ -2721,7 +2892,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     );
                     self.terminals.extend(terminal);
                 } else {
-                    tracing::warn!(index = i, count = self.apps.len(), "menu fired an out-of-range application index");
+                    // Not a bug to shout about: the menu was open
+                    // across a rescan of the index, and the generation
+                    // guard did its job — the Omarchy arm below keeps
+                    // the same contract across a definition reload.
+                    tracing::info!(index, generation, "application pick outlived its index; ignoring it");
                 }
             }
             RootMenuAction::OmarchyCommand { index, generation } => {
@@ -2760,7 +2935,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 if let Err(e) = theme_select::persist(id) {
                     tracing::warn!(?e, id, "failed to persist theme selection");
                 }
-                let next = self.resolve_live_config();
+                // An unreadable file keeps the working state (with the
+                // rejection recorded); the choice to follow still holds.
+                let next = self.resolve_live_config().unwrap_or_else(|_| self.state.clone());
                 self.adopt_wallpaper_of(wm, &next.base_theme);
                 self.apply_session_state(wm, next);
             }
@@ -3058,13 +3235,19 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // through this desktop's menu can be noticed *before* the desk
         // follows. A session wearing a built-in with nothing armed
         // never polls.
+        // Theme following also re-reads the entire Hyprland config.
+        // Leave its baseline untouched while the upgrade guard holds
+        // that tree, then catch up after resume.
+        let autoreload_paused = self.autoreload_paused();
         let armed = self.omarchy_adoption_armed.is_some_and(|since| since.elapsed() < ADOPTION_ARM_WINDOW);
         if self.state.following.is_none() && !armed {
             self.omarchy_adoption_armed = None;
-        } else if self.omarchy.changed(now) {
+        } else if !autoreload_paused && self.omarchy.changed(now) {
             if self.state.following.is_some() {
                 tracing::info!("Omarchy's current theme or background changed; re-dressing");
-                self.reresolve(wm);
+                // A rejection is logged and recorded by the resolve
+                // itself; the watch has nobody else to answer.
+                let _ = self.reresolve(wm);
                 // The background is part of the look and the watch fires
                 // for it too, but a background swap leaves the palette —
                 // and so the resolved theme — exactly as it was, and
@@ -3090,7 +3273,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // change take, so the read cannot resolve by different rules
         // than the startup it replaces.
         if let Some((roots, watch)) = &mut self.hyprland_config {
-            if watch.changed(std::time::Instant::now()) {
+            if hyprland_config_due(autoreload_paused, watch, std::time::Instant::now()) {
                 tracing::info!("the desktop's Hyprland configuration changed; re-reading it");
                 // Re-point the watch before re-resolving: the file set
                 // is itself part of what an edit can change (a fresh
@@ -3100,7 +3283,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 let reading = wm_config::hyprland::read(roots);
                 reading.report();
                 watch.follow(&reading);
-                self.reresolve(wm);
+                // A rejection is logged and recorded by the resolve
+                // itself; the watch has nobody else to answer.
+                let _ = self.reresolve(wm);
                 self.config_reloaded = true;
             }
         }
@@ -3128,6 +3313,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             }
         }
         self.desktop.tick_menu(wm.backend_mut(), &self.theme);
+        // The application index: a `.desktop` file installed or
+        // removed during the session reaches the Applications submenu
+        // here. The directory poll and the walk it triggers both live
+        // in the rescanner — the walk on its own thread — and only a
+        // finished index is swapped in, so this tick never reads a
+        // desktop file. A root menu already open keeps its rows; its
+        // picks carry the old generation and dissolve.
+        if let Some(apps) = self.app_rescan.tick(now) {
+            tracing::info!(count = apps.entries().len(), generation = apps.generation(), "application index rescanned");
+            self.desktop.set_apps(apps);
+        }
         // The session-layout store rides the same cadence. Most ticks
         // find the exact arrangement it already holds; prove that by
         // borrowed field comparisons so those ticks can advance the
@@ -3142,7 +3338,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         if layout_matches_clients(wm, self.layout.current()) {
             self.layout.service_current(now);
         } else {
-            self.layout.service(layout_snapshot(wm, &self.apps), now);
+            self.layout.service(layout_snapshot(wm, self.desktop.apps()), now);
         }
     }
 
@@ -3150,6 +3346,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// ready. Exact transient deadlines win; otherwise the bounded idle
     /// poll services filesystem markers and worker-thread samples.
     pub fn next_housekeeping_in(&self, now: Instant) -> Duration {
+        // Requests the control socket parked under its per-pass cap are
+        // work already read out of the kernel: no descriptor will wake
+        // the loop for them, so the next pass follows at once rather
+        // than at the idle bound.
+        if self.control.has_backlog() {
+            return Duration::ZERO;
+        }
         let deadline = self
             .desktop
             .next_housekeeping_deadline()
@@ -3183,13 +3386,20 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// A `focus-workspace` a client asked for is applied here and the
     /// result published in the same pass, so the client's answer is
     /// the `workspaces` event the switch produced, not one a tick late.
+    ///
+    /// The socket hands back a bounded number of commands per pass
+    /// (`control::MAX_REQUESTS_PER_PASS` per client, `REQUEST_BUDGET` in
+    /// all) and parks the rest, so a client that packs thousands of
+    /// requests into one write costs the compositor thread a few
+    /// switches per pass, not all of them at once.
     fn service_control(&mut self, wm: &mut WindowManager<B>) {
+        let readable = self.control_readable.take();
         self.control.accept();
         if !self.control.has_clients() {
             return;
         }
         let stamp = self.control_snapshot_stamp(wm);
-        if !self.control.snapshot_needed(stamp) {
+        if !self.control.snapshot_needed(stamp, readable) {
             // A previous non-blocking write may still have bytes queued.
             // Retrying it is socket maintenance, not a reason to rebuild
             // the desktop view it already carries.
@@ -3198,7 +3408,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         let snapshot = self.control_snapshot(wm);
         let commands = self.control.service(&snapshot);
+        self.control_load.note_pass(commands.len());
         let mut publish_after_command = false;
+        // The diagnostic dump walks every window, buffer and layer, and
+        // is built at most once per pass however many `debug` requests
+        // this pass carries: each still gets its own event, from the
+        // same instant.
+        let mut dump: Option<String> = None;
         for command in commands {
             match command {
                 // A switch, never a create — `docs/control-socket.md`
@@ -3221,15 +3437,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     }
                 }
                 control::Command::Debug { client, topic } => {
-                    let data = format!(
-                        "workspace={} focused_window={:?} clients={}\n{}",
-                        wm.current_workspace(),
-                        wm.focused_client().map(|id| id.as_u64()),
-                        wm.iter_clients()
-                            .filter(|(_, client)| client.lifecycle != Lifecycle::Withdrawn)
-                            .count(),
-                        wm.backend().diagnostic_snapshot(),
-                    );
+                    let data = dump.get_or_insert_with(|| {
+                        self.control_load.dumps = self.control_load.dumps.wrapping_add(1);
+                        format!(
+                            "workspace={} focused_window={:?} clients={}\n{}",
+                            wm.current_workspace(),
+                            wm.focused_client().map(|id| id.as_u64()),
+                            wm.iter_clients()
+                                .filter(|(_, client)| client.lifecycle != Lifecycle::Withdrawn)
+                                .count(),
+                            wm.backend().diagnostic_snapshot(),
+                        )
+                    });
                     self.control.answer_debug(client, topic, data);
                 }
             }
@@ -3307,6 +3526,20 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     }
 }
 
+/// The line `hyprctl configerrors` carries for a reload whose file
+/// could not be read at all. One such line at most, and first: it is
+/// the reason nothing after it in the list has changed since the edit.
+const REJECTED_RELOAD: &str = "reload rejected: ";
+
+/// Records a rejected reload where `configerrors` reads, replacing the
+/// previous rejection so a user retrying a broken edit sees one line
+/// and not a history. The refusals from the last file that did apply
+/// stay below it: they still describe the running configuration.
+fn record_reload_rejection(diagnostics: &mut Vec<String>, error: &str) {
+    diagnostics.retain(|line| !line.starts_with(REJECTED_RELOAD));
+    diagnostics.insert(0, format!("{REJECTED_RELOAD}{error}"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3315,6 +3548,27 @@ mod tests {
 
     fn combo(keysym: u32) -> KeyCombo {
         KeyCombo { keysym, modifiers: Modifiers::ALT }
+    }
+
+    #[test]
+    fn a_rejected_reload_is_one_line_at_the_top_of_configerrors() {
+        // The refusals from the last file that applied describe the
+        // running configuration and stay; the rejection goes first,
+        // because it is the reason they are still the current list.
+        let mut diagnostics = vec!["config: unknown top-level key bogus, ignoring it".to_string()];
+        record_reload_rejection(&mut diagnostics, "config.toml: invalid TOML: expected `=`");
+        assert_eq!(
+            diagnostics,
+            vec![
+                "reload rejected: config.toml: invalid TOML: expected `=`".to_string(),
+                "config: unknown top-level key bogus, ignoring it".to_string(),
+            ]
+        );
+        // A retry that fails differently replaces the line rather
+        // than stacking a history on top of the list.
+        record_reload_rejection(&mut diagnostics, "config.toml: invalid TOML: unterminated string");
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0], "reload rejected: config.toml: invalid TOML: unterminated string");
     }
 
     #[test]
@@ -3505,7 +3759,7 @@ mod tests {
         for action in [
             RootMenuAction::LaunchTerminal,
             RootMenuAction::LaunchAbout,
-            RootMenuAction::LaunchApp(0),
+            RootMenuAction::LaunchApp { index: 0, generation: 1 },
             RootMenuAction::OmarchyCommand { index: 0, generation: 1 },
             RootMenuAction::SetWallpaper(Wallpaper::LavenderGrid),
         ] {
@@ -3653,5 +3907,37 @@ mod bound_resize {
             wm.client(ids[0]).unwrap().geometry.size,
             Size::new(before.w - 100, before.h - 50)
         );
+    }
+}
+
+#[cfg(test)]
+mod reload_guard {
+    use super::*;
+
+    /// Omarchy's reload guard: while auto-reload is paused an edit to a
+    /// watched file is not re-read however many ticks go by, and once
+    /// the pause lifts it is re-read exactly once.
+    #[test]
+    fn a_paused_watch_is_not_consulted_and_catches_up_once_when_resumed() {
+        let root = std::env::temp_dir().join(format!("chonk-reload-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let entry = root.join(".config/hypr/hyprland.conf");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "bind = SUPER, W, killactive,\n").unwrap();
+        let roots = wm_config::hyprland::Roots::under(&root);
+        let mut watch = wm_config::hyprland::Watch::new(&roots, &wm_config::hyprland::read(&roots));
+        let t0 = Instant::now();
+        let second = |n: u64| t0 + std::time::Duration::from_secs(n);
+        assert!(!hyprland_config_due(false, &mut watch, t0), "the first look is a baseline");
+
+        // Paused: the file is replaced, and poll after poll says nothing.
+        std::fs::write(&entry, "bind = SUPER SHIFT, Q, killactive,\n").unwrap();
+        for n in 2..=8 {
+            assert!(!hyprland_config_due(true, &mut watch, second(n)), "paused at t+{n}s");
+        }
+        // Resumed: seen once, then quiet.
+        assert!(hyprland_config_due(false, &mut watch, second(10)), "the edit is seen when the pause lifts");
+        assert!(!hyprland_config_due(false, &mut watch, second(12)), "and only once");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

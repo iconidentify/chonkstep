@@ -22,12 +22,20 @@ pub enum RootMenuAction {
     LaunchTerminal,
     LaunchAbout,
     Help,
-    /// An entry picked from the Applications submenu — the payload is
-    /// an index into the same scanned `Vec<AppEntry>` handed to
-    /// `Desktop::new` (read back through `Desktop::apps`), not a menu
-    /// row position: the menu regroups entries by category, but the
-    /// flat index is the identity both sides agree on.
-    LaunchApp(usize),
+    /// An entry picked from the Applications submenu — `index` is a
+    /// flat position in the [`crate::apps::AppIndex`] the menu was
+    /// built from, not a menu row position: the menu regroups entries
+    /// by category, but the flat index is the identity both sides
+    /// agree on. `generation` names that index: the list is rescanned
+    /// during the session (an install, a reload), and the dispatch
+    /// hands both back to `Desktop::app_entry`, which refuses an index
+    /// from a generation it has since replaced — a menu opened before
+    /// an install landed cannot launch whatever the re-sorted list now
+    /// holds at that position.
+    LaunchApp {
+        index: usize,
+        generation: u64,
+    },
     SetWallpaper(Wallpaper),
     /// The `Omarchy Bar` row: show the hosted shell's bar if it is
     /// hidden, hide it if it is shown (`Desktop::toggle_omarchy_bar`).
@@ -239,14 +247,16 @@ fn applications_items(apps: &[crate::apps::AppEntry]) -> Vec<MenuItem> {
 }
 
 /// What a root menu was built against, and therefore what its fired
-/// ids may resolve to: the resolver's bounds. `app_count` is the
-/// length of the app index the Applications submenu came from;
-/// `omarchy_count` and `omarchy_generation` are the Omarchy model's
-/// flat action count and its generation stamp (zero of each when the
-/// submenu is absent, which refuses every Omarchy id).
+/// ids may resolve to: the resolver's bounds. `app_count` and
+/// `app_generation` are the length and generation stamp of the app
+/// index the Applications submenu came from; `omarchy_count` and
+/// `omarchy_generation` are the Omarchy model's flat action count and
+/// its generation stamp (zero of each when the submenu is absent,
+/// which refuses every Omarchy id).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RootMenuBounds {
     pub app_count: usize,
+    pub app_generation: u64,
     pub omarchy_count: usize,
     pub omarchy_generation: u64,
 }
@@ -356,7 +366,10 @@ fn resolve_action(action: u32, bounds: RootMenuBounds) -> Option<RootMenuAction>
             if (ACTION_APP_BASE..ACTION_OMARCHY_BASE).contains(&action)
                 && ((action - ACTION_APP_BASE) as usize) < bounds.app_count =>
         {
-            Some(RootMenuAction::LaunchApp((action - ACTION_APP_BASE) as usize))
+            Some(RootMenuAction::LaunchApp {
+                index: (action - ACTION_APP_BASE) as usize,
+                generation: bounds.app_generation,
+            })
         }
         action if (ACTION_WALLPAPER_BASE..ACTION_WALLPAPER_OMARCHY).contains(&action) => {
             Some(RootMenuAction::SetWallpaper(Wallpaper::ALL[(action - ACTION_WALLPAPER_BASE) as usize]))
@@ -735,7 +748,10 @@ pub struct Desktop<B: Backend> {
     overview: OverviewPanel<B>,
     escape_key_grabbed: bool,
     theme_id: String,
-    apps: Vec<crate::apps::AppEntry>,
+    /// The current application index — the shell's copy is this one
+    /// (`AppIndex` is an `Arc` snapshot), swapped by `set_apps` when
+    /// a rescan lands.
+    apps: crate::apps::AppIndex,
     omarchy: Option<crate::omarchy_menu::OmarchyMenu>,
     omarchy_bar: Option<BarVisibility>,
 }
@@ -745,7 +761,7 @@ impl<B: Backend> Desktop<B> {
     pub fn new(
         backend: &mut B, screen: Size, primary: Rect, scale: f32,
         theme: &Theme, appearance: wm_theme::Appearance,
-        apps: Vec<crate::apps::AppEntry>, fonts: wm_theme::FontState,
+        apps: crate::apps::AppIndex, fonts: wm_theme::FontState,
     ) -> Self {
         let desktop = Self {
             screen, primary, scale, reserved: EdgeReservation::default(),
@@ -866,7 +882,8 @@ impl<B: Backend> Desktop<B> {
             .map(|menu| menu.items(ACTION_OMARCHY_BASE, ACTION_OMARCHY_INERT_ROW))
             .unwrap_or_default();
         let root_bounds = RootMenuBounds {
-            app_count: self.apps.len(),
+            app_count: self.apps.entries().len(),
+            app_generation: self.apps.generation(),
             omarchy_count: self.omarchy.as_ref().map_or(0, |menu| menu.action_count()),
             omarchy_generation: self.omarchy.as_ref().map_or(0, |menu| menu.generation()),
         };
@@ -882,7 +899,7 @@ impl<B: Backend> Desktop<B> {
         let items = root_menu_items(
             self.wallpaper,
             &self.theme_id,
-            &self.apps,
+            self.apps.entries(),
             follow_omarchy.as_deref(),
             omarchy_items,
             self.omarchy_bar,
@@ -929,7 +946,22 @@ impl<B: Backend> Desktop<B> {
     }
 
     pub fn apps(&self) -> &[crate::apps::AppEntry] {
-        &self.apps
+        self.apps.entries()
+    }
+
+    /// Swaps in a rescanned index. An open root menu keeps the rows it
+    /// was built from; its picks carry the old generation and resolve
+    /// to nothing (`app_entry`), exactly as the Omarchy submenu's do
+    /// across a definition reload.
+    pub fn set_apps(&mut self, apps: crate::apps::AppIndex) {
+        self.apps = apps;
+    }
+
+    /// The entry a `LaunchApp { index, generation }` pick names, or
+    /// `None` when the index has been replaced since that menu was
+    /// built — the stale-menu guard, twin of [`Self::omarchy_command`].
+    pub fn app_entry(&self, index: usize, generation: u64) -> Option<&crate::apps::AppEntry> {
+        self.apps.entry(generation, index)
     }
 
     pub fn set_omarchy_menu(&mut self, menu: Option<crate::omarchy_menu::OmarchyMenu>) {
@@ -1222,7 +1254,7 @@ impl<B: Backend> Desktop<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apps::{AppCategory, AppEntry};
+    use crate::apps::{AppCategory, AppEntry, AppIndex};
     #[test]
     fn every_theme_starts_without_persistent_shell_surfaces_or_reserved_columns() {
         use wm_core::fake_backend::FakeBackend;
@@ -1231,7 +1263,7 @@ mod tests {
         for theme in wm_theme::default_theme::all_themes() {
             let mut backend = FakeBackend::new();
             let mut desktop = Desktop::new(&mut backend, Size::new(1280, 520), primary,
-                1.5, &theme, wm_theme::Appearance::Dark, vec![], fonts.clone());
+                1.5, &theme, wm_theme::Appearance::Dark, AppIndex::default(), fonts.clone());
             assert_eq!(backend.next_shell_id, 0, "{} creates persistent surfaces", theme.id);
             assert_eq!(desktop.primary_workarea(), primary);
             let reservation = EdgeReservation { top: 32, right: 16, bottom: 20, left: 8 };
@@ -1257,7 +1289,7 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
         let mut desktop = Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0,
-            &theme, wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+            &theme, wm_theme::Appearance::Dark, AppIndex::default(), wm_theme::FontState::new());
         // Independent of any wallpaper selected in this developer's
         // state directory, which Desktop::new normally restores.
         desktop.wallpaper = Wallpaper::LavenderGrid;
@@ -1350,7 +1382,7 @@ mod tests {
             1.0,
             &test_theme(),
             wm_theme::Appearance::Dark,
-            Vec::new(),
+            AppIndex::default(),
             wm_theme::FontState::new(),
         );
         backend.layer_visibility_calls.clear();
@@ -1541,9 +1573,11 @@ mod tests {
             };
             for item in items {
                 let MenuItem::Action { label, action } = item else { panic!("app rows are actions") };
-                let Some(RootMenuAction::LaunchApp(index)) = resolve_action(*action, apps_only(apps.len())) else {
+                let Some(RootMenuAction::LaunchApp { index, generation }) = resolve_action(*action, apps_only(apps.len()))
+                else {
                     panic!("app id {action} must resolve to LaunchApp");
                 };
+                assert_eq!(generation, apps_only(apps.len()).app_generation, "the pick carries the bounds' generation");
                 // The resolved index names the very app the label
                 // promised — the whole point of carrying flat indices
                 // through the category regrouping.
@@ -1567,12 +1601,12 @@ mod tests {
 
     /// Bounds for a root menu with an app index and no Omarchy submenu.
     fn apps_only(app_count: usize) -> RootMenuBounds {
-        RootMenuBounds { app_count, ..RootMenuBounds::default() }
+        RootMenuBounds { app_count, app_generation: 3, ..RootMenuBounds::default() }
     }
 
     #[test]
     fn omarchy_ids_resolve_within_their_count_and_carry_the_generation() {
-        let bounds = RootMenuBounds { app_count: 4, omarchy_count: 3, omarchy_generation: 7 };
+        let bounds = RootMenuBounds { app_count: 4, app_generation: 3, omarchy_count: 3, omarchy_generation: 7 };
         assert!(matches!(
             resolve_action(ACTION_OMARCHY_BASE, bounds),
             Some(RootMenuAction::OmarchyCommand { index: 0, generation: 7 })
@@ -1594,8 +1628,8 @@ mod tests {
         // is not a real index, and an id in the Omarchy range must
         // never come back as an app even against one: the two
         // open-ended ranges are kept disjoint by the app arm's ceiling.
-        let huge = RootMenuBounds { app_count: usize::MAX, omarchy_count: 0, omarchy_generation: 0 };
-        assert!(matches!(resolve_action(ACTION_OMARCHY_BASE - 1, huge), Some(RootMenuAction::LaunchApp(_))));
+        let huge = RootMenuBounds { app_count: usize::MAX, ..RootMenuBounds::default() };
+        assert!(matches!(resolve_action(ACTION_OMARCHY_BASE - 1, huge), Some(RootMenuAction::LaunchApp { .. })));
         assert!(resolve_action(ACTION_OMARCHY_BASE, huge).is_none());
         assert!(resolve_action(ACTION_OMARCHY_BASE + 5, huge).is_none());
     }
@@ -1761,7 +1795,7 @@ mod tests {
         ));
         assert!(matches!(
             resolve_session_action(&root_session, ACTION_APP_BASE + 2),
-            Some(MenuAction::Root(RootMenuAction::LaunchApp(2)))
+            Some(MenuAction::Root(RootMenuAction::LaunchApp { index: 2, generation: 3 }))
         ));
     }
 
@@ -1839,6 +1873,34 @@ mod tests {
             );
         }
 
+        /// A root session built against `apps`, bounds and all — the
+        /// same two reads `Desktop::open_root_menu` makes of its own
+        /// stored index.
+        fn open_root_with(&mut self, apps: &AppIndex) {
+            let items = root_menu_items(
+                Wallpaper::TealBlueprint,
+                "nextstep-classic",
+                apps.entries(),
+                None,
+                Vec::new(),
+                None,
+            );
+            let bounds = RootMenuBounds {
+                app_count: apps.entries().len(),
+                app_generation: apps.generation(),
+                ..RootMenuBounds::default()
+            };
+            self.menu.open_root(
+                &mut self.host,
+                &self.theme,
+                &mut self.font_system,
+                items,
+                bounds,
+                Point::new(0, 0),
+                Size::new(1600, 1000),
+            );
+        }
+
         fn open_window(&mut self, ctx: &WindowMenuContext) {
             self.menu.open_window(
                 &mut self.host,
@@ -1872,6 +1934,76 @@ mod tests {
             assert_eq!(self.host.open.len(), 1, "expected exactly one open popup");
             *self.host.open.iter().next().unwrap()
         }
+
+        /// The one popup open now that is not among `known`: the
+        /// cascade the last click opened.
+        fn window_besides(&self, known: &[u32]) -> u32 {
+            let mut fresh = self.host.open.iter().copied().filter(|id| !known.contains(id));
+            let window = fresh.next().expect("a cascade should have opened");
+            assert!(fresh.next().is_none(), "exactly one popup opens per cascade click");
+            window
+        }
+    }
+
+    /// The stale-pick guard across a rescan: a root menu opened against
+    /// one index, an install landing a new generation while it is
+    /// open, and the pick from that old menu resolving to nothing —
+    /// never to whatever the re-sorted list now holds at the position.
+    #[test]
+    fn a_pick_from_a_menu_opened_before_a_rescan_resolves_to_nothing() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let before = AppIndex::new(app_index());
+        let mut f = MenuFixture::new();
+        f.open_root_with(&before);
+
+        // Applications -> Graphics -> GIMP, three real clicks down the
+        // cascade, each aimed with the cascade's own render.
+        let root = f.only_open_window();
+        let root_items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", before.entries(), None, Vec::new(), None);
+        let applications_row = f.row_point(root_menu_title(), &root_items, 1);
+        assert!(f.click(root, applications_row).is_none());
+        let applications = f.window_besides(&[root]);
+        let application_items = applications_submenu(before.entries());
+        let graphics_index = application_items.iter().position(|item| item.label() == "Graphics").expect("a Graphics cascade");
+        let graphics_row = f.row_point("Applications", &application_items, graphics_index);
+        assert!(f.click(applications, graphics_row).is_none());
+        let graphics = f.window_besides(&[root, applications]);
+        let MenuItem::Submenu { items: graphics_items, .. } = &application_items[graphics_index] else {
+            panic!("Graphics is a cascade")
+        };
+        let gimp_row = f.row_point("Graphics", graphics_items, 0);
+        let Some(MenuAction::Root(RootMenuAction::LaunchApp { index, generation })) = f.click(graphics, gimp_row) else {
+            panic!("the GIMP row must fire an app pick");
+        };
+        assert_eq!((index, generation), (2, before.generation()), "the pick names GIMP's flat index in the open menu's generation");
+        assert_eq!(before.entry(generation, index).map(|app| app.name.as_str()), Some("GIMP"));
+
+        // A rescan landed while that menu was open — Emacs uninstalled,
+        // Zed installed — so the list has the same count in a
+        // different order, and index 2 now names Inkscape.
+        let after = AppIndex::new(vec![
+            app("Chromium", AppCategory::Internet),
+            app("GIMP", AppCategory::Graphics),
+            app("Inkscape", AppCategory::Graphics),
+            app("Zed", AppCategory::Development),
+        ]);
+        assert_eq!(after.entries().len(), before.entries().len());
+        assert_eq!(after.entries()[index].name, "Inkscape");
+
+        let mut backend = FakeBackend::new();
+        let theme = test_theme();
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut desktop = Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0,
+            &theme, wm_theme::Appearance::Dark, before.clone(), wm_theme::FontState::new());
+        assert_eq!(desktop.app_entry(index, generation).map(|app| app.name.as_str()), Some("GIMP"));
+        desktop.set_apps(after.clone());
+        assert!(desktop.app_entry(index, generation).is_none(), "the old menu's pick outlived its index and must dissolve");
+        assert_eq!(
+            desktop.app_entry(index, after.generation()).map(|app| app.name.as_str()),
+            Some("Inkscape"),
+            "a menu opened after the swap resolves against the new index"
+        );
     }
 
     #[test]

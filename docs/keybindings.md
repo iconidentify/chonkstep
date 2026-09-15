@@ -64,9 +64,16 @@ ever do disagree, the source wins.
 
 Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
 `miniaturize`, `toggle-fullscreen`, `toggle-tiled-fullscreen`,
-`window-menu`) act on the focused window and do nothing when no window
-is focused. `toggle-tiled-fullscreen` has no default chord; it is what
-Omarchy's `super+ctrl+f` becomes, and Hyprland's `fullscreenstate 0 2`.
+`toggle-pin`, `center`, `toggle-opaque`, `window-menu`) act on the
+focused window and do nothing when no window is focused.
+`toggle-tiled-fullscreen` has no default chord; it is what Omarchy's
+`super+ctrl+f` becomes, and Hyprland's `fullscreenstate 0 2`.
+`toggle-pin` keeps the window on every workspace, above ordinary
+windows, and `center` puts it in the middle of its screen's workarea;
+neither has a default chord, and they are what a Hyprland `pin` or
+`centerwindow` binding becomes (see
+[hyprland-config.md](hyprland-config.md#bindings-this-desktop-has-no-verb-for)
+for the whole dispatcher table).
 
 ChonkStep has three workspace styles. **Freeform** lets you place windows
 yourself. **Mosaic** keeps windows visible. **Flow** extends them sideways.
@@ -433,7 +440,14 @@ line. The session lock and **Ctrl+Alt+F1..F12** outrank all of it.
   hosts Omarchy's shell) and the `Omarchy` submenu (when Omarchy is
   installed), and `Exit`. `Omarchy Bar` is bulleted when
   that column is on screen, the way the `Theme` and `Wallpaper` rows
-  mark the current choice.
+  mark the current choice. `Applications` lists the `.desktop` entries
+  in the XDG application directories and follows them for the life of
+  the session: an application installed with `pacman`, through
+  Omarchy's own `Install` rows, or by dropping a file into
+  `~/.local/share/applications` is in the submenu on the next
+  right-click, and one removed is gone. A menu already open when the
+  list changes keeps its rows; a pick from it is ignored rather than
+  launching whatever now sits at that position.
 - Right-click any titlebar: the window commands menu.
 
 

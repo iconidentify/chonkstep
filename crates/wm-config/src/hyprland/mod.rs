@@ -321,6 +321,10 @@ pub struct Reading {
     /// way: whether an application's own `xdg_activation_v1` request
     /// may take the keyboard without the user's input behind it.
     pub focus_on_activate: Option<bool>,
+    /// `misc:disable_autoreload`, when the configuration says either
+    /// way: whether the session's one-second re-read of these very
+    /// files is off until an explicit `reload`.
+    pub disable_autoreload: Option<bool>,
     /// `decoration:dim_inactive` at `decoration:dim_strength`: how much
     /// to darken every unfocused window, or `None` to leave them alone.
     pub dim_inactive: Option<f32>,
@@ -372,7 +376,7 @@ impl Reading {
         // future category cannot silently disappear at this loading boundary.
         let Self {
             keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
-            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, disable_keybind_grabbing, focus_on_activate, dim_inactive, files: _, skipped: _, motion,
+            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, disable_keybind_grabbing, focus_on_activate, disable_autoreload, dim_inactive, files: _, skipped: _, motion,
         } = self;
         keybindings.is_empty()
             && dim_inactive.is_none()
@@ -391,6 +395,7 @@ impl Reading {
             && hide_special_on_workspace_change.is_none()
             && disable_keybind_grabbing.is_none()
             && focus_on_activate.is_none()
+            && disable_autoreload.is_none()
             && *motion == wm_core::MotionPolicy::default()
     }
 
@@ -616,6 +621,9 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
     }
     if let Some(focus) = reading.focus_on_activate {
         config.focus_on_activate = focus;
+    }
+    if let Some(paused) = reading.disable_autoreload {
+        config.disable_autoreload = paused;
     }
     config.monitor_rules = reading.monitors.lines.clone();
     config.autostart = reading.autostart.clone();
@@ -1517,13 +1525,15 @@ fn binds(reading: &mut Reading, name: &str, value: &str) {
     });
 }
 
-/// One key of the `misc` table. The one carried is
-/// `focus_on_activate`, Hyprland's word for whether an application that
-/// asks to be focused through `xdg_activation_v1` gets its way without
-/// the user's own input behind the request. Off is Hyprland's default;
-/// Omarchy turns it on. Everything else in the table is Hyprland's own
-/// housekeeping — its logo, its splash, its ANR pings — which this
-/// desktop has no counterpart for.
+/// One key of the `misc` table. Two are carried. `focus_on_activate`
+/// is Hyprland's word for whether an application that asks to be
+/// focused through `xdg_activation_v1` gets its way without the user's
+/// own input behind the request: off is Hyprland's default, and Omarchy
+/// turns it on. `disable_autoreload` switches off the one-second
+/// re-read of these files until an explicit `reload` — the same switch
+/// Omarchy's upgrade hooks throw live over the IPC. Everything else in
+/// the table is Hyprland's own housekeeping — its logo, its splash, its
+/// ANR pings — which this desktop has no counterpart for.
 fn misc(reading: &mut Reading, name: &str, value: &str) {
     let value = value.trim().trim_matches(['\"', '\'']);
     let name = name.trim().to_ascii_lowercase();
@@ -1534,6 +1544,13 @@ fn misc(reading: &mut Reading, name: &str, value: &str) {
                 return;
             }
             None => "focus_on_activate must be true or false",
+        },
+        "disable_autoreload" => match toggle(value) {
+            Some(paused) => {
+                reading.disable_autoreload = Some(paused);
+                return;
+            }
+            None => "disable_autoreload must be true or false",
         },
         _ => "misc setting is not implemented",
     };

@@ -12,6 +12,7 @@ use std::os::fd::OwnedFd;
 use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::Serial;
 use smithay::wayland::compositor::{with_states, SurfaceAttributes};
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -171,20 +172,20 @@ impl PrimarySelectionHandler for Compositor {
 /// commits and answering its frame callbacks are all the renderer's
 /// job, keyed off the ledger entry these two hooks maintain.
 impl ClientDndGrabHandler for Compositor {
-    fn started(&mut self, _source: Option<WlDataSource>, icon: Option<WlSurface>, seat: Seat<Self>) {
+    fn started_with_serial(&mut self, _source: Option<WlDataSource>, icon: Option<WlSurface>, seat: Seat<Self>, serial: Serial) {
         let Some(surface) = icon else {
             return;
         };
-        // Smithay hands the drag to whichever implicit grab the serial
-        // names, the pointer's first (`data_device/device.rs`). The
-        // serial is not passed on, so the same preference is read
-        // back from the seat: a grabbed pointer means a button-held
-        // drag, and only otherwise does the touch's own grab — whose
-        // start data names the finger — make this a touch drag.
-        let (touch, origin) = if let Some(start) = seat.get_pointer().and_then(|pointer| pointer.grab_start_data()) {
+        // Match the serial Smithay validated, including its pointer-first
+        // preference. A held mouse button must not lend its location or
+        // window's privacy policy to a drag started by a different touch.
+        let pointer_start = seat.get_pointer().filter(|pointer| pointer.has_grab(serial))
+            .and_then(|pointer| pointer.grab_start_data());
+        let (touch, origin) = if let Some(start) = pointer_start {
             (None, start.focus.map(|(focus, _)| focus.surface().clone()))
         } else {
-            let start = seat.get_touch().and_then(|touch| touch.grab_start_data());
+            let start = seat.get_touch().filter(|touch| touch.has_grab(serial))
+                .and_then(|touch| touch.grab_start_data());
             (start.as_ref().map(|start| (start.slot, start.location)),
                 start.and_then(|start| start.focus.map(|(focus, _)| focus.surface().clone())))
         };
