@@ -840,6 +840,12 @@ pub struct Config {
     /// user is typing. A `focus_on_activate` window rule still refuses
     /// per window whatever this says.
     pub focus_on_activate: bool,
+    /// Whether the one-second re-read of the desktop's Hyprland
+    /// configuration is off until an explicit `reload` — Hyprland's
+    /// `misc:disable_autoreload`. The configuration's own baseline;
+    /// Omarchy's upgrade hooks flip the same switch live over the IPC
+    /// for the length of a package transaction.
+    pub disable_autoreload: bool,
     /// Relaunch the previous session's windows at startup, restoring
     /// each one's geometry, workspace and shape flags from the layout
     /// file the shell keeps. Off by default — a session that spawns
@@ -1024,6 +1030,7 @@ impl Config {
             allow_shortcut_inhibit: true,
             shortcuts_inhibit_escape: parse_key(DEFAULT_SHORTCUTS_INHIBIT_ESCAPE),
             focus_on_activate: false,
+            disable_autoreload: false,
             scale: None,
             theme: None,
             appearance: None,

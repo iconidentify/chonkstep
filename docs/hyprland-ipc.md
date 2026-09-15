@@ -50,9 +50,15 @@ $XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock
 $XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock
 ```
 
-The instance directory is mode `0700`; both sockets are `0600`, and
-accepted peers must have the compositor user's uid. There is no `/tmp`
-fallback. Requests are capped at 64 KiB, all request readers together
+The instance directory is mode `0700` and both sockets are `0600`. The
+event socket accepts peers with the compositor user's uid; the request
+socket accepts those and root. Root is past the directory mode
+regardless and can read or kill the process outright, so refusing it
+protected nothing — it only answered a root-run `hyprctl` with silence,
+and Omarchy's pacman hooks pause and resume the configuration watch
+through exactly that (`sudo hyprctl reload` is another). Root gets the
+same verbs this user gets and nothing more; every other uid is refused.
+There is no `/tmp` fallback. Requests are capped at 64 KiB, all request readers together
 share a 128 KiB budget per server pass, and all descriptors are
 non-blocking. The server retains at most **64 one-shot request clients**
 and **64 event subscribers**; an accepted connection beyond either cap
@@ -90,9 +96,9 @@ start with `[[BATCH]]` and use `;` separators.
 | `cursorpos` | The live pointer as plain `X, Y`, or `{"x": X, "y": Y}` with `-j` |
 | `devices` | Seat keyboards and pointers; keyboards include `name`, `layout` (the installed layout list, such as `us,de`), `active_keymap` (the group in force now), and `active_layout_index`. Plain `devices` uses Hyprland's block format, with one `active keymap:` line per keyboard |
 | `binds` | The live chonkstep keymap in Hyprland's plain bind-block format (or JSON). Every row replays through `dispatch`: an action with a Hyprland verb reports that verb, `exec` rows are shell-quoted so the command rebuilds exactly, and an action with no Hyprland verb reports `chonkstep <name>` |
-| `getoption` | An explicitly unset `{ "option": ..., "set": false }` object. Value fields are absent so JavaScript keeps its own default instead of coercing `null` or zero. |
+| `getoption` | An explicitly unset `{ "option": ..., "set": false }` object for every option but two. Value fields are absent so JavaScript keeps its own default instead of coercing `null` or zero. `misc:disable_autoreload` (also `misc.disable_autoreload`, as Omarchy's reload guard spells it) answers `{ "int", "bool", "set": true }` with the live state of the configuration watch, and `debug:suppress_errors` is always set and `true`: chonkstep has no on-screen configuration-error surface, so there is never anything shown to suppress |
 | `version`, `splash` | Supported |
-| `systeminfo` | Version and source, the config path, the current workspace and output count, then `shortcut_inhibitor:` — `active holder=APP` when a client holds every chord through `zwp_keyboard_shortcuts_inhibit_v1`, `suspended holder=APP` after the escape chord, `disabled` under `allow_shortcut_inhibit = false`, else `none` — and the graphics and output snapshot |
+| `systeminfo` | Version and source, the config path, `autoreload:` — `on`, or `paused` while `misc:disable_autoreload` holds the configuration watch — the current workspace and output count, then `shortcut_inhibitor:` — `active holder=APP` when a client holds every chord through `zwp_keyboard_shortcuts_inhibit_v1`, `suspended holder=APP` after the escape chord, `disabled` under `allow_shortcut_inhibit = false`, else `none` — and the graphics and output snapshot |
 | `configerrors` | Retained live-Hyprland refusals, one per line or as JSON `{"error": "…"}` objects |
 
 The nested backend has no libinput device records, so it reports one
@@ -196,6 +202,21 @@ actions. Supported families include:
   group and emits `activelayout` with its human-readable name;
 - `eval hl.config({ cursor = { invisible = BOOL } })`, the live
   cursor-visibility property used by Omarchy's screensaver;
+- `eval hl.config({ misc = { disable_autoreload = BOOL } })` and
+  `keyword misc:disable_autoreload BOOL`, which pause and resume the
+  one-second watch over the desktop's Hyprland configuration — the switch
+  Omarchy's pacman hooks throw around every `omarchy-settings` upgrade so
+  a tree that is half replaced is never read (see
+  [hyprland-config.md](hyprland-config.md#following-your-edits)). Paused,
+  an edit waits; `reload` applies it regardless and re-baselines the
+  watch, so a resume after that reload re-reads nothing more. `debug = {
+  suppress_errors = BOOL }` may ride along in the same call or come
+  alone: `true` is accepted as what is already the case, `false` is
+  refused by name. A call with any other table or key, or a value that is
+  not a boolean — Omarchy's resume writes back the word `null` after a
+  failed read — is refused whole, so the guard never gets `ok` for a
+  pause or a restore it did not get. The pause is session-local and not
+  persisted; the transition is logged and `systeminfo` reports it;
 - `eval hl.device({ name = "NAME", enabled = BOOL })`, the request
   Omarchy's touchpad and touchscreen toggles send. `NAME` is a quoted Lua
   string, escapes included, and must be exactly the name of a pointer,
@@ -224,7 +245,8 @@ a scale that the compositor said it applied but did not.
 
 `keyword` supports workspace layouts, the named
 `keyword cursor:invisible BOOL` screensaver fallback, which reaches the
-same live cursor flag as `hl.config`, and the two `keyword monitor`
+same live cursor flag as `hl.config`, `keyword misc:disable_autoreload
+BOOL`, which reaches the same watch switch, and the two `keyword monitor`
 forms Omarchy's Display panel sends from its row toggle:
 `keyword monitor NAME,disable` and `keyword monitor
 NAME,MODE,POSITION,SCALE`. If the focused client that hid the cursor

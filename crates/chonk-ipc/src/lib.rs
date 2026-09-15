@@ -233,6 +233,26 @@ pub fn peer_is_this_user_on(fd: RawFd) -> io::Result<bool> {
     Ok(peer_credentials_of(fd)?.uid == unsafe { libc::geteuid() })
 }
 
+/// Whether the peer on `fd` is this user, or root.
+///
+/// For a socket that takes *commands* and lives under a `0700`
+/// directory. Refusing uid 0 there protects nothing: root walks into
+/// the directory regardless, can read the process's memory and can
+/// `kill` it, so the only effect of dropping its connection is that a
+/// root-run `hyprctl` — Omarchy's pacman hooks, `sudo hyprctl reload`
+/// — gets silence instead of an answer or a refusal. Every other uid
+/// stays refused: they are exactly who the directory mode keeps out.
+pub fn peer_is_this_user_or_root_on(fd: RawFd) -> io::Result<bool> {
+    Ok(uid_is_this_user_or_root(peer_credentials_of(fd)?.uid))
+}
+
+/// The rule behind [`peer_is_this_user_or_root_on`], on a bare uid so
+/// it can be checked without a socket.
+pub fn uid_is_this_user_or_root(uid: libc::uid_t) -> bool {
+    // SAFETY: `geteuid` takes no arguments and has no memory preconditions.
+    uid == 0 || uid == unsafe { libc::geteuid() }
+}
+
 pub fn send_on(fd: RawFd, message: &[u8]) -> io::Result<usize> {
     // SAFETY: `message` is readable for the supplied length and remains live;
     // the raw descriptor is passed only as a kernel handle.
@@ -350,6 +370,11 @@ impl Stream {
         peer_is_this_user_on(self.fd.as_raw_fd())
     }
 
+    /// See [`peer_is_this_user_or_root_on`].
+    pub fn peer_is_this_user_or_root(&self) -> io::Result<bool> {
+        peer_is_this_user_or_root_on(self.fd.as_raw_fd())
+    }
+
     /// Whether the peer has fully closed the connection.
     ///
     /// This is the server-side liveness check for a write-only event
@@ -396,5 +421,39 @@ impl Stream {
 impl AsRawFd for Stream {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    /// The command socket's peer rule: this user and root are the
+    /// callers that can reach the socket anyway, and nobody else is.
+    #[test]
+    fn the_command_peer_rule_admits_this_user_and_root_and_nobody_else() {
+        // SAFETY: `geteuid` takes no arguments and has no memory preconditions.
+        let me = unsafe { libc::geteuid() };
+        assert!(uid_is_this_user_or_root(me), "the compositor's own uid");
+        assert!(uid_is_this_user_or_root(0), "root, who owns the machine regardless");
+        // A uid that is neither: `nobody` unless that is who is running
+        // the tests, in which case one below it.
+        let stranger = if me == 65534 { 65533 } else { 65534 };
+        assert!(!uid_is_this_user_or_root(stranger), "any other uid stays refused");
+        if me != 0 && me != u32::MAX - 1 {
+            assert!(!uid_is_this_user_or_root(me + 1), "off by one is another user");
+        }
+    }
+
+    /// The same rule read off a live socket through `SO_PEERCRED`, so
+    /// the predicate the server calls is exercised end to end, not
+    /// only the arithmetic behind it.
+    #[test]
+    fn a_socket_peer_of_this_user_passes_both_predicates() {
+        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        assert!(peer_is_this_user_on(ours.as_raw_fd()).expect("SO_PEERCRED"));
+        assert!(peer_is_this_user_or_root_on(ours.as_raw_fd()).expect("SO_PEERCRED"));
+        assert!(peer_is_this_user_or_root_on(theirs.as_raw_fd()).expect("SO_PEERCRED"));
     }
 }

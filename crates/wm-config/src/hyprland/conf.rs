@@ -417,10 +417,11 @@ fn directive(keyword: &str, value: &str, out: &mut Vec<Directive>) {
         "workspace" => workspace_rule(value, out),
         // The colon spelling of `general { layout = … }`.
         "general:layout" => out.push(Directive::DefaultLayout { layout: value.to_string() }),
-        // The colon spelling of `misc { focus_on_activate = … }`, the
-        // one `misc` key with a meaning here.
-        "misc:focus_on_activate" => out.push(Directive::Misc {
-            name: "focus_on_activate".into(),
+        // The colon spelling of `misc { focus_on_activate = … }` and
+        // `misc { disable_autoreload = … }`, the two `misc` keys with a
+        // meaning here.
+        "misc:focus_on_activate" | "misc:disable_autoreload" => out.push(Directive::Misc {
+            name: keyword["misc:".len()..].to_string(),
             value: value.to_string(),
         }),
         // Handled by `read`, which must retain scope between lines.

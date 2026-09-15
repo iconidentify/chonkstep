@@ -1090,6 +1090,16 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// else's configuration, which is most of them — see
     /// `wm_config::hyprland::wanted`.
     hyprland_config: Option<(wm_config::hyprland::Roots, wm_config::hyprland::Watch)>,
+    /// The reload guard's live switch — `hl.config({ misc = {
+    /// disable_autoreload = BOOL } })`, `keyword misc:disable_autoreload`
+    /// — standing over the configuration's own
+    /// `SessionState::disable_autoreload`. `None` until the IPC says
+    /// either way, so until then a reload that changes the file's line
+    /// is followed; after that the live word holds for the session. It
+    /// is written nowhere, so a package transaction killed between
+    /// Omarchy's pause and resume hooks leaves the watch paused only
+    /// until logout — see [`Shell::set_autoreload_paused`].
+    autoreload_live: Option<bool>,
     /// The per-workspace layout rules the last pass installed, so the
     /// next pass applies only what changed — see
     /// [`apply_workspace_layouts`].
@@ -1151,6 +1161,16 @@ fn hyprland_watch(state: &SessionState) -> Option<(wm_config::hyprland::Roots, w
     let watch = wm_config::hyprland::Watch::new(&roots, &reading);
     tracing::info!(files = reading.files.len(), "watching the desktop's Hyprland configuration for changes");
     Some((roots, watch))
+}
+
+/// Whether the tick should re-read the desktop's Hyprland configuration
+/// now. While auto-reload is paused the watch is not consulted at all —
+/// no `stat`, and no advance of its baseline — so the first look after
+/// the pause lifts compares against the signature from before it and
+/// re-reads once if anything moved in between. The pause only removes
+/// filesystem work from the compositor thread; it never adds any.
+fn hyprland_config_due(paused: bool, watch: &mut wm_config::hyprland::Watch, now: Instant) -> bool {
+    !paused && watch.changed(now)
 }
 
 /// A bound `Action::Resize` on one window: a layout-managed window
@@ -1341,6 +1361,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // else's configuration; on every other session this is
             // `None` and the poll in `tick` never touches the disk.
             hyprland_config: hyprland_watch(state),
+            autoreload_live: None,
             applied_workspace_layouts: std::collections::BTreeMap::new(),
         }
     }
@@ -1581,8 +1602,43 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// clients need a `configreloaded` event after the apply settles.
     pub fn reload_config(&mut self, wm: &mut WindowManager<B>) {
         self.reresolve(wm);
+        // The read just applied is the one the watch is measured
+        // against from here, exactly as the tick re-points it after
+        // its own re-read. It matters most for a reload issued while
+        // auto-reload is paused — Omarchy's resume hook reloads and
+        // then lifts the pause — which must not be followed by a
+        // second re-read of the same files the moment the watch is
+        // consulted again.
+        if let Some((roots, watch)) = &mut self.hyprland_config {
+            watch.follow(&wm_config::hyprland::read(roots));
+        }
         self.config_reloaded = true;
         self.monitor_rules_pending = true;
+    }
+
+    /// Whether the one-second watch over the desktop's Hyprland
+    /// configuration is paused: the live IPC word if one was given,
+    /// else what the configuration says. An explicit reload re-reads
+    /// regardless. What `getoption misc.disable_autoreload` answers.
+    pub fn autoreload_paused(&self) -> bool {
+        self.autoreload_live.unwrap_or(self.state.disable_autoreload)
+    }
+
+    /// `misc:disable_autoreload` from the IPC — Omarchy's reload guard
+    /// pauses around every `omarchy-settings` upgrade so a tree that
+    /// is half replaced is never read, and resumes after one explicit
+    /// reload. Session-local and not persisted, which is why the
+    /// transition is logged and `systeminfo` reports it: a user whose
+    /// edits stopped landing can see why.
+    pub fn set_autoreload_paused(&mut self, paused: bool) {
+        if self.autoreload_paused() != paused {
+            if paused {
+                tracing::info!("Hyprland configuration auto-reload paused; edits wait for an explicit reload");
+            } else {
+                tracing::info!("Hyprland configuration auto-reload resumed");
+            }
+        }
+        self.autoreload_live = Some(paused);
     }
 
     pub fn take_config_reloaded(&mut self) -> bool {
@@ -3109,8 +3165,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // `reresolve`, which is the same one path a reload and a theme
         // change take, so the read cannot resolve by different rules
         // than the startup it replaces.
+        let autoreload_paused = self.autoreload_paused();
         if let Some((roots, watch)) = &mut self.hyprland_config {
-            if watch.changed(std::time::Instant::now()) {
+            if hyprland_config_due(autoreload_paused, watch, std::time::Instant::now()) {
                 tracing::info!("the desktop's Hyprland configuration changed; re-reading it");
                 // Re-point the watch before re-resolving: the file set
                 // is itself part of what an edit can change (a fresh
@@ -3684,5 +3741,37 @@ mod bound_resize {
             wm.client(ids[0]).unwrap().geometry.size,
             Size::new(before.w - 100, before.h - 50)
         );
+    }
+}
+
+#[cfg(test)]
+mod reload_guard {
+    use super::*;
+
+    /// Omarchy's reload guard: while auto-reload is paused an edit to a
+    /// watched file is not re-read however many ticks go by, and once
+    /// the pause lifts it is re-read exactly once.
+    #[test]
+    fn a_paused_watch_is_not_consulted_and_catches_up_once_when_resumed() {
+        let root = std::env::temp_dir().join(format!("chonk-reload-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let entry = root.join(".config/hypr/hyprland.conf");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "bind = SUPER, W, killactive,\n").unwrap();
+        let roots = wm_config::hyprland::Roots::under(&root);
+        let mut watch = wm_config::hyprland::Watch::new(&roots, &wm_config::hyprland::read(&roots));
+        let t0 = Instant::now();
+        let second = |n: u64| t0 + std::time::Duration::from_secs(n);
+        assert!(!hyprland_config_due(false, &mut watch, t0), "the first look is a baseline");
+
+        // Paused: the file is replaced, and poll after poll says nothing.
+        std::fs::write(&entry, "bind = SUPER SHIFT, Q, killactive,\n").unwrap();
+        for n in 2..=8 {
+            assert!(!hyprland_config_due(true, &mut watch, second(n)), "paused at t+{n}s");
+        }
+        // Resumed: seen once, then quiet.
+        assert!(hyprland_config_due(false, &mut watch, second(10)), "the edit is seen when the pause lifts");
+        assert!(!hyprland_config_due(false, &mut watch, second(12)), "and only once");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

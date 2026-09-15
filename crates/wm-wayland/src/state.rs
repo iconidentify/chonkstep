@@ -4041,6 +4041,7 @@ impl Compositor {
                 self.session_lock.machine.locked(),
                 self.shell.session_state(),
                 &shortcut_inhibit,
+                self.shell.autoreload_paused(),
             );
             if first_event_client {
                 // The event and request listeners can become readable
@@ -4080,6 +4081,7 @@ impl Compositor {
                     &self.wm,
                     self.session_lock.machine.locked(),
                     self.shell.session_state(),
+                    self.shell.autoreload_paused(),
                 );
                 server.publish_owned(after);
             }

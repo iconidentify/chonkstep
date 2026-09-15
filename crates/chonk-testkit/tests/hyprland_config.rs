@@ -724,17 +724,22 @@ fn tail(log: &str) -> String {
 
 // ---- monitor rules on reload -------------------------------------------
 
-/// One request to the session's Hyprland socket, in `hyprctl`'s shape.
-fn hyprland_request(session: &Session, request: &str) -> String {
-    use std::io::{Read, Write};
+/// The directory the session bound its Hyprland sockets in, from the
+/// log line `scripts/wayland-session.sh` reads too.
+fn hyprland_socket_dir(session: &Session) -> PathBuf {
     let log = session.log();
     let directory = log
         .lines()
         .find(|line| line.contains("hyprland ipc listening"))
         .and_then(|line| line.split("directory=\"").nth(1)?.split('"').next())
-        .expect("the compositor announces its Hyprland IPC directory")
-        .to_string();
-    let mut socket = std::os::unix::net::UnixStream::connect(Path::new(&directory).join(".socket.sock")).unwrap();
+        .expect("the compositor announces its Hyprland IPC directory");
+    PathBuf::from(directory)
+}
+
+/// One request to the session's Hyprland socket, in `hyprctl`'s shape.
+fn hyprland_request(session: &Session, request: &str) -> String {
+    use std::io::{Read, Write};
+    let mut socket = UnixStream::connect(hyprland_socket_dir(session).join(".socket.sock")).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     socket.write_all(request.as_bytes()).unwrap();
     socket.shutdown(std::net::Shutdown::Write).unwrap();
@@ -944,4 +949,119 @@ fn a_reload_applies_a_changed_scale_and_an_unchanged_reload_moves_nothing() {
     );
     assert_eq!(geometry(&session), placed, "no output moved");
     assert!(session.compositor_alive());
+}
+
+// ---- the reload guard ----------------------------------------------------
+
+/// A bar, tailing the session's event socket. The read timeout is short
+/// so [`configreloaded_within`] can read to the end of a window rather
+/// than to the first event.
+fn hyprland_events(session: &Session) -> std::io::BufReader<UnixStream> {
+    let stream = UnixStream::connect(hyprland_socket_dir(session).join(".socket2.sock"))
+        .expect("the event socket");
+    stream.set_read_timeout(Some(Duration::from_millis(250))).expect("read timeout");
+    std::io::BufReader::new(stream)
+}
+
+/// How many `configreloaded` events arrive within `window`. Read to the
+/// end of the window rather than to the first one, because the answers
+/// that matter here are "none" and "exactly one".
+fn configreloaded_within(events: &mut std::io::BufReader<UnixStream>, window: Duration) -> usize {
+    use std::io::{BufRead, ErrorKind};
+    let deadline = std::time::Instant::now() + window;
+    let mut count = 0;
+    while std::time::Instant::now() < deadline {
+        let mut line = String::new();
+        match events.read_line(&mut line) {
+            Ok(0) => panic!("the event socket closed"),
+            Ok(_) => count += usize::from(line.starts_with("configreloaded>>")),
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+            Err(error) => panic!("reading the event socket: {error}"),
+        }
+    }
+    count
+}
+
+/// Omarchy's `omarchy-hyprland-reload-guard`, verbatim, against a live
+/// session: its pause stops the one-second watch from applying an edit
+/// however long the edit sits there, `hyprctl reload` applies it
+/// anyway, and its resume — that reload having applied everything —
+/// re-reads nothing more. `getoption` tells the guard the truth at each
+/// step, which is what it writes back on resume.
+///
+/// The guard runs as root from a pacman hook, which a nested test
+/// session cannot; the request socket's admission of uid 0 is covered
+/// by `chonk_ipc`'s unit tests, and everything after the connection is
+/// the same code for either caller.
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn a_paused_auto_reload_holds_edits_for_an_explicit_reload() {
+    let (_omarchy_root, options) = scratch_machine("hyprland-reload-guard", FIRST_SIZE, "SUPER + SHIFT + K");
+    let mut session = Session::boot("hyprland-reload-guard", options).expect("session boots");
+    let log_path = session.dir.join("compositor.log");
+    let rereads = || {
+        std::fs::read_to_string(&log_path).map_or(0, |log| log.matches("Hyprland configuration changed").count())
+    };
+    let option = |session: &Session, name: &str| hyprland_json(session, &format!("j/getoption {name}"));
+
+    // What the pause hook reads first, with `jq -r '.bool'`, to write
+    // back afterwards: set, and false.
+    let before = option(&session, "misc.disable_autoreload");
+    assert_eq!(before["set"], serde_json::json!(true), "{before}");
+    assert_eq!(before["bool"], serde_json::json!(false), "{before}");
+    assert_eq!(option(&session, "debug.suppress_errors")["bool"], serde_json::json!(true));
+    assert!(hyprland_request(&session, "/systeminfo").contains("autoreload: on"));
+
+    // ---- the PreTransaction hook pauses -------------------------------
+    assert_eq!(
+        hyprland_request(
+            &session,
+            "/eval hl.config({ misc = { disable_autoreload = true }, debug = { suppress_errors = true } })"
+        )
+        .trim(),
+        "ok"
+    );
+    assert_eq!(option(&session, "misc.disable_autoreload")["bool"], serde_json::json!(true));
+    assert!(
+        hyprland_request(&session, "/systeminfo").contains("autoreload: paused"),
+        "systeminfo says why edits are not landing"
+    );
+    let mut events = hyprland_events(&session);
+
+    // ---- the transaction replaces a watched file ----------------------
+    let seen = rereads();
+    std::fs::write(user_config_path(&session), user_hyprland_lua(SECOND_SIZE, "SUPER + SHIFT + J"))
+        .expect("rewrite their config");
+    // Well over two poll intervals: nothing is re-read.
+    assert_eq!(configreloaded_within(&mut events, Duration::from_secs(3)), 0, "no re-read while paused");
+    assert_eq!(rereads(), seen, "the watch never fired:\n{}", tail(&session.log()));
+
+    // ---- the PostTransaction hook: one reload, then resume ------------
+    assert_eq!(hyprland_request(&session, "/eval hl.config({ debug = { suppress_errors = true } })").trim(), "ok");
+    assert_eq!(hyprland_request(&session, "/reload").trim(), "ok");
+    assert_eq!(
+        configreloaded_within(&mut events, Duration::from_secs(3)),
+        1,
+        "exactly one re-read, from the explicit reload"
+    );
+    assert_eq!(
+        hyprland_request(
+            &session,
+            "/eval hl.config({ misc = { disable_autoreload = false }, debug = { suppress_errors = true } })"
+        )
+        .trim(),
+        "ok"
+    );
+    assert_eq!(option(&session, "misc.disable_autoreload")["bool"], serde_json::json!(false));
+    assert!(hyprland_request(&session, "/systeminfo").contains("autoreload: on"));
+
+    // The reload applied the edit: their rewritten rule sizes a window.
+    let probe = profile_binary(PROBE).expect("cargo build -p chonk-testkit builds the probe");
+    session.launch(&probe.display().to_string(), &[]).expect("the probe launches");
+    assert_eq!(probe_size(&mut session), SECOND_SIZE, "the reload applied the edit made during the pause");
+
+    // And the resume, that reload having applied everything, re-reads
+    // nothing more: the watch was re-baselined by the reload.
+    assert_eq!(configreloaded_within(&mut events, Duration::from_secs(3)), 0, "no catch-up re-read after resume");
+    assert_eq!(rereads(), seen, "the watch never fired:\n{}", tail(&session.log()));
 }

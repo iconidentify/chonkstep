@@ -624,8 +624,16 @@ off` window rule still refuses per window whatever the key says, a
 taskbar's `activate` and a pager's `_NET_ACTIVE_WINDOW` are the user's
 own acts and never consult it, and behind the session lock every
 request becomes an urgency hint. The key is read live, so a reload
-applies it. The rest of the `misc` table is Hyprland's own housekeeping
-and is reported rather than carried.
+applies it.
+
+`misc.disable_autoreload` (also `misc:disable_autoreload = …`) switches
+off the one-second watch described under
+[Following your edits](#following-your-edits) until an explicit
+`reload`, as it does in Hyprland. Omarchy's upgrade hooks throw the same
+switch live over the IPC for the length of a package transaction, and
+the live word stands over the file's for the rest of the session. The
+rest of the `misc` table is Hyprland's own housekeeping and is reported
+rather than carried.
 
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
 build the seat's xkb keymap. A value Hyprland would compute as it runs,
@@ -863,6 +871,26 @@ move whole trees; an inotify watch on a path that is unlinked and
 recreated has to be re-armed by exactly the kind of code that goes
 wrong at 3 a.m., where a signature comparison simply sees a different
 inode. Watching the directories too is what notices a *new* file.
+
+**Upgrades pause it.** Omarchy's pacman hooks run
+`omarchy-hyprland-reload-guard` around every `omarchy-settings`
+transaction. Before it, `hyprctl eval 'hl.config({ misc = {
+disable_autoreload = true }, debug = { suppress_errors = true } })'`
+pauses the watch, so a tree that is half replaced — a new
+`bindings.lua` beside a file it `require`s that has not landed yet — is
+never read; after it, one `hyprctl reload` applies the finished tree and
+the setting the guard read beforehand is written back. Both run as
+root, which the request socket admits for exactly this (see
+[hyprland-ipc.md](hyprland-ipc.md)). While paused the watch is not
+consulted at all — no `stat`, and no advance of its baseline — so the
+first look after the pause lifts sees whatever changed in between and
+re-reads once, unless a `reload` already applied it: an explicit reload
+re-baselines the watch, so the guard's resume re-reads nothing more.
+The pause is a live session property, written nowhere: a transaction
+killed between the two hooks leaves it paused until logout, which the
+session log says and `hyprctl systeminfo` reports as `autoreload:
+paused`. `misc.disable_autoreload` in the configuration itself sets the
+same switch from the file.
 
 When it fires, the whole session re-resolves through the same one path
 a `reload` binding takes, so a session that has followed a dozen edits

@@ -570,6 +570,46 @@ fn focus_on_activate_is_read_from_either_syntax() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `misc.disable_autoreload`, the other `misc` key with a meaning here:
+/// the configuration's own baseline for the switch Omarchy's upgrade
+/// hooks throw live over the IPC. Off unless the file says so, as in
+/// Hyprland, in every spelling the file can use.
+#[test]
+fn disable_autoreload_is_read_from_either_syntax() {
+    let root = scratch("autoreload-conf");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "misc {\n    disable_autoreload = true\n    disable_hyprland_logo = true\n}\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.disable_autoreload, Some(true), "{:?}", reading.skipped);
+    assert!(skipped_why(&reading, "disable_autoreload").is_none(), "{:?}", reading.skipped);
+    let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+    assert!(config.disable_autoreload);
+    assert!(!crate::parse("").unwrap().disable_autoreload, "off by default, as in Hyprland");
+
+    // The colon spelling, and a later line winning.
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "misc:disable_autoreload = true\nmisc:disable_autoreload = 0\n",
+    );
+    assert_eq!(read(&Roots::under(&root)).disable_autoreload, Some(false));
+
+    // Omarchy 4's Lua spelling.
+    let lua = scratch("autoreload-lua");
+    write(&lua.join(".config/hypr/hyprland.lua"), "hl.config({ misc = { disable_autoreload = true } })\n");
+    let reading = read(&Roots::under(&lua));
+    assert_eq!(reading.disable_autoreload, Some(true), "{:?}", reading.skipped);
+
+    // A value that is not a toggle is reported, not guessed at.
+    write(&root.join(".config/hypr/hyprland.conf"), "misc {\n    disable_autoreload = later\n}\n");
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.disable_autoreload, None);
+    assert!(skipped_why(&reading, "disable_autoreload").is_some(), "{:?}", reading.skipped);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&lua);
+}
+
 /// The conditional Omarchy gates its preinstalled application chords
 /// on is a file-system question, and answering it is a strict
 /// improvement on the baked preset — which had to write off twenty-odd
@@ -3292,6 +3332,31 @@ fn unchanged_watch_polls_do_not_allocate() {
     assert!(!changed);
     eprintln!("256 files, 20 unchanged polls: {stats:?}");
     assert_eq!(stats, chonk_test_support::AllocationStats::default());
+}
+
+/// What the reload guard's pause rests on: a watch that is simply not
+/// asked for a while keeps the baseline it had, so an edit made in the
+/// meantime — an upgrade replacing the tree file by file — is seen
+/// exactly once when asking resumes, and never while it is off.
+#[test]
+fn an_edit_made_while_the_watch_is_not_consulted_is_seen_once_afterwards() {
+    let root = scratch("watch-withheld");
+    let entry = root.join(".config/hypr/hyprland.conf");
+    write(&entry, "bind = SUPER, W, killactive,\n");
+    let roots = Roots::under(&root);
+    let mut watch = Watch::new(&roots, &read(&roots));
+    let t0 = std::time::Instant::now();
+    assert!(!watch.changed(t0), "the first look is a baseline");
+
+    // Replaced the way a package transaction replaces it, while nobody
+    // is asking.
+    let staged = root.join(".config/hypr/hyprland.conf.new");
+    write(&staged, "bind = SUPER, Q, killactive,\n");
+    std::fs::rename(&staged, &entry).unwrap();
+
+    assert!(watch.changed(t0 + std::time::Duration::from_secs(9)), "seen on the first look afterwards");
+    assert!(!watch.changed(t0 + std::time::Duration::from_secs(11)), "and only once");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The live-edit path: a change to a watched file is seen, once.

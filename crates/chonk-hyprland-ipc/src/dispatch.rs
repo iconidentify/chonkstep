@@ -111,6 +111,21 @@ pub enum Action {
     /// live session property used by Omarchy's screensaver, not a
     /// persisted Hyprland configuration mutation.
     SetCursorHidden(bool),
+    /// Pause or resume the session's one-second re-read of its Hyprland
+    /// configuration — `misc:disable_autoreload`, the switch Omarchy's
+    /// pacman hooks throw around every `omarchy-settings` upgrade so a
+    /// half-replaced tree is never loaded. A live session property, not
+    /// persisted configuration; an explicit `reload` still re-reads
+    /// while paused, which is what the resume hook relies on.
+    SetAutoreload { paused: bool },
+    /// `debug.suppress_errors = true`, which Omarchy's reload guard sets
+    /// beside the pause and writes back on resume. Already the case:
+    /// chonkstep has no on-screen configuration-error surface — refusals
+    /// are served by `configerrors` and logged — so the host applies
+    /// nothing and the answer is truthful. `false` asks for a surface
+    /// that does not exist and never reaches here; the parser refuses it
+    /// by name.
+    SuppressConfigErrors,
     /// Switch one input device on or off by its exact libinput name: the
     /// request Omarchy's touchpad and touchscreen toggles make. Parsing has
     /// already refused a name that no pointer, touch or tablet device
@@ -724,21 +739,7 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         });
     }
     if let Some(body) = source.strip_prefix("hl.config(").and_then(|value| value.strip_suffix(')')) {
-        let args = match lua_arguments(body) {
-            Ok(args) => args,
-            Err(error) => return Outcome::Unsupported(format!("hl.config: invalid Lua arguments: {error}")),
-        };
-        if let Some(cursor @ Literal::Table(_)) = lua_value(&args, "cursor") {
-            if let Some(value) = lua_field(std::slice::from_ref(cursor), "invisible") {
-                return match parse_bool(&value) {
-                    Some(hidden) => Outcome::Run(Action::SetCursorHidden(hidden)),
-                    None => Outcome::Unsupported(
-                        "hl.config cursor.invisible requires true or false".to_string(),
-                    ),
-                };
-            }
-        }
-        return Outcome::Unsupported("hl.config property mutation is not supported by chonkstep".to_string());
+        return parse_config(body);
     }
     if let Some(call) = source.strip_prefix("hl.device(") {
         return parse_device(call.strip_suffix(')'), snapshot);
@@ -920,6 +921,15 @@ pub fn parse_keyword(source: &str, snapshot: &Snapshot) -> Outcome {
                 "keyword cursor:invisible requires true or false".to_string(),
             ),
         },
+        // Hyprland's own spelling of the reload guard's switch, for a
+        // `sudo hyprctl keyword misc:disable_autoreload true` typed by
+        // hand; it reaches the same live flag as `hl.config`.
+        (Some("misc:disable_autoreload"), Some(value), None) => match parse_bool(value) {
+            Some(paused) => Outcome::Run(Action::SetAutoreload { paused }),
+            None => Outcome::Unsupported(
+                "keyword misc:disable_autoreload requires true or false".to_string(),
+            ),
+        },
         _ => Outcome::Unsupported(
             "keyword does not mutate chonkstep's configuration. \
              chonkstep reads ~/.config/hypr and re-reads it within a second of an edit, \
@@ -928,6 +938,82 @@ pub fn parse_keyword(source: &str, snapshot: &Snapshot) -> Outcome {
              `keyword monitor NAME,MODE,POSITION,SCALE` are the two keyword forms served."
                 .to_string(),
         ),
+    }
+}
+
+/// `hl.config({ TABLE = { KEY = BOOL, ... }, ... })`: the three live
+/// properties chonkstep models — `cursor.invisible`,
+/// `misc.disable_autoreload` and `debug.suppress_errors` — with every
+/// other table or key refused by name.
+///
+/// Every key in the call is checked before anything is produced.
+/// Omarchy's reload guard sends `misc` and `debug` together in one
+/// call, and its resume writes back whatever its earlier `getoption`
+/// read, which after a failed read is the word `null`: a call that is
+/// half right is refused whole, so the guard never gets `ok` for a
+/// pause or a restore it did not get. One call sets one property;
+/// `debug.suppress_errors = true` rides along with either because it
+/// changes nothing.
+fn parse_config(body: &str) -> Outcome {
+    let args = match lua_arguments(body) {
+        Ok(args) => args,
+        Err(error) => return Outcome::Unsupported(format!("hl.config: invalid Lua arguments: {error}")),
+    };
+    let mut cursor_hidden = None;
+    let mut autoreload_paused = None;
+    let mut suppress_errors = None;
+    for arg in &args {
+        let Literal::Table(tables) = arg else {
+            return Outcome::Unsupported("hl.config takes one table of named keys".to_string());
+        };
+        for (table, settings) in tables {
+            let Some(table) = table.as_deref() else {
+                return Outcome::Unsupported("hl.config takes named keys only".to_string());
+            };
+            let Literal::Table(settings) = settings else {
+                return Outcome::Unsupported(format!("hl.config {table} must be a table of settings"));
+            };
+            for (key, value) in settings {
+                let Some(key) = key.as_deref() else {
+                    return Outcome::Unsupported(format!("hl.config {table} takes named keys only"));
+                };
+                let slot = match (table, key) {
+                    ("cursor", "invisible") => &mut cursor_hidden,
+                    ("misc", "disable_autoreload") => &mut autoreload_paused,
+                    ("debug", "suppress_errors") => &mut suppress_errors,
+                    _ => {
+                        return Outcome::Unsupported(format!(
+                            "hl.config {table}.{key} is not a live property of chonkstep; \
+                             cursor.invisible, misc.disable_autoreload and debug.suppress_errors are"
+                        ))
+                    }
+                };
+                let text = match value {
+                    Literal::Str(text) | Literal::Word(text) => text.as_str(),
+                    Literal::Table(_) => "",
+                };
+                match parse_bool(text) {
+                    Some(flag) => *slot = Some(flag),
+                    None => return Outcome::Unsupported(format!("hl.config {table}.{key} requires true or false")),
+                }
+            }
+        }
+    }
+    if suppress_errors == Some(false) {
+        return Outcome::Unsupported(
+            "hl.config debug.suppress_errors = false: chonkstep has no on-screen configuration-error \
+             surface to unsuppress; refusals are served by `configerrors` and logged"
+                .to_string(),
+        );
+    }
+    match (cursor_hidden, autoreload_paused, suppress_errors) {
+        (Some(_), Some(_), _) => Outcome::Unsupported(
+            "hl.config sets cursor.invisible or misc.disable_autoreload in one call, not both".to_string(),
+        ),
+        (Some(hidden), None, _) => Outcome::Run(Action::SetCursorHidden(hidden)),
+        (None, Some(paused), _) => Outcome::Run(Action::SetAutoreload { paused }),
+        (None, None, Some(true)) => Outcome::Run(Action::SuppressConfigErrors),
+        (None, None, _) => Outcome::Unsupported("hl.config: no property to set".to_string()),
     }
 }
 

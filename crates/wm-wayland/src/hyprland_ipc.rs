@@ -130,14 +130,16 @@ pub(crate) fn init() -> Option<Server> {
 /// state through and the one Omarchy's tooling reads.
 /// `shortcut_inhibit` is `Compositor::shortcut_inhibit_report`, which
 /// lives beside the grants for the same reason and is served only by
-/// `systeminfo`.
+/// `systeminfo`. `autoreload_paused` is `Shell::autoreload_paused`, the
+/// live word over the session state's own line.
 pub(crate) fn snapshot(
     wm: &WindowManager<WaylandBackend>,
     locked: bool,
     session: &chonk_shell::startup::SessionState,
     shortcut_inhibit: &str,
+    autoreload_paused: bool,
 ) -> Snapshot {
-    build_snapshot(wm, locked, session, Some(shortcut_inhibit))
+    build_snapshot(wm, locked, session, Some(shortcut_inhibit), autoreload_paused)
 }
 
 /// Snapshot retained only by the event differ. Bindings are request-only:
@@ -147,8 +149,9 @@ pub(crate) fn event_snapshot(
     wm: &WindowManager<WaylandBackend>,
     locked: bool,
     session: &chonk_shell::startup::SessionState,
+    autoreload_paused: bool,
 ) -> Snapshot {
-    build_snapshot(wm, locked, session, None)
+    build_snapshot(wm, locked, session, None, autoreload_paused)
 }
 
 /// `system_info` is the request-only half: `Some` carries the
@@ -158,6 +161,7 @@ fn build_snapshot(
     locked: bool,
     session: &chonk_shell::startup::SessionState,
     system_info: Option<&str>,
+    autoreload_paused: bool,
 ) -> Snapshot {
     tracing::trace!("constructing Hyprland IPC snapshot");
     let include_bindings = system_info.is_some();
@@ -473,13 +477,17 @@ fn build_snapshot(
         system_info: if let Some(shortcut_inhibit) = system_info {
             // The inhibitor line is the first clue for "my shortcuts
             // stopped working": which client holds them, or that the
-            // user suspended a grant, or that grants are off.
+            // user suspended a grant, or that grants are off. The
+            // autoreload line is the same clue for "my edits stopped
+            // landing": the pause is session-local and written
+            // nowhere else.
             format!(
-                "ChonkStep {}\nsource: {}\nconfig: {}\nworkspace: {}\noutputs: {}\nshortcut_inhibitor: {}\n{}",
+                "ChonkStep {}\nsource: {}\nconfig: {}\nautoreload: {}\nworkspace: {}\noutputs: {}\nshortcut_inhibitor: {}\n{}",
                 env!("CARGO_PKG_VERSION"),
                 chonk_build_info::SOURCE_ID,
                 wm_config::config_path()
                     .map_or_else(|| "defaults (HOME unavailable)".to_string(), |path| path.display().to_string()),
+                if autoreload_paused { "paused (misc:disable_autoreload; edits wait for an explicit reload)" } else { "on" },
                 wm.current_workspace() + 1,
                 monitors_info.len(),
                 shortcut_inhibit,
@@ -493,6 +501,7 @@ fn build_snapshot(
         },
         separate_spaces: wm.separate_spaces(),
         previous_workspace: wm.previous_workspace(),
+        autoreload_paused,
     }
 }
 
@@ -1050,6 +1059,12 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             comp.shell.reload_config(&mut comp.wm);
             true
         }
+        Action::SetAutoreload { paused } => {
+            comp.shell.set_autoreload_paused(paused);
+            true
+        }
+        // Already the case, and applied as nothing: see the variant.
+        Action::SuppressConfigErrors => true,
         Action::SetDiagnostic { name, enabled } => match wm.backend_mut().set_diagnostic(&name, enabled) {
             Ok(()) => true,
             Err(error) => {

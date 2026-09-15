@@ -130,6 +130,11 @@ pub struct SessionState {
     /// Whether an application's own activation request takes the
     /// keyboard with no user input behind it — `misc:focus_on_activate`.
     pub focus_on_activate: bool,
+    /// Whether the configuration itself switched off the one-second
+    /// re-read of the desktop's Hyprland files —
+    /// `misc:disable_autoreload`. The baseline the live IPC switch
+    /// stands over; see `Shell::autoreload_paused`.
+    pub disable_autoreload: bool,
     pub placement: PlacementPolicy,
     pub edge_resistance: u32,
     pub terminal_font_px: f32,
@@ -282,6 +287,7 @@ impl SessionState {
                 escape: config.shortcuts_inhibit_escape,
             },
             focus_on_activate: config.focus_on_activate,
+            disable_autoreload: config.disable_autoreload,
             placement: config.placement,
             edge_resistance: config.edge_resistance,
             terminal_font_px: config.terminal_font_px,
@@ -1038,6 +1044,7 @@ mod tests {
             hide_special_on_workspace_change: false,
             shortcut_inhibit: wm_core::ShortcutInhibitPolicy::default(),
             focus_on_activate: false,
+            disable_autoreload: false,
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: 20.0,
