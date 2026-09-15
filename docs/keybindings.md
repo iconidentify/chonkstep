@@ -64,9 +64,16 @@ ever do disagree, the source wins.
 
 Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
 `miniaturize`, `toggle-fullscreen`, `toggle-tiled-fullscreen`,
-`window-menu`) act on the focused window and do nothing when no window
-is focused. `toggle-tiled-fullscreen` has no default chord; it is what
-Omarchy's `super+ctrl+f` becomes, and Hyprland's `fullscreenstate 0 2`.
+`toggle-pin`, `center`, `toggle-opaque`, `window-menu`) act on the
+focused window and do nothing when no window is focused.
+`toggle-tiled-fullscreen` has no default chord; it is what Omarchy's
+`super+ctrl+f` becomes, and Hyprland's `fullscreenstate 0 2`.
+`toggle-pin` keeps the window on every workspace, above ordinary
+windows, and `center` puts it in the middle of its screen's workarea;
+neither has a default chord, and they are what a Hyprland `pin` or
+`centerwindow` binding becomes (see
+[hyprland-config.md](hyprland-config.md#bindings-this-desktop-has-no-verb-for)
+for the whole dispatcher table).
 
 ChonkStep has three workspace styles. **Freeform** lets you place windows
 yourself. **Mosaic** keeps windows visible. **Flow** extends them sideways.

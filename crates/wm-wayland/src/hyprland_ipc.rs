@@ -539,6 +539,8 @@ fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::Ses
         A::Floating(None) => verb("togglefloating", ""),
         A::Floating(Some(true)) => verb("setfloating", ""),
         A::Floating(Some(false)) => verb("settiled", ""),
+        A::TogglePin => verb("pin", ""),
+        A::Center => verb("centerwindow", ""),
         A::ToggleLayout => verb("togglelayout", ""),
         A::Layout(mode) => verb("layout", mode.compatible_name()),
         A::LayoutNoop => verb("layoutmsg", ""),

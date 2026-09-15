@@ -1742,113 +1742,43 @@ fn dispatcher_from(value: &Value, description: Option<&str>) -> Dispatcher {
 
 /// `hl.dsp.<something>(<table>)` in Hyprland's conf spelling.
 ///
-/// Only the forms Omarchy writes are translated. An unrecognised
-/// dispatcher becomes a [`Dispatcher::Verb`] under its own Lua name,
-/// which `super::dispatch` will not recognise either and will report
-/// as having no verb here — the same outcome, reached without this
-/// function having to pretend to know.
+/// The translation is [`hypr_dispatch::flatten`]'s, shared with the
+/// Hyprland IPC, so the Lua vocabulary a binding understands is exactly
+/// the one `hyprctl dispatch` understands and both are the classic one
+/// under another spelling. An unrecognised dispatcher becomes a
+/// [`Dispatcher::Verb`] under its own Lua name, which `super::dispatch`
+/// will not recognise either and will report as having no verb here —
+/// the same outcome, reached without this function having to pretend
+/// to know.
 fn dsp(path: &str, args: &[Value]) -> Dispatcher {
-    let table = args.first();
-    let field = |name: &str| match table {
-        Some(Value::Table(fields)) => fields
-            .iter()
-            .find(|(k, _)| k.as_deref() == Some(name))
-            .map(|(_, v)| v),
-        _ => None,
-    };
-    let text = |name: &str| field(name).and_then(as_string).unwrap_or_default();
-    let verb = |name: &str, arg: String| Dispatcher::Verb {
-        name: name.to_string(),
-        arg,
-    };
-    match path.strip_prefix("hl.dsp.").unwrap_or(path) {
-        "exec_cmd" => Dispatcher::Exec(args.first().and_then(as_string).unwrap_or_default()),
-        "window.close" => verb("killactive", String::new()),
-        "window.fullscreen" => verb(
-            "fullscreen",
-            if text("mode") == "maximized" {
-                "1".into()
-            } else {
-                "0".into()
-            },
-        ),
-        // Both axes in the classic spelling, so `super::dispatch` makes
-        // the one judgement for both syntaxes; a table missing either
-        // keeps the empty argument it refuses.
-        "window.fullscreen_state" => {
-            let level = |name: &str| match field(name) {
-                Some(Value::Num(n)) if n.is_finite() => Some(format_number(*n)),
-                _ => None,
-            };
-            match (level("internal"), level("client")) {
-                (Some(internal), Some(client)) => verb("fullscreenstate", format!("{internal} {client}")),
-                _ => verb("fullscreenstate", String::new()),
-            }
+    let path = path.strip_prefix("hl.dsp.").unwrap_or(path);
+    match hypr_dispatch::flatten(path, &DspArgs(args)) {
+        hypr_dispatch::Flattened::Verb { name, arg } => Dispatcher::Verb { name: name.to_string(), arg },
+        hypr_dispatch::Flattened::ExecShell(command) => Dispatcher::Exec(command),
+        hypr_dispatch::Flattened::Unknown => Dispatcher::Verb { name: path.to_string(), arg: String::new() },
+    }
+}
+
+/// A call's arguments as the shared flattening looks at them: the
+/// fields of the first table, and the first argument when it is a
+/// string, each as text. A value only known at runtime has no text and
+/// reads as absent, so the classic dispatcher it would have filled in
+/// is refused for the missing argument rather than guessed.
+struct DspArgs<'a>(&'a [Value]);
+
+impl hypr_dispatch::LuaCall for DspArgs<'_> {
+    fn field(&self, key: &str) -> Option<String> {
+        match self.0.first() {
+            Some(Value::Table(fields)) => fields
+                .iter()
+                .find(|(k, _)| k.as_deref() == Some(key))
+                .and_then(|(_, v)| as_string(v)),
+            _ => None,
         }
-        "window.pseudo" => verb("pseudo", String::new()),
-        "window.float" => verb("togglefloating", String::new()),
-        "window.pin" => verb("pin", String::new()),
-        "window.swap" => verb("swapwindow", text("direction")),
-        // `x` and `y` are a delta with `relative = true`, and an exact
-        // size without it: Omarchy's `omarchy-hyprland-window-pop` pairs
-        // the bare form with the classic `resizeactive exact`. Both are
-        // carried in the classic spelling so that `super::dispatch`
-        // makes the one judgement for both syntaxes, and a table this
-        // cannot read keeps the empty argument it refuses.
-        "window.resize" => {
-            let number = |name: &str| match field(name) {
-                Some(Value::Num(n)) if n.is_finite() => Some(format_number(*n)),
-                _ => None,
-            };
-            match (number("x"), number("y")) {
-                (Some(x), Some(y)) if matches!(field("relative"), Some(Value::Bool(true))) => {
-                    verb("resizeactive", format!("{x} {y}"))
-                }
-                (Some(x), Some(y)) => verb("resizeactive", format!("exact {x} {y}")),
-                _ => verb("resizeactive", String::new()),
-            }
-        }
-        "window.drag" => verb("movewindow", String::new()),
-        "window.cycle_next" => verb("cyclenext", String::new()),
-        "window.bring_to_top" => verb("bringactivetotop", String::new()),
-        "window.move" => {
-            // `hl.dsp.window.move` is three dispatchers wearing one
-            // name: to a workspace, into a group, or out of one.
-            if field("into_group").is_some() {
-                return verb("moveintogroup", text("into_group"));
-            }
-            if field("out_of_group").is_some() {
-                return verb("moveoutofgroup", String::new());
-            }
-            let name = if matches!(field("follow"), Some(Value::Bool(false))) {
-                "movetoworkspacesilent"
-            } else {
-                "movetoworkspace"
-            };
-            verb(name, text("workspace"))
-        }
-        "focus" => {
-            if field("workspace").is_some() {
-                return verb("workspace", text("workspace"));
-            }
-            if field("monitor").is_some() {
-                return verb("focusmonitor", text("monitor"));
-            }
-            verb("movefocus", text("direction"))
-        }
-        "workspace.toggle_special" => verb(
-            "togglespecialworkspace",
-            args.first().and_then(as_string).unwrap_or_default(),
-        ),
-        "workspace.move" => verb("movecurrentworkspacetomonitor", text("monitor")),
-        "layout" => verb(
-            "layoutmsg",
-            args.first().and_then(as_string).unwrap_or_default(),
-        ),
-        "group.toggle" => verb("togglegroup", String::new()),
-        "group.next" | "group.prev" | "group.active" => verb("changegroupactive", String::new()),
-        "send_key_state" | "send_shortcut" => verb("sendshortcut", String::new()),
-        other => verb(other, String::new()),
+    }
+
+    fn positional(&self) -> Option<String> {
+        self.0.first().and_then(as_string)
     }
 }
 

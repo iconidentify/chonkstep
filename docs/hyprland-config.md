@@ -543,6 +543,58 @@ starts are refused with the piece they need:
 
 ### Bindings this desktop has no verb for
 
+A dispatcher gets one verdict here and over `hyprctl dispatch`. Both
+readers consult one table, `crates/hypr-dispatch`, before their own
+lowering, so a binding of `pin` or `togglelayout` binds exactly as the
+socket serves it, and a dispatcher the socket refuses is refused here
+with the same words. Where a binding and the socket differ, the table
+says why, and the reasons are three: the dispatcher names a window by
+selector, which a config file cannot resolve, so bind the same
+dispatcher without the selector; chonkstep has no binding verb for it
+yet, and the socket reaches it through its own request table; or it is
+Alt-Tab, declined on purpose below. Every other name in the table is
+served on both sides, and `docs/hyprland-ipc.md` lists them all. The
+rows below are the ones a binding does not reach, rendered from the
+table by `crates/chonk-hyprland-ipc/tests/vocabulary.rs`, which fails
+when this text and the table disagree:
+
+<!-- hypr-dispatch: bindings begin -->
+| Dispatcher | Keybinding | `hyprctl dispatch` |
+|---|---|---|
+| `moveactive 10 0` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `resizewindowpixel 10 0,activewindow` | refused: names a window by selector; a binding acts on the focused window | served |
+| `movewindowpixel 10 0,activewindow` | refused: names a window by selector; a binding acts on the focused window | served |
+| `alterzorder top` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `tagwindow +pop` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `focuswindow activewindow` | refused: names a window by selector; a binding acts on the focused window | served |
+| `cyclenext` | refused: declined on purpose: the window switcher owns Alt-Tab | served |
+| `bringactivetotop` | refused: declined on purpose: the window switcher owns Alt-Tab | served |
+| `focuscurrentorlast` | refused: chonkstep has no verb for the previously focused window | refused: chonkstep has no verb for the previously focused window |
+| `focuswindowbyclass foot` | refused: is not a Hyprland dispatcher; focuswindow class:NAME is served | refused: is not a Hyprland dispatcher; focuswindow class:NAME is served |
+| `workspaceopt allfloat` | refused: chonkstep has no per-workspace layout options | refused: chonkstep has no per-workspace layout options |
+| `togglegroup` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `changegroupactive f` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `moveintogroup l` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `moveoutofgroup` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `lockgroups toggle` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `lockactivegroup toggle` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `denywindowfromgroup toggle` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `moveworkspacetomonitor 3 l` | refused: names a workspace other than the active one; movecurrentworkspacetomonitor moves the active Space | refused: names a workspace other than the active one; movecurrentworkspacetomonitor moves the active Space |
+| `swapactiveworkspaces l r` | refused: swaps the workspaces of two displays, which the shared desktop does not have | refused: swaps the workspaces of two displays, which the shared desktop does not have |
+| `renameworkspace 3 mail` | refused: names a workspace; chonkstep workspaces are numbered | refused: names a workspace; chonkstep workspaces are numbered |
+| `global app:id` | served | refused: fires a portal global shortcut from its key, which the socket does not press |
+| `movecursor 10 20` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `dpms off` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `sendshortcut CTRL, c,` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `sendkeystate CTRL, c, down,` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `send_key_state` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `sendkey` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `submap resize` | refused: chonkstep's keybindings do not have submaps | refused: chonkstep's keybindings do not have submaps |
+| `exit` | refused: ends the compositor, which chonkstep does not do for a dispatcher | refused: ends the compositor, which chonkstep does not do for a dispatcher |
+| `forcerendererreload` | refused: reloads Hyprland's renderer, which is not running | refused: reloads Hyprland's renderer, which is not running |
+| `exec-shutdown true` | refused: runs a command as Hyprland exits, which is not running | refused: runs a command as Hyprland exits, which is not running |
+<!-- hypr-dispatch: bindings end -->
+
 One additional chord family remains unbound and
 is worth knowing about:
 
@@ -563,6 +615,12 @@ exact-size forms (`resizeactive exact w h`, and the Lua call without
 as a delta.
 `fullscreen 0` toggles real fullscreen; `fullscreen 1` toggles maximize within
 the workarea. Floating windows retain traditional movement and resizing.
+`pin` is the native `toggle-pin` and `centerwindow` the native `center`;
+`togglelayout` and `layout freeform|mosaic|flow` (also Hyprland's
+`dwindle` and `scrolling`) are `toggle-layout` and `layout-*`; and
+`toggleopaque`, or `setprop activewindow opaque toggle`, is
+`toggle-opaque`. `swapnext` and `swapnext prev` move the window right
+and left in the layout.
 
 Silent workspace sends (`movetoworkspacesilent 1..99`) are native too:
 the active window moves without changing the current workspace, and an

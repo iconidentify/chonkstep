@@ -1999,6 +1999,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.set_client_opaque(id, None);
                 }
             }
+            Action::TogglePin => {
+                if let Some(id) = wm.focused_client() {
+                    let pinned = wm.client(id).is_some_and(|client| client.flags.contains(wm_core::ClientFlags::STICKY));
+                    wm.set_client_pinned(id, !pinned);
+                }
+            }
+            Action::Center => {
+                if let Some(id) = wm.focused_client() {
+                    wm.center_client(id);
+                }
+            }
             Action::Floating(value) => {
                 if let Some(id) = wm.focused_client() {
                     if let Some(value) = value {

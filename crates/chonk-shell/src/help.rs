@@ -72,6 +72,8 @@ fn action_label(action: &Action) -> (&'static str, String, bool) {
         WindowMenu => ("WINDOWS", "Open window commands".into(), true),
         ToggleShade => ("WINDOWS", "Roll up / unroll the window".into(), false),
         ToggleOpaque => ("WINDOWS", "Toggle the window's transparency".into(), false),
+        TogglePin => ("WINDOWS", "Pin the window to every workspace / unpin it".into(), false),
+        Center => ("WINDOWS", "Center the window on its screen".into(), false),
         QuitApplication => ("WINDOWS", "Quit the focused application".into(), false),
         ForceQuitApplications => ("WINDOWS", "Open Force Quit Applications".into(), false),
         HideApplication => ("WINDOWS", "Hide the focused application".into(), false),

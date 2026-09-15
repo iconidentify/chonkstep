@@ -31,6 +31,7 @@
 
 use crate::preset::Unbound;
 use crate::{Action, FocusDirection};
+use hypr_dispatch::{BindingGap, Support};
 use wm_core::OutputTarget;
 
 use super::directive::Dispatcher;
@@ -225,13 +226,38 @@ fn needs_a_shell(command: &str) -> bool {
 
 /// A compositor dispatcher and its argument.
 ///
-/// Grouped in the order Omarchy's own `bindings/tiling.lua` is written
+/// The vocabulary is [`hypr_dispatch::CLASSIC`]'s, shared with the
+/// Hyprland IPC so that a chord and a `hyprctl dispatch` of the same
+/// name get one verdict: a name the table does not list has no verb
+/// here and is unknown there, a name it lists as unsupported is refused
+/// here with the words the socket refuses it with, and the dispatchers
+/// the socket serves that a binding cannot are each refused for the
+/// reason the table gives — a selector a config file cannot resolve, a
+/// verb this desktop has not grown yet, or Alt-Tab, which the modal
+/// switcher owns. Only the lowering below is this reader's own, and it
+/// is grouped in the order Omarchy's `bindings/tiling.lua` is written,
 /// so a diff against a future release is a read down one file rather
 /// than a hunt, exactly as [`crate::preset::OMARCHY_BINDINGS`] is.
 fn compositor_verb(name: &str, arg: &str) -> Verb {
     let arg = arg.trim();
-    match name.trim().to_ascii_lowercase().as_str() {
-        "killactive" | "closewindow" => Verb::Action(Action::Close),
+    let name = name.trim().to_ascii_lowercase();
+    let Some(entry) = hypr_dispatch::classic(&name) else {
+        return Verb::Unbound(Unbound::NoVerb);
+    };
+    match entry.support {
+        Support::Unsupported(why) => return Verb::Unbound(Unbound::Unsupported(why)),
+        Support::IpcOnly(gap) => {
+            return Verb::Unbound(match gap {
+                BindingGap::Declined => Unbound::Declined,
+                BindingGap::Selector => Unbound::Selector,
+                BindingGap::NotBindableYet => Unbound::NotBindableYet,
+            })
+        }
+        Support::Served | Support::BindingOnly(_) => {}
+    }
+    match name.as_str() {
+        "killactive" => Verb::Action(Action::Close),
+        "closewindow" => focused_only(arg, Action::Close),
         // Hyprland's `fullscreen` takes a mode: 0 takes the whole
         // output with no chrome, 1 fills the workarea and keeps it.
         // Those are exactly this desktop's fullscreen and maximize, and
@@ -246,20 +272,42 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         // idea and the client's separately, which is how Omarchy's
         // classic bindings spell "tiled fullscreen" (`0 2`). Both axes
         // are required, each 0, 1 or 2; anything else is refused rather
-        // than rounded to a state the chord did not ask for.
+        // than rounded to a state the chord did not ask for. A third
+        // word is the Lua form's window selector.
         "fullscreenstate" => match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
             [internal, client] => match (fullscreen_mode(internal), fullscreen_mode(client)) {
                 (Some(internal), Some(client)) => Verb::Action(Action::FullscreenState { internal, client }),
                 _ => Verb::Unbound(Unbound::NoVerb),
             },
+            [_, _, ..] => Verb::Unbound(Unbound::Selector),
             _ => Verb::Unbound(Unbound::NoVerb),
         },
-        "togglefloating" => Verb::Action(Action::Floating(None)),
-        "setfloating" => Verb::Action(Action::Floating(Some(true))),
-        "settiled" => Verb::Action(Action::Floating(Some(false))),
+        "togglefloating" => focused_only(arg, Action::Floating(None)),
+        "setfloating" => focused_only(arg, Action::Floating(Some(true))),
+        "settiled" => focused_only(arg, Action::Floating(Some(false))),
+        "pin" => focused_only(arg, Action::TogglePin),
+        "centerwindow" => focused_only(arg, Action::Center),
+        "toggleopaque" => Verb::Action(Action::ToggleOpaque),
+        // `setprop <window> opaque toggle`, the classic spelling of the
+        // transparency toggle. Only the toggle has a verb here; setting
+        // the property one way has none, and a window other than the
+        // focused one is the socket's to name.
+        "setprop" => match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [window, "opaque", "toggle"] if is_focused_window(window) => Verb::Action(Action::ToggleOpaque),
+            [window, ..] if !is_focused_window(window) => Verb::Unbound(Unbound::Selector),
+            _ => Verb::Unbound(Unbound::NoVerb),
+        },
         "layoutmsg" | "togglesplit" | "swapsplit" | "pseudo" | "splitratio" => {
             Verb::Action(Action::LayoutNoop)
         }
+        "togglelayout" => Verb::Action(Action::ToggleLayout),
+        // `layout <mode>` in either vocabulary: Hyprland's `dwindle` and
+        // `scrolling` are Mosaic and Flow, as the workspace rules read
+        // them.
+        "layout" => match wm_core::LayoutMode::parse(arg) {
+            Some(mode) => Verb::Action(Action::Layout(mode)),
+            None => Verb::Unbound(Unbound::NoVerb),
+        },
         // `resizeactive x y` is a delta, in logical pixels. Exactly two
         // integers and nothing else: the `exact w h` form sets a size,
         // which this desktop has no binding verb for, and reading its
@@ -270,16 +318,16 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
                 (Ok(x), Ok(y)) => Verb::Action(Action::Resize(wm_core::Point::new(x, y))),
                 _ => Verb::Unbound(Unbound::NoVerb),
             },
+            [x, y, ..] if x.parse::<i32>().is_ok() && y.parse::<i32>().is_ok() => Verb::Unbound(Unbound::Selector),
             _ => Verb::Unbound(Unbound::NoVerb),
         },
-        "swapnext" | "moveactive" | "pin" | "centerwindow" => Verb::Unbound(Unbound::TilingOnly),
-        "togglegroup"
-        | "changegroupactive"
-        | "moveintogroup"
-        | "moveoutofgroup"
-        | "lockactivegroup"
-        | "lockgroups"
-        | "denywindowfromgroup" => Verb::Unbound(Unbound::TilingOnly),
+        // `swapnext` swaps with the next window in the layout, `swapnext
+        // prev` with the previous: this desktop's move right and left.
+        "swapnext" => Verb::Action(Action::Move(if arg.contains("prev") {
+            FocusDirection::Left
+        } else {
+            FocusDirection::Right
+        })),
         // Directional focus is spatial over the actual floating frame
         // geometry. Directional movement remains a tiling operation:
         // there is no neighbouring slot to move a free-form window into.
@@ -323,7 +371,9 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         // Silent sends are native: the window leaves and the workspace
         // does not. Relative targets are deliberately left alone here
         // because config actions carry a stable workspace number while
-        // direct IPC resolves them against its live snapshot.
+        // direct IPC resolves them against its live snapshot. A window
+        // after the comma is the socket's to name.
+        "movetoworkspacesilent" if arg.contains(',') => Verb::Unbound(Unbound::Selector),
         "movetoworkspacesilent" => match workspace_target(arg) {
             WorkspaceTarget::Index(n) => match workspace_send_index_action(n) {
                 Some(action) => Verb::Action(action),
@@ -338,6 +388,7 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         // Carrying a window to the next existing workspace is carrying
         // it to the next one: a window in tow makes the destination
         // occupied either way.
+        "movetoworkspace" if arg.contains(',') => Verb::Unbound(Unbound::Selector),
         "movetoworkspace" => match workspace_target(arg) {
             WorkspaceTarget::Next | WorkspaceTarget::NextExisting => Verb::Action(Action::WorkspaceCarryNext),
             WorkspaceTarget::Prev | WorkspaceTarget::PrevExisting => Verb::Action(Action::WorkspaceCarryPrev),
@@ -358,8 +409,7 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         // Monitors. `focusmonitor` takes a step, a direction or an
         // output name, and so does `movecurrentworkspacetomonitor`,
         // which moves the active Space under separate Spaces and is
-        // refused with a reason on the shared desktop. The forms that
-        // name a workspace *and* a monitor stay unbound.
+        // refused with a reason on the shared desktop.
         "focusmonitor" => match output_target(arg) {
             Some(target) => Verb::Action(Action::FocusMonitor(target)),
             None => Verb::Unbound(Unbound::NoVerb),
@@ -368,21 +418,6 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             Some(target) => Verb::Action(Action::MoveWorkspaceToMonitor(target)),
             None => Verb::Unbound(Unbound::NoVerb),
         },
-        "moveworkspacetomonitor" | "swapactiveworkspaces" => Verb::Unbound(Unbound::NoVerb),
-        // Alt-Tab. This desktop's switcher is modal machinery rather
-        // than a binding — while it is up the shell owns the keyboard —
-        // so the chord is already answered, correctly, by something
-        // that is not in the binding table at all. Binding it to
-        // anything from here would break it.
-        "cyclenext" | "bringactivetotop" | "focuscurrentorlast" | "alterzorder" => {
-            Verb::Unbound(Unbound::Declined)
-        }
-        // Synthesising a key chord at the seat, which is how Omarchy
-        // builds its universal copy/paste. No verb here, and no command
-        // could stand in: it is the compositor's own input path.
-        "sendshortcut" | "sendkeystate" | "send_key_state" | "sendkey" => {
-            Verb::Unbound(Unbound::NoVerb)
-        }
         // Talking to the compositor about itself.
         "global" => {
             let target = arg.trim();
@@ -393,15 +428,41 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
                 _ => Verb::Unbound(Unbound::NoVerb),
             }
         }
-        "exit"
-        | "forcerendererreload"
-        | "dpms"
-        | "exec-shutdown"
-        | "submap"
-        | "setprop"
-        | "toggleopaque"
-        | "renameworkspace" => Verb::Unbound(Unbound::HyprlandOnly),
+        // `chonkstep <name>`: this desktop's own verb by the name
+        // `binds` reports it under and a config file spells it with.
+        // Not `run`, whose argument is a `[commands]` key this file
+        // does not declare.
+        "chonkstep" => match crate::action_from_name(arg) {
+            Some(Action::Run(_)) | None => Verb::Unbound(Unbound::NoVerb),
+            Some(action) => Verb::Action(action),
+        },
+        // A conf line spells `exec` as its own directive; a Lua call
+        // reaches here only through the shared flattening, which keeps
+        // `exec_cmd` apart. Both meet in `exec_verb` either way.
+        "exec" => exec_verb(arg),
+        // A name the table lists as served with no verb here is a table
+        // the code has not caught up with; the conformance test over
+        // the table in `chonk-hyprland-ipc` fails before this can be
+        // reached.
         _ => Verb::Unbound(Unbound::NoVerb),
+    }
+}
+
+/// Whether a window selector means the focused window: nothing, or
+/// Hyprland's own name for it.
+fn is_focused_window(selector: &str) -> bool {
+    let selector = selector.trim();
+    selector.is_empty() || selector.eq_ignore_ascii_case("activewindow")
+}
+
+/// `action`, for a dispatcher whose optional selector names the
+/// focused window; [`Unbound::Selector`] when it names another, which
+/// only the socket can resolve.
+fn focused_only(selector: &str, action: Action) -> Verb {
+    if is_focused_window(selector) {
+        Verb::Action(action)
+    } else {
+        Verb::Unbound(Unbound::Selector)
     }
 }
 

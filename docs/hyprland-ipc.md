@@ -129,7 +129,10 @@ native control socket and internal rendering geometry remain in physical pixels.
 ## Mutations
 
 Classic dispatch and Omarchy's Lua dispatch vocabulary reach the same
-actions. Supported families include:
+actions, because a Lua call is flattened onto its classic spelling
+before anything is answered — see [the dispatcher
+vocabulary](#the-dispatcher-vocabulary) below. Supported families
+include:
 
 - workspace focus and moving a window to a workspace;
 - special workspaces, Omarchy's scratchpad: `togglespecialworkspace [NAME]`
@@ -235,6 +238,152 @@ actions. Supported families include:
   a pointer constraint;
 - `reload`, which re-reads chonkstep/Hyprland configuration and emits
   `configreloaded` only after it has applied.
+
+### The dispatcher vocabulary
+
+The dispatcher names this socket recognises are the ones a keybinding
+in `hyprland.conf` or Omarchy's Lua recognises, from one table:
+`crates/hypr-dispatch`, which both `wm-config` and this crate consult
+before their own lowering. A name outside the table is unknown to both;
+a name the table refuses is refused by both with the same words; and
+where the two sides differ, the table says why, so a user reading
+`hyprctl configerrors` for a skipped binding is never told `pin` needs
+window groups while `hyprctl dispatch pin` works. The three documented
+differences are a window selector (a binding acts on the focused
+window; the socket resolves a selector against the live desktop), a
+verb chonkstep has not grown a binding for yet, and Alt-Tab, which the
+modal window switcher owns.
+
+The table below is rendered from that crate by
+`crates/chonk-hyprland-ipc/tests/vocabulary.rs`, which also walks every
+row through both front ends and fails on any disagreement the table
+does not declare. Each row shows the example the test uses; a
+window-targeted dispatcher takes a selector after it over the socket.
+
+<!-- hypr-dispatch: classic begin -->
+| Dispatcher | Keybinding | `hyprctl dispatch` |
+|---|---|---|
+| `killactive` | served | served |
+| `closewindow activewindow` | served | served |
+| `fullscreen` | served | served |
+| `fullscreenstate 0 2` | served | served |
+| `togglefloating` | served | served |
+| `setfloating` | served | served |
+| `settiled` | served | served |
+| `pin` | served | served |
+| `centerwindow` | served | served |
+| `toggleopaque` | served | served |
+| `setprop activewindow opaque toggle` | served | served |
+| `resizeactive 10 0` | served | served |
+| `moveactive 10 0` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `resizewindowpixel 10 0,activewindow` | refused: names a window by selector; a binding acts on the focused window | served |
+| `movewindowpixel 10 0,activewindow` | refused: names a window by selector; a binding acts on the focused window | served |
+| `alterzorder top` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `tagwindow +pop` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `movefocus l` | served | served |
+| `focuswindow activewindow` | refused: names a window by selector; a binding acts on the focused window | served |
+| `focusmonitor +1` | served | served |
+| `cyclenext` | refused: declined on purpose: the window switcher owns Alt-Tab | served |
+| `bringactivetotop` | refused: declined on purpose: the window switcher owns Alt-Tab | served |
+| `focuscurrentorlast` | refused: chonkstep has no verb for the previously focused window | refused: chonkstep has no verb for the previously focused window |
+| `focuswindowbyclass foot` | refused: is not a Hyprland dispatcher; focuswindow class:NAME is served | refused: is not a Hyprland dispatcher; focuswindow class:NAME is served |
+| `movewindow l` | served | served |
+| `swapwindow l` | served | served |
+| `movewindoworgroup l` | served | served |
+| `swapnext` | served | served |
+| `layoutmsg togglesplit` | served | served |
+| `togglesplit` | served | served |
+| `swapsplit` | served | served |
+| `pseudo` | served | served |
+| `splitratio 0.5` | served | served |
+| `togglelayout` | served | served |
+| `layout mosaic` | served | served |
+| `workspaceopt allfloat` | refused: chonkstep has no per-workspace layout options | refused: chonkstep has no per-workspace layout options |
+| `togglegroup` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `changegroupactive f` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `moveintogroup l` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `moveoutofgroup` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `lockgroups toggle` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `lockactivegroup toggle` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `denywindowfromgroup toggle` | refused: chonkstep has no window groups | refused: chonkstep has no window groups |
+| `workspace 3` | served | served |
+| `focusworkspaceoncurrentmonitor 3` | served | served |
+| `movetoworkspace 3` | served | served |
+| `movetoworkspacesilent 3` | served | served |
+| `togglespecialworkspace` | served | served |
+| `movecurrentworkspacetomonitor l` | served | served |
+| `moveworkspacetomonitor 3 l` | refused: names a workspace other than the active one; movecurrentworkspacetomonitor moves the active Space | refused: names a workspace other than the active one; movecurrentworkspacetomonitor moves the active Space |
+| `swapactiveworkspaces l r` | refused: swaps the workspaces of two displays, which the shared desktop does not have | refused: swaps the workspaces of two displays, which the shared desktop does not have |
+| `renameworkspace 3 mail` | refused: names a workspace; chonkstep workspaces are numbered | refused: names a workspace; chonkstep workspaces are numbered |
+| `exec foot` | served | served |
+| `chonkstep overview` | served | served |
+| `global app:id` | served | refused: fires a portal global shortcut from its key, which the socket does not press |
+| `movecursor 10 20` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `dpms off` | refused: served over hyprctl dispatch; ChonkStep has no binding verb for it yet | served |
+| `sendshortcut CTRL, c,` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `sendkeystate CTRL, c, down,` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `send_key_state` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `sendkey` | refused: synthesises a key at the seat, which is the compositor's own input path | refused: synthesises a key at the seat, which is the compositor's own input path |
+| `submap resize` | refused: chonkstep's keybindings do not have submaps | refused: chonkstep's keybindings do not have submaps |
+| `exit` | refused: ends the compositor, which chonkstep does not do for a dispatcher | refused: ends the compositor, which chonkstep does not do for a dispatcher |
+| `forcerendererreload` | refused: reloads Hyprland's renderer, which is not running | refused: reloads Hyprland's renderer, which is not running |
+| `exec-shutdown true` | refused: runs a command as Hyprland exits, which is not running | refused: runs a command as Hyprland exits, which is not running |
+<!-- hypr-dispatch: classic end -->
+
+Omarchy 4's Lua forms are the same vocabulary under another spelling.
+Each call below flattens to the classic line beside it, and is answered
+exactly as that line is; a `window = "…"` field becomes the selector
+the classic dispatcher takes. `hl.dsp.exec_cmd` is the one exception:
+its string is shell source, where classic `exec` is an argv `hyprctl`
+has already flattened, and the two are kept apart on purpose.
+
+<!-- hypr-dispatch: lua begin -->
+| Lua call | Classic spelling |
+|---|---|
+| `hl.dsp.exec_cmd("foot")` | `exec foot` |
+| `hl.dsp.window.close()` | `killactive` |
+| `hl.dsp.window.close({ window = "activewindow" })` | `closewindow activewindow` |
+| `hl.dsp.window.fullscreen({ mode = "fullscreen" })` | `fullscreen 0` |
+| `hl.dsp.window.fullscreen({ mode = "maximized" })` | `fullscreen 1` |
+| `hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })` | `fullscreenstate 0 2` |
+| `hl.dsp.window.pseudo()` | `pseudo` |
+| `hl.dsp.window.float({ action = "toggle" })` | `togglefloating` |
+| `hl.dsp.window.float({ action = "on" })` | `setfloating` |
+| `hl.dsp.window.float({ action = "off" })` | `settiled` |
+| `hl.dsp.window.pin()` | `pin` |
+| `hl.dsp.window.center()` | `centerwindow` |
+| `hl.dsp.window.alter_zorder({ mode = "top" })` | `alterzorder top` |
+| `hl.dsp.window.tag({ tag = "+pop" })` | `tagwindow +pop` |
+| `hl.dsp.window.set_prop({ prop = "opaque", value = "toggle" })` | `setprop activewindow opaque toggle` |
+| `hl.dsp.window.swap({ direction = "l" })` | `swapwindow l` |
+| `hl.dsp.window.resize({ x = 10, y = 0, relative = true })` | `resizeactive 10 0` |
+| `hl.dsp.window.resize({ x = 1300, y = 900 })` | `resizeactive exact 1300 900` |
+| `hl.dsp.window.move({ workspace = "3" })` | `movetoworkspace 3` |
+| `hl.dsp.window.move({ workspace = "3", follow = false })` | `movetoworkspacesilent 3` |
+| `hl.dsp.window.move({ x = 10, y = 0, relative = true })` | `moveactive 10 0` |
+| `hl.dsp.window.move({ x = 40, y = 30 })` | `moveactive exact 40 30` |
+| `hl.dsp.window.move({ into_group = "l" })` | `moveintogroup l` |
+| `hl.dsp.window.move({ out_of_group = true })` | `moveoutofgroup` |
+| `hl.dsp.window.cycle_next()` | `cyclenext` |
+| `hl.dsp.window.cycle_next({ next = false })` | `cyclenext prev` |
+| `hl.dsp.window.bring_to_top()` | `bringactivetotop` |
+| `hl.dsp.focus({ direction = "l" })` | `movefocus l` |
+| `hl.dsp.focus({ workspace = "3" })` | `workspace 3` |
+| `hl.dsp.focus({ window = "activewindow" })` | `focuswindow activewindow` |
+| `hl.dsp.focus({ monitor = "+1" })` | `focusmonitor +1` |
+| `hl.dsp.workspace.toggle_special("scratchpad")` | `togglespecialworkspace scratchpad` |
+| `hl.dsp.workspace.move({ monitor = "l" })` | `movecurrentworkspacetomonitor l` |
+| `hl.dsp.layout("togglesplit")` | `layoutmsg togglesplit` |
+| `hl.dsp.group.toggle()` | `togglegroup` |
+| `hl.dsp.group.next()` | `changegroupactive f` |
+| `hl.dsp.group.prev()` | `changegroupactive b` |
+| `hl.dsp.group.active({ index = 1 })` | `changegroupactive 1` |
+| `hl.dsp.send_key_state({ mods = "CTRL", key = "c", state = "down" })` | `sendkeystate` |
+| `hl.dsp.send_shortcut({ mods = "CTRL", key = "c" })` | `sendshortcut` |
+| `hl.dsp.cursor.move({ x = 10, y = 20 })` | `movecursor 10 20` |
+| `hl.dsp.dpms({ state = "off" })` | `dpms off` |
+| `hl.dsp.dpms({ action = "disable", monitor = "eDP-1" })` | `dpms off eDP-1` |
+<!-- hypr-dispatch: lua end -->
 
 `hl.config`, `hl.device`, and `hl.workspace_rule` are recognized and
 refused by name when their requested property is not modeled (for

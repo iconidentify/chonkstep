@@ -160,6 +160,15 @@ pub enum Action {
     /// A session toggle only: nothing is written anywhere, and a window
     /// no rule makes translucent is unchanged by it.
     ToggleOpaque,
+    /// Pin the focused window to every workspace, or unpin it —
+    /// Hyprland's `pin`, and the same sticky flag `hyprctl dispatch
+    /// pin` sets for Omarchy's window pop-out. A managed window comes
+    /// out of its layout to be pinned, as it does there.
+    TogglePin,
+    /// Centre the focused window in the workarea of the output it is
+    /// on, keeping its size — Hyprland's `centerwindow`, through the
+    /// same operation `hyprctl dispatch centerwindow` performs.
+    Center,
     /// Re-exec the session's on-disk binary. Distinct from [`Self::Reload`]
     /// on purpose: reloading applies a changed *config*, restarting
     /// applies a changed *build*, and only the second one has to cost
@@ -276,6 +285,8 @@ impl Action {
             Action::WindowMenu => "window-menu",
             Action::Reload => "reload",
             Action::ToggleOpaque => "toggle-opaque",
+            Action::TogglePin => "toggle-pin",
+            Action::Center => "center",
             Action::Restart => "restart",
             Action::Run(name) => return Some(format!("run {name}")),
         };
@@ -542,7 +553,7 @@ impl InputConfig {
 /// gained by making `"Close"` a startup-breaking typo. Returns `None`
 /// for unknown names — including `"none"`, which the caller must treat
 /// as unbinding *before* asking here.
-fn action_from_name(name: &str) -> Option<Action> {
+pub(crate) fn action_from_name(name: &str) -> Option<Action> {
     let name = name.trim();
     let normalized = name.to_ascii_lowercase();
     if normalized.starts_with("global-shortcut ") {
@@ -620,6 +631,8 @@ fn action_from_name(name: &str) -> Option<Action> {
         "window-menu" => Some(Action::WindowMenu),
         "reload" => Some(Action::Reload),
         "toggle-opaque" => Some(Action::ToggleOpaque),
+        "toggle-pin" => Some(Action::TogglePin),
+        "center" => Some(Action::Center),
         "restart" => Some(Action::Restart),
         // The two verbs that carry a workspace *number* rather than a
         // name. Parameterised rather than eighteen literal spellings
@@ -688,11 +701,13 @@ fn action_from_name(name: &str) -> Option<Action> {
 /// refused at parse time with a warning naming the line than deferred
 /// to the core guard at the first keypress.
 ///
-/// This public config spelling is deliberately restated by value from
-/// [`wm_core::MAX_WORKSPACES`], the authoritative core ceiling. Keep
-/// the literal synchronized so config documentation remains explicit;
-/// the assertion below makes any drift a compile error.
-pub const MAX_WORKSPACE: usize = 99;
+/// This public config spelling is [`hypr_dispatch::MAX_WORKSPACE`],
+/// the value the Hyprland IPC clamps to as well, restated by value
+/// from [`wm_core::MAX_WORKSPACES`], the authoritative core ceiling:
+/// the shared crate cannot depend on the core, so this is where the
+/// two are checked against each other. The assertion below makes any
+/// drift a compile error.
+pub const MAX_WORKSPACE: usize = hypr_dispatch::MAX_WORKSPACE;
 
 /// Overview arrangement, independent of the palette and window decorations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

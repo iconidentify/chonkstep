@@ -1,0 +1,16 @@
+[package]
+name = "hypr-dispatch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Hyprland dispatcher vocabulary chonkstep answers, in one table both the binding reader and the IPC consult."
+
+# No dependencies, on purpose. Two crates read Hyprland dispatchers —
+# `wm-config` for a keybinding and `chonk-hyprland-ipc` for a `hyprctl`
+# request — and neither may depend on the other: the IPC crate is kept
+# clear of chonkstep's own types so its promises to somebody else's
+# binary can be tested without a window manager, and the binding
+# reader has no business pulling in a socket server. A leaf crate is
+# the one place both can reach, and keeping it dependency-free is what
+# keeps both of those properties.
+[dependencies]

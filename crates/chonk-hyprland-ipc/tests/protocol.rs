@@ -1196,7 +1196,8 @@ fn fullscreen_arguments_map() {
 }
 
 /// `fullscreenstate` carries two axes, and both reach the action in
-/// either spelling; the Lua form also takes a window selector.
+/// either spelling; a window selector — the Lua form's `window`, or a
+/// third classic word — names a window other than the focused one.
 #[test]
 fn fullscreen_state_parses_both_axes_in_both_spellings() {
     let snapshot = desktop();
@@ -1206,25 +1207,25 @@ fn fullscreen_state_parses_both_axes_in_both_spellings() {
         ("/dispatch fullscreenstate 0 0", 0, 0),
         ("/dispatch fullscreenstate 2 1", 2, 1),
         ("/dispatch fullscreenstate  1   2 ", 1, 2),
+        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })", 0, 2),
+        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })", 0, 0),
+        ("/dispatch hl.dsp.window.fullscreen_state({ client = 1, internal = 2 })", 2, 1),
     ] {
         let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
         assert_eq!(response, "ok", "{wire}");
         assert_eq!(actions, vec![Action::FullscreenState { window: None, internal, client }], "{wire}");
     }
-    for (wire, internal, client) in [
-        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })", 0, 2),
-        ("/dispatch hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })", 0, 0),
-        ("/dispatch hl.dsp.window.fullscreen_state({ client = 1, internal = 2 })", 2, 1),
-        (
-            "/dispatch hl.dsp.window.fullscreen_state({ window = \"address:0x100000001\", internal = 1, client = 1 })",
-            1,
-            1,
-        ),
+    for wire in [
+        "/dispatch hl.dsp.window.fullscreen_state({ window = \"address:0x100000001\", internal = 1, client = 1 })",
+        "/dispatch fullscreenstate 1 1 address:0x100000001",
     ] {
         let (response, actions) = answer_payload(wire.as_bytes(), &snapshot);
         assert_eq!(response, "ok", "{wire}");
-        assert_eq!(actions, vec![Action::FullscreenState { window: Some(focused), internal, client }], "{wire}");
+        assert_eq!(actions, vec![Action::FullscreenState { window: Some(focused), internal: 1, client: 1 }], "{wire}");
     }
+    assert!(
+        matches!(dispatch::parse("fullscreenstate 1 1 address:0x9", &snapshot), Outcome::Unsupported(why) if why.contains("no window matches"))
+    );
 }
 
 /// A mode outside 0..=2, a missing axis, or a non-number is refused by

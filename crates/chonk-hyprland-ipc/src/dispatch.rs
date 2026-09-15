@@ -27,6 +27,7 @@
 use crate::state::{
     workspace_index_from_hypr_id, Snapshot, Window, MAX_SPECIAL_NAME, MAX_SPECIAL_WORKSPACES, NESTED_DEVICES,
 };
+use hypr_dispatch::{Flattened, LuaCall, Support, MAX_WORKSPACE};
 
 /// What a dispatch request asks chonkstep to do.
 ///
@@ -232,24 +233,6 @@ impl Outcome {
     }
 }
 
-/// Known operations outside ChonkStep's model, with their refusal reason.
-///
-/// Listing them explicitly — rather than letting them fall through to
-/// "unknown dispatcher" — is the difference between "chonkstep does not
-/// recognise this word" and "chonkstep understands exactly what you
-/// asked for and is not able to do it". The second is a much better
-/// error to read at 2am, and it is the one that tells a script author
-/// their fallback path is the right one to write.
-const UNSUPPORTED: &[(&str, &str)] = &[
-    ("togglegroup", "chonkstep has no window groups"),
-    ("changegroupactive", "chonkstep has no window groups"),
-    ("moveintogroup", "chonkstep has no window groups"),
-    ("moveoutofgroup", "chonkstep has no window groups"),
-    ("lockgroups", "chonkstep has no window groups"),
-    ("workspaceopt", "chonkstep has no per-workspace layout options"),
-    ("submap", "chonkstep's keybindings do not have submaps"),
-];
-
 /// Parse a dispatch argument string.
 ///
 /// `args` is everything after `dispatch` — either a classic verb with
@@ -297,8 +280,20 @@ fn opaque_value(value: &str) -> Option<Option<bool>> {
 }
 
 fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
-    if let Some((_, why)) = UNSUPPORTED.iter().find(|(name, _)| *name == verb) {
-        return Outcome::Unsupported((*why).to_string());
+    // The vocabulary is the shared table's, not this match's. A name the
+    // table does not list is unknown here exactly as it is to a
+    // binding, and a name it refuses is refused here with the same
+    // words a binding is refused with — "chonkstep understands exactly
+    // what you asked for and is not able to do it" is a much better
+    // error to read at 2am than "unknown dispatcher", and it is the one
+    // that tells a script author their fallback path is the right one
+    // to write. Only the lowering below is this crate's own.
+    let Some(entry) = hypr_dispatch::classic(verb) else {
+        return Outcome::Unknown(format!("unknown dispatcher {verb:?}"));
+    };
+    match entry.support {
+        Support::Unsupported(why) | Support::BindingOnly(why) => return Outcome::Unsupported(why.to_string()),
+        Support::Served | Support::IpcOnly(_) => {}
     }
 
     match verb {
@@ -312,14 +307,14 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
         } else {
             Direction::Right
         })),
-        "movewindow" | "swapwindow" => match rest.trim() {
+        "movewindow" | "swapwindow" | "movewindoworgroup" => match rest.trim() {
             "l" | "left" => Outcome::Run(Action::MoveDirection(Direction::Left)),
             "r" | "right" => Outcome::Run(Action::MoveDirection(Direction::Right)),
             "u" | "up" => Outcome::Run(Action::MoveDirection(Direction::Up)),
             "d" | "down" => Outcome::Run(Action::MoveDirection(Direction::Down)),
             _ => Outcome::Unsupported("window movement requires a direction".into()),
         },
-        "workspace" => match workspace_selector(rest, snapshot) {
+        "workspace" | "focusworkspaceoncurrentmonitor" => match workspace_selector(rest, snapshot) {
             Ok(WorkspaceSelector::Numbered(index)) => Outcome::Run(Action::FocusWorkspace(index)),
             // `workspace special:NAME` shows the special: the overlay
             // `togglespecialworkspace` drops down, reached by name.
@@ -377,16 +372,36 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                 Outcome::Run(Action::Fullscreen(Fullscreen::Toggle))
             }
         }
+        // `fullscreenstate <internal> <client>`, acting on the focused
+        // window as in Hyprland; the Lua form's `window` field arrives
+        // as a third word and names another.
         "fullscreenstate" => {
             let mut words = rest.split_whitespace();
             let (internal, client) = (words.next(), words.next());
+            let selector = words.collect::<Vec<_>>().join(" ");
             let level = |name: &str, value: Option<&str>| fullscreen_level("fullscreenstate", name, value);
             match (level("internal", internal), level("client", client)) {
-                (Ok(internal), Ok(client)) => Outcome::Run(Action::FullscreenState { window: None, internal, client }),
+                (Ok(internal), Ok(client)) => {
+                    let window = if selector.is_empty() {
+                        None
+                    } else {
+                        match resolve_window(&selector, snapshot) {
+                            Some(window) => Some(window.id),
+                            None => return Outcome::Unsupported(format!("no window matches {selector:?}")),
+                        }
+                    };
+                    Outcome::Run(Action::FullscreenState { window, internal, client })
+                }
                 (Err(why), _) | (_, Err(why)) => Outcome::Unsupported(why),
             }
         }
         "cyclenext" => Outcome::Run(Action::CycleFocus { forward: !rest.contains("prev") }),
+        // The second half of Omarchy's Alt-Tab: the focused window to
+        // the top of the stack.
+        "bringactivetotop" => match snapshot.focused_window() {
+            Some(window) => Outcome::Run(Action::RaiseWindow(window.id)),
+            None => Outcome::Unsupported("no window is focused".to_string()),
+        },
         "resizeactive" => classic_geometry(rest, snapshot, true, true),
         "resizewindowpixel" => classic_geometry(rest, snapshot, true, false),
         "moveactive" => classic_geometry(rest, snapshot, false, true),
@@ -428,6 +443,12 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                 None => Outcome::Unsupported(format!("no window matches {window:?}")),
             }
         }
+        // `toggleopaque`: `setprop activewindow opaque toggle` in one
+        // word, and what the native `toggle-opaque` binding reports.
+        "toggleopaque" => match snapshot.focused_window() {
+            Some(window) => Outcome::Run(Action::SetOpaque { window: window.id, opaque: None }),
+            None => Outcome::Unsupported("no window is focused".to_string()),
+        },
         "pin" => selected_window(rest, snapshot)
             .map(|window| Outcome::Run(Action::SetPinned { window: window.id, pinned: None }))
             .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {rest:?}"))),
@@ -473,24 +494,28 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
         "dpms" => parse_dpms(rest, snapshot),
         "focusmonitor" => focus_monitor(rest, snapshot),
         "movecurrentworkspacetomonitor" => move_workspace_to_monitor(rest, snapshot),
-        "focuswindowbyclass" => Outcome::Unsupported(format!("{verb} is not implemented yet")),
-        other => Outcome::Unknown(format!("unknown dispatcher {other:?}")),
+        // A name the table lists as served with no request here is a
+        // table the code has not caught up with; the conformance test
+        // over the table fails before this can be reached.
+        other => Outcome::Unknown(format!("dispatcher {other:?} has no request here")),
     }
 }
 
 /// Parse the Lua dispatch forms Omarchy 4 actually sends.
 ///
-/// This is not a Lua interpreter and does not try to be. It recognises
-/// the handful of shapes that appear in Omarchy's source and rejects
-/// everything else *as unsupported rather than as understood*, which is
-/// the safe direction: a Lua call we mis-parse into a plausible action
-/// would be exactly the confident wrong answer this module forbids.
-///
-/// The arguments, though, are read as real Lua literals: a string is
-/// decoded with Lua's own escape rules, and a field is a key of a table
-/// rather than a word found somewhere in the text. `exec_cmd`'s string
-/// is a command to run, so reading it as "whatever lies between the
-/// first two quotes" ran a different command and answered `ok`.
+/// This is not a Lua interpreter and does not try to be. The arguments
+/// are read as real Lua literals — a string is decoded with Lua's own
+/// escape rules, and a field is a key of a table rather than a word
+/// found somewhere in the text, because `exec_cmd`'s string is a
+/// command to run — and then the call is flattened onto the classic
+/// vocabulary by the shared table, so `hl.dsp.window.move({ workspace
+/// = "3" })` is answered by exactly the code that answers
+/// `movetoworkspace 3`, and a Lua spelling can never reach a dispatcher
+/// the classic side does not serve, or be refused where it is served.
+/// A path the table does not know is refused *as unknown rather than
+/// as understood*, which is the safe direction: a Lua call mis-parsed
+/// into a plausible action would be exactly the confident wrong answer
+/// this module forbids.
 fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
     let (path, body) = match rest.split_once('(') {
         Some((path, body)) => (path.trim(), body.trim_end().trim_end_matches(')')),
@@ -500,147 +525,28 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
         Ok(args) => args,
         Err(error) => return Outcome::Unsupported(format!("hl.dsp.{path}: invalid Lua arguments: {error}")),
     };
+    match hypr_dispatch::flatten(path, &LuaArgs(&args)) {
+        Flattened::Verb { name, arg } => parse_classic(name, &arg, snapshot),
+        // Shell source, as the Lua API defines it; classic `exec` is an
+        // argv and is reconstructed by `classic_exec` instead.
+        Flattened::ExecShell(command) if command.is_empty() => {
+            Outcome::Unknown("hl.dsp.exec_cmd with no command".to_string())
+        }
+        Flattened::ExecShell(command) => Outcome::Run(Action::ExecShell(command)),
+        Flattened::Unknown => Outcome::Unknown(format!("unknown Lua dispatcher hl.dsp.{path}")),
+    }
+}
 
-    match path {
-        "focus" => {
-            if let Some(value) = lua_field(&args, "workspace") {
-                return match workspace_selector(&value, snapshot) {
-                    Ok(WorkspaceSelector::Numbered(index)) => Outcome::Run(Action::FocusWorkspace(index)),
-                    Ok(WorkspaceSelector::Special(name)) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
-                    Err(why) => Outcome::Unsupported(why),
-                };
-            }
-            if let Some(value) = lua_field(&args, "window") {
-                return match resolve_window(&value, snapshot) {
-                    Some(window) => Outcome::Run(Action::FocusWindow(window.id)),
-                    None => Outcome::Unsupported(format!("no window matches {value:?}")),
-                };
-            }
-            if let Some(value) = lua_field(&args, "monitor") {
-                return focus_monitor(&value, snapshot);
-            }
-            if let Some(value) = lua_field(&args, "direction") {
-                return parse_classic("movefocus", &value, snapshot);
-            }
-            Outcome::Unknown("hl.dsp.focus with no workspace, window, monitor or direction".to_string())
-        }
-        "workspace.move" => match lua_field(&args, "monitor") {
-            Some(value) => move_workspace_to_monitor(&value, snapshot),
-            None => Outcome::Unsupported("hl.dsp.workspace.move requires a monitor".to_string()),
-        },
-        "window.close" => match lua_field(&args, "window") {
-            Some(value) => match resolve_window(&value, snapshot) {
-                Some(window) => Outcome::Run(Action::CloseWindow(window.id)),
-                None => Outcome::Unsupported(format!("no window matches {value:?}")),
-            },
-            None => Outcome::Run(Action::KillActive),
-        },
-        "exec_cmd" => match lua_field(&args, "cmd").or_else(|| lua_string(&args)) {
-            Some(command) => Outcome::Run(Action::ExecShell(command)),
-            None => Outcome::Unknown("hl.dsp.exec_cmd with no command".to_string()),
-        },
-        "window.float" => lua_window(&args, snapshot, |window| Action::SetFloating {
-            window: window.id,
-            floating: match lua_field(&args, "action").as_deref() {
-                Some("on" | "set") => Some(true),
-                Some("off" | "unset") => Some(false),
-                _ => None,
-            },
-        }),
-        "layout" => Outcome::Run(Action::LayoutNoop),
-        "window.pin" => lua_window(&args, snapshot, |window| Action::SetPinned { window: window.id, pinned: None }),
-        "window.resize" => lua_geometry(&args, snapshot, true),
-        // `hl.dsp.window.move` is a move to a workspace when it names
-        // one — Omarchy's `{ workspace = "special:scratchpad", follow =
-        // false }` — and a geometry move otherwise. Groups are refused
-        // by the name Omarchy gives them.
-        "window.move" => {
-            if lua_field(&args, "into_group").is_some() || lua_field(&args, "out_of_group").is_some() {
-                return Outcome::Unsupported("chonkstep has no window groups".to_string());
-            }
-            match lua_field(&args, "workspace") {
-                Some(target) => {
-                    let selector = match workspace_selector(&target, snapshot) {
-                        Ok(selector) => selector,
-                        Err(why) => return Outcome::Unsupported(why),
-                    };
-                    let follow = lua_field(&args, "follow").is_none_or(|value| value != "false");
-                    let window = match lua_field(&args, "window") {
-                        None => None,
-                        Some(value) => match resolve_window(&value, snapshot) {
-                            Some(window) => Some(window.id),
-                            None => return Outcome::Unsupported(format!("no window matches {value:?}")),
-                        },
-                    };
-                    Outcome::Run(move_action(selector, window, follow))
-                }
-                None => lua_geometry(&args, snapshot, false),
-            }
-        }
-        // `hl.dsp.workspace.toggle_special("scratchpad")`, or with no
-        // argument the default special workspace.
-        "workspace.toggle_special" => {
-            let name = lua_field(&args, "name").or_else(|| lua_string(&args)).unwrap_or_default();
-            match special_name(&name, snapshot) {
-                Ok(name) => Outcome::Run(Action::ToggleSpecialWorkspace(name)),
-                Err(why) => Outcome::Unsupported(why),
-            }
-        }
-        "window.center" => lua_window(&args, snapshot, |window| Action::CenterWindow(window.id)),
-        "window.alter_zorder" => {
-            if lua_field(&args, "mode").as_deref() != Some("top") {
-                Outcome::Unsupported("hl.dsp.window.alter_zorder supports mode=top only".to_string())
-            } else {
-                lua_window(&args, snapshot, |window| Action::RaiseWindow(window.id))
-            }
-        }
-        "window.tag" => {
-            let Some(tag) = lua_field(&args, "tag") else {
-                return Outcome::Unknown("hl.dsp.window.tag with no tag".to_string());
-            };
-            let (present, tag) = match tag.strip_prefix('-') {
-                Some(tag) => (false, tag.to_string()),
-                None => (true, tag.trim_start_matches('+').to_string()),
-            };
-            lua_window(&args, snapshot, |window| Action::SetTag { window: window.id, tag, present })
-        }
-        "window.fullscreen_state" => {
-            let level = |name: &str| {
-                fullscreen_level("hl.dsp.window.fullscreen_state", name, lua_field(&args, name).as_deref())
-            };
-            match (level("internal"), level("client")) {
-                (Ok(internal), Ok(client)) => lua_window(&args, snapshot, |window| Action::FullscreenState {
-                    window: Some(window.id),
-                    internal,
-                    client,
-                }),
-                (Err(why), _) | (_, Err(why)) => Outcome::Unsupported(why),
-            }
-        }
-        "window.set_prop" => {
-            let Some(prop) = lua_field(&args, "prop") else {
-                return Outcome::Unknown("hl.dsp.window.set_prop with no prop".to_string());
-            };
-            if prop != "opaque" {
-                return Outcome::Unsupported(format!(
-                    "window property {prop:?} is not modeled; opaque is the one set_prop property ChonkStep serves"
-                ));
-            }
-            let value = lua_field(&args, "value").unwrap_or_else(|| "toggle".to_string());
-            match opaque_value(&value) {
-                Some(opaque) => lua_window(&args, snapshot, |window| Action::SetOpaque { window: window.id, opaque }),
-                None => Outcome::Unsupported(format!("set_prop opaque takes toggle, 1 or 0, not {value:?}")),
-            }
-        }
-        "cursor.move" => {
-            let coordinate = |key: &str| lua_field(&args, key).and_then(|value| value.trim().parse::<i32>().ok());
-            match (coordinate("x"), coordinate("y")) {
-                (Some(x), Some(y)) => Outcome::Run(Action::WarpPointer { x, y }),
-                _ => Outcome::Unsupported("hl.dsp.cursor.move requires integer x and y".to_string()),
-            }
-        }
-        "dpms" => parse_dpms_lua(&args, snapshot),
-        other => Outcome::Unknown(format!("unknown Lua dispatcher hl.dsp.{other}")),
+/// A read argument list, as the shared flattening looks at it.
+struct LuaArgs<'a>(&'a [Literal]);
+
+impl LuaCall for LuaArgs<'_> {
+    fn field(&self, key: &str) -> Option<String> {
+        lua_field(self.0, key)
+    }
+
+    fn positional(&self) -> Option<String> {
+        lua_string(self.0)
     }
 }
 
@@ -1071,23 +977,6 @@ fn parse_dpms(source: &str, snapshot: &Snapshot) -> Outcome {
     Outcome::Run(Action::SetDpms { output, powered })
 }
 
-fn parse_dpms_lua(args: &[Literal], snapshot: &Snapshot) -> Outcome {
-    let state = lua_field(args, "state")
-        .or_else(|| lua_field(args, "enabled"))
-        .or_else(|| lua_field(args, "action"))
-        .or_else(|| lua_string(args));
-    let Some(state) = state else {
-        return Outcome::Unsupported("hl.dsp.dpms requires state=on or state=off".to_string());
-    };
-    let state = match state.to_ascii_lowercase().as_str() {
-        "enable" | "enabled" => "on",
-        "disable" | "disabled" => "off",
-        _ => state.as_str(),
-    };
-    let output = lua_field(args, "output").or_else(|| lua_field(args, "monitor"));
-    parse_dpms(&format!("{}{}", state, output.map_or_else(String::new, |name| format!(" {name}"))), snapshot)
-}
-
 /// One axis of `fullscreenstate`, refused by name for anything but the
 /// three modes Hyprland numbers. A missing field is refused too rather
 /// than defaulted: Hyprland reads a missing axis as "keep the current
@@ -1110,35 +999,6 @@ fn selected_window<'a>(selector: &str, snapshot: &'a Snapshot) -> Option<&'a Win
     } else {
         resolve_window(selector.trim(), snapshot)
     }
-}
-
-fn lua_window<F>(args: &[Literal], snapshot: &Snapshot, action: F) -> Outcome
-where
-    F: FnOnce(&Window) -> Action,
-{
-    let window = lua_field(args, "window")
-        .as_deref()
-        .and_then(|selector| resolve_window(selector, snapshot))
-        .or_else(|| snapshot.focused_window());
-    window.map(|window| Outcome::Run(action(window)))
-        .unwrap_or_else(|| Outcome::Unsupported("window dispatcher has no matching target".to_string()))
-}
-
-fn lua_geometry(args: &[Literal], snapshot: &Snapshot, resize: bool) -> Outcome {
-    let Some(x) = lua_field(args, "x").and_then(|value| value.parse::<i32>().ok()) else {
-        return Outcome::Unsupported("window geometry requires an integer x".to_string());
-    };
-    let Some(y) = lua_field(args, "y").and_then(|value| value.parse::<i32>().ok()) else {
-        return Outcome::Unsupported("window geometry requires an integer y".to_string());
-    };
-    let relative = lua_field(args, "relative").is_some_and(|value| value == "true");
-    lua_window(args, snapshot, |window| {
-        if resize {
-            Action::ResizeWindow { window: window.id, width: x, height: y, relative }
-        } else {
-            Action::MoveWindow { window: window.id, x, y, relative }
-        }
-    })
 }
 
 fn classic_geometry(rest: &str, snapshot: &Snapshot, resize: bool, active_form: bool) -> Outcome {
@@ -1673,7 +1533,7 @@ fn classic_exec(rest: &str) -> Outcome {
     Outcome::Run(Action::ExecArgv(argv))
 }
 
-/// The workspaces a switch may name.
+/// Reject a workspace index the keyboard could not reach either.
 ///
 /// `wm-core`'s `switch_workspace` grows the workspace row on demand up
 /// to its fixed ceiling, so mechanically any index below that ceiling
@@ -1697,16 +1557,12 @@ fn classic_exec(rest: &str) -> Outcome {
 /// keyboard worked — which is not a compositor that Omarchy's
 /// unmodified shell runs on, and running on it is the point.
 ///
-/// Mirrors `wm_core::MAX_WORKSPACES`, the authoritative core ceiling,
-/// deliberately by value rather than by dependency: this crate stays
-/// free of chonkstep's own crates so that every promise it makes to
-/// somebody else's binary can be tested without booting a window
-/// manager (see the crate doc). `wm_config::MAX_WORKSPACE` restates the
-/// same one-based limit and checks it against the core at compile time.
-/// If the core constant moves, this one follows.
-const MAX_WORKSPACE: usize = 99;
-
-/// Reject a workspace index the keyboard could not reach either.
+/// The ceiling itself is `hypr_dispatch::MAX_WORKSPACE`, which mirrors
+/// `wm_core::MAX_WORKSPACES` by value rather than by dependency: this
+/// crate stays free of chonkstep's own crates so that every promise it
+/// makes to somebody else's binary can be tested without booting a
+/// window manager (see the crate doc), and `wm_config::MAX_WORKSPACE`
+/// checks the shared value against the core at compile time.
 fn in_range(index: usize) -> Result<usize, String> {
     if index < MAX_WORKSPACE {
         return Ok(index);

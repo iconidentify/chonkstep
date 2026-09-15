@@ -700,6 +700,19 @@ pub enum Unbound {
     /// Chonkstep *could* bind it and declines to, because what it would
     /// do here is not what the user pressing it is asking for.
     Declined,
+    /// A dispatcher `hypr_dispatch::CLASSIC` lists as outside
+    /// chonkstep's model, with the one reason both the binding reader
+    /// and the Hyprland IPC report for it, so a chord and a `hyprctl
+    /// dispatch` of the same name never disagree about why.
+    Unsupported(&'static str),
+    /// A dispatcher `hyprctl dispatch` serves that names a window by
+    /// selector. A binding acts on the focused window; the same
+    /// dispatcher without the selector is the one to bind.
+    Selector,
+    /// A dispatcher `hyprctl dispatch` serves that chonkstep has no
+    /// binding verb for yet. Accurate rather than wrong: the old
+    /// answer told a user `pin` needed window groups.
+    NotBindableYet,
 }
 
 impl Unbound {
@@ -720,6 +733,9 @@ impl Unbound {
             Self::NotAKey => "not a key chord this config format can express",
             Self::Conditional => "Omarchy binds it conditionally; a table of constants cannot",
             Self::Declined => "declined on purpose -- see the note under the table",
+            Self::Unsupported(why) => why,
+            Self::Selector => hypr_dispatch::BindingGap::Selector.reason(),
+            Self::NotBindableYet => hypr_dispatch::BindingGap::NotBindableYet.reason(),
         }
     }
 }
