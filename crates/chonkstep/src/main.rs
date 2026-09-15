@@ -48,9 +48,10 @@ fn inspect_config_and_exit_if_asked() {
     else {
         return;
     };
-    // Offline inspection still needs the parser's per-entry warnings;
-    // the normal subscriber is intentionally installed only after
-    // this early-exit path.
+    // The parser's refusals are printed from `Config::diagnostics`
+    // below; this subscriber is for what the live Hyprland reader logs
+    // about files it could not read. The normal subscriber is
+    // intentionally installed only after this early-exit path.
     let _ = tracing_subscriber::fmt()
         .without_time()
         .with_max_level(tracing::Level::WARN)

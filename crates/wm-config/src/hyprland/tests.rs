@@ -3288,7 +3288,7 @@ fn chonksteps_own_config_still_wins_over_the_read() {
     let table: toml::Table = "\"super+w\" = \"overview\"\n\"super+f\" = \"none\"\n"
         .parse()
         .unwrap();
-    crate::apply_keybindings(&mut config.keybindings, &table);
+    crate::apply_keybindings(&mut config.keybindings, &table, &mut config.diagnostics);
     let action = |spec: &str| {
         let combo = crate::parse_key(spec).unwrap();
         config

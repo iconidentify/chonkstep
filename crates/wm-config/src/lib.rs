@@ -986,15 +986,47 @@ pub struct Config {
     pub motion: wm_core::MotionPolicy,
 }
 
+/// Logs a refused configuration item and keeps it for `hyprctl
+/// configerrors`, `--check-config` and the reload paths — the single
+/// path every per-item refusal takes, so the log and the diagnostics
+/// channel can never disagree about what the file lost. Without a
+/// subscriber the log half costs nothing, which keeps [`parse`]
+/// trivially callable from tests.
+pub(crate) fn refuse(diagnostics: &mut Vec<String>, message: String) {
+    tracing::warn!("{message}");
+    diagnostics.push(message);
+}
+
+/// [`refuse`] with `format!` arguments. The first argument is the
+/// diagnostics list the refusal lands in — `config.diagnostics` in the
+/// walk, the borrowed list in the helpers below it.
+macro_rules! refuse {
+    ($diagnostics:expr, $($arg:tt)*) => {{
+        let message = format!($($arg)*);
+        refuse(&mut $diagnostics, message)
+    }};
+}
+
+/// A refused value as its diagnostic shows it: a scalar as the user
+/// wrote it, an array or table by shape, so one refusal stays one line
+/// however large the table behind it was.
+fn shown(value: &toml::Value) -> String {
+    match value {
+        toml::Value::Array(items) => format!("an array of {} entries", items.len()),
+        toml::Value::Table(_) => "a table".into(),
+        other => other.to_string(),
+    }
+}
+
 /// The `hyprland_config` key, read out of the raw table before the
 /// walk because the read it gates has to happen there — the same
 /// chicken-and-egg `preset::base` solves for `desktop` and `keymap`,
 /// solved the same way.
-fn hyprland_switch(table: &toml::Table) -> Option<bool> {
+fn hyprland_switch(table: &toml::Table, diagnostics: &mut Vec<String>) -> Option<bool> {
     match table.get("hyprland_config")? {
         toml::Value::Boolean(b) => Some(*b),
         other => {
-            tracing::warn!(value = ?other, "config: hyprland_config must be a boolean, deciding from the posture instead");
+            refuse!(*diagnostics, "config: hyprland_config must be a boolean, deciding from the posture instead (got {})", shown(other));
             None
         }
     }
@@ -1434,17 +1466,21 @@ fn shortcuts_inhibit_escape_from_spec(spec: &str) -> Option<Option<KeyCombo>> {
 /// rather than erroring, and rather than unbinding — is what makes a
 /// typo cost the user one binding at most, never the file or a default
 /// they still rely on.
-fn apply_keybindings(bindings: &mut Vec<(KeyCombo, Action)>, table: &toml::Table) {
+fn apply_keybindings(
+    bindings: &mut Vec<(KeyCombo, Action)>,
+    table: &toml::Table,
+    diagnostics: &mut Vec<String>,
+) {
     for (spec, value) in table {
         let Some(combo) = parse_key(spec) else {
-            tracing::warn!(key = %spec, "config: unparsable key spec in [keybindings], skipping entry");
+            refuse!(*diagnostics, "config: unparsable key spec {spec:?} in [keybindings], skipping entry");
             continue;
         };
         let toml::Value::String(name) = value else {
-            tracing::warn!(
-                key = %spec,
-                value = ?value,
-                "config: [keybindings] value must be an action name string, skipping entry"
+            refuse!(
+                *diagnostics,
+                "config: [keybindings] value for {spec:?} must be an action name string, skipping entry (got {})",
+                shown(value)
             );
             continue;
         };
@@ -1455,10 +1491,9 @@ fn apply_keybindings(bindings: &mut Vec<(KeyCombo, Action)>, table: &toml::Table
             continue;
         }
         let Some(action) = action_from_name(name) else {
-            tracing::warn!(
-                key = %spec,
-                action = %name,
-                "config: unknown action name, skipping entry (any default binding for this combo is kept)"
+            refuse!(
+                *diagnostics,
+                "config: unknown action name {name:?} for {spec:?}, skipping entry (any default binding for this combo is kept)"
             );
             continue;
         };
@@ -1543,7 +1578,11 @@ fn input_number(value: &toml::Value) -> Option<f64> {
 /// `[motion]`: four switches and a speed. Every key is validated on its
 /// own and an invalid one keeps the inherited value, so a typo in one
 /// line cannot turn motion back on or off elsewhere in the table.
-fn apply_motion_table(policy: &mut wm_core::MotionPolicy, entries: &toml::Table) {
+fn apply_motion_table(
+    policy: &mut wm_core::MotionPolicy,
+    entries: &toml::Table,
+    diagnostics: &mut Vec<String>,
+) {
     for (key, value) in entries {
         match (key.as_str(), value) {
             ("enabled", toml::Value::Boolean(on)) => policy.enabled = *on,
@@ -1558,16 +1597,22 @@ fn apply_motion_table(policy: &mut wm_core::MotionPolicy, entries: &toml::Table)
             {
                 policy.speed = input_number(value).unwrap();
             }
-            _ => tracing::warn!(
-                %key, ?value,
-                "config: invalid [motion] setting; use enabled, layout, overview, gesture_settle (booleans) or speed (0.25..=4)"
+            _ => refuse!(
+                *diagnostics,
+                "config: invalid [motion] setting {key} = {}; use enabled, layout, overview, gesture_settle (booleans) or speed (0.25..=4)",
+                shown(value)
             ),
         }
     }
     *policy = policy.sanitized();
 }
 
-fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &str) {
+fn apply_input_table(
+    config: &mut InputConfig,
+    entries: &toml::Table,
+    prefix: &str,
+    diagnostics: &mut Vec<String>,
+) {
     for (key, value) in entries {
         let setting = if prefix.is_empty() {
             key.to_string()
@@ -1593,46 +1638,49 @@ fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &s
                             {
                                 config.gestures.distance = input_number(value).unwrap();
                             }
-                            _ => {
-                                tracing::warn!(%key, ?value, "config: invalid gesture setting; use enabled (boolean), fingers (0, 3 or 4), distance (24..1000)")
-                            }
+                            _ => refuse!(
+                                *diagnostics,
+                                "config: invalid gesture setting {key} = {}; use enabled (boolean), fingers (0, 3 or 4), distance (24..1000)",
+                                shown(value)
+                            ),
                         }
                     }
                 }
-                None => tracing::warn!(
-                    ?value,
-                    "config: [input.gestures] must be a table, ignoring it"
+                None => refuse!(
+                    *diagnostics,
+                    "config: [input.gestures] must be a table, ignoring it (got {})",
+                    shown(value)
                 ),
             },
             "sensitivity" => match input_number(value) {
                 Some(speed) if (-1.0..=1.0).contains(&speed) => config.sensitivity = Some(speed),
-                _ => tracing::warn!(key = %setting, value = ?value, "config: input sensitivity must be a number from -1 to 1, ignoring it"),
+                _ => refuse!(*diagnostics, "config: input {setting} must be a number from -1 to 1, ignoring it (got {})", shown(value)),
             },
             "natural_scroll" => match value.as_bool() {
                 Some(enabled) if prefix == "touchpad" => config.touchpad_natural_scroll = Some(enabled),
                 Some(enabled) => config.natural_scroll = Some(enabled),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "tap_to_click" => match value.as_bool() {
                 Some(enabled) => config.tap_to_click = Some(enabled),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "disable_while_typing" => match value.as_bool() {
                 Some(enabled) => config.disable_while_typing = Some(enabled),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "clickfinger_behavior" => match value.as_bool() {
                 Some(enabled) => config.clickfinger_behavior = Some(enabled),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "left_handed" => match value.as_bool() {
                 Some(enabled) => config.left_handed = Some(enabled),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "scroll_factor" => match input_number(value) {
                 Some(factor) if factor > 0.0 && prefix == "touchpad" => config.touchpad_scroll_factor = Some(factor),
                 Some(factor) if factor > 0.0 => config.scroll_factor = Some(factor),
-                _ => tracing::warn!(key = %setting, value = ?value, "config: input scroll_factor must be a positive number, ignoring it"),
+                _ => refuse!(*diagnostics, "config: input {setting} must be a positive number, ignoring it (got {})", shown(value)),
             },
             "accel_profile" => match value.as_str().map(str::trim) {
                 Some(profile) if profile.eq_ignore_ascii_case("flat") => {
@@ -1641,75 +1689,80 @@ fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &s
                 Some(profile) if profile.eq_ignore_ascii_case("adaptive") => {
                     config.accel_profile = Some("adaptive".into())
                 }
-                _ => tracing::warn!(key = %setting, value = ?value, "config: input accel_profile must be \"flat\" or \"adaptive\", ignoring it"),
+                _ => refuse!(*diagnostics, "config: input {setting} must be \"flat\" or \"adaptive\", ignoring it (got {})", shown(value)),
             },
             "numlock_by_default" if prefix.is_empty() => match value.as_bool() {
                 Some(enabled) => config.numlock_by_default = Some(enabled),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "middle_button_emulation" => match value.as_bool() {
                 Some(enabled) if prefix == "touchpad" => config.touchpad_middle_button_emulation = Some(enabled),
                 Some(enabled) => config.middle_button_emulation = Some(enabled),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "scroll_method" => match value.as_str().and_then(wm_core::ScrollMethod::from_name) {
                 Some(method) if prefix == "touchpad" => config.touchpad_scroll_method = Some(method),
                 Some(method) => config.scroll_method = Some(method),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input scroll_method must be \"2fg\", \"edge\", \"on_button_down\" or \"no_scroll\", ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be \"2fg\", \"edge\", \"on_button_down\" or \"no_scroll\", ignoring it (got {})", shown(value)),
             },
             "scroll_button" => match value.as_integer().and_then(|button| u32::try_from(button).ok()) {
                 Some(button) if button <= wm_core::MAX_SCROLL_BUTTON && prefix == "touchpad" => {
                     config.touchpad_scroll_button = Some(button)
                 }
                 Some(button) if button <= wm_core::MAX_SCROLL_BUTTON => config.scroll_button = Some(button),
-                _ => tracing::warn!(key = %setting, value = ?value, "config: input scroll_button must be an evdev button code from 0 through 300, ignoring it"),
+                _ => refuse!(*diagnostics, "config: input {setting} must be an evdev button code from 0 through 300, ignoring it (got {})", shown(value)),
             },
             "tap_and_drag" => match value.as_bool() {
                 Some(enabled) => config.tap_and_drag = Some(enabled),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "drag_lock" => match value.as_bool() {
                 Some(enabled) => config.drag_lock = Some(enabled),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input drag_lock must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "tap_button_map" => match value.as_str().and_then(wm_core::TapButtonMap::from_name) {
                 Some(map) => config.tap_button_map = Some(map),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input tap_button_map must be \"lrm\" or \"lmr\", ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be \"lrm\" or \"lmr\", ignoring it (got {})", shown(value)),
             },
             "drag_3fg" => match value.as_integer().and_then(wm_core::MultiFingerDrag::from_number) {
                 Some(drag) => config.drag_3fg = Some(drag),
-                None => tracing::warn!(key = %setting, value = ?value, "config: input drag_3fg must be 0, 1 (three fingers) or 2 (four fingers), ignoring it"),
+                None => refuse!(*diagnostics, "config: input {setting} must be 0, 1 (three fingers) or 2 (four fingers), ignoring it (got {})", shown(value)),
             },
             "touchpad" if prefix.is_empty() => match value.as_table() {
-                Some(touchpad) => apply_input_table(config, touchpad, "touchpad"),
-                None => tracing::warn!(value = ?value, "config: [input.touchpad] must be a table, ignoring it"),
+                Some(touchpad) => apply_input_table(config, touchpad, "touchpad", diagnostics),
+                None => refuse!(*diagnostics, "config: [input.touchpad] must be a table, ignoring it (got {})", shown(value)),
             },
-            unknown => tracing::warn!(key = %setting, name = %unknown, "config: unknown input setting, ignoring it"),
+            _ => refuse!(*diagnostics, "config: unknown input setting {setting}, ignoring it"),
         }
     }
 }
 
 /// `[cursor]`: when the compositor hides the pointer on its own. A value
 /// of the wrong type is warned about and leaves that key as it was.
-fn apply_cursor_table(cursor: &mut wm_core::CursorBehaviour, entries: &toml::Table) {
+fn apply_cursor_table(
+    cursor: &mut wm_core::CursorBehaviour,
+    entries: &toml::Table,
+    diagnostics: &mut Vec<String>,
+) {
     for (key, value) in entries {
         match key.as_str() {
             "hide_on_key_press" => match value.as_bool() {
                 Some(enabled) => cursor.hide_on_key_press = Some(enabled),
-                None => tracing::warn!(%key, ?value, "config: [cursor] setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: [cursor] {key} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "hide_on_touch" => match value.as_bool() {
                 Some(enabled) => cursor.hide_on_touch = Some(enabled),
-                None => tracing::warn!(%key, ?value, "config: [cursor] setting must be a boolean, ignoring it"),
+                None => refuse!(*diagnostics, "config: [cursor] {key} must be a boolean, ignoring it (got {})", shown(value)),
             },
             "inactive_timeout" => match input_number(value) {
                 Some(seconds) if seconds.is_finite() && seconds >= 0.0 => cursor.inactive_timeout = Some(seconds),
-                _ => tracing::warn!(
-                    %key, ?value,
-                    "config: [cursor] inactive_timeout must be a non-negative number of seconds (0 never hides), ignoring it"
+                _ => refuse!(
+                    *diagnostics,
+                    "config: [cursor] inactive_timeout must be a non-negative number of seconds (0 never hides), ignoring it (got {})",
+                    shown(value)
                 ),
             },
-            unknown => tracing::warn!(key = %unknown, "config: unknown [cursor] setting, ignoring it"),
+            unknown => refuse!(*diagnostics, "config: unknown [cursor] setting {unknown}, ignoring it"),
         }
     }
 }
@@ -1719,11 +1772,12 @@ fn apply_cursor_table(cursor: &mut wm_core::CursorBehaviour, entries: &toml::Tab
 ///
 /// `Err` is reserved for text that is not valid TOML at all — the one
 /// case where nothing can be salvaged. Everything below that (wrongly
-/// typed fields, unknown keys, bad `[keybindings]` entries) degrades
-/// per-item with a `tracing::warn!`, keeping the rest of the file. The
-/// warnings go through `tracing` rather than being accumulated in the
-/// return value so the function stays trivially callable from tests
-/// and from `load` alike; without a subscriber they cost nothing.
+/// typed fields, unknown keys, bad `[keybindings]` entries, a mode or
+/// `[mac]` value the compositor does not know) degrades per-item
+/// through [`refuse`], keeping the rest of the file: each refusal is
+/// logged *and* kept in [`Config::diagnostics`], which is what
+/// `hyprctl configerrors` and `--check-config` serve. A file may
+/// therefore parse with any number of diagnostics and still apply.
 pub fn parse(text: &str) -> Result<Config, String> {
     parse_with(text, &|| None)
 }
@@ -1755,6 +1809,31 @@ pub fn parse_with(
     text: &str,
     live: &dyn Fn() -> Option<hyprland::Reading>,
 ) -> Result<Config, String> {
+    parse_in_session(text, live, None)
+}
+
+/// [`parse_with`], inside a session that is already running in a mode.
+///
+/// `interaction_mode` and `keyboard_mode` decide how the rest of the
+/// file is read — which keymap, whose drag modifier, whether the Mac
+/// profile owns focus — so a refused mode key needs a fallback before
+/// any other key is looked at. At startup the built-in default is the
+/// right one: nothing is running yet. On a live reload it is not: a
+/// Spaces or Mac-keyboard session whose file gained one typo in that
+/// key would drop back to desktop mode, which is the one outcome a
+/// reload must never produce on its own (`docs/mac-mode.md`: an invalid
+/// reload retains the working configuration). So the reload path
+/// passes `running`, and a refused mode key keeps *that* mode — the
+/// resulting config is then consistent with itself, keymap included,
+/// rather than a running mode stapled onto a default-mode read.
+///
+/// Still a pure function of its inputs: the running mode is an
+/// argument, not a global.
+pub fn parse_in_session(
+    text: &str,
+    live: &dyn Fn() -> Option<hyprland::Reading>,
+    running: Option<&wm_core::InteractionConfig>,
+) -> Result<Config, String> {
     let table: toml::Table = text
         .parse()
         .map_err(|err: toml::de::Error| format!("invalid TOML: {err}"))?;
@@ -1763,19 +1842,58 @@ pub fn parse_with(
     // a preset default" (see `preset::base`, which also explains why
     // this cannot happen inside the walk below).
     let mut config = preset::base(&table);
+    // The mode keys, read before everything else because everything
+    // else is read *in* the mode they select (see `parse_in_session`).
+    // A refused value keeps the mode in force — the running session's,
+    // or the default — and says so, like any other bad key: one typo
+    // here used to cost the whole file, `desktop = "omarchy"` included.
     if let Some(value) = table.get("interaction_mode") {
-        config.interaction.mode = value.as_str().and_then(wm_core::InteractionMode::from_name)
-            .ok_or("interaction_mode must be 'desktop', 'spaces' or 'mac'")?;
-        config.provenance.insert("interaction_mode".into(), "config file".into());
+        match value.as_str().and_then(wm_core::InteractionMode::from_name) {
+            Some(mode) => {
+                config.interaction.mode = mode;
+                config.provenance.insert("interaction_mode".into(), "config file".into());
+            }
+            None => {
+                if let Some(running) = running {
+                    config.interaction.mode = running.mode;
+                }
+                refuse!(
+                    config.diagnostics,
+                    "config: interaction_mode must be 'desktop', 'spaces' or 'mac', keeping {} (got {})",
+                    config.interaction.mode.id(),
+                    shown(value)
+                );
+            }
+        }
     }
     if let Some(value) = table.get("keyboard_mode") {
-        config.interaction.keyboard_mode = Some(value.as_str().and_then(wm_core::KeyboardMode::from_name)
-            .ok_or("keyboard_mode must be 'desktop' or 'mac'")?);
-        config.provenance.insert("keyboard_mode".into(), "config file".into());
+        match value.as_str().and_then(wm_core::KeyboardMode::from_name) {
+            Some(mode) => {
+                config.interaction.keyboard_mode = Some(mode);
+                config.provenance.insert("keyboard_mode".into(), "config file".into());
+            }
+            None => {
+                if let Some(running) = running {
+                    config.interaction.keyboard_mode = running.keyboard_mode;
+                }
+                refuse!(
+                    config.diagnostics,
+                    "config: keyboard_mode must be 'desktop' or 'mac', keeping {} (got {})",
+                    config.interaction.keyboard_mode().id(),
+                    shown(value)
+                );
+            }
+        }
     }
     if config.interaction.mac_keyboard() {
         if table.contains_key("keymap") {
-            return Err("Mac keyboard mode owns its keymap; remove the explicit keymap setting (individual [keybindings] overrides are supported)".into());
+            // The profile wins and the key is what the user loses —
+            // the outcome the old whole-file error asked them to
+            // produce by hand, minus the hand.
+            refuse!(
+                config.diagnostics,
+                "config: the Mac keyboard profile owns its keymap; ignoring keymap (individual [keybindings] overrides are supported)"
+            );
         }
         config.keybindings = preset::mac_keybindings(config.desktop);
         config.drag_modifier = None;
@@ -1819,7 +1937,7 @@ pub fn parse_with(
     // Applied here rather than inside `preset::base` because it is not
     // a preset: a preset is a constant, and this reads the disk. Its
     // *place* in the order is the preset's, which is what matters.
-    config.hyprland_config = hyprland_switch(&table);
+    config.hyprland_config = hyprland_switch(&table, &mut config.diagnostics);
     if hyprland::wanted(&config) {
         let reading = live();
         if let Some(reading) = &reading {
@@ -1868,16 +1986,18 @@ pub fn parse_with(
         match key.as_str() {
             "focus_follows_mouse" => match value {
                 toml::Value::Boolean(b) => config.focus_follows_mouse = *b,
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: focus_follows_mouse must be a boolean, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: focus_follows_mouse must be a boolean, keeping default (got {})",
+                    shown(other)
                 ),
             },
             "autoraise" => match value {
                 toml::Value::Boolean(b) => config.autoraise = *b,
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: autoraise must be a boolean, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: autoraise must be a boolean, keeping default (got {})",
+                    shown(other)
                 ),
             },
             // The kill switch for `opacity` window rules. `false` draws
@@ -1886,23 +2006,26 @@ pub fn parse_with(
             // `dim_inactive` are unaffected.
             "window_opacity" => match value {
                 toml::Value::Boolean(enabled) => config.decorations.opacity_rules_disabled = !enabled,
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: window_opacity must be a boolean, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: window_opacity must be a boolean, keeping default (got {})",
+                    shown(other)
                 ),
             },
             "scale" => match scale_from_value(value) {
                 Some(scale) => config.scale = Some(scale),
-                None => tracing::warn!(
-                    value = ?value,
-                    "config: scale must be a positive number, ignoring it"
+                None => refuse!(
+                    config.diagnostics,
+                    "config: scale must be a positive number, ignoring it (got {})",
+                    shown(value)
                 ),
             },
             "theme" => match value {
                 toml::Value::String(name) => config.theme = Some(name.clone()),
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: theme must be a string, ignoring it"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: theme must be a string, ignoring it (got {})",
+                    shown(other)
                 ),
             },
             // Trimmed and case-insensitive like every other name in
@@ -1916,108 +2039,163 @@ pub fn parse_with(
                 {
                     config.appearance = Some(name.trim().to_ascii_lowercase());
                 }
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: appearance must be \"light\" or \"dark\", ignoring it"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: appearance must be \"light\" or \"dark\", ignoring it (got {})",
+                    shown(other)
                 ),
             },
             "decoration_style" => match value.as_str().and_then(wm_theme_api::DecorationStyle::from_name) {
                 Some(style) => config.decoration_style = style,
-                None => {
-                    let message = format!(
-                        "config: decoration_style must be \"auto\", \"windowmaker\", \"system7\" or \"modern\", keeping default (got {value})"
-                    );
-                    tracing::warn!("{message}");
-                    config.diagnostics.push(message);
-                }
+                None => refuse!(
+                    config.diagnostics,
+                    "config: decoration_style must be \"auto\", \"windowmaker\", \"system7\" or \"modern\", keeping default (got {})",
+                    shown(value)
+                ),
             },
             "overview_style" => match value.as_str().and_then(OverviewStyle::from_name) {
                 Some(style) => config.overview_style = style,
-                None => {
-                    let message = format!(
-                        "config: overview_style must be \"classic\" or \"cards\", keeping default (got {value})"
-                    );
-                    tracing::warn!("{message}");
-                    config.diagnostics.push(message);
-                }
+                None => refuse!(
+                    config.diagnostics,
+                    "config: overview_style must be \"classic\" or \"cards\", keeping default (got {})",
+                    shown(value)
+                ),
             },
             "placement" => match placement_from_value(value) {
                 Some(policy) => config.placement = policy,
-                None => tracing::warn!(
-                    value = ?value,
-                    "config: placement must be \"smart\", \"cascade\", or \"center\", keeping default"
+                None => refuse!(
+                    config.diagnostics,
+                    "config: placement must be \"smart\", \"cascade\", or \"center\", keeping default (got {})",
+                    shown(value)
                 ),
             },
             "edge_resistance" => match edge_resistance_from_value(value) {
                 Some(px) => config.edge_resistance = px,
-                None => tracing::warn!(
-                    value = ?value,
-                    "config: edge_resistance must be a non-negative integer, keeping default"
+                None => refuse!(
+                    config.diagnostics,
+                    "config: edge_resistance must be a non-negative integer, keeping default (got {})",
+                    shown(value)
                 ),
             },
             "terminal_font_px" => match terminal_font_px_from_value(value) {
                 Some(px) => config.terminal_font_px = px,
-                None => tracing::warn!(
-                    value = ?value,
-                    "config: terminal_font_px must be a number between 6 and 96, keeping default"
+                None => refuse!(
+                    config.diagnostics,
+                    "config: terminal_font_px must be a number between 6 and 96, keeping default (got {})",
+                    shown(value)
                 ),
             },
             "restore_session" => match value {
                 toml::Value::Boolean(b) => config.restore_session = *b,
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: restore_session must be a boolean, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: restore_session must be a boolean, keeping default (got {})",
+                    shown(other)
                 ),
             },
             "omarchy_menu" => match value {
                 toml::Value::Boolean(b) => config.omarchy_menu = *b,
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: omarchy_menu must be a boolean, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: omarchy_menu must be a boolean, keeping default (got {})",
+                    shown(other)
                 ),
             },
             "omarchy_shell" => match value {
                 toml::Value::Boolean(b) => config.omarchy_shell = *b,
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: omarchy_shell must be a boolean, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: omarchy_shell must be a boolean, keeping default (got {})",
+                    shown(other)
                 ),
             },
-            // Both preset keys are resolved by `preset::base` above,
-            // which also warns about a bad value. Listed here only so
-            // they are not reported as unknown top-level keys.
+            // The preset keys are resolved by `preset::base` and the
+            // mode keys above it, each of which refuses a bad value
+            // itself. Listed here only so they are not reported as
+            // unknown top-level keys.
             "desktop" | "keymap" | "interaction_mode" | "keyboard_mode" => {}
-            "mac" => {
-                let settings = value.as_table().ok_or("[mac] must be a table")?;
-                for key in settings.keys() {
-                    if !matches!(key.as_str(), "applications" | "clipboard_persistence" | "separate_spaces") { return Err(format!("unknown Mac setting: {key}")); }
-                }
-                if let Some(value) = settings.get("separate_spaces") {
-                    config.interaction.separate_spaces = value.as_bool().ok_or("mac.separate_spaces must be a boolean")?;
-                }
-                if let Some(value) = settings.get("clipboard_persistence") {
-                    config.interaction.clipboard_persistence = value.as_bool().ok_or("mac.clipboard_persistence must be a boolean")?;
-                }
-                if let Some(applications) = settings.get("applications") {
-                    let applications = applications.as_table().ok_or("[mac.applications] must be a table")?;
-                    if applications.len() > 256 { return Err("at most 256 Mac application profiles are supported".into()); }
-                    for (identity, profile) in applications {
-                        let profile = profile.as_str().and_then(wm_core::AppProfile::from_name)
-                            .ok_or_else(|| format!("invalid Mac profile for {identity}: use gui, terminal, terminal-window, browser, files, native, or passthrough"))?;
-                        config.interaction.applications.push((identity.clone(), profile));
+            // Per entry, like every table in this walk: one bad
+            // profile costs that profile, not the other profiles and
+            // not the file.
+            "mac" => match value {
+                toml::Value::Table(settings) => {
+                    for (key, value) in settings {
+                        match key.as_str() {
+                            "separate_spaces" => match value {
+                                toml::Value::Boolean(on) => config.interaction.separate_spaces = *on,
+                                other => refuse!(
+                                    config.diagnostics,
+                                    "config: mac.separate_spaces must be a boolean, keeping default (got {})",
+                                    shown(other)
+                                ),
+                            },
+                            "clipboard_persistence" => match value {
+                                toml::Value::Boolean(on) => config.interaction.clipboard_persistence = *on,
+                                other => refuse!(
+                                    config.diagnostics,
+                                    "config: mac.clipboard_persistence must be a boolean, keeping default (got {})",
+                                    shown(other)
+                                ),
+                            },
+                            "applications" => match value {
+                                toml::Value::Table(applications) => {
+                                    // Bounded like every list a client
+                                    // or file can grow: the profiles are
+                                    // scanned per window identity.
+                                    const MAX_PROFILES: usize = 256;
+                                    if applications.len() > MAX_PROFILES {
+                                        refuse!(
+                                            config.diagnostics,
+                                            "config: at most {MAX_PROFILES} Mac application profiles are supported, reading the first {MAX_PROFILES} of {}",
+                                            applications.len()
+                                        );
+                                    }
+                                    for (identity, profile) in applications.iter().take(MAX_PROFILES) {
+                                        match profile.as_str().and_then(wm_core::AppProfile::from_name) {
+                                            Some(profile) => config.interaction.applications.push((identity.clone(), profile)),
+                                            None => refuse!(
+                                                config.diagnostics,
+                                                "config: invalid Mac profile for {identity}: use gui, terminal, terminal-window, browser, files, native, or passthrough; skipping it (got {})",
+                                                shown(profile)
+                                            ),
+                                        }
+                                    }
+                                }
+                                other => refuse!(
+                                    config.diagnostics,
+                                    "config: [mac.applications] must be a table, ignoring it (got {})",
+                                    shown(other)
+                                ),
+                            },
+                            unknown => refuse!(
+                                config.diagnostics,
+                                "config: unknown Mac setting {unknown}, ignoring it"
+                            ),
+                        }
                     }
                 }
-            }
+                other => refuse!(
+                    config.diagnostics,
+                    "config: [mac] must be a table, ignoring it (got {})",
+                    shown(other)
+                ),
+            },
             "omarchy_bar" => match value {
                 toml::Value::Boolean(b) => config.omarchy_bar = Some(*b),
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: omarchy_bar must be a boolean, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: omarchy_bar must be a boolean, keeping default (got {})",
+                    shown(other)
                 ),
             },
             "show_dock" => {},
-            "minimized_previews" => {
-                config.minimized_previews = value.as_bool().ok_or("minimized_previews must be a boolean")?;
+            "minimized_previews" => match value {
+                toml::Value::Boolean(on) => config.minimized_previews = *on,
+                other => refuse!(
+                    config.diagnostics,
+                    "config: minimized_previews must be a boolean, keeping default (got {})",
+                    shown(other)
+                ),
             },
             "lock_command" => match value {
                 // An empty or whitespace-only command means the same
@@ -2028,11 +2206,12 @@ pub fn parse_with(
                     config.lock_command = Some(command.clone());
                 }
                 toml::Value::String(_) => {
-                    tracing::warn!("config: lock_command is empty, treating it as unset")
+                    refuse!(config.diagnostics, "config: lock_command is empty, treating it as unset")
                 }
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: lock_command must be a command-line string, ignoring it"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: lock_command must be a command-line string, ignoring it (got {})",
+                    shown(other)
                 ),
             },
             // The one-directional ancestor of `[decorations]`, kept
@@ -2042,35 +2221,40 @@ pub fn parse_with(
             // frame these", which is exactly `decorations.client_side`.
             "self_decorating_apps" => match value {
                 toml::Value::Array(_) => {
-                    tracing::warn!(
+                    refuse!(
+                        config.diagnostics,
                         "config: self_decorating_apps is now decorations.client_side — reading it as that; \
                          see docs/config.example.toml for the [decorations] table, which also forces chrome ON"
                     );
-                    config.decorations.client_side = string_list(value, "self_decorating_apps");
+                    config.decorations.client_side =
+                        string_list(value, "self_decorating_apps", &mut config.diagnostics);
                 }
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: self_decorating_apps must be an array of strings, ignoring it"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: self_decorating_apps must be an array of strings, ignoring it (got {})",
+                    shown(other)
                 ),
             },
             "drag_modifier" => match value {
                 toml::Value::String(name) => match drag_modifier_from_name(name) {
                     Some(mods) => config.drag_modifier = mods,
-                    None => tracing::warn!(
-                        value = %name,
-                        "config: drag_modifier must be \"alt\", \"super\", \"control\" or \"none\", keeping default"
+                    None => refuse!(
+                        config.diagnostics,
+                        "config: drag_modifier must be \"alt\", \"super\", \"control\" or \"none\", keeping default (got {name:?})"
                     ),
                 },
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: drag_modifier must be a string, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: drag_modifier must be a string, keeping default (got {})",
+                    shown(other)
                 ),
             },
             "allow_shortcut_inhibit" => match value {
                 toml::Value::Boolean(allow) => config.allow_shortcut_inhibit = *allow,
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: allow_shortcut_inhibit must be a boolean, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: allow_shortcut_inhibit must be a boolean, keeping default (got {})",
+                    shown(other)
                 ),
             },
             // A chord, or `"none"` to have no keyboard route out of an
@@ -2080,14 +2264,15 @@ pub fn parse_with(
             "shortcuts_inhibit_escape" => match value {
                 toml::Value::String(spec) => match shortcuts_inhibit_escape_from_spec(spec) {
                     Some(escape) => config.shortcuts_inhibit_escape = escape,
-                    None => tracing::warn!(
-                        value = %spec,
-                        "config: shortcuts_inhibit_escape must be a key spec or \"none\", keeping default"
+                    None => refuse!(
+                        config.diagnostics,
+                        "config: shortcuts_inhibit_escape must be a key spec or \"none\", keeping default (got {spec:?})"
                     ),
                 },
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: shortcuts_inhibit_escape must be a string, keeping default"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: shortcuts_inhibit_escape must be a string, keeping default (got {})",
+                    shown(other)
                 ),
             },
             "decorations" => match value {
@@ -2095,57 +2280,74 @@ pub fn parse_with(
                     for (key, value) in entries {
                         match key.as_str() {
                             "server_side" => {
-                                config.decorations.server_side =
-                                    string_list(value, "decorations.server_side")
+                                config.decorations.server_side = string_list(
+                                    value,
+                                    "decorations.server_side",
+                                    &mut config.diagnostics,
+                                )
                             }
                             "client_side" => {
-                                config.decorations.client_side =
-                                    string_list(value, "decorations.client_side")
+                                config.decorations.client_side = string_list(
+                                    value,
+                                    "decorations.client_side",
+                                    &mut config.diagnostics,
+                                )
                             }
                             "frame_client_drawn" => match value {
                                 toml::Value::Boolean(frame) => {
                                     config.decorations.frame_client_drawn = *frame
                                 }
-                                other => tracing::warn!(
-                                    value = ?other,
-                                    "config: decorations.frame_client_drawn must be true or false, keeping default"
+                                other => refuse!(
+                                    config.diagnostics,
+                                    "config: decorations.frame_client_drawn must be true or false, keeping default (got {})",
+                                    shown(other)
                                 ),
                             },
-                            unknown => tracing::warn!(
-                                key = %unknown,
-                                "config: unknown key in [decorations], ignoring it"
+                            unknown => refuse!(
+                                config.diagnostics,
+                                "config: unknown key {unknown} in [decorations], ignoring it"
                             ),
                         }
                     }
                 }
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: [decorations] must be a table, ignoring it"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: [decorations] must be a table, ignoring it (got {})",
+                    shown(other)
                 ),
             },
             "input" => match value {
-                toml::Value::Table(entries) => apply_input_table(&mut config.input, entries, ""),
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: [input] must be a table, ignoring it"
+                toml::Value::Table(entries) => {
+                    apply_input_table(&mut config.input, entries, "", &mut config.diagnostics)
+                }
+                other => refuse!(
+                    config.diagnostics,
+                    "config: [input] must be a table, ignoring it (got {})",
+                    shown(other)
                 ),
             },
             // Over the live Hyprland configuration's animation switches,
             // like every key in this walk.
             "motion" => match value {
-                toml::Value::Table(entries) => apply_motion_table(&mut config.motion, entries),
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: [motion] must be a table, ignoring it"
+                toml::Value::Table(entries) => {
+                    apply_motion_table(&mut config.motion, entries, &mut config.diagnostics)
+                }
+                other => refuse!(
+                    config.diagnostics,
+                    "config: [motion] must be a table, ignoring it (got {})",
+                    shown(other)
                 ),
             },
             // Read after the live Hyprland configuration, like every key in
             // this walk, so a `[cursor]` setting here overrides Omarchy's.
             "cursor" => match value {
-                toml::Value::Table(entries) => apply_cursor_table(&mut config.input.cursor, entries),
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: [cursor] must be a table, ignoring it"
+                toml::Value::Table(entries) => {
+                    apply_cursor_table(&mut config.input.cursor, entries, &mut config.diagnostics)
+                }
+                other => refuse!(
+                    config.diagnostics,
+                    "config: [cursor] must be a table, ignoring it (got {})",
+                    shown(other)
                 ),
             },
             "commands" => match value {
@@ -2153,32 +2355,34 @@ pub fn parse_with(
                     for (name, value) in entries {
                         let name = name.trim().to_ascii_lowercase();
                         if name.is_empty() {
-                            tracing::warn!(
+                            refuse!(
+                                config.diagnostics,
                                 "config: [commands] entry with an empty name, skipping it"
                             );
                             continue;
                         }
-                        match argv_from_value(value, "commands") {
-                            Some(argv) => {
+                        match argv_from_value(value) {
+                            Ok(argv) => {
                                 config.commands.insert(name, argv);
                             }
-                            None => tracing::warn!(
-                                name = %name,
-                                "config: [commands] entry must be a command-line string or an array of arguments, skipping it"
+                            Err(why) => refuse!(
+                                config.diagnostics,
+                                "config: [commands] entry {name} {why}, skipping it"
                             ),
                         }
                     }
                 }
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: [commands] must be a table, ignoring it"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: [commands] must be a table, ignoring it (got {})",
+                    shown(other)
                 ),
             },
-            "terminal" => match argv_from_value(value, "terminal") {
-                Some(argv) => config.terminal = Some(argv),
-                None => tracing::warn!(
-                    value = ?value,
-                    "config: terminal must be a command-line string or an array of arguments, keeping the built-in terminal"
+            "terminal" => match argv_from_value(value) {
+                Ok(argv) => config.terminal = Some(argv),
+                Err(why) => refuse!(
+                    config.diagnostics,
+                    "config: terminal {why}, keeping the built-in terminal"
                 ),
             },
             // A list of command lines rather than a table: these are
@@ -2187,33 +2391,37 @@ pub fn parse_with(
             "autostart" => match value {
                 toml::Value::Array(items) => {
                     for item in items {
-                        match argv_from_value(item, "autostart") {
-                            Some(argv) => config.autostart.push(argv),
-                            None => tracing::warn!(
-                                value = ?item,
-                                "config: autostart entries must be command-line strings or arrays of arguments, skipping one"
+                        match argv_from_value(item) {
+                            Ok(argv) => config.autostart.push(argv),
+                            Err(why) => refuse!(
+                                config.diagnostics,
+                                "config: autostart entry {why}, skipping it"
                             ),
                         }
                     }
                 }
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: autostart must be an array of command lines, ignoring it"
+                other => refuse!(
+                    config.diagnostics,
+                    "config: autostart must be an array of command lines, ignoring it (got {})",
+                    shown(other)
                 ),
             },
             // Read in `preset::base`'s company, before the walk (see
             // below); accepted here so it is not reported as unknown.
             "hyprland_config" => {}
             "keybindings" => match value {
-                toml::Value::Table(entries) => apply_keybindings(&mut config.keybindings, entries),
-                other => tracing::warn!(
-                    value = ?other,
-                    "config: [keybindings] must be a table, keeping default bindings"
+                toml::Value::Table(entries) => {
+                    apply_keybindings(&mut config.keybindings, entries, &mut config.diagnostics)
+                }
+                other => refuse!(
+                    config.diagnostics,
+                    "config: [keybindings] must be a table, keeping default bindings (got {})",
+                    shown(other)
                 ),
             },
-            unknown => tracing::warn!(
-                key = %unknown,
-                "config: unknown top-level key, ignoring it"
+            unknown => refuse!(
+                config.diagnostics,
+                "config: unknown top-level key {unknown}, ignoring it"
             ),
         }
     }
@@ -2274,7 +2482,7 @@ pub fn parse_with(
             "drag_modifier" if value.as_str().and_then(drag_modifier_from_name).is_some() => {
                 Some("drag_modifier")
             }
-            "terminal" if argv_from_value(value, "terminal").is_some() => Some("terminal"),
+            "terminal" if argv_from_value(value).is_ok() => Some("terminal"),
             "self_decorating_apps" if value.is_array() => Some("decorations"),
             "decorations" if value.is_table() => Some("decorations"),
             "input" if value.is_table() => Some("input"),
@@ -2309,18 +2517,19 @@ pub fn parse_with(
             }
         }
     }
+    let commands = &config.commands;
+    let diagnostics = &mut config.diagnostics;
     config.keybindings.retain(|(combo, action)| {
         let Action::Run(name) = action else {
             return true;
         };
-        if config.commands.contains_key(name) {
+        if commands.contains_key(name) {
             return true;
         }
-        tracing::warn!(
-            command = %name,
-            key = ?combo,
-            known = ?config.commands.keys().collect::<Vec<_>>(),
-            "config: binding runs a command that is not in [commands], dropping the binding"
+        refuse!(
+            *diagnostics,
+            "config: binding {combo:?} runs {name:?}, which is not in [commands] (known: {:?}), dropping the binding",
+            commands.keys().collect::<Vec<_>>()
         );
         false
     });
@@ -2339,11 +2548,13 @@ pub fn parse_with(
 /// with a space in it — and is taken verbatim, so
 /// `["notify-send", "hello world"]` sends one argument, not two.
 ///
-/// `None` means "not a command line at all". An empty result is also
-/// `None`: a string of only spaces and an empty array both describe no
-/// program to run, and every caller would otherwise have to guard
+/// `Err` is why the value is not a command line, phrased to follow the
+/// key's name in the caller's refusal, so one bad entry is one line
+/// that says both what was wrong and what it cost. An empty result is
+/// also `Err`: a string of only spaces and an empty array both describe
+/// no program to run, and every caller would otherwise have to guard
 /// against spawning "".
-fn argv_from_value(value: &toml::Value, what: &str) -> Option<Vec<String>> {
+fn argv_from_value(value: &toml::Value) -> Result<Vec<String>, String> {
     let argv: Vec<String> = match value {
         toml::Value::String(line) => line.split_whitespace().map(str::to_string).collect(),
         toml::Value::Array(items) => {
@@ -2352,29 +2563,35 @@ fn argv_from_value(value: &toml::Value, what: &str) -> Option<Vec<String>> {
                 match item {
                     toml::Value::String(arg) => argv.push(arg.clone()),
                     other => {
-                        tracing::warn!(
-                            value = ?other,
-                            key = %what,
-                            "config: command arguments must be strings, rejecting this command"
-                        );
-                        return None;
+                        return Err(format!(
+                            "has a command argument that is not a string (got {})",
+                            shown(other)
+                        ))
                     }
                 }
             }
             argv
         }
-        _ => return None,
+        other => {
+            return Err(format!(
+                "must be a command-line string or an array of arguments (got {})",
+                shown(other)
+            ))
+        }
     };
-    (!argv.is_empty()).then_some(argv)
+    if argv.is_empty() {
+        return Err("is an empty command line".into());
+    }
+    Ok(argv)
 }
 
 /// A TOML array of strings, trimmed and lowercased for the
 /// case-insensitive prefix matching every identity list here does.
 /// Non-string entries are skipped individually rather than voiding the
 /// whole list — one typo'd entry should cost one entry.
-fn string_list(value: &toml::Value, what: &str) -> Vec<String> {
+fn string_list(value: &toml::Value, what: &str, diagnostics: &mut Vec<String>) -> Vec<String> {
     let toml::Value::Array(items) = value else {
-        tracing::warn!(value = ?value, key = %what, "config: expected an array of strings, ignoring it");
+        refuse!(*diagnostics, "config: {what} must be an array of strings, ignoring it (got {})", shown(value));
         return Vec::new();
     };
     items
@@ -2382,7 +2599,7 @@ fn string_list(value: &toml::Value, what: &str) -> Vec<String> {
         .filter_map(|v| match v {
             toml::Value::String(name) => Some(name.trim().to_ascii_lowercase()),
             other => {
-                tracing::warn!(value = ?other, key = %what, "config: entries must be strings, skipping one");
+                refuse!(*diagnostics, "config: {what} entries must be strings, skipping one (got {})", shown(other));
                 None
             }
         })
@@ -2425,9 +2642,21 @@ pub fn config_path() -> Option<PathBuf> {
 ///   silently — an absent file is the normal case, not a problem.
 /// - File unreadable or not valid TOML: `tracing::warn!` with the
 ///   error, then the defaults.
-/// - File fine but individual entries bad: [`parse`] warns and skips
-///   those entries, keeping the rest.
+/// - File fine but individual entries bad: [`parse`] refuses and skips
+///   those entries, keeping the rest and listing them in
+///   [`Config::diagnostics`].
 pub fn inspect(path: Option<&Path>) -> Result<Config, String> {
+    inspect_in_session(path, None)
+}
+
+/// [`inspect`] for a live reload: `running` is the session's current
+/// interaction settings, which a refused `interaction_mode` or
+/// `keyboard_mode` keeps instead of the default (see
+/// [`parse_in_session`]).
+pub fn inspect_in_session(
+    path: Option<&Path>,
+    running: Option<&wm_core::InteractionConfig>,
+) -> Result<Config, String> {
     let path = match path {
         Some(path) => path.to_path_buf(),
         None => match config_path() {
@@ -2442,7 +2671,8 @@ pub fn inspect(path: Option<&Path>) -> Result<Config, String> {
         }
         Err(err) => return Err(format!("{}: {err}", path.display())),
     };
-    parse_with(&text, &hyprland::load).map_err(|error| format!("{}: {error}", path.display()))
+    parse_in_session(&text, &hyprland::load, running)
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// Stable, line-oriented effective configuration with the last writer
@@ -4386,9 +4616,22 @@ mod command_tests {
         let keys_on = parse("interaction_mode = 'spaces'\nkeyboard_mode = 'mac'").unwrap();
         assert!(keys_on.interaction.spaces_mode() && keys_on.interaction.mac_keyboard());
         assert_eq!(action_for(&keys_on, "cmd+q"), Some(Action::QuitApplication));
-        assert!(parse("keyboard_mode = 'spaces'").is_err());
-        assert!(parse("keyboard_mode = false").is_err());
-        assert!(parse("keyboard_mode = 'mac'\nkeymap = 'omarchy'").is_err());
+        // A bad keyboard_mode costs that key and not the file: the
+        // keyboard follows the mode as if the key were absent, and the
+        // refusal is recorded for `configerrors`.
+        for text in ["keyboard_mode = 'spaces'", "keyboard_mode = false"] {
+            let config = parse(text).unwrap();
+            assert_eq!(config.interaction.keyboard_mode, None, "{text}");
+            assert_eq!(config.diagnostics.len(), 1, "{text}: {:?}", config.diagnostics);
+            assert!(config.diagnostics[0].contains("keyboard_mode must be"), "{text}");
+        }
+        // The Mac profile owns its keymap: an explicit keymap is the
+        // one setting lost, and the profile still applies.
+        let owned = parse("keyboard_mode = 'mac'\nkeymap = 'omarchy'").unwrap();
+        assert!(owned.interaction.mac_keyboard());
+        assert_eq!(action_for(&owned, "cmd+q"), Some(Action::QuitApplication));
+        assert_eq!(owned.diagnostics.len(), 1, "{:?}", owned.diagnostics);
+        assert!(owned.diagnostics[0].contains("owns its keymap"));
     }
 
     #[test]
@@ -4399,15 +4642,197 @@ mod command_tests {
         assert_eq!(mac.drag_modifier, None);
         assert!(mac.interaction.separate_spaces);
         assert!(!parse("interaction_mode = 'mac'\n[mac]\nseparate_spaces = false\n").unwrap().interaction.separate_spaces);
-        assert!(parse("interaction_mode = 'mac'\n[mac]\nseparate_spaces = 'linked'\n").is_err());
+        let linked = parse("interaction_mode = 'mac'\n[mac]\nseparate_spaces = 'linked'\n").unwrap();
+        assert!(linked.interaction.separate_spaces, "a refused value keeps the default");
+        assert_eq!(linked.diagnostics.len(), 1, "{:?}", linked.diagnostics);
+        assert!(linked.diagnostics[0].contains("mac.separate_spaces must be a boolean"));
         assert_eq!(mac.keybindings.iter().find(|(key,_)| Some(*key)==parse_key("command+shift+3")).map(|(_,a)| a), Some(&Action::Capture(CaptureMode::Screen)));
         assert_eq!(mac.keybindings.iter().find(|(key,_)| Some(*key)==parse_key("command+control+shift+3")).map(|(_,a)| a), Some(&Action::Capture(CaptureMode::ScreenClipboard)));
-        assert!(parse("interaction_mode = 'typo'").is_err());
-        assert!(parse("interaction_mode = 'mac'\nkeymap = 'omarchy'").is_err());
-        assert!(parse("interaction_mode = 'mac'\n[mac.applications]\nfoot = 'typo'").is_err());
+        let typo = parse("interaction_mode = 'typo'").unwrap();
+        assert_eq!(typo.interaction.mode, wm_core::InteractionMode::Desktop);
+        assert_eq!(typo.diagnostics.len(), 1, "{:?}", typo.diagnostics);
+        let owned = parse("interaction_mode = 'mac'\nkeymap = 'omarchy'").unwrap();
+        assert!(owned.interaction.mac_keyboard());
+        assert_eq!(owned.diagnostics.len(), 1, "{:?}", owned.diagnostics);
+        let profile = parse("interaction_mode = 'mac'\n[mac.applications]\nfoot = 'typo'").unwrap();
+        assert!(profile.interaction.applications.is_empty());
+        assert_eq!(profile.diagnostics.len(), 1, "{:?}", profile.diagnostics);
         assert!(effective_config_report(&mac).contains("keymap = mac"));
         let mut combos = std::collections::HashSet::new();
         for (key, _) in &mac.keybindings { assert!(combos.insert(*key), "duplicate Mac shortcut {key:?}"); }
+    }
+
+    /// The keys that used to throw the whole file away — and with it
+    /// `desktop = "omarchy"`, so one typo reverted an Omarchy desktop
+    /// to stock chonkstep — now cost exactly the value they name.
+    #[test]
+    fn a_bad_mode_mac_or_preview_value_costs_that_key_and_not_the_file() {
+        let cases: &[(&str, &str)] = &[
+            ("minimized_previews = 1", "minimized_previews must be a boolean"),
+            ("interaction_mode = \"tiling\"", "interaction_mode must be"),
+            ("keyboard_mode = \"dvorak\"", "keyboard_mode must be"),
+            ("[mac]\nseparate_spaces = \"linked\"", "mac.separate_spaces must be a boolean"),
+            ("[mac]\nspaces = true", "unknown Mac setting spaces"),
+            ("[mac.applications]\nfoot = \"typo\"", "invalid Mac profile for foot"),
+            ("interaction_mode = \"mac\"\nkeymap = \"omarchy\"", "owns its keymap"),
+        ];
+        for (bad, expected) in cases {
+            let text = format!("desktop = \"omarchy\"\nhyprland_config = false\n{bad}\n");
+            let config = parse(&text).unwrap_or_else(|e| panic!("{bad}: {e}"));
+            assert_eq!(config.desktop, preset::Desktop::Omarchy, "{bad}: the posture must survive");
+            assert_eq!(config.omarchy_bar, Some(true), "{bad}: the posture must survive");
+            assert_eq!(config.diagnostics.len(), 1, "{bad}: {:?}", config.diagnostics);
+            assert!(config.diagnostics[0].contains(expected), "{bad}: {:?}", config.diagnostics);
+            assert!(config.minimized_previews, "{bad}: a refused value keeps the default");
+        }
+        // One bad profile costs that profile, not its neighbours.
+        let config = parse(
+            "interaction_mode = 'mac'\nhyprland_config = false\n[mac.applications]\nfoot = 'native'\nkitty = 'typo'\nfirefox = 'browser'\n",
+        )
+        .unwrap();
+        assert_eq!(config.interaction.profile("foot"), wm_core::AppProfile::Native);
+        assert_eq!(config.interaction.profile("firefox"), wm_core::AppProfile::Browser);
+        assert_eq!(config.interaction.applications.len(), 2);
+        assert_eq!(config.diagnostics.len(), 1, "{:?}", config.diagnostics);
+    }
+
+    /// Every refusal in the walk is recorded, not only logged: one bad
+    /// value per documented key yields exactly one diagnostic, which is
+    /// what makes `configerrors` and `--check-config` complete rather
+    /// than a subset of the log.
+    #[test]
+    fn every_refusal_in_the_walk_is_recorded_once() {
+        let cases: &[(&str, &str)] = &[
+            ("focus_follows_mouse = 1", "focus_follows_mouse must be a boolean"),
+            ("autoraise = 1", "autoraise must be a boolean"),
+            ("window_opacity = 1", "window_opacity must be a boolean"),
+            ("scale = \"big\"", "scale must be a positive number"),
+            ("theme = 1", "theme must be a string"),
+            ("appearance = \"drak\"", "appearance must be"),
+            ("decoration_style = \"x\"", "decoration_style must be"),
+            ("overview_style = \"x\"", "overview_style must be"),
+            ("placement = \"x\"", "placement must be"),
+            ("edge_resistance = -1", "edge_resistance must be"),
+            ("edge_resistance = 7.5", "edge_resistance must be"),
+            ("terminal_font_px = 2000", "terminal_font_px must be"),
+            ("restore_session = 1", "restore_session must be a boolean"),
+            ("omarchy_menu = 1", "omarchy_menu must be a boolean"),
+            ("omarchy_shell = 1", "omarchy_shell must be a boolean"),
+            ("omarchy_bar = 1", "omarchy_bar must be a boolean"),
+            ("minimized_previews = 1", "minimized_previews must be a boolean"),
+            ("lock_command = 1", "lock_command must be"),
+            ("lock_command = \"  \"", "lock_command is empty"),
+            ("self_decorating_apps = [\"x\"]", "self_decorating_apps is now"),
+            ("self_decorating_apps = 1", "self_decorating_apps must be"),
+            ("drag_modifier = \"hyper\"", "drag_modifier must be"),
+            ("drag_modifier = 1", "drag_modifier must be a string"),
+            ("allow_shortcut_inhibit = 1", "allow_shortcut_inhibit must be"),
+            ("shortcuts_inhibit_escape = \"not a key\"", "shortcuts_inhibit_escape must be"),
+            ("shortcuts_inhibit_escape = 1", "shortcuts_inhibit_escape must be a string"),
+            ("decorations = 1", "[decorations] must be a table"),
+            ("[decorations]\nframe_client_drawn = 1", "frame_client_drawn must be"),
+            ("[decorations]\nbogus = 1", "unknown key bogus in [decorations]"),
+            ("[decorations]\nserver_side = 1", "decorations.server_side must be an array"),
+            ("[decorations]\nclient_side = [1]", "decorations.client_side entries must be strings"),
+            ("input = 1", "[input] must be a table"),
+            ("[input]\nsensitivity = 5", "input sensitivity must be a number"),
+            ("[input]\ntap_to_click = 1", "input tap_to_click must be a boolean"),
+            ("[input]\nnumlock_by_default = 1", "input numlock_by_default must be a boolean"),
+            ("[input]\nscroll_factor = -1", "input scroll_factor must be"),
+            ("[input]\naccel_profile = \"x\"", "input accel_profile must be"),
+            ("[input]\nscroll_method = \"x\"", "input scroll_method must be"),
+            ("[input]\nscroll_button = 999", "input scroll_button must be"),
+            ("[input]\ndrag_lock = 1", "input drag_lock must be"),
+            ("[input]\ntap_button_map = \"x\"", "input tap_button_map must be"),
+            ("[input]\ndrag_3fg = 7", "input drag_3fg must be"),
+            ("[input]\nbogus = 1", "unknown input setting bogus"),
+            ("[input]\ntouchpad = 1", "[input.touchpad] must be a table"),
+            ("[input.touchpad]\nnatural_scroll = 1", "input touchpad.natural_scroll must be a boolean"),
+            ("[input]\ngestures = 1", "[input.gestures] must be a table"),
+            ("[input.gestures]\nfingers = 2", "invalid gesture setting fingers"),
+            ("motion = 1", "[motion] must be a table"),
+            ("[motion]\nspeed = 99", "invalid [motion] setting speed"),
+            ("cursor = 1", "[cursor] must be a table"),
+            ("[cursor]\nhide_on_key_press = 1", "[cursor] hide_on_key_press must be a boolean"),
+            ("[cursor]\ninactive_timeout = -1", "inactive_timeout must be"),
+            ("[cursor]\nbogus = 1", "unknown [cursor] setting bogus"),
+            ("commands = 1", "[commands] must be a table"),
+            ("[commands]\n\" \" = \"x\"", "[commands] entry with an empty name"),
+            ("[commands]\nfoo = 1", "[commands] entry foo must be a command-line string"),
+            ("[commands]\nfoo = [\"x\", 1]", "[commands] entry foo has a command argument that is not a string"),
+            ("[commands]\nfoo = \"  \"", "[commands] entry foo is an empty command line"),
+            ("terminal = 1", "terminal must be a command-line string"),
+            ("terminal = []", "terminal is an empty command line"),
+            ("autostart = 1", "autostart must be an array"),
+            ("autostart = [1]", "autostart entry must be a command-line string"),
+            ("keybindings = 1", "[keybindings] must be a table"),
+            ("[keybindings]\n\"nokey+\" = \"close\"", "unparsable key spec"),
+            ("[keybindings]\n\"super+a\" = 1", "must be an action name string"),
+            ("[keybindings]\n\"super+a\" = \"bogus\"", "unknown action name"),
+            ("[keybindings]\n\"super+a\" = \"run nothing-here\"", "not in [commands]"),
+            ("bogus = 1", "unknown top-level key bogus"),
+            ("interaction_mode = \"x\"", "interaction_mode must be"),
+            ("keyboard_mode = \"x\"", "keyboard_mode must be"),
+            ("keyboard_mode = \"mac\"\nkeymap = \"omarchy\"", "owns its keymap"),
+            ("mac = 1", "[mac] must be a table"),
+            ("[mac]\nseparate_spaces = 1", "mac.separate_spaces must be"),
+            ("[mac]\nclipboard_persistence = 1", "mac.clipboard_persistence must be"),
+            ("[mac]\nbogus = 1", "unknown Mac setting bogus"),
+            ("[mac]\napplications = 1", "[mac.applications] must be a table"),
+            ("[mac.applications]\nfoot = \"x\"", "invalid Mac profile for foot"),
+            ("hyprland_config = 1", "hyprland_config must be a boolean"),
+            ("desktop = \"x\"", "unknown desktop preset name"),
+            ("desktop = 1", "desktop preset must be a name string"),
+            ("keymap = \"x\"", "unknown keymap preset name"),
+        ];
+        for (text, expected) in cases {
+            let config = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(config.diagnostics.len(), 1, "{text}: {:?}", config.diagnostics);
+            assert!(config.diagnostics[0].contains(expected), "{text}: {:?}", config.diagnostics);
+            assert!(config.diagnostics[0].starts_with("config: "), "{text}: {:?}", config.diagnostics);
+        }
+        let bad_argument = parse("[commands]\nfoo = [\"x\", 1]").unwrap();
+        assert!(!bad_argument.commands.contains_key("foo"));
+    }
+
+    /// On a live reload the running mode is the fallback for a refused
+    /// mode key — a Spaces session stays a Spaces session, keymap and
+    /// all — while at startup the default is. The rest of the file
+    /// applies in both cases.
+    #[test]
+    fn a_refused_mode_key_keeps_the_running_mode_on_reload_and_the_default_at_startup() {
+        let text = "interaction_mode = 'tiling'\ntheme = 'washi'\n";
+        let startup = parse_in_session(text, &|| None, None).unwrap();
+        assert_eq!(startup.interaction.mode, wm_core::InteractionMode::Desktop);
+        assert_eq!(startup.theme.as_deref(), Some("washi"));
+        assert!(startup.diagnostics[0].contains("keeping desktop"), "{:?}", startup.diagnostics);
+
+        let spaces = wm_core::InteractionConfig { mode: wm_core::InteractionMode::Spaces, ..Default::default() };
+        let reload = parse_in_session(text, &|| None, Some(&spaces)).unwrap();
+        assert_eq!(reload.interaction.mode, wm_core::InteractionMode::Spaces);
+        assert!(reload.interaction.spaces_mode());
+        assert_eq!(reload.theme.as_deref(), Some("washi"));
+        assert_eq!(reload.diagnostics.len(), 1, "{:?}", reload.diagnostics);
+        assert!(reload.diagnostics[0].contains("keeping spaces"), "{:?}", reload.diagnostics);
+        assert_eq!(reload.provenance.get("interaction_mode"), None, "a refused key did not write the setting");
+
+        // The keyboard follows the same rule, and the keymap follows
+        // the keyboard: a Mac-keyboard session whose keyboard_mode is
+        // typo'd keeps Mac keys, not a Mac keyboard over desktop keys.
+        let mac_keys = wm_core::InteractionConfig {
+            mode: wm_core::InteractionMode::Spaces,
+            keyboard_mode: Some(wm_core::KeyboardMode::Mac),
+            ..Default::default()
+        };
+        let text = "interaction_mode = 'spaces'\nkeyboard_mode = 'mca'\nhyprland_config = false\n";
+        let reload = parse_in_session(text, &|| None, Some(&mac_keys)).unwrap();
+        assert!(reload.interaction.mac_keyboard());
+        assert_eq!(action_for(&reload, "cmd+q"), Some(Action::QuitApplication));
+        assert_eq!(reload.diagnostics.len(), 1, "{:?}", reload.diagnostics);
+        assert!(reload.diagnostics[0].contains("keeping mac"), "{:?}", reload.diagnostics);
+        let startup = parse_in_session(text, &|| None, None).unwrap();
+        assert!(!startup.interaction.mac_keyboard());
+        assert_eq!(action_for(&startup, "cmd+q"), None);
     }
 
     #[test]

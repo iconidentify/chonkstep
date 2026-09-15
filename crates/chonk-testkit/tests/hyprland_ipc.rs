@@ -1226,6 +1226,56 @@ fn exec_and_reload_have_observable_effects_before_success() {
     assert_eq!(events.wait_for("configreloaded"), "", "a live re-read must tell Quickshell to refresh");
 }
 
+/// The reply to a reload is the truth about it. A `config.toml` that
+/// no longer parses keeps the working configuration — correctly — but
+/// `reload` used to answer `ok` and `configerrors` kept listing the
+/// diagnostics from before the edit, which is the pair Omarchy's
+/// documented validation loop (`hyprctl reload`, then `hyprctl
+/// configerrors`) reads. Now the reload is refused, the rejection
+/// heads the list (once, however often the retry fails), and fixing
+/// the file clears it.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn a_reload_of_an_unparseable_config_is_refused_and_listed_until_the_file_is_fixed() {
+    let mut session = boot("hypr-ipc-reload-rejected");
+    let dir = socket_dir(&session);
+    let working = std::fs::read_to_string(session.dir.join("config/chonkstep/config.toml"))
+        .expect("the harness wrote the session's config");
+    fn config_errors(dir: &Path) -> Vec<String> {
+        json(dir, "j/configerrors")
+            .as_array()
+            .expect("configerrors is an array")
+            .iter()
+            .map(|entry| entry["error"].as_str().expect("an error line").to_string())
+            .collect()
+    }
+    fn rejections(lines: &[String]) -> Vec<&String> {
+        lines.iter().filter(|line| line.starts_with("reload rejected: ")).collect()
+    }
+
+    assert_eq!(request(&dir, "/reload").trim(), "ok");
+    assert!(rejections(&config_errors(&dir)).is_empty(), "a working file has no rejection to report");
+
+    session.rewrite_config("omarchy_shell = false\n[broken\ntheme = \"unterminated\n").unwrap();
+    let reply = request(&dir, "/reload");
+    assert_ne!(reply.trim(), "ok", "a reload that applied nothing must not claim success");
+    let errors = config_errors(&dir);
+    let rejected = rejections(&errors);
+    assert_eq!(rejected.len(), 1, "{errors:?}");
+    assert!(rejected[0].contains("invalid TOML"), "{errors:?}");
+    assert_eq!(errors[0], *rejected[0], "the rejection heads the list: {errors:?}");
+
+    // Retrying the same broken file replaces the line, never stacks it.
+    assert_ne!(request(&dir, "/reload").trim(), "ok");
+    assert_eq!(rejections(&config_errors(&dir)).len(), 1);
+    assert!(session.compositor_alive(), "a broken edit must never cost the session");
+
+    session.rewrite_config(&working).unwrap();
+    assert_eq!(request(&dir, "/reload").trim(), "ok", "the restored file applies again");
+    let errors = config_errors(&dir);
+    assert!(rejections(&errors).is_empty(), "a successful reload clears the rejection: {errors:?}");
+}
+
 /// The regression test for the bug an end-to-end run found and the unit
 /// tests could not: `dispatch workspace N` answered `ok` and left the
 /// desktop where it was, because the answer was written on one side of

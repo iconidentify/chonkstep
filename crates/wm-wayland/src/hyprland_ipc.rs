@@ -1057,10 +1057,20 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
                 }
             }
         }
-        Action::ReloadConfig => {
-            comp.shell.reload_config(&mut comp.wm);
-            true
-        }
+        // `ok` only when the file was read and applied. A file that
+        // could not be read keeps the working configuration, and the
+        // refusal reply plus the rejection now in `configerrors` say
+        // so — where `ok` and last edit's diagnostics used to.
+        Action::ReloadConfig => match comp.shell.reload_config(&mut comp.wm) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "reload refused at apply");
+                // The snapshot's `configErrors` changed even though the
+                // desktop did not.
+                comp.mark_hyprland_state_dirty();
+                false
+            }
+        },
         Action::SetAutoreload { paused } => {
             comp.shell.set_autoreload_paused(paused);
             true

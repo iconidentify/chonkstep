@@ -322,15 +322,17 @@ fn native_and_xwayland_copy_cut_paste_undo_and_releases() {
     s.door().tap_key(48).unwrap(); // b replaces selection
     s.door().barrier().unwrap();
     expect(&mut native, "target", "b");
-    // Invalid reload cannot silently replace Mac with the legacy profile.
+    // An invalid mode on reload cannot silently replace Mac with the
+    // legacy profile: the key is refused and the running mode is kept,
+    // which the refusal names.
     std::fs::write(
         s.dir.join("config/chonkstep/config.toml"),
         "interaction_mode = 'invalid'",
     )
     .unwrap();
     s.request_reload().unwrap();
-    poll_until(WAIT, "rejected reload", || {
-        s.log().contains("retaining working configuration").then_some(())
+    poll_until(WAIT, "refused interaction_mode", || {
+        (s.log().contains("interaction_mode must be") && s.log().contains("keeping mac")).then_some(())
     })
     .unwrap();
     chord(&mut s, &[CMD], 30);

@@ -5298,7 +5298,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             // key apply exactly the same set. They did not: the
             // decoration policy was assigned here and nowhere else, so
             // the key silently skipped it.
-            comp.shell.reload_config(&mut comp.wm);
+            // The marker has nobody to answer; the shell logs and
+            // records a rejection itself.
+            let _ = comp.shell.reload_config(&mut comp.wm);
             comp.hyprland_state_dirty = true;
             comp.foreign_toplevel_dirty = true;
         }

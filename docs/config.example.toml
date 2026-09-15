@@ -7,8 +7,10 @@
 # no file at all, the defaults shown below apply. A broken file never
 # prevents the session from starting -- an unreadable or invalid file
 # logs a warning and falls back to the defaults, and an individually
-# bad line (a typo'd key spec, an unknown action name) is skipped while
-# every other line still applies.
+# bad line (a typo'd key spec, an unknown action name, a value of the
+# wrong type) is skipped while every other line still applies. Every
+# skipped line is listed by `chonkstep-wayland --check-config` and, in
+# a running session, by `hyprctl configerrors`.
 #
 # Changes apply to a live session without restarting anything: run
 # scripts/reload.sh, or bind the "reload" action to a key (see below).

@@ -929,6 +929,19 @@ pub fn clear_inherited_gtk_scale_env() {
 mod tests {
     use super::*;
 
+    /// `--check-config` counts `Config::diagnostics`; `configerrors`
+    /// serves the session's copy of it. Same list, same count.
+    #[test]
+    fn configerrors_carries_every_diagnostic_check_config_counts() {
+        let config = wm_config::parse(
+            "minimized_previews = 1\ninteraction_mode = \"tiling\"\nbogus = true\n[input]\ntap_to_click = 3\n",
+        )
+        .expect("individually bad keys never fail the parse");
+        assert_eq!(config.diagnostics.len(), 4, "{:?}", config.diagnostics);
+        let state = SessionState::resolve(&config);
+        assert_eq!(state.config_diagnostics, config.diagnostics);
+    }
+
     #[test]
     fn session_markers_are_probed_only_when_their_deadline_is_due() {
         let start = Instant::now();

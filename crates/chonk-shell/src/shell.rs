@@ -1610,8 +1610,24 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// it — what a reload does, and what following Omarchy does when
     /// Omarchy's theme changes. One function so the two cannot resolve
     /// by different rules.
-    fn reresolve(&mut self, wm: &mut WindowManager<B>) {
-        self.apply_session_state(wm, self.resolve_live_config());
+    ///
+    /// `Err` is a file that could not be read at all (unreadable, or
+    /// not TOML): the working configuration stays, and the rejection
+    /// is recorded where `hyprctl configerrors` reads so the edit that
+    /// did not apply is not answered with the diagnostics of the one
+    /// before it. A file that parses applies whatever it could and is
+    /// `Ok` — its per-item refusals travel in the new state.
+    fn reresolve(&mut self, wm: &mut WindowManager<B>) -> Result<(), String> {
+        match self.resolve_live_config() {
+            Ok(next) => {
+                self.apply_session_state(wm, next);
+                Ok(())
+            }
+            Err(error) => {
+                self.apply_session_state(wm, self.state.clone());
+                Err(error)
+            }
+        }
     }
 
     /// Resolve a live configuration edit without forgetting the
@@ -1620,32 +1636,53 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// fallback whenever neither `CHONKSTEP_SCALE` nor `scale` is an
     /// explicit override. This also retains a scale selected through
     /// Omarchy's monitor UI across its subsequent theme-file rewrite.
-    fn resolve_live_config(&self) -> SessionState {
-        match wm_config::inspect(None) {
-            Ok(config) => SessionState::resolve_with_scale_default(&config, self.state.scale),
+    ///
+    /// The running interaction settings go in for the same reason the
+    /// scale does: a refused `interaction_mode` or `keyboard_mode`
+    /// keeps the mode in force rather than the default, so one typo in
+    /// that key cannot drop a Spaces session to desktop mode
+    /// (`wm_config::parse_in_session`).
+    ///
+    /// On `Err` the rejection is recorded into the working state's
+    /// diagnostics — replacing any earlier one, so repeated failed
+    /// reloads do not pile up — and the caller keeps that state. The
+    /// next successful resolve rebuilds the list from the file.
+    fn resolve_live_config(&mut self) -> Result<SessionState, String> {
+        match wm_config::inspect_in_session(None, Some(&self.state.interaction)) {
+            Ok(config) => Ok(SessionState::resolve_with_scale_default(&config, self.state.scale)),
             Err(error) => {
                 tracing::warn!(%error, "config reload rejected; retaining working configuration");
-                self.state.clone()
+                record_reload_rejection(&mut self.state.config_diagnostics, &error);
+                Err(error)
             }
         }
     }
 
     /// Re-read the complete configuration and remember that IPC
     /// clients need a `configreloaded` event after the apply settles.
-    pub fn reload_config(&mut self, wm: &mut WindowManager<B>) {
-        self.reresolve(wm);
+    ///
+    /// `Err` means the file could not be read and nothing was applied;
+    /// the IPC's `reload` answers with a refusal rather than `ok`, and
+    /// `configerrors` carries the reason. The `configreloaded` event
+    /// still goes out: the diagnostics a bar may be showing changed.
+    pub fn reload_config(&mut self, wm: &mut WindowManager<B>) -> Result<(), String> {
+        let outcome = self.reresolve(wm);
         // The read just applied is the one the watch is measured
         // against from here, exactly as the tick re-points it after
         // its own re-read. It matters most for a reload issued while
         // auto-reload is paused — Omarchy's resume hook reloads and
         // then lifts the pause — which must not be followed by a
         // second re-read of the same files the moment the watch is
-        // consulted again.
-        if let Some((roots, watch)) = &mut self.hyprland_config {
-            watch.follow(&wm_config::hyprland::read(roots));
+        // consulted again. A rejected reload applied nothing, so the
+        // watch keeps measuring against what is in force.
+        if outcome.is_ok() {
+            if let Some((roots, watch)) = &mut self.hyprland_config {
+                watch.follow(&wm_config::hyprland::read(roots));
+            }
         }
         self.config_reloaded = true;
         self.monitor_rules_pending = true;
+        outcome
     }
 
     /// Whether the one-second watch over the desktop's Hyprland
@@ -2231,7 +2268,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.carry_focused_to_workspace(wm.current_workspace() + 1);
                 }
             }
-            Action::Reload => self.reresolve(wm),
+            // A key has nobody to answer: the resolve logs and records
+            // a rejection itself, where `configerrors` reads.
+            Action::Reload => {
+                let _ = self.reresolve(wm);
+            }
             // Re-exec the on-disk binary. Since `Action::Reload` exists
             // this is no longer the config hot-reload gesture; it is
             // how a session picks up a *new build* of itself, which is
@@ -2894,7 +2935,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 if let Err(e) = theme_select::persist(id) {
                     tracing::warn!(?e, id, "failed to persist theme selection");
                 }
-                let next = self.resolve_live_config();
+                // An unreadable file keeps the working state (with the
+                // rejection recorded); the choice to follow still holds.
+                let next = self.resolve_live_config().unwrap_or_else(|_| self.state.clone());
                 self.adopt_wallpaper_of(wm, &next.base_theme);
                 self.apply_session_state(wm, next);
             }
@@ -3198,7 +3241,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         } else if self.omarchy.changed(now) {
             if self.state.following.is_some() {
                 tracing::info!("Omarchy's current theme or background changed; re-dressing");
-                self.reresolve(wm);
+                // A rejection is logged and recorded by the resolve
+                // itself; the watch has nobody else to answer.
+                let _ = self.reresolve(wm);
                 // The background is part of the look and the watch fires
                 // for it too, but a background swap leaves the palette —
                 // and so the resolved theme — exactly as it was, and
@@ -3235,7 +3280,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 let reading = wm_config::hyprland::read(roots);
                 reading.report();
                 watch.follow(&reading);
-                self.reresolve(wm);
+                // A rejection is logged and recorded by the resolve
+                // itself; the watch has nobody else to answer.
+                let _ = self.reresolve(wm);
                 self.config_reloaded = true;
             }
         }
@@ -3476,6 +3523,20 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     }
 }
 
+/// The line `hyprctl configerrors` carries for a reload whose file
+/// could not be read at all. One such line at most, and first: it is
+/// the reason nothing after it in the list has changed since the edit.
+const REJECTED_RELOAD: &str = "reload rejected: ";
+
+/// Records a rejected reload where `configerrors` reads, replacing the
+/// previous rejection so a user retrying a broken edit sees one line
+/// and not a history. The refusals from the last file that did apply
+/// stay below it: they still describe the running configuration.
+fn record_reload_rejection(diagnostics: &mut Vec<String>, error: &str) {
+    diagnostics.retain(|line| !line.starts_with(REJECTED_RELOAD));
+    diagnostics.insert(0, format!("{REJECTED_RELOAD}{error}"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3484,6 +3545,27 @@ mod tests {
 
     fn combo(keysym: u32) -> KeyCombo {
         KeyCombo { keysym, modifiers: Modifiers::ALT }
+    }
+
+    #[test]
+    fn a_rejected_reload_is_one_line_at_the_top_of_configerrors() {
+        // The refusals from the last file that applied describe the
+        // running configuration and stay; the rejection goes first,
+        // because it is the reason they are still the current list.
+        let mut diagnostics = vec!["config: unknown top-level key bogus, ignoring it".to_string()];
+        record_reload_rejection(&mut diagnostics, "config.toml: invalid TOML: expected `=`");
+        assert_eq!(
+            diagnostics,
+            vec![
+                "reload rejected: config.toml: invalid TOML: expected `=`".to_string(),
+                "config: unknown top-level key bogus, ignoring it".to_string(),
+            ]
+        );
+        // A retry that fails differently replaces the line rather
+        // than stacking a history on top of the list.
+        record_reload_rejection(&mut diagnostics, "config.toml: invalid TOML: unterminated string");
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0], "reload rejected: config.toml: invalid TOML: unterminated string");
     }
 
     #[test]
