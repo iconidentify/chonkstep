@@ -5,6 +5,37 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-15
+
+- Read Omarchy's default and per-workspace layouts, evaluate window-rule size
+  and position expressions, and support client-only fullscreen inside a tile.
+- Add named special workspaces for scratchpads, monitor focus and workspace
+  moves, and occupied/previous workspace selectors. Keep scratchpad membership
+  and output ownership consistent across pinning, dialogs and separate Spaces.
+- Support disabling and re-enabling outputs, retain parked connectors after
+  failed probes, and preserve unchanged monitors' runtime settings on reload.
+  Reserve non-desktop connectors on hotplug and retry failed display links.
+- Add a motion off-switch, per-window opacity, inactive dimming and a live
+  transparency toggle.
+- Draw drag icons at integer and fractional scales, follow the correct input
+  serial when mouse and touch are held together, and remove icons on drop or lock.
+- Enforce `no_screen_share` in compositor-rendered captures, including cached
+  switcher previews and protected drag icons.
+- Add a shortcut-inhibition escape chord and preserve each window's suspension
+  independently. Validate activation tokens against the focus and input serial
+  that authorized them, rejecting forged future serials.
+- Expose xdg toplevel tags and descriptions, and support `match:xdg_tag` rules.
+- Unify the binding and IPC dispatcher vocabulary, preserve window selectors
+  containing spaces and commas, and retain effective keyboard modes after an
+  invalid configuration edit.
+- Report invalid configuration items and rejected reloads through diagnostics.
+  Honor Omarchy's automatic-reload pause across both configuration and theme
+  watches, with explicit reload still available.
+- Rescan installed application entries off-thread, reject stale menu picks,
+  and prevent named pipes from blocking the application scanner.
+- Bound control-socket requests and connection acceptance per servicing pass,
+  rotate readers fairly, and reuse snapshot and diagnostic serialization.
+
 ## [0.6.0] - 2026-09-14
 
 - Remove the built-in dock, its instruments and samplers, the dock tile
