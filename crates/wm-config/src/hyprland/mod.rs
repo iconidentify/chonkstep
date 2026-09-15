@@ -312,6 +312,11 @@ pub struct Reading {
     /// `binds:hide_special_on_workspace_change`, when the configuration
     /// says either way.
     pub hide_special_on_workspace_change: Option<bool>,
+    /// `binds:disable_keybind_grabbing`, when the configuration says
+    /// either way: Hyprland's name for refusing every
+    /// `zwp_keyboard_shortcuts_inhibit_v1` request, which is
+    /// `allow_shortcut_inhibit = false` here.
+    pub disable_keybind_grabbing: Option<bool>,
     /// `decoration:dim_inactive` at `decoration:dim_strength`: how much
     /// to darken every unfocused window, or `None` to leave them alone.
     pub dim_inactive: Option<f32>,
@@ -363,7 +368,7 @@ impl Reading {
         // future category cannot silently disappear at this loading boundary.
         let Self {
             keybindings, explicit_keys, bindings, layer_bindings, switch_bindings, commands, env, autostart,
-            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, dim_inactive, files: _, skipped: _, motion,
+            float_rules, monitors, input, default_layout, workspace_layouts, hide_special_on_workspace_change, disable_keybind_grabbing, dim_inactive, files: _, skipped: _, motion,
         } = self;
         keybindings.is_empty()
             && dim_inactive.is_none()
@@ -380,6 +385,7 @@ impl Reading {
             && default_layout.is_none()
             && workspace_layouts.is_empty()
             && hide_special_on_workspace_change.is_none()
+            && disable_keybind_grabbing.is_none()
             && *motion == wm_core::MotionPolicy::default()
     }
 
@@ -599,6 +605,9 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
     config.input = reading.input.clone();
     if let Some(hide) = reading.hide_special_on_workspace_change {
         config.hide_special_on_workspace_change = hide;
+    }
+    if let Some(disable) = reading.disable_keybind_grabbing {
+        config.allow_shortcut_inhibit = !disable;
     }
     config.monitor_rules = reading.monitors.lines.clone();
     config.autostart = reading.autostart.clone();
@@ -1466,8 +1475,10 @@ fn cursor(reading: &mut Reading, name: &str, value: &str) {
     });
 }
 
-/// One key of the `binds` table. The one carried is the scratchpad's:
-/// whether a workspace switch takes the shown special down with it.
+/// One key of the `binds` table. Two are carried: the scratchpad's —
+/// whether a workspace switch takes the shown special down with it —
+/// and `disable_keybind_grabbing`, which is whether a focused client
+/// may take every chord through the shortcut-inhibit protocol.
 /// Everything else in the table is Hyprland's own binding behaviour,
 /// which this desktop answers its own way.
 fn binds(reading: &mut Reading, name: &str, value: &str) {
@@ -1480,6 +1491,13 @@ fn binds(reading: &mut Reading, name: &str, value: &str) {
                 return;
             }
             None => "hide_special_on_workspace_change must be true or false",
+        },
+        "disable_keybind_grabbing" => match toggle(value) {
+            Some(disable) => {
+                reading.disable_keybind_grabbing = Some(disable);
+                return;
+            }
+            None => "disable_keybind_grabbing must be true or false",
         },
         _ => "binds setting is not implemented",
     };

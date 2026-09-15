@@ -659,6 +659,11 @@ pub trait Backend {
     /// this verb existed the reload path answered `ok` and changed
     /// nothing.
     fn set_keyboard_config(&mut self, _config: KeyboardConfig) {}
+    /// The shortcut-inhibit policy: whether a focused client may take
+    /// every chord, and the chord that takes them back. Defaulted to a
+    /// no-op because only the Wayland session implements the inhibit
+    /// protocol; X11 has its own grab semantics and no such request.
+    fn set_shortcut_inhibit_policy(&mut self, _policy: crate::ShortcutInhibitPolicy) {}
     /// Applies libinput-owned pointer settings where the backend owns
     /// those devices. X11 leaves them to its display server.
     fn set_pointer_config(&mut self, _config: crate::PointerConfig) {}

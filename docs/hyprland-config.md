@@ -596,8 +596,16 @@ do is not what you are asking for:
 `binds.hide_special_on_workspace_change`, which Omarchy turns on, makes
 a workspace switch hide the special workspace shown on the output the
 switch lands on. Off — Hyprland's own default — the scratchpad stays
-shown across the switch. The rest of the `binds` table is Hyprland's
-own binding behaviour and is reported rather than carried.
+shown across the switch. `binds.disable_keybind_grabbing = true` is
+`allow_shortcut_inhibit = false`: no client is granted a
+`zwp_keyboard_shortcuts_inhibit_v1` inhibitor, so a VM console or
+remote-desktop viewer never takes the desktop's chords (see
+[keybindings.md](keybindings.md#taking-the-shortcuts-back-from-a-client-that-inhibits-them)
+for the escape chord that takes them back when it is allowed). Off by
+default, as in Hyprland, and `allow_shortcut_inhibit` in your own
+`config.toml` has the last word over it. The rest of the `binds`
+table is Hyprland's own binding behaviour and is reported rather than
+carried.
 
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
 build the seat's xkb keymap. A value Hyprland would compute as it runs,

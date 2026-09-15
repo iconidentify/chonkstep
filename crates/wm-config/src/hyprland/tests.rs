@@ -471,6 +471,38 @@ hl.bind("SUPER + CTRL + N", hl.dsp.window.move({ workspace = "name:notes", follo
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `binds.disable_keybind_grabbing`, Hyprland's spelling of
+/// `allow_shortcut_inhibit = false`: read from the `binds` table, off
+/// by default as in Hyprland, and the config file's own key still has
+/// the last word over it.
+#[test]
+fn disable_keybind_grabbing_maps_onto_allow_shortcut_inhibit() {
+    let root = scratch("binds-grabbing");
+    write(&root.join(".config/hypr/hyprland.conf"), "binds {\n    disable_keybind_grabbing = true\n}\n");
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.disable_keybind_grabbing, Some(true), "{:?}", reading.skipped);
+    assert!(skipped_why(&reading, "disable_keybind_grabbing").is_none(), "carried, not reported");
+    let live = || Some(read(&Roots::under(&root)));
+    assert!(!crate::parse_with("desktop = \"omarchy\"", &live).unwrap().allow_shortcut_inhibit);
+    assert!(
+        crate::parse_with("desktop = \"omarchy\"\nallow_shortcut_inhibit = true", &live).unwrap().allow_shortcut_inhibit,
+        "config.toml has the last word"
+    );
+    assert!(
+        crate::parse_with("desktop = \"omarchy\"", &|| None).unwrap().allow_shortcut_inhibit,
+        "granted by default, as in Hyprland"
+    );
+
+    write(&root.join(".config/hypr/hyprland.conf"), "binds {\n    disable_keybind_grabbing = false\n}\n");
+    assert_eq!(read(&Roots::under(&root)).disable_keybind_grabbing, Some(false));
+    assert!(crate::parse_with("desktop = \"omarchy\"", &live).unwrap().allow_shortcut_inhibit);
+    write(&root.join(".config/hypr/hyprland.conf"), "binds {\n    disable_keybind_grabbing = maybe\n}\n");
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.disable_keybind_grabbing, None);
+    assert!(skipped_why(&reading, "disable_keybind_grabbing").is_some(), "a bad value is reported: {:?}", reading.skipped);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `binds.hide_special_on_workspace_change`, the one `binds` key with a
 /// meaning here: Omarchy sets it, and a workspace switch then takes
 /// the scratchpad down with it.

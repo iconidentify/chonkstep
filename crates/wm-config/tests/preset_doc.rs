@@ -220,6 +220,31 @@ fn the_documented_preset_names_all_parse() {
 /// chord cannot be bound and documented dead at once. Checked over the
 /// unbound entries that name one literal chord, since the rest name
 /// families.
+/// The chord that takes the shortcuts back from an inhibiting client
+/// has to work under every keymap, so no keymap may bind it to
+/// anything else — and the card has to say it exists, since it is the
+/// one chord that still works while every other is being forwarded.
+#[test]
+fn the_shortcut_inhibit_escape_chord_is_free_in_every_keymap_and_documented() {
+    let spec = wm_config::DEFAULT_SHORTCUTS_INHIBIT_ESCAPE;
+    let escape = wm_config::parse_key(spec).expect("the default escape chord must parse");
+    for text in ["", "keymap = \"omarchy\"", "desktop = \"omarchy\"", "interaction_mode = \"mac\""] {
+        let config = wm_config::parse_with(text, &|| None).expect("preset configs parse");
+        assert_eq!(config.shortcuts_inhibit_escape, Some(escape), "{text:?}: a preset must not touch the escape chord");
+        assert!(
+            !config.keybindings.iter().any(|(combo, _)| *combo == escape),
+            "{text:?}: the keymap binds {spec} and would shadow the escape chord"
+        );
+    }
+    assert!(CARD.contains(&format!("`{spec}`")), "docs/keybindings.md must name the escape chord");
+    assert!(CARD.contains("shortcuts_inhibit_escape"), "docs/keybindings.md must name its config key");
+    assert!(
+        REFERENCE.contains(&format!("#shortcuts_inhibit_escape = \"{spec}\"")),
+        "docs/config.example.toml must show the default escape chord"
+    );
+    assert!(REFERENCE.contains("#allow_shortcut_inhibit = true"), "docs/config.example.toml must show the opt-out");
+}
+
 #[test]
 fn no_chord_is_both_bound_and_documented_unbound() {
     let bound: BTreeSet<&str> = OMARCHY_BINDINGS.iter().map(|(spec, _)| *spec).collect();

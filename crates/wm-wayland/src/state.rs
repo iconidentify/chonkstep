@@ -952,6 +952,16 @@ pub struct WaylandBackend {
     /// drains it on the next pass — the same shape every other
     /// deferred backend request in this file takes.
     pub(crate) pending_keyboard: Option<wm_core::KeyboardConfig>,
+    /// The shortcut-inhibit policy the shell last applied: whether a
+    /// focused client may take every chord, and the chord that takes
+    /// them back. Read by the inhibit handler in `core_protocols.rs`
+    /// and the key filter in `input.rs`. A ledger like
+    /// `pending_keyboard`, and for the same reason: the grants live on
+    /// `Compositor`, so a reload that turns grants off has an active
+    /// one to withdraw — `apply_shortcut_inhibit_policy` does that at
+    /// the top of the next dispatch pass when `_changed` says to.
+    pub(crate) shortcut_inhibit_policy: wm_core::ShortcutInhibitPolicy,
+    pub(crate) shortcut_inhibit_policy_changed: bool,
     pub(crate) pending_pointer: Option<wm_core::PointerConfig>,
     pub(crate) pointer_config: wm_core::PointerConfig,
     /// Which input devices are switched off by name, from the configuration
@@ -1387,6 +1397,8 @@ impl WaylandBackend {
             stacking_dirty: false,
             xwayland_keyboard_grab: None,
             pending_keyboard: None,
+            shortcut_inhibit_policy: wm_core::ShortcutInhibitPolicy::default(),
+            shortcut_inhibit_policy_changed: false,
             pending_pointer: None,
             pointer_config: wm_core::PointerConfig::default(),
             input_device_states: Default::default(),
@@ -3467,6 +3479,7 @@ impl Compositor {
         crate::gesture_scene::tick(self);
         crate::layout_scene::tick(self);
         self.apply_pending_keyboard();
+        self.apply_shortcut_inhibit_policy();
         if self.wm.backend_mut().cursor_visibility.tick(dispatch_started) {
             self.wm.backend_mut().mark_damaged();
         }
@@ -4009,10 +4022,12 @@ impl Compositor {
 
         let mut first_event_baselined = false;
         if socket_ready && server.has_request_clients() {
+            let shortcut_inhibit = self.shortcut_inhibit_report();
             let before = crate::hyprland_ipc::snapshot(
                 &self.wm,
                 self.session_lock.machine.locked(),
                 self.shell.session_state(),
+                &shortcut_inhibit,
             );
             if first_event_client {
                 // The event and request listeners can become readable

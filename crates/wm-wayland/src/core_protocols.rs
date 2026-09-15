@@ -14,7 +14,7 @@ use smithay::reexports::wayland_protocols_misc::zwp_input_method_v2::server::{
 };
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::XdgToplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::{backend::ClientId, Client, DataInit, Dispatch, DisplayHandle, Resource};
+use smithay::reexports::wayland_server::{backend::ClientId, Client, DataInit, Dispatch, DisplayHandle, Resource, Weak};
 use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::input_method::{
     InputMethodHandler, InputMethodKeyboardUserData, InputMethodManagerGlobalData, InputMethodManagerState,
@@ -22,6 +22,7 @@ use smithay::wayland::input_method::{
 };
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
+    KeyboardShortcutsInhibitorSeat,
 };
 use smithay::wayland::pointer_constraints::PointerConstraintsState;
 use smithay::wayland::xdg_activation::{
@@ -137,7 +138,22 @@ pub(crate) struct CoreProtocols {
     rejected_ime_popups: u64,
     pub xdg_foreign: XdgForeignState,
     pub shortcuts: KeyboardShortcutsInhibitState,
+    /// The one `zwp_keyboard_shortcuts_inhibitor_v1` grant in force:
+    /// the focused surface's, when policy let it have one. See the
+    /// `Compositor` impl below for the policy.
     pub active_shortcut_inhibitor: Option<KeyboardShortcutsInhibitor>,
+    /// The surface whose grant the user suspended with the escape
+    /// chord, if any. Keyed by surface rather than by inhibitor object
+    /// so a client cannot have its grant back by destroying and
+    /// recreating the inhibitor, and `Weak` so the surface's own
+    /// destruction clears it without a hook of its own. Focus may
+    /// leave and return while it is set: the grant stays suspended
+    /// until the chord is pressed again with this surface focused.
+    suspended_inhibit_surface: Option<Weak<WlSurface>>,
+    /// Budget for the info-level inhibit lines. A client creating and
+    /// destroying inhibitors in a loop while focused would otherwise
+    /// turn one line per decision into an unbounded log.
+    inhibit_log: LogBudget,
     pub _cursor_shape: smithay::wayland::cursor_shape::CursorShapeManagerState,
     pub _single_pixel: smithay::wayland::single_pixel_buffer::SinglePixelBufferState,
     pub _presentation: smithay::wayland::presentation::PresentationState,
@@ -165,6 +181,8 @@ pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
         xdg_foreign: XdgForeignState::new::<Compositor>(display),
         shortcuts: KeyboardShortcutsInhibitState::new::<Compositor>(display),
         active_shortcut_inhibitor: None,
+        suspended_inhibit_surface: None,
+        inhibit_log: LogBudget::default(),
         _cursor_shape: smithay::wayland::cursor_shape::CursorShapeManagerState::new::<Compositor>(display),
         _single_pixel: smithay::wayland::single_pixel_buffer::SinglePixelBufferState::new::<Compositor>(display),
         // Linux CLOCK_MONOTONIC. Presentation timestamps emitted by
@@ -285,6 +303,244 @@ impl XdgForeignHandler for Compositor {
     }
 }
 
+/// How many inhibit-policy lines a window of [`INHIBIT_LOG_WINDOW`]
+/// gets before the rest of the window is counted instead of logged.
+const INHIBIT_LOG_BURST: u32 = 8;
+const INHIBIT_LOG_WINDOW: Duration = Duration::from_secs(10);
+
+/// A per-window budget for a log line a client can trigger at will.
+///
+/// The first [`INHIBIT_LOG_BURST`] events of a window are logged one
+/// by one; the rest are counted, and the count rides on the first line
+/// of the next window. A looping client thus costs the log a burst per
+/// window instead of a line per iteration, and the loop itself stays
+/// visible as the suppressed count.
+#[derive(Debug, Default)]
+struct LogBudget {
+    window_start: Option<Instant>,
+    logged: u32,
+    suppressed: u64,
+}
+
+impl LogBudget {
+    /// `Some(n)` when this event gets its own line, with `n` the events
+    /// that went unlogged since the last line; `None` when it does not.
+    fn admit(&mut self, now: Instant) -> Option<u64> {
+        let fresh_window = self
+            .window_start
+            .is_none_or(|start| now.saturating_duration_since(start) >= INHIBIT_LOG_WINDOW);
+        if fresh_window {
+            self.window_start = Some(now);
+            self.logged = 1;
+            return Some(std::mem::take(&mut self.suppressed));
+        }
+        if self.logged < INHIBIT_LOG_BURST {
+            self.logged += 1;
+            Some(0)
+        } else {
+            self.suppressed = self.suppressed.saturating_add(1);
+            None
+        }
+    }
+}
+
+/// `zwp_keyboard_shortcuts_inhibit_v1` policy.
+///
+/// The protocol exists so a VM console or a remote-desktop viewer can
+/// receive the chords the host would otherwise take, and it expects
+/// the compositor to decide who gets that and to keep "a special key
+/// combo … allowing the user to forcibly restore normal keyboard
+/// events routing in the case of an unwilling client". Three rules
+/// decide a grant, in `shortcut_inhibit_permitted`: the config allows
+/// grants at all (`allow_shortcut_inhibit`, Hyprland's
+/// `binds:disable_keybind_grabbing` inverted), the client is not
+/// sandboxed (a security-context client is hidden from every other
+/// desktop-level capability, and an inhibitor plus fullscreen is what
+/// a convincing fake lock screen is made of), and the user has not
+/// suspended this surface's grant with the escape chord. A refused
+/// inhibitor simply never receives `active`, which the protocol reads
+/// as "not granted".
+///
+/// The escape chord (`shortcuts_inhibit_escape`) suspends the grant in
+/// force and swallows itself; pressing it again with the same surface
+/// focused resumes the grant. Suspension is keyed by surface, so
+/// neither a focus round-trip nor destroying and recreating the
+/// inhibitor gets the client its grant back — only the user does. The
+/// session lock and the VT switch outrank all of this: see the key
+/// filter in `input.rs`, where the chord is matched.
+impl Compositor {
+    /// The name the log and `systeminfo` know a holder by: the app id
+    /// of the window the surface belongs to, or the surface id for a
+    /// surface with no window (odd, and the id is what identifies it).
+    fn inhibit_holder_name(&self, surface: &WlSurface) -> String {
+        self.wm
+            .backend()
+            .window_for_surface(surface)
+            .and_then(|id| self.wm.backend().windows.get(&id))
+            .and_then(|record| record.app_id.clone())
+            .unwrap_or_else(|| format!("{:?}", surface.id()))
+    }
+
+    fn inhibit_log_slot(&mut self) -> Option<u64> {
+        self.core_protocols.inhibit_log.admit(Instant::now())
+    }
+
+    fn shortcut_inhibit_suspended(&self, surface: &WlSurface) -> bool {
+        self.core_protocols
+            .suspended_inhibit_surface
+            .as_ref()
+            .and_then(|weak| weak.upgrade().ok())
+            .is_some_and(|suspended| suspended == *surface)
+    }
+
+    /// Whether `surface` may hold an active grant right now, or why not.
+    fn shortcut_inhibit_permitted(&self, surface: &WlSurface) -> Result<(), &'static str> {
+        if !self.wm.backend().shortcut_inhibit_policy.allow {
+            return Err("allow_shortcut_inhibit is off");
+        }
+        if surface.client().is_some_and(|client| crate::state::client_is_confined(&client)) {
+            return Err("the client is sandboxed");
+        }
+        if self.shortcut_inhibit_suspended(surface) {
+            return Err("the user suspended this window's grant");
+        }
+        Ok(())
+    }
+
+    /// Activates `inhibitor` if its surface may hold a grant, and logs
+    /// the decision either way. The caller has already withdrawn any
+    /// grant in force.
+    fn grant_shortcut_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        let holder = self.inhibit_holder_name(inhibitor.wl_surface());
+        match self.shortcut_inhibit_permitted(inhibitor.wl_surface()) {
+            Ok(()) => {
+                inhibitor.activate();
+                self.core_protocols.active_shortcut_inhibitor = Some(inhibitor);
+                if let Some(suppressed) = self.inhibit_log_slot() {
+                    tracing::info!(
+                        holder,
+                        suppressed,
+                        "keyboard shortcuts inhibited: the focused client receives every chord until the shortcuts_inhibit_escape chord or a focus change"
+                    );
+                }
+            }
+            Err(why) => {
+                if let Some(suppressed) = self.inhibit_log_slot() {
+                    tracing::info!(holder, why, suppressed, "declined a keyboard-shortcuts inhibitor");
+                }
+            }
+        }
+    }
+
+    /// Withdraws the grant in force, if any. The suspension, if any,
+    /// is not touched: it belongs to the surface, not to the grant.
+    fn withdraw_shortcut_inhibitor(&mut self, why: &'static str) {
+        let Some(active) = self.core_protocols.active_shortcut_inhibitor.take() else {
+            return;
+        };
+        active.inactivate();
+        let holder = self.inhibit_holder_name(active.wl_surface());
+        if let Some(suppressed) = self.inhibit_log_slot() {
+            tracing::info!(holder, why, suppressed, "keyboard shortcuts restored");
+        }
+    }
+
+    /// Moves the one grant with keyboard focus: withdraws the old one
+    /// and grants the new focus's inhibitor, if it has one and may
+    /// hold it. `focus_changed` calls this on every focus change,
+    /// which is what keeps a background VM from retaining raw keys —
+    /// and what keeps the session lock ahead of every inhibitor, since
+    /// the lock surface takes focus.
+    pub(crate) fn sync_shortcut_inhibitor_to_focus(&mut self, target: Option<&WlSurface>) {
+        if let (Some(active), Some(surface)) = (self.core_protocols.active_shortcut_inhibitor.as_ref(), target) {
+            if active.wl_surface() == surface {
+                return;
+            }
+        }
+        self.withdraw_shortcut_inhibitor("keyboard focus left the window");
+        if let Some(surface) = target {
+            if let Some(inhibitor) = self.seat.keyboard_shortcuts_inhibitor_for_surface(surface) {
+                self.grant_shortcut_inhibitor(inhibitor);
+            }
+        }
+    }
+
+    /// The escape chord was pressed (and the session is not locked).
+    /// A grant in force is suspended; otherwise a suspended focused
+    /// surface has its grant resumed. Returns whether the press meant
+    /// either — the caller swallows it then, and treats it as an
+    /// ordinary key when it did not.
+    pub(crate) fn shortcut_inhibit_escape_pressed(&mut self) -> bool {
+        if let Some(active) = self.core_protocols.active_shortcut_inhibitor.take() {
+            active.inactivate();
+            let surface = active.wl_surface();
+            self.core_protocols.suspended_inhibit_surface = Some(surface.downgrade());
+            let holder = self.inhibit_holder_name(surface);
+            // Not budgeted: this is the user's own key, once per press.
+            tracing::info!(
+                holder,
+                "keyboard shortcuts restored by the user: the window's inhibitor is suspended until the chord is pressed again"
+            );
+            return true;
+        }
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .map(|focus| focus.surface().clone());
+        let Some(surface) = focused.filter(|surface| self.shortcut_inhibit_suspended(surface)) else {
+            return false;
+        };
+        self.core_protocols.suspended_inhibit_surface = None;
+        let holder = self.inhibit_holder_name(&surface);
+        tracing::info!(holder, "the user resumed the window's keyboard-shortcuts inhibitor");
+        if let Some(inhibitor) = self.seat.keyboard_shortcuts_inhibitor_for_surface(&surface) {
+            self.grant_shortcut_inhibitor(inhibitor);
+        }
+        true
+    }
+
+    /// Reconciles the grant in force with a policy the shell just
+    /// applied (`Backend::set_shortcut_inhibit_policy` stages it):
+    /// grants turned off withdraw the active one; grants turned back
+    /// on give the focused surface its inhibitor, if it has one.
+    pub(crate) fn apply_shortcut_inhibit_policy(&mut self) {
+        if !std::mem::take(&mut self.wm.backend_mut().shortcut_inhibit_policy_changed) {
+            return;
+        }
+        let policy = self.wm.backend().shortcut_inhibit_policy.clone();
+        if policy.escape.is_none() {
+            tracing::warn!(
+                "shortcuts_inhibit_escape is unbound: nothing on the keyboard but a VT switch leaves a client that inhibits shortcuts"
+            );
+        }
+        if policy.allow {
+            let focused = self
+                .seat
+                .get_keyboard()
+                .and_then(|keyboard| keyboard.current_focus())
+                .map(|focus| focus.surface().clone());
+            self.sync_shortcut_inhibitor_to_focus(focused.as_ref());
+        } else {
+            self.withdraw_shortcut_inhibitor("allow_shortcut_inhibit was turned off");
+        }
+    }
+
+    /// One line for `hyprctl systeminfo`: who holds the shortcuts, or
+    /// whose grant is suspended, or that grants are off.
+    pub(crate) fn shortcut_inhibit_report(&self) -> String {
+        if let Some(active) = &self.core_protocols.active_shortcut_inhibitor {
+            return format!("active holder={}", self.inhibit_holder_name(active.wl_surface()));
+        }
+        if let Some(surface) =
+            self.core_protocols.suspended_inhibit_surface.as_ref().and_then(|weak| weak.upgrade().ok())
+        {
+            return format!("suspended holder={}", self.inhibit_holder_name(&surface));
+        }
+        if self.wm.backend().shortcut_inhibit_policy.allow { "none".into() } else { "disabled".into() }
+    }
+}
+
 impl KeyboardShortcutsInhibitHandler for Compositor {
     fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
         &mut self.core_protocols.shortcuts
@@ -292,15 +548,26 @@ impl KeyboardShortcutsInhibitHandler for Compositor {
 
     fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
         let focused = self.seat.get_keyboard().and_then(|keyboard| keyboard.current_focus());
-        if focused.as_ref().map(crate::input::keyboard::KeyboardFocus::surface) == Some(inhibitor.wl_surface()) {
-            inhibitor.activate();
-            self.core_protocols.active_shortcut_inhibitor = Some(inhibitor);
+        if focused.as_ref().map(crate::input::keyboard::KeyboardFocus::surface) != Some(inhibitor.wl_surface()) {
+            // Nothing to decide until the surface is focused;
+            // `focus_changed` grants it then, policy permitting.
+            return;
         }
+        // A surface holds at most one inhibitor per seat (smithay
+        // refuses a second with `already_inhibited`), so a grant in
+        // force here is another surface's stale one; withdraw it so
+        // there is ever one grant, and decide this one.
+        self.withdraw_shortcut_inhibitor("a newer inhibitor was created");
+        self.grant_shortcut_inhibitor(inhibitor);
     }
 
     fn inhibitor_destroyed(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
         if self.core_protocols.active_shortcut_inhibitor.as_ref().is_some_and(|active| active == &inhibitor) {
             self.core_protocols.active_shortcut_inhibitor = None;
+            let holder = self.inhibit_holder_name(inhibitor.wl_surface());
+            if let Some(suppressed) = self.inhibit_log_slot() {
+                tracing::info!(holder, suppressed, "keyboard shortcuts restored: the client destroyed its inhibitor");
+            }
         }
     }
 }
@@ -618,5 +885,25 @@ mod tests {
         assert!(activation_token_is_fresh(now, now - ACTIVATION_TOKEN_TTL + Duration::from_nanos(1)));
         assert!(!activation_token_is_fresh(now, now - ACTIVATION_TOKEN_TTL));
         assert!(activation_token_is_fresh(now, now + Duration::from_secs(1)));
+    }
+
+    /// A client toggling inhibitors in a loop gets a burst of lines per
+    /// window, then a count; the count rides on the next window's first
+    /// line, so the loop stays visible without the log growing with it.
+    #[test]
+    fn inhibit_log_budget_bursts_then_counts_then_reports_the_count() {
+        let start = Instant::now();
+        let mut budget = LogBudget::default();
+        for _ in 0..INHIBIT_LOG_BURST {
+            assert_eq!(budget.admit(start), Some(0));
+        }
+        for _ in 0..1000 {
+            assert_eq!(budget.admit(start + Duration::from_secs(1)), None);
+        }
+        // A new window: one line, carrying the thousand it swallowed.
+        assert_eq!(budget.admit(start + INHIBIT_LOG_WINDOW), Some(1000));
+        assert_eq!(budget.admit(start + INHIBIT_LOG_WINDOW), Some(0));
+        // A clock that went backwards is a fresh window, not a panic.
+        assert_eq!(budget.admit(start - Duration::from_secs(1)), Some(0));
     }
 }

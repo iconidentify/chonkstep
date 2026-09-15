@@ -2158,6 +2158,17 @@ impl Backend for WaylandBackend {
         self.pending_keyboard = Some(config);
     }
 
+    fn set_shortcut_inhibit_policy(&mut self, policy: wm_core::ShortcutInhibitPolicy) {
+        // Staged like the keyboard config: the grants live on
+        // `Compositor`, and a policy that turns them off has the grant
+        // in force to withdraw. Only a change is staged, so a reload
+        // that leaves the policy alone leaves the grant alone too.
+        if self.shortcut_inhibit_policy != policy {
+            self.shortcut_inhibit_policy = policy;
+            self.shortcut_inhibit_policy_changed = true;
+        }
+    }
+
     fn set_pointer_config(&mut self, mut config: wm_core::PointerConfig) {
         // Live `hl.device` requests ride along with the configured rules;
         // `input::devices` decides which of the two is the newer word.

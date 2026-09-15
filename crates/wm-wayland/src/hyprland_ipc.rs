@@ -128,12 +128,16 @@ pub(crate) fn init() -> Option<Server> {
 /// passed in. It reaches clients as `LOCK` in every monitor's
 /// `solitaryBlockedBy`, the one field Hyprland's IPC exposes lock
 /// state through and the one Omarchy's tooling reads.
+/// `shortcut_inhibit` is `Compositor::shortcut_inhibit_report`, which
+/// lives beside the grants for the same reason and is served only by
+/// `systeminfo`.
 pub(crate) fn snapshot(
     wm: &WindowManager<WaylandBackend>,
     locked: bool,
     session: &chonk_shell::startup::SessionState,
+    shortcut_inhibit: &str,
 ) -> Snapshot {
-    build_snapshot(wm, locked, session, true)
+    build_snapshot(wm, locked, session, Some(shortcut_inhibit))
 }
 
 /// Snapshot retained only by the event differ. Bindings are request-only:
@@ -144,16 +148,19 @@ pub(crate) fn event_snapshot(
     locked: bool,
     session: &chonk_shell::startup::SessionState,
 ) -> Snapshot {
-    build_snapshot(wm, locked, session, false)
+    build_snapshot(wm, locked, session, None)
 }
 
+/// `system_info` is the request-only half: `Some` carries the
+/// shortcut-inhibit report into it and asks for the bindings too.
 fn build_snapshot(
     wm: &WindowManager<WaylandBackend>,
     locked: bool,
     session: &chonk_shell::startup::SessionState,
-    include_bindings: bool,
+    system_info: Option<&str>,
 ) -> Snapshot {
     tracing::trace!("constructing Hyprland IPC snapshot");
+    let include_bindings = system_info.is_some();
     let monitors_info = wm.monitors();
 
     let monitors: Vec<Monitor> = monitors_info
@@ -463,15 +470,19 @@ fn build_snapshot(
         bindings,
         config_errors: session.config_diagnostics.clone(),
         devices,
-        system_info: if include_bindings {
+        system_info: if let Some(shortcut_inhibit) = system_info {
+            // The inhibitor line is the first clue for "my shortcuts
+            // stopped working": which client holds them, or that the
+            // user suspended a grant, or that grants are off.
             format!(
-                "ChonkStep {}\nsource: {}\nconfig: {}\nworkspace: {}\noutputs: {}\n{}",
+                "ChonkStep {}\nsource: {}\nconfig: {}\nworkspace: {}\noutputs: {}\nshortcut_inhibitor: {}\n{}",
                 env!("CARGO_PKG_VERSION"),
                 chonk_build_info::SOURCE_ID,
                 wm_config::config_path()
                     .map_or_else(|| "defaults (HOME unavailable)".to_string(), |path| path.display().to_string()),
                 wm.current_workspace() + 1,
                 monitors_info.len(),
+                shortcut_inhibit,
                 wm.backend().system_snapshot(),
             )
         } else {

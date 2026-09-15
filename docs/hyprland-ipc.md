@@ -92,6 +92,7 @@ start with `[[BATCH]]` and use `;` separators.
 | `binds` | The live chonkstep keymap in Hyprland's plain bind-block format (or JSON). Every row replays through `dispatch`: an action with a Hyprland verb reports that verb, `exec` rows are shell-quoted so the command rebuilds exactly, and an action with no Hyprland verb reports `chonkstep <name>` |
 | `getoption` | An explicitly unset `{ "option": ..., "set": false }` object. Value fields are absent so JavaScript keeps its own default instead of coercing `null` or zero. |
 | `version`, `splash` | Supported |
+| `systeminfo` | Version and source, the config path, the current workspace and output count, then `shortcut_inhibitor:` — `active holder=APP` when a client holds every chord through `zwp_keyboard_shortcuts_inhibit_v1`, `suspended holder=APP` after the escape chord, `disabled` under `allow_shortcut_inhibit = false`, else `none` — and the graphics and output snapshot |
 | `configerrors` | Retained live-Hyprland refusals, one per line or as JSON `{"error": "…"}` objects |
 
 The nested backend has no libinput device records, so it reports one

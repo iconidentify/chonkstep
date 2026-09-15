@@ -362,6 +362,25 @@
 # applications you did not just ask for is something to opt into.
 #restore_session = true
 
+# Keyboard-shortcut inhibition. A VM console or a remote-desktop viewer
+# can ask, through zwp_keyboard_shortcuts_inhibit_v1, to receive every
+# chord the desktop would otherwise take; while the grant is in force
+# every binding goes to that client. It is granted to the focused
+# client by default (never to a sandboxed one), and the escape chord
+# is the way back on the keyboard: it suspends the focused client's
+# inhibitor and swallows itself, and a second press resumes the grant.
+# Suspension belongs to the window, so destroying and recreating the
+# inhibitor, or a focus round trip, does not get the grant back. The
+# same chord releases an X11 client's XGrabKeyboard. Any key spec, or
+# "none" to have no way back but a VT switch. The default is bound by
+# no preset keymap, and a test keeps it that way.
+#
+# allow_shortcut_inhibit = false answers every request with no grant --
+# Hyprland's binds:disable_keybind_grabbing = true, which the live
+# Hyprland configuration also sets. See docs/keybindings.md.
+#allow_shortcut_inhibit = true
+#shortcuts_inhibit_escape = "super+shift+escape"
+
 # Omarchy's own command menu, hosted as the `Omarchy` submenu of the
 # root menu (right-click the desktop): Learn, Trigger, Style, Setup,
 # Install, Remove, Update, About, System -- every entry Omarchy's shell

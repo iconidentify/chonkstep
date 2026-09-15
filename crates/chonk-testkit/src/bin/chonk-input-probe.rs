@@ -18,6 +18,12 @@
 //! old 400x300 buffer. `stale-geometry-fullscreen` pins a 400x300 window
 //! geometry, answers the fullscreen configure with a buffer of the full size,
 //! then asks to be maximized and leaves every later configure unacknowledged.
+//! `inhibit` asks for a keyboard-shortcuts inhibitor on the toplevel and
+//! reports `shortcut-inhibitor active` / `inactive`; F5 then minimizes the
+//! window and F6 destroys the inhibitor and creates a new one, the way a
+//! client trying to get a withdrawn grant back would. `--socket=PATH`
+//! connects through that socket instead of `WAYLAND_DISPLAY` — a
+//! security-context listener's, for the sandboxed-client tests.
 
 #[path = "chonk-input-probe/constraints.rs"]
 mod constraints;
@@ -98,6 +104,8 @@ struct Probe {
     shortcuts_manager: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
     toplevel: Option<XdgToplevel>,
     inhibit: bool,
+    /// The live inhibitor under `inhibit`, held here so F6 can replace it.
+    inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
     keymap_count: u64,
     touch: Option<wl_touch::WlTouch>,
     touches: HashMap<i32, (f64, f64)>,
@@ -324,6 +332,20 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Probe {
                         .as_ref()
                         .expect("mapped toplevel")
                         .set_minimized();
+                }
+                if probe.inhibit && pressed && key == 64 {
+                    if let Some(old) = probe.inhibitor.take() {
+                        old.destroy();
+                    }
+                    probe.inhibitor = Some(
+                        probe.shortcuts_manager.as_ref().expect("shortcuts-inhibit").inhibit_shortcuts(
+                            probe.surface.as_ref().expect("mapped surface"),
+                            probe.seat.as_ref().expect("seat"),
+                            qh,
+                            (),
+                        ),
+                    );
+                    say("shortcut-inhibitor recreated");
                 }
             }
             _ => {}
@@ -881,7 +903,13 @@ fn main() {
         [1.0, 1.5, 2.0].contains(&scale),
         "supported test scales: 1, 1.5, 2"
     );
-    let connection = Connection::connect_to_env().expect("private Wayland connection");
+    let connection = match std::env::args().find_map(|arg| arg.strip_prefix("--socket=").map(str::to_owned)) {
+        Some(path) => Connection::from_socket(
+            std::os::unix::net::UnixStream::connect(&path).expect("the named Wayland socket accepts"),
+        )
+        .expect("Wayland connection over the named socket"),
+        None => Connection::connect_to_env().expect("private Wayland connection"),
+    };
     let mut queue = connection.new_event_queue::<Probe>();
     let qh = queue.handle();
     connection.display().get_registry(&qh, ());
@@ -937,7 +965,7 @@ fn main() {
         .get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg.get_toplevel(&qh, ());
     probe.toplevel = Some(toplevel.clone());
-    let _inhibitor = probe.inhibit.then(|| {
+    probe.inhibitor = probe.inhibit.then(|| {
         probe
             .shortcuts_manager
             .as_ref()

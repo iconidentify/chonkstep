@@ -513,6 +513,33 @@ pub struct KeyboardConfig {
     pub numlock_by_default: Option<bool>,
 }
 
+/// What the compositor does with `zwp_keyboard_shortcuts_inhibit_v1`:
+/// whether a focused client may take every chord at all, and which
+/// chord the user presses to take them back from one that has.
+///
+/// `escape` is `None` when the user unbound it; the compositor then
+/// has no keyboard route out of an inhibiting client and says so at
+/// startup. The default spelling lives with the other config
+/// defaults in `wm-config`, which is also what checks it against the
+/// preset keymaps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShortcutInhibitPolicy {
+    /// `allow_shortcut_inhibit`: whether any client is granted an
+    /// inhibitor. `false` answers every request with silence, which
+    /// the protocol reads as "not granted".
+    pub allow: bool,
+    /// `shortcuts_inhibit_escape`: the chord that suspends the active
+    /// inhibitor (and releases an XWayland keyboard grab), and resumes
+    /// a suspended one on its next press.
+    pub escape: Option<KeyCombo>,
+}
+
+impl Default for ShortcutInhibitPolicy {
+    fn default() -> Self {
+        Self { allow: true, escape: None }
+    }
+}
+
 /// When the compositor hides the pointer on its own: while the user types
 /// or touches, or after a stretch without pointer input. `None` everywhere
 /// means never; the IPC-owned `invisible` flag is a separate matter.

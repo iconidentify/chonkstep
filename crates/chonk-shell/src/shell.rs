@@ -1370,6 +1370,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // Straight through to the backend, which is what answers the
         // decoration protocols and decides who gets a frame...
         wm.backend_mut().set_decoration_rules(next.decorations.clone());
+        // Whether a focused client may take every chord, and the chord
+        // that takes them back. The backend answers the inhibit
+        // protocol and filters the keys, so it is the one to tell.
+        wm.backend_mut().set_shortcut_inhibit_policy(next.shortcut_inhibit.clone());
         // The user's own window rules, read live out of their Hyprland
         // configuration. Pushed through the same pass as the
         // decoration rules beside it, so a `windowrule` edited through

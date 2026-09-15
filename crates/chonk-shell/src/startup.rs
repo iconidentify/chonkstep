@@ -124,6 +124,9 @@ pub struct SessionState {
     /// Whether a workspace switch hides the special workspace shown on
     /// the output it lands on.
     pub hide_special_on_workspace_change: bool,
+    /// Whether a focused client may take every chord through the
+    /// shortcut-inhibit protocol, and the chord that takes them back.
+    pub shortcut_inhibit: wm_core::ShortcutInhibitPolicy,
     pub placement: PlacementPolicy,
     pub edge_resistance: u32,
     pub terminal_font_px: f32,
@@ -271,6 +274,10 @@ impl SessionState {
             },
             autoraise: config.autoraise,
             hide_special_on_workspace_change: config.hide_special_on_workspace_change,
+            shortcut_inhibit: wm_core::ShortcutInhibitPolicy {
+                allow: config.allow_shortcut_inhibit,
+                escape: config.shortcuts_inhibit_escape,
+            },
             placement: config.placement,
             edge_resistance: config.edge_resistance,
             terminal_font_px: config.terminal_font_px,
@@ -1025,6 +1032,7 @@ mod tests {
             focus: FocusPolicy::ClickToFocus,
             autoraise: true,
             hide_special_on_workspace_change: false,
+            shortcut_inhibit: wm_core::ShortcutInhibitPolicy::default(),
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: 20.0,
