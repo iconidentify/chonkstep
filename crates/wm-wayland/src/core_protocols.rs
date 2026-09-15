@@ -152,14 +152,14 @@ pub(crate) struct CoreProtocols {
     /// the focused surface's, when policy let it have one. See the
     /// `Compositor` impl below for the policy.
     pub active_shortcut_inhibitor: Option<KeyboardShortcutsInhibitor>,
-    /// The surface whose grant the user suspended with the escape
-    /// chord, if any. Keyed by surface rather than by inhibitor object
+    /// The surfaces whose grants the user suspended with the escape
+    /// chord. Keyed by surface rather than by inhibitor object
     /// so a client cannot have its grant back by destroying and
     /// recreating the inhibitor, and `Weak` so the surface's own
     /// destruction clears it without a hook of its own. Focus may
     /// leave and return while it is set: the grant stays suspended
     /// until the chord is pressed again with this surface focused.
-    suspended_inhibit_surface: Option<Weak<WlSurface>>,
+    suspended_inhibit_surfaces: Vec<Weak<WlSurface>>,
     /// Budget for the info-level inhibit lines. A client creating and
     /// destroying inhibitors in a loop while focused would otherwise
     /// turn one line per decision into an unbounded log.
@@ -189,7 +189,7 @@ pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
         xdg_foreign: XdgForeignState::new::<Compositor>(display),
         shortcuts: KeyboardShortcutsInhibitState::new::<Compositor>(display),
         active_shortcut_inhibitor: None,
-        suspended_inhibit_surface: None,
+        suspended_inhibit_surfaces: Vec::new(),
         inhibit_log: LogBudget::default(),
         _cursor_shape: smithay::wayland::cursor_shape::CursorShapeManagerState::new::<Compositor>(display),
         _single_pixel: smithay::wayland::single_pixel_buffer::SinglePixelBufferState::new::<Compositor>(display),
@@ -231,6 +231,19 @@ pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
 /// client behind the request, only a keybinding or a menu pick — and it
 /// is the one kind of serial-less token `request_activation` honours.
 pub(crate) struct CompositorIssued;
+
+/// Focus generation in which the creator supplied a plausible input
+/// serial. Decide this at mint time: a later focus change cannot turn a
+/// token created in the background into evidence of user input.
+struct FocusedActivationInput(smithay::utils::Serial);
+
+fn activation_serial_in_focus(
+    serial: smithay::utils::Serial,
+    enter: smithay::utils::Serial,
+    next: smithay::utils::Serial,
+) -> bool {
+    serial.is_no_older_than(&enter) && serial < next
+}
 
 impl WaylandBackend {
     /// Discards abandoned activation tokens on a bounded housekeeping
@@ -335,6 +348,19 @@ impl XdgActivationHandler for Compositor {
             }
         }
         if total < MAX_ACTIVATION_TOKENS_GLOBAL && for_client < MAX_ACTIVATION_TOKENS_PER_CLIENT {
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                let focused_client = keyboard.current_focus()
+                    .and_then(|focus| focus.surface().client()).map(|client| client.id());
+                if focused_client.is_some() && focused_client == data.client_id {
+                    if let (Some((serial, seat)), Some(enter)) = (&data.serial, keyboard.last_enter()) {
+                        if smithay::input::Seat::<Self>::from_resource(seat).as_ref() == Some(&self.seat)
+                            && activation_serial_in_focus(*serial, enter, smithay::utils::SERIAL_COUNTER.next_serial())
+                        {
+                            data.user_data.insert_if_missing(|| FocusedActivationInput(enter));
+                        }
+                    }
+                }
+            }
             return true;
         }
 
@@ -405,8 +431,8 @@ impl XdgActivationHandler for Compositor {
                 .current_focus()
                 .and_then(|focus| focus.surface().client())
                 .map(|client| client.id());
-            let serial_ok = match (&data.serial, keyboard.last_enter()) {
-                (Some((serial, _)), Some(enter)) => serial.is_no_older_than(&enter),
+            let serial_ok = match (data.user_data.get::<FocusedActivationInput>(), keyboard.last_enter()) {
+                (Some(FocusedActivationInput(created_enter)), Some(enter)) => *created_enter == enter,
                 _ => false,
             };
             serial_ok && focused_client.is_some() && focused_client == data.client_id
@@ -526,10 +552,9 @@ impl Compositor {
 
     fn shortcut_inhibit_suspended(&self, surface: &WlSurface) -> bool {
         self.core_protocols
-            .suspended_inhibit_surface
-            .as_ref()
-            .and_then(|weak| weak.upgrade().ok())
-            .is_some_and(|suspended| suspended == *surface)
+            .suspended_inhibit_surfaces
+            .iter()
+            .any(|weak| weak.upgrade().is_ok_and(|suspended| suspended == *surface))
     }
 
     /// Whether `surface` may hold an active grant right now, or why not.
@@ -613,7 +638,10 @@ impl Compositor {
         if let Some(active) = self.core_protocols.active_shortcut_inhibitor.take() {
             active.inactivate();
             let surface = active.wl_surface();
-            self.core_protocols.suspended_inhibit_surface = Some(surface.downgrade());
+            self.core_protocols.suspended_inhibit_surfaces.retain(|weak| weak.upgrade().is_ok());
+            if !self.shortcut_inhibit_suspended(surface) {
+                self.core_protocols.suspended_inhibit_surfaces.push(surface.downgrade());
+            }
             let holder = self.inhibit_holder_name(surface);
             // Not budgeted: this is the user's own key, once per press.
             tracing::info!(
@@ -630,7 +658,9 @@ impl Compositor {
         let Some(surface) = focused.filter(|surface| self.shortcut_inhibit_suspended(surface)) else {
             return false;
         };
-        self.core_protocols.suspended_inhibit_surface = None;
+        self.core_protocols.suspended_inhibit_surfaces.retain(|weak| {
+            weak.upgrade().is_ok_and(|suspended| suspended != surface)
+        });
         let holder = self.inhibit_holder_name(&surface);
         tracing::info!(holder, "the user resumed the window's keyboard-shortcuts inhibitor");
         if let Some(inhibitor) = self.seat.keyboard_shortcuts_inhibitor_for_surface(&surface) {
@@ -671,8 +701,10 @@ impl Compositor {
         if let Some(active) = &self.core_protocols.active_shortcut_inhibitor {
             return format!("active holder={}", self.inhibit_holder_name(active.wl_surface()));
         }
-        if let Some(surface) =
-            self.core_protocols.suspended_inhibit_surface.as_ref().and_then(|weak| weak.upgrade().ok())
+        if let Some(surface) = self.seat.get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .map(|focus| focus.surface().clone())
+            .filter(|surface| self.shortcut_inhibit_suspended(surface))
         {
             return format!("suspended holder={}", self.inhibit_holder_name(&surface));
         }
@@ -995,6 +1027,18 @@ impl Dispatch<ZwpInputPopupSurfaceV2, InputMethodPopupSurfaceUserData> for Compo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_serials_reject_future_and_previous_focus_events_including_wraparound() {
+        for enter in [100_u32, u32::MAX - 2] {
+            let next = enter.wrapping_add(5);
+            assert!(activation_serial_in_focus(enter.into(), enter.into(), next.into()));
+            assert!(activation_serial_in_focus(enter.wrapping_add(3).into(), enter.into(), next.into()));
+            assert!(!activation_serial_in_focus(enter.wrapping_sub(1).into(), enter.into(), next.into()));
+            assert!(!activation_serial_in_focus(next.into(), enter.into(), next.into()));
+            assert!(!activation_serial_in_focus(next.wrapping_add(1000).into(), enter.into(), next.into()));
+        }
+    }
 
     /// A tag over the bound is cut at a character boundary, never
     /// inside a multi-byte character; one at or under it is untouched.

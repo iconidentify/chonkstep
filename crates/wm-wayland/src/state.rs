@@ -330,6 +330,8 @@ pub(crate) enum ManagedSurface {
 #[derive(Debug)]
 pub(crate) struct DndIcon {
     pub(crate) surface: WlSurface,
+    /// A drag preview can contain the originating window's secrets too.
+    pub(crate) capture_redacted: bool,
     /// Where the icon's origin sits relative to the drag's hotspot, in
     /// the icon's own surface-local units. Accumulated from every
     /// `wl_surface.attach` dx/dy and `wl_surface.offset` the icon

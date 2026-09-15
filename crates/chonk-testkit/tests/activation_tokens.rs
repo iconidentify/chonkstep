@@ -209,6 +209,22 @@ fn a_token_the_focused_client_made_from_a_key_press_moves_focus_when_handed_on()
 /// unconditional behaviour: the same self-made token now takes focus.
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
+fn a_forged_future_serial_does_not_authorize_a_focus_handoff() {
+    let mut session = boot("activation-future-serial", "");
+    let hand_off = session.dir.join("handed-token");
+    let probe = probe_path();
+    session.launch(&probe, &["activate-from-file", hand_off.to_str().unwrap()]).unwrap();
+    session.wait_for_window("activation-handed").unwrap();
+    session.launch(&probe, &["mint-on-key", hand_off.to_str().unwrap(), "--future-serial"]).unwrap();
+    let b = session.wait_for_window("activation-mint").unwrap();
+    poll_until(EVENT, "B focused", || (focus_of(&mut session) == Some(b.id)).then_some(())).unwrap();
+    session.door().tap_key(keys::X).unwrap();
+    poll_until(EVENT, "forged serial refused", || (refusals(&session) >= 1).then_some(())).unwrap();
+    assert_eq!(focus_of(&mut session), Some(b.id));
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh"]
 fn misc_focus_on_activate_restores_unconditional_focus() {
     let mut session = boot("activation-misc-on", "misc {\n    focus_on_activate = true\n}\n");
     let probe = probe_path();

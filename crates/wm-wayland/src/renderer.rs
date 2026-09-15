@@ -397,7 +397,7 @@ pub(crate) fn build_scene_into(
     }
     // Directly beneath the cursors and above everything else: what the
     // pointer is carrying sits under its tip.
-    push_dnd_icon(elements, renderer, backend, pointer_location, viewport);
+    push_dnd_icon(elements, renderer, backend, pointer_location, viewport, purpose);
 
     // Input-method candidate windows belong above every application
     // surface (including overlay layers) and below only the pointer.
@@ -2148,6 +2148,7 @@ pub(crate) fn push_dnd_icon(
     backend: &WaylandBackend,
     pointer_location: SPoint<f64, Logical>,
     viewport: Rect,
+    purpose: ScenePurpose,
 ) {
     if backend.locked {
         return;
@@ -2155,6 +2156,9 @@ pub(crate) fn push_dnd_icon(
     let Some(icon) = backend.dnd_icon.as_ref().filter(|icon| icon.surface.alive()) else {
         return;
     };
+    if purpose == ScenePurpose::Capture && icon.capture_redacted {
+        return;
+    }
     // The icon is drawn buffer pixel : screen pixel like the client
     // cursor, at the density it committed, with the integral-fallback
     // correction every window gets on a fractional output.
