@@ -73,13 +73,17 @@ impl Drag {
     }
 
     fn boot_options(name: &str, scale: f32, options: SessionOptions) -> Drag {
+        Self::boot_mode(name, scale, options, "dnd")
+    }
+
+    fn boot_mode(name: &str, scale: f32, options: SessionOptions, mode: &str) -> Drag {
         let mut session = Session::boot(
             name,
             SessionOptions { scale: Some(scale), ..options },
         )
         .expect("nested compositor");
         let binary = profile_binary(PROBE).expect("input probe built");
-        session.launch(binary.to_str().unwrap(), &[&scale.to_string(), "dnd", "icon"]).expect("probe launches");
+        session.launch(binary.to_str().unwrap(), &[&scale.to_string(), mode, "icon"]).expect("probe launches");
         let window: WindowInfo = session.wait_for_window("input-probe").expect("probe maps");
         session.door().barrier().unwrap();
         let origin = (f64::from(window.x - window.offset_x), f64::from(window.y - window.offset_y));
@@ -216,6 +220,40 @@ fn a_protected_windows_drag_icon_stays_on_screen_but_out_of_captures() {
     let capture = drag.screenshot("private-icon");
     drag.assert_no_icon_at(&capture, START, [51, 51, 51]);
     drag.session.door().button("right", false).unwrap();
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest inside"]
+fn a_touch_drag_uses_its_own_serial_while_a_mouse_button_is_held() {
+    let mut drag = Drag::boot_mode("dnd-icon-touch-with-mouse", 1.0, SessionOptions {
+        config_extra: "show_dock = false\nhyprland_config = true\n".into(),
+        config_root_files: vec![("hypr/hyprland.conf".into(),
+            "windowrule = no_screen_share on, match:class ^input-probe$\n".into())],
+        ..Default::default()
+    }, "dnd-touch");
+    let (x, y) = drag.global(START);
+    drag.session.door().motion(f64::from(x), f64::from(y)).unwrap();
+    wait_event(&drag.session, 0, &["enter", "motion"]);
+    drag.session.door().button("left", true).unwrap();
+    wait_event(&drag.session, 0, &["press"]);
+
+    let (x, y) = drag.global(CARRY);
+    drag.session.door().touch_down(0, f64::from(x), f64::from(y)).unwrap();
+    wait_line(&drag.session, "icon committed");
+    let carried = (230.0, 170.0);
+    let (x, y) = drag.global(carried);
+    drag.session.door().touch_motion(0, f64::from(x), f64::from(y)).unwrap();
+    wait_event(&drag.session, 0, &["dnd-enter", "dnd-motion"]);
+    wait_line(&drag.session, "icon frame done");
+
+    let path = drag.session.dir.join("display-touch-icon.png");
+    std::fs::write(drag.session.dir.join("state/chonkstep/screenshot"), path.display().to_string()).unwrap();
+    let display = poll_until(EVENT, "display capture", || Screenshot::load(&path).ok()).unwrap();
+    drag.assert_icon_at(&display, carried);
+    let capture = drag.screenshot("private-touch-icon");
+    drag.assert_no_icon_at(&capture, carried, [51, 51, 51]);
+    drag.session.door().touch_up(0).unwrap();
+    drag.session.door().button("left", false).unwrap();
 }
 
 #[test]

@@ -16,6 +16,22 @@ Provenance:
   source changes are listed below. Preserve upstream attribution and compare
   against the archive when updating; do not reformat the dependency.
 
+## Local patch: retain the serial that authorized a client drag
+
+`src/wayland/selection/data_device/mod.rs` and `device.rs`:
+
+Add `ClientDndGrabHandler::started_with_serial` and call it with the serial
+already validated against the pointer or touch implicit grab. Its default
+delegates to `started`, preserving existing implementations. ChonkStep uses
+the serial to select the correct icon anchor and originating window's privacy
+policy when a mouse button and a touch are held simultaneously.
+
+Evidence: `a_touch_drag_uses_its_own_serial_while_a_mouse_button_is_held` in
+`crates/chonk-testkit/tests/dnd_icon.rs` failed with the icon left at the mouse
+position. It now follows the touch while staying excluded from captures of a
+protected window. Remove this patch when an adopted upstream API supplies
+equivalent drag-start provenance.
+
 ## Local patch: cancel every active touch, including framed touches
 
 `src/input/touch/mod.rs`, `TouchInternal::cancel`:

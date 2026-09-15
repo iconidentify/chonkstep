@@ -80,7 +80,7 @@ where
                             }
                         }
                         // The StartDrag is in response to a pointer implicit grab, all is good
-                        handler.started(source.clone(), icon.clone(), seat.clone());
+                        handler.started_with_serial(source.clone(), icon.clone(), seat.clone(), serial);
                         let start_data = pointer.grab_start_data().unwrap();
                         pointer.set_grab(
                             handler,
@@ -103,7 +103,7 @@ where
                             }
                         }
                         // The StartDrag is in response to a touch implicit grab, all is good
-                        handler.started(source.clone(), icon.clone(), seat.clone());
+                        handler.started_with_serial(source.clone(), icon.clone(), seat.clone(), serial);
                         let start_data = touch.grab_start_data().unwrap();
                         touch.set_grab(
                             handler,

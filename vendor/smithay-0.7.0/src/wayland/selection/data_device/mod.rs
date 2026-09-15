@@ -134,6 +134,21 @@ pub trait ClientDndGrabHandler: SeatHandler + Sized {
     /// * `seat` - The seat on which the DnD operation was started
     fn started(&mut self, source: Option<WlDataSource>, icon: Option<WlSurface>, seat: Seat<Self>) {}
 
+    /// A client started a drag in response to the implicit grab identified by `serial`.
+    ///
+    /// This is called before installing the drag grab, so a compositor can use
+    /// `has_grab(serial)` to distinguish pointer and touch input when both are
+    /// held. The default preserves the existing [`Self::started`] callback.
+    fn started_with_serial(
+        &mut self,
+        source: Option<WlDataSource>,
+        icon: Option<WlSurface>,
+        seat: Seat<Self>,
+        serial: Serial,
+    ) {
+        self.started(source, icon, seat);
+    }
+
     /// The drag'n'drop action was finished by the user releasing the buttons
     ///
     /// At this point, any pointer icon should be removed.
