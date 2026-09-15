@@ -1882,6 +1882,7 @@ impl<B: Backend> WindowManager<B> {
             }
             BackendEvent::TitleChanged(window) => self.handle_title_changed(window),
             BackendEvent::ChromeChanged(window) => self.handle_chrome_changed(window),
+            BackendEvent::MetadataChanged(window) => self.handle_metadata_changed(window),
             BackendEvent::SizeHintsChanged(window) => {
                 if let Some(id) = self.client_for_window(window) {
                     // Terminals update WM_NORMAL_HINTS while answering each
@@ -2000,6 +2001,11 @@ impl<B: Backend> WindowManager<B> {
         let mut client = Client::new(window, title);
         client.chrome = chrome;
         client.class = self.backend.window_class(window).map(|c| c.class).unwrap_or_default();
+        // The third leg of the identity a window rule matches on. Read
+        // once here, like the title: a client normally tags a window
+        // before its first commit, and a tag set later reaches the IPC
+        // but not the rules, exactly as a later title does not.
+        let xdg_tag = self.backend.window_xdg_tag(window).unwrap_or_default();
         client.geometry = content;
         Self::clamp_geometry(&mut client, self.backend.screen_size());
         client.parent = self
@@ -2017,7 +2023,7 @@ impl<B: Backend> WindowManager<B> {
         let window_rule = self
             .float_policy
             .as_deref()
-            .map(|policy| policy.window_decision_for(&client.class, &client.title))
+            .map(|policy| policy.window_decision_for(&client.class, &client.title, &xdg_tag))
             .unwrap_or_else(|| placement::WindowRuleDecision::for_identity(&client.class));
         if window_rule.pin {
             client.flags.insert(ClientFlags::STICKY);
@@ -2082,13 +2088,14 @@ impl<B: Backend> WindowManager<B> {
         let rule_placement = self
             .float_policy
             .as_deref()
-            .and_then(|policy| policy.placement_for(&client.class, &client.title, &metrics));
+            .and_then(|policy| policy.placement_for(&client.class, &client.title, &xdg_tag, &metrics));
         let floated = match rule_placement.and_then(|rule| rule.size) {
             Some(size) => Some(placement::fit_in(size, workarea, chrome_size, output_scale)),
             None => placement::float_override_for(
                 self.float_policy.as_deref(),
                 &client.class,
                 &client.title,
+                &xdg_tag,
                 workarea,
                 chrome_size,
                 content.size,
@@ -2518,6 +2525,19 @@ impl<B: Backend> WindowManager<B> {
         client.title = title;
         self.bump_protocol_state_revision();
         self.repaint_decoration(id);
+    }
+
+    /// A window's protocol-only metadata — its xdg toplevel tag or
+    /// description — changed. The core keeps no copy of either (the
+    /// IPC snapshot reads the backend's record directly), so the only
+    /// work is telling the publishers that a window they last
+    /// published is stale. Rules are not re-run: they are evaluated
+    /// at map time, exactly as a later title change does not re-run
+    /// them.
+    fn handle_metadata_changed(&mut self, window: B::WindowId) {
+        if self.client_for_window(window).is_some() {
+            self.bump_protocol_state_revision();
+        }
     }
 
     /// Refreshes the transient edge after a client reparents itself.
@@ -5501,11 +5521,11 @@ mod tests {
     struct InhibitsIdle;
 
     impl FloatPolicy for InhibitsIdle {
-        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+        fn decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
             None
         }
 
-        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+        fn window_decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> crate::placement::WindowRuleDecision {
             crate::placement::WindowRuleDecision { idle_inhibit: IdleInhibitRule::Always, ..Default::default() }
         }
     }
@@ -5515,11 +5535,11 @@ mod tests {
     struct InhibitsIdleWhen(IdleInhibitRule);
 
     impl FloatPolicy for InhibitsIdleWhen {
-        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+        fn decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
             None
         }
 
-        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+        fn window_decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> crate::placement::WindowRuleDecision {
             crate::placement::WindowRuleDecision { idle_inhibit: self.0, ..Default::default() }
         }
     }
@@ -5530,11 +5550,11 @@ mod tests {
     struct NoActivate;
 
     impl FloatPolicy for NoActivate {
-        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+        fn decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
             None
         }
 
-        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+        fn window_decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> crate::placement::WindowRuleDecision {
             crate::placement::WindowRuleDecision {
                 focus_on_activate: Some(false),
                 ..Default::default()
@@ -5546,11 +5566,11 @@ mod tests {
     struct NoInitialFocus;
 
     impl FloatPolicy for NoInitialFocus {
-        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+        fn decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
             None
         }
 
-        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+        fn window_decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> crate::placement::WindowRuleDecision {
             crate::placement::WindowRuleDecision { no_initial_focus: true, ..Default::default() }
         }
     }
@@ -9340,11 +9360,11 @@ mod tests {
     struct ScrollsFaster;
 
     impl FloatPolicy for ScrollsFaster {
-        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+        fn decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
             None
         }
 
-        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+        fn window_decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> crate::placement::WindowRuleDecision {
             crate::placement::WindowRuleDecision { touchpad_scroll_factor: Some(1.5), ..Default::default() }
         }
     }
@@ -10655,11 +10675,11 @@ mod tests {
         struct Suppresses;
 
         impl FloatPolicy for Suppresses {
-            fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+            fn decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
                 None
             }
 
-            fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+            fn window_decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> crate::placement::WindowRuleDecision {
                 crate::placement::WindowRuleDecision {
                     suppress_maximize: true,
                     suppress_fullscreen: true,
@@ -11029,7 +11049,7 @@ mod tests {
     struct CornerRules;
 
     impl FloatPolicy for CornerRules {
-        fn decision_for(&self, class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+        fn decision_for(&self, class: &str, _title: &str, _xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
             matches!(class, "pip" | "WebcamOverlay-small" | "about")
                 .then_some(crate::placement::FloatDecision { size: None, center: true })
         }
@@ -11038,6 +11058,7 @@ mod tests {
             &self,
             class: &str,
             _title: &str,
+            _xdg_tag: &str,
             metrics: &crate::placement::RuleMetrics,
         ) -> Option<crate::placement::RulePlacement> {
             let (monitor_w, monitor_h) = (f64::from(metrics.monitor.w), f64::from(metrics.monitor.h));
@@ -11063,6 +11084,56 @@ mod tests {
                 _ => None,
             }
         }
+    }
+
+    /// A policy keyed on the `xdg_toplevel_tag_v1` tag alone, the way
+    /// a `match:xdg_tag ^quake$` rule is: it floats a tagged window at
+    /// a fixed size and has no opinion about any other.
+    #[derive(Debug)]
+    struct TagRules;
+
+    impl FloatPolicy for TagRules {
+        fn decision_for(&self, _class: &str, _title: &str, xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
+            (xdg_tag == "quake").then_some(crate::placement::FloatDecision { size: Some(Size::new(500, 400)), center: true })
+        }
+    }
+
+    /// The tag reaches the rules at map time, read from the backend
+    /// like the title and class: a window the client tagged `quake`
+    /// maps floating at the rule's size, and one of the same class
+    /// without the tag maps as itself. After the map, a tag change is
+    /// protocol-only metadata: it advances the protocol-state revision
+    /// so the IPC republishes the window, and nothing else — a window
+    /// the core does not know cannot advance it.
+    #[test]
+    fn the_xdg_tag_reaches_the_rules_at_map_time_and_a_later_change_only_republishes() {
+        let mut backend = FakeBackend::new();
+        let tagged = backend.create_window();
+        let plain = backend.create_window();
+        for window in [tagged, plain] {
+            backend.set_geometry(window, Rect { pos: Point::new(0, 0), size: Size::new(640, 360) });
+            backend.set_client_draws_own_chrome(window, true);
+            backend.window_classes.insert(window, "term".to_string());
+        }
+        backend.window_xdg_tags.insert(tagged, "quake".to_string());
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(TagRules)));
+
+        let geometry = mapped_geometry(&mut wm, tagged);
+        assert_eq!(geometry.size, Size::new(500, 400), "the tag rule sized the tagged window");
+        wm.dispatch(BackendEvent::MapRequest(plain));
+        let plain_id = wm.client_for_window(plain).expect("the untagged window maps");
+        assert_eq!(wm.client(plain_id).unwrap().geometry.size, Size::new(640, 360), "no rule matched the untagged one");
+
+        let revision = wm.protocol_state_revision();
+        wm.dispatch(BackendEvent::MetadataChanged(tagged));
+        assert_ne!(wm.protocol_state_revision(), revision, "a retag must reach the IPC publishers");
+        let revision = wm.protocol_state_revision();
+        let unknown = wm.backend_mut().create_window();
+        wm.dispatch(BackendEvent::MetadataChanged(unknown));
+        assert_eq!(wm.protocol_state_revision(), revision, "a window the core never mapped publishes nothing");
+        assert_eq!(wm.client_for_window(tagged).map(|id| wm.client(id).unwrap().geometry.size), Some(Size::new(500, 400)),
+            "rules are not re-run after map");
     }
 
     /// One output of `monitor` device pixels at `scale`, with three

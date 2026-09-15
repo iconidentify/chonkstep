@@ -46,12 +46,17 @@
 //! idle notification but no inhibitor, for testing compositor-side idle rules.
 //! `absurd-geometry` instead declares
 //! a hostile 600-million-pixel-wide xdg window geometry while committing the
-//! ordinary 400x300 buffer; the compositor-survival E2E uses that mode:
+//! ordinary 400x300 buffer; the compositor-survival E2E uses that mode.
+//! `xdg-tag` tags the toplevel `probe-main` through `xdg_toplevel_tag_v1`
+//! before the initial commit, the way a real client tags its windows, and
+//! describes it `Probe window` afterwards; the Hyprland IPC E2E reads both
+//! back:
 //!
 //! | key | evdev | meaning |
 //! |---|---|---|
 //! | `f` | 33 | the fullscreen control: enter if no session is open, exit if one is |
 //! | `m` | 50 | the same control for maximize, whose request pair has the identical shape |
+//! | `t` | 20 | in `xdg-tag` mode, retag the mapped toplevel `probe-retagged` |
 //!
 //! Everything it is told and everything it concludes goes to stdout,
 //! one line per event, flushed — the harness reads that log back as the
@@ -98,6 +103,7 @@ use wayland_protocols::xdg::shell::client::{
     xdg_toplevel::{self, XdgToplevel},
     xdg_wm_base::{self, XdgWmBase},
 };
+use wayland_protocols::xdg::toplevel_tag::v1::client::xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1;
 use wayland_protocols::{
     ext::idle_notify::v1::client::{
         ext_idle_notification_v1::{self, ExtIdleNotificationV1},
@@ -122,6 +128,14 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 const KEY_F: u32 = 33;
 /// evdev `KEY_M`: the same gesture for maximize.
 const KEY_M: u32 = 50;
+/// evdev `KEY_T`: retag the toplevel, in `xdg-tag` mode.
+const KEY_T: u32 = 20;
+
+/// The tag and description `xdg-tag` mode sets before the first
+/// commit, and the tag `t` replaces the first with.
+const XDG_TAG: &str = "probe-main";
+const XDG_DESCRIPTION: &str = "Probe window";
+const XDG_RETAG: &str = "probe-retagged";
 
 /// The size the probe asks to be before anything has resized it. Small
 /// enough to leave a visibly different rect to come back to when a
@@ -169,6 +183,10 @@ struct Probe {
     seat: Option<wl_seat::WlSeat>,
     idle_notifier: Option<ExtIdleNotifierV1>,
     idle_inhibit_manager: Option<ZwpIdleInhibitManagerV1>,
+    /// Bound whenever the compositor offers it; used only in `xdg-tag`
+    /// mode, which is what [`Probe::tagging`] records.
+    toplevel_tag_manager: Option<XdgToplevelTagManagerV1>,
+    tagging: bool,
     text_input_manager: Option<ZwpTextInputManagerV3>,
     input_method_manager: Option<ZwpInputMethodManagerV2>,
     surface: Option<WlSurface>,
@@ -219,6 +237,16 @@ struct Probe {
 impl Probe {
     fn holds_session(&self, want: Want) -> bool {
         self.sessions.contains(&want)
+    }
+
+    /// Sets the toplevel's `xdg_toplevel_tag_v1` tag and says so; the
+    /// harness reads the line to know the request left this process.
+    fn set_xdg_tag(&self, tag: &str) {
+        let (Some(manager), Some(toplevel)) = (&self.toplevel_tag_manager, &self.toplevel) else {
+            return;
+        };
+        manager.set_toplevel_tag(toplevel, tag.to_string());
+        say(&format!("xdg tag set to {tag:?}"));
     }
 
     /// The control a user clicks: enter the state if this client has no
@@ -296,6 +324,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                 }
                 "zwp_idle_inhibit_manager_v1" => {
                     probe.idle_inhibit_manager = Some(registry.bind(name, 1, qh, ()))
+                }
+                "xdg_toplevel_tag_manager_v1" => {
+                    probe.toplevel_tag_manager = Some(registry.bind(name, 1, qh, ()))
                 }
                 "zwp_text_input_manager_v3" => {
                     probe.text_input_manager = Some(registry.bind(name, 1, qh, ()))
@@ -452,6 +483,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Probe {
             match key {
                 KEY_F => probe.control(Want::Fullscreen, qh),
                 KEY_M => probe.control(Want::Maximized, qh),
+                KEY_T if probe.tagging => probe.set_xdg_tag(XDG_RETAG),
                 32 => dialog::toggle(probe, qh), // D: a native transient toplevel.
                 25 => popup::toggle(probe, qh), // P: a native application menu.
                 49 => {
@@ -569,6 +601,7 @@ ignore_events!(
     WlBuffer,
     ExtIdleNotifierV1,
     ZwpIdleInhibitManagerV1,
+    XdgToplevelTagManagerV1,
     ZwpIdleInhibitorV1,
     ZwpTextInputManagerV3,
     ZwpInputMethodManagerV2,
@@ -634,6 +667,7 @@ fn main() {
         Some("inhibit-idle" | "animate-inhibit-idle" | "animate-duplicate-inhibit-idle")
     );
     let absurd_geometry = animation.as_deref() == Some("absurd-geometry");
+    let tagging = animation.as_deref() == Some("xdg-tag");
 
     let connection = Connection::connect_to_env()
         .unwrap_or_else(|error| fatal(&format!("no wayland display: {error}")));
@@ -643,6 +677,7 @@ fn main() {
 
     let mut probe = Probe {
         size: WINDOWED,
+        tagging,
         configure_delay: if animation.as_deref() == Some("delayed-configure") {
             Duration::from_millis(200)
         } else {
@@ -711,9 +746,23 @@ fn main() {
         }
         _ => {}
     }
-    surface.commit();
     probe.surface = Some(surface.clone());
     probe.toplevel = Some(toplevel);
+    if tagging {
+        // Tag first, describe second, both before the initial commit:
+        // the order a client that sets both uses, and the one that
+        // exposed a server-side copy writing the description over the
+        // tag.
+        if probe.toplevel_tag_manager.is_none() {
+            fatal("no xdg_toplevel_tag_manager_v1");
+        }
+        probe.set_xdg_tag(XDG_TAG);
+        if let (Some(manager), Some(toplevel)) = (&probe.toplevel_tag_manager, &probe.toplevel) {
+            manager.set_toplevel_description(toplevel, XDG_DESCRIPTION.to_string());
+            say(&format!("xdg description set to {XDG_DESCRIPTION:?}"));
+        }
+    }
+    surface.commit();
 
     // The opening move: commit the role, wait to be told a size, then
     // attach the first buffer. Anything else is a protocol error.

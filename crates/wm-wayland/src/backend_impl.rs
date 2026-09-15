@@ -884,6 +884,13 @@ impl Backend for WaylandBackend {
         }
     }
 
+    fn window_xdg_tag(&self, window: Self::WindowId) -> Option<String> {
+        // The record's copy, not Smithay's `XdgToplevelTagSurfaceData`:
+        // the handler already bounded it, and the record is what the
+        // IPC reports, so a rule and `hyprctl clients` read one value.
+        self.windows.get(&window)?.xdg_tag.clone()
+    }
+
     fn window_class(&self, window: Self::WindowId) -> Option<WmClass> {
         let record = self.windows.get(&window)?;
         match &record.surface {

@@ -157,10 +157,23 @@ windowrule   = float on, match:class steam               # 0.53+
 The supported properties are `float`, `size`, `move`, `center`,
 `idle_inhibit`, `pin`, `no_focus`, `no_initial_focus`,
 `focus_on_activate`, `fullscreen`, `maximize`, `suppress_event`,
-`scroll_touchpad`, `workspace`, `opacity` and `no_dim`. They match `class` and `title` as regular
-expressions, matched against the entire class or title, as in Hyprland's
-`RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
-rule wins independently for each property.
+`scroll_touchpad`, `workspace`, `opacity` and `no_dim`. They match `class`, `title` and
+`xdg_tag` as regular expressions, matched against the entire class,
+title or tag, as in Hyprland's `RE2::FullMatch`. Use `.*` when a
+substring is intended. Last matching rule wins independently for each
+property.
+
+`xdg_tag` (`match:xdg_tag`, `xdgTag:` in the v2 form, `xdg_tag =` in a
+Lua `match` table) reads the window's `xdg_toplevel_tag_v1` tag: the
+application's own stable, untranslated name for one of its windows
+(`main`, `preferences`, `quake`), which unlike the title does not change
+with the document and unlike the class tells one of an application's
+windows from another. Rules are evaluated once, when the window maps,
+against the tag it carried then — a client tags a window before its
+first commit, so that is the tag the protocol means. A tag set or
+changed after the map reaches `hyprctl clients` at once but does not
+re-run the rules, exactly as a later title change does not. A window
+whose client never tagged it has an empty tag, which only `^$` matches.
 
 `size` and `move` take two values, each a number or one of Hyprland's
 layout expressions — arithmetic over `monitor_w`, `monitor_h`,

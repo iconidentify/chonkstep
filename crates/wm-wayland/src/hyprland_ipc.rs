@@ -266,6 +266,7 @@ fn build_snapshot(
         }
 
         let output_index = wm.client_output_index(id);
+        let record = wm.backend().windows.get(&client.window);
         let coordinates = OutputCoordinates::for_output(wm.backend(), output_index);
         let geometry = Rect::new(coordinates.logical_position(client.geometry.pos), coordinates.logical_size(client.geometry.size));
         let monitor = i32::try_from(output_index).unwrap_or(0);
@@ -292,8 +293,7 @@ fn build_snapshot(
             // gap would let a script signal the wrong process.
             pid: wm.backend().window_pid(client.window).and_then(|pid| i32::try_from(pid).ok()).unwrap_or(0),
             floating: !wm.is_layout_managed(id),
-            xwayland: wm.backend().windows.get(&client.window)
-                .is_some_and(|record| matches!(record.surface, ManagedSurface::X11(_))),
+            xwayland: record.is_some_and(|record| matches!(record.surface, ManagedSurface::X11(_))),
             fullscreen,
             maximized: client
                 .flags
@@ -307,8 +307,11 @@ fn build_snapshot(
             // stays awake, and a windowed Steam library does not.
             inhibiting_idle: wm.client_inhibits_idle(id),
             tags: client.tags.clone(),
-            xdg_tag: String::new(),
-            xdg_description: String::new(),
+            // `xdg_toplevel_tag_v1`, as the client set it and the
+            // backend bounded it; empty for a window that never set
+            // one, which is every XWayland window.
+            xdg_tag: record.and_then(|record| record.xdg_tag.clone()).unwrap_or_default(),
+            xdg_description: record.and_then(|record| record.xdg_description.clone()).unwrap_or_default(),
             focus_history_id,
         });
     }

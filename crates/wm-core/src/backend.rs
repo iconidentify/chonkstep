@@ -365,6 +365,15 @@ pub trait Backend {
     // -- properties (ICCCM reads) ------------------------------------------
     fn window_title(&self, window: Self::WindowId) -> Option<String>;
     fn window_class(&self, window: Self::WindowId) -> Option<WmClass>;
+    /// The window's `xdg_toplevel_tag_v1` tag: an application's own
+    /// stable, untranslated name for one of its windows (`main`,
+    /// `preferences`), which is what a `match:xdg_tag` window rule
+    /// reads. `None` for a window that never set one — every X11
+    /// window, since the protocol has no X11 counterpart, which is why
+    /// the default answers for backends that cannot see one.
+    fn window_xdg_tag(&self, _window: Self::WindowId) -> Option<String> {
+        None
+    }
     /// `_NET_WM_PID` — lets the shell correlate a freshly mapped window
     /// with the specific process it just spawned (e.g. to apply a
     /// default size only to *that* window, not any other window of the

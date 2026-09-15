@@ -1846,6 +1846,7 @@ fn window_rule(match_arg: &Value, rules: &Value) -> Result<WindowRule, String> {
             "class" => Matcher::Class(text),
             "title" => Matcher::Title(text),
             "tag" => Matcher::Tag(text),
+            "xdg_tag" | "xdgTag" => Matcher::XdgTag(text),
             other => Matcher::Other {
                 key: other.to_string(),
                 value: text,

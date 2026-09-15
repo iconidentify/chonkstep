@@ -273,6 +273,15 @@ pub enum BackendEvent<Win, Frame> {
     ///
     /// [`Backend::client_chrome`]: crate::Backend::client_chrome
     ChromeChanged(Win),
+    /// Metadata only the protocol publishers read changed: the
+    /// window's `xdg_toplevel_tag_v1` tag or description. Nothing the
+    /// window manager draws depends on either, so this is deliberately
+    /// not `TitleChanged`: that one repaints a titlebar, and returns
+    /// before bumping the protocol-state revision when the title is
+    /// unchanged, which it always is here. This only advances the
+    /// revision, so the IPC and foreign-toplevel publishers re-read a
+    /// window they had already published.
+    MetadataChanged(Win),
     /// Committed minimum/maximum sizes or resize increments changed.
     SizeHintsChanged(Win),
     /// The toplevel's transient parent changed. Backends emit this for

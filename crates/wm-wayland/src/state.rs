@@ -432,6 +432,16 @@ pub(crate) struct WindowRecord {
     /// reports so per-app shell behavior (dock matching, opacity
     /// rules) works identically on both stacks.
     pub app_id: Option<String>,
+    /// `xdg_toplevel_tag_v1`'s tag and description: the application's
+    /// own stable name for this window (`main`, `preferences`) and a
+    /// human-readable description of it. ChonkStep's own copies, kept
+    /// from the handler arguments and bounded before storage
+    /// (`core_protocols::MAX_TOPLEVEL_TAG_BYTES`); the Hyprland IPC
+    /// reports them as `xdgTag`/`xdgDescription`, and window rules
+    /// read the tag at map time. Always `None` for an XWayland window,
+    /// which has no such protocol.
+    pub xdg_tag: Option<String>,
+    pub xdg_description: Option<String>,
     /// Decoration policy class, decided at map time exactly as the X11
     /// backend decides it from `_NET_WM_WINDOW_TYPE`: override-redirect
     /// XWayland windows (menus, tooltips) come through as `Unmanaged`
@@ -613,6 +623,8 @@ impl WindowRecord {
             space_clip_id: smithay::backend::renderer::element::Id::new(),
             title: None,
             app_id: None,
+            xdg_tag: None,
+            xdg_description: None,
             window_type: WindowType::Normal,
             parent: None,
             modal: false,

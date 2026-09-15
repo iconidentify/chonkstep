@@ -278,6 +278,23 @@ client fully covers its resize fill. Complex declarations keep the fill and do
 not allocate new opacity copies. This avoids applying rounded coverage twice
 behind opaque clients while preserving transparent clients and resize gaps.
 
+## Local patch: a toplevel description is stored as the description
+
+`src/wayland/xdg_toplevel_tag.rs`, the `SetToplevelDescription` arm:
+
+Write the description into `XdgToplevelTagSurfaceData::description`.
+Upstream 0.7.0 writes it into `tag`, so a client that sets both loses
+its tag in that copy and `description()` never answers. The
+`XdgToplevelTagHandler` callbacks were already passed the right
+strings; only the surface-side copy was crossed. No API change.
+
+ChonkStep keeps its own bounded copies from the handler arguments and
+reads neither field, so the patch protects only a future reader of the
+surface data. Evidence: `crates/chonk-testkit/tests/hyprland_ipc.rs`
+tags a real toplevel and then describes it, and checks that
+`hyprctl clients` reports both. Remove this patch once an adopted
+upstream release stores the description in its own field.
+
 ## Local patch: link-status retrain and forced modeset on request
 
 `src/backend/drm/surface/atomic.rs`, `src/backend/drm/surface/mod.rs` and

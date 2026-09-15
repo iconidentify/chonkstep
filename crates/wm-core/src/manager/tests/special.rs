@@ -250,11 +250,11 @@ fn shown_special_members_sit_above_pinned_windows() {
 struct SilentSpecialRule;
 
 impl FloatPolicy for SilentSpecialRule {
-    fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+    fn decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
         None
     }
 
-    fn window_decision_for(&self, _class: &str, title: &str) -> crate::placement::WindowRuleDecision {
+    fn window_decision_for(&self, _class: &str, title: &str, _xdg_tag: &str) -> crate::placement::WindowRuleDecision {
         let workspace = title.contains("is sharing").then(|| crate::placement::RuleWorkspace {
             target: crate::placement::RuleWorkspaceTarget::Special("special".into()),
             silent: true,
@@ -291,10 +291,10 @@ fn a_numbered_workspace_rule_moves_the_window_before_it_is_seen() {
     #[derive(Debug)]
     struct ToWorkspaceThree(bool);
     impl FloatPolicy for ToWorkspaceThree {
-        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+        fn decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> Option<crate::placement::FloatDecision> {
             None
         }
-        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+        fn window_decision_for(&self, _class: &str, _title: &str, _xdg_tag: &str) -> crate::placement::WindowRuleDecision {
             crate::placement::WindowRuleDecision {
                 workspace: Some(crate::placement::RuleWorkspace {
                     target: crate::placement::RuleWorkspaceTarget::Numbered(2),

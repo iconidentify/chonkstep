@@ -12,6 +12,7 @@ use smithay::reexports::wayland_protocols_misc::zwp_input_method_v2::server::{
     zwp_input_method_v2::ZwpInputMethodV2,
     zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2,
 };
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::XdgToplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{backend::ClientId, Client, DataInit, Dispatch, DisplayHandle, Resource};
 use smithay::utils::{Logical, Rectangle};
@@ -386,7 +387,82 @@ impl smithay::wayland::shell::xdg::dialog::XdgDialogHandler for Compositor {
     }
 }
 
-impl smithay::wayland::xdg_toplevel_tag::XdgToplevelTagHandler for Compositor {}
+/// The longest `xdg_toplevel_tag_v1` tag or description kept, in
+/// bytes. Both are client-controlled strings that reach the Hyprland
+/// IPC reply and the window-rule matcher's input, so a client must not
+/// be able to grow either without limit; a tag is a short identifier
+/// (`main`, `preferences`) and a description one sentence, so the
+/// bound is far above anything honest.
+const MAX_TOPLEVEL_TAG_BYTES: usize = 256;
+
+/// `text` cut to at most `max` bytes at a character boundary, so a
+/// multi-byte character straddling the bound is dropped whole rather
+/// than leaving the string invalid UTF-8.
+fn bounded_utf8(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
+impl smithay::wayland::xdg_toplevel_tag::XdgToplevelTagHandler for Compositor {
+    fn set_tag(&mut self, toplevel: XdgToplevel, tag: String) {
+        let tag = bounded_utf8(tag, MAX_TOPLEVEL_TAG_BYTES);
+        self.store_toplevel_metadata(&toplevel, |record| {
+            let changed = record.xdg_tag.as_deref() != Some(tag.as_str());
+            record.xdg_tag = Some(tag);
+            changed
+        });
+    }
+
+    fn set_description(&mut self, toplevel: XdgToplevel, description: String) {
+        let description = bounded_utf8(description, MAX_TOPLEVEL_TAG_BYTES);
+        self.store_toplevel_metadata(&toplevel, |record| {
+            let changed = record.xdg_description.as_deref() != Some(description.as_str());
+            record.xdg_description = Some(description);
+            changed
+        });
+    }
+}
+
+impl Compositor {
+    /// Writes one `xdg_toplevel_tag_v1` value onto the toplevel's
+    /// window record. ChonkStep keeps its own copies rather than
+    /// reading Smithay's `XdgToplevelTagSurfaceData`, so the handler
+    /// arguments are the one source for both the IPC and the rules.
+    ///
+    /// `write` returns whether the stored value changed; when it did,
+    /// the publishers are told through `MetadataChanged` — not
+    /// `TitleChanged`, which repaints chrome nothing here affects and
+    /// would not bump the revision for an unchanged title anyway.
+    /// A window rule is not re-run: it read the tag at map time, and
+    /// clients set the tag before their first commit, when the record
+    /// already exists (`new_toplevel` registers it) but nothing has
+    /// mapped yet.
+    fn store_toplevel_metadata(
+        &mut self,
+        toplevel: &XdgToplevel,
+        write: impl FnOnce(&mut crate::state::WindowRecord) -> bool,
+    ) {
+        let Some(surface) = self.xdg_shell_state.get_toplevel(toplevel) else {
+            return;
+        };
+        let backend = self.wm.backend_mut();
+        let Some(window) = backend.window_for_surface(surface.wl_surface()) else {
+            return;
+        };
+        let Some(record) = backend.windows.get_mut(&window) else {
+            return;
+        };
+        if write(record) {
+            backend.queue(BackendEvent::MetadataChanged(window));
+        }
+    }
+}
 
 impl smithay::wayland::xdg_system_bell::XdgSystemBellHandler for Compositor {
     fn ring(&mut self, surface: Option<WlSurface>) {
@@ -513,6 +589,28 @@ impl Dispatch<ZwpInputPopupSurfaceV2, InputMethodPopupSurfaceUserData> for Compo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tag over the bound is cut at a character boundary, never
+    /// inside a multi-byte character; one at or under it is untouched.
+    #[test]
+    fn toplevel_tags_are_bounded_at_a_character_boundary() {
+        let short = "a".repeat(MAX_TOPLEVEL_TAG_BYTES);
+        assert_eq!(bounded_utf8(short.clone(), MAX_TOPLEVEL_TAG_BYTES), short);
+        assert_eq!(
+            bounded_utf8("a".repeat(MAX_TOPLEVEL_TAG_BYTES + 1), MAX_TOPLEVEL_TAG_BYTES),
+            short
+        );
+        // 255 ASCII bytes and then a three-byte character: byte 256
+        // falls inside it, so the whole character goes.
+        let straddling = format!("{}€", "a".repeat(MAX_TOPLEVEL_TAG_BYTES - 1));
+        assert_eq!(bounded_utf8(straddling, MAX_TOPLEVEL_TAG_BYTES), "a".repeat(MAX_TOPLEVEL_TAG_BYTES - 1));
+        // A run of multi-byte characters is cut to whole ones and stays
+        // valid UTF-8 by construction.
+        let euros = "€".repeat(100);
+        let bounded = bounded_utf8(euros, MAX_TOPLEVEL_TAG_BYTES);
+        assert_eq!(bounded, "€".repeat(85), "85 * 3 = 255 bytes, the most that fit");
+        assert_eq!(bounded_utf8(String::new(), MAX_TOPLEVEL_TAG_BYTES), "");
+    }
 
     #[test]
     fn activation_tokens_expire_at_the_ttl_and_future_timestamps_are_safe() {

@@ -570,6 +570,8 @@ fn is_matcher_key(key: &str) -> bool {
             | "title"
             | "initialtitle"
             | "tag"
+            | "xdgtag"
+            | "xdg_tag"
             | "xwayland"
             | "floating"
             | "float"
@@ -594,6 +596,9 @@ fn matcher(key: &str, value: &str) -> Matcher {
         "class" | "initialclass" => Matcher::Class(value.to_string()),
         "title" | "initialtitle" => Matcher::Title(value.to_string()),
         "tag" => Matcher::Tag(value.to_string()),
+        // `xdgTag:` in the v2 syntax, `match:xdg_tag` in 0.53's; the
+        // key has been lowercased by now.
+        "xdgtag" | "xdg_tag" => Matcher::XdgTag(value.to_string()),
         other => Matcher::Other {
             key: other.to_string(),
             value: value.to_string(),

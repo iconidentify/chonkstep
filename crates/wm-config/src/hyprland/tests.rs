@@ -1552,7 +1552,7 @@ fn float_rules_resolve_through_omarchys_tags() {
     let reading = read(&machine());
     let policy = reading.float_rules;
     let decision = policy
-        .decision_for("org.omarchy.btop", "")
+        .decision_for("org.omarchy.btop", "", "")
         .expect("Omarchy's own terminals float");
     assert_eq!(
         decision.size,
@@ -1562,7 +1562,7 @@ fn float_rules_resolve_through_omarchys_tags() {
     assert!(decision.center);
     // The `.*` rules that carry no float property must not float
     // everything on the desk.
-    assert_eq!(policy.decision_for("some-ordinary-app", "A window"), None);
+    assert_eq!(policy.decision_for("some-ordinary-app", "A window", ""), None);
 }
 
 /// `apps/browser.lua` sends Chromium's "is sharing your screen" bar to
@@ -1573,7 +1573,7 @@ fn float_rules_resolve_through_omarchys_tags() {
 fn the_screen_sharing_bar_rule_maps_the_window_hidden_and_unfocused() {
     let reading = read(&machine());
     let policy = reading.float_rules;
-    let decision = policy.window_decision_for("chromium", "example.com is sharing your screen.");
+    let decision = policy.window_decision_for("chromium", "example.com is sharing your screen.", "");
     assert_eq!(
         decision.workspace,
         Some(wm_core::RuleWorkspace {
@@ -1581,7 +1581,7 @@ fn the_screen_sharing_bar_rule_maps_the_window_hidden_and_unfocused() {
             silent: true,
         })
     );
-    assert_eq!(policy.window_decision_for("chromium", "New Tab").workspace, None);
+    assert_eq!(policy.window_decision_for("chromium", "New Tab", "").workspace, None);
     assert!(
         policy.descriptions().iter().any(|line| line.contains("workspace special:special silently")),
         "{:?}",
@@ -1626,7 +1626,7 @@ hl.window_rule({ match = { class = "^(loud)$" }, workspace = "special quiet" })
     );
     let reading = read(&Roots::under(&root));
     let policy = &reading.float_rules;
-    let target = |class: &str| policy.window_decision_for(class, "").workspace;
+    let target = |class: &str| policy.window_decision_for(class, "", "").workspace;
     assert_eq!(
         target("numbered"),
         Some(wm_core::RuleWorkspace { target: wm_core::RuleWorkspaceTarget::Numbered(2), silent: true })
@@ -1661,13 +1661,13 @@ fn the_sizes_the_hardcoded_rule_could_not_express_come_through() {
     // `apps/steam.lua`: `o.window({ class = "steam", title = "Steam" },
     // { center = true, size = { 1100, 700 } })`
     assert_eq!(
-        policy.decision_for("steam", "Steam").and_then(|d| d.size),
+        policy.decision_for("steam", "Steam", "").and_then(|d| d.size),
         Some(wm_core::Size::new(1100, 700))
     );
     // `apps/pip.lua`: picture-in-picture, matched on *title*.
     assert_eq!(
         policy
-            .decision_for("firefox", "Picture-in-Picture")
+            .decision_for("firefox", "Picture-in-Picture", "")
             .and_then(|d| d.size),
         Some(wm_core::Size::new(600, 338)),
         "a title-matched rule, through the `pip` tag"
@@ -1675,23 +1675,23 @@ fn the_sizes_the_hardcoded_rule_could_not_express_come_through() {
     // `apps/system.lua`: the About box has its own size.
     assert_eq!(
         policy
-            .decision_for("org.omarchy.about", "")
+            .decision_for("org.omarchy.about", "", "")
             .and_then(|d| d.size),
         Some(wm_core::Size::new(920, 480))
     );
     // Hyprland requires a full match even without explicit anchors.
     assert_eq!(
         policy
-            .decision_for("localsend", "")
+            .decision_for("localsend", "", "")
             .and_then(|d| d.size),
         Some(wm_core::Size::new(1100, 700))
     );
-    assert!(policy.decision_for("localsend_app", "").is_none());
+    assert!(policy.decision_for("localsend_app", "", "").is_none());
     for title in ["Steam Big Picture Mode", "Sign in to Steam"] {
-        assert_eq!(policy.decision_for("steam", title).and_then(|d| d.size), None,
+        assert_eq!(policy.decision_for("steam", title, "").and_then(|d| d.size), None,
             "the desktop size rule must not resize {title}");
     }
-    assert!(policy.decision_for("steam_app_123", "Steam").is_none(),
+    assert!(policy.decision_for("steam_app_123", "Steam", "").is_none(),
         "Steam's floating rule must not turn a game's window into the launcher");
 }
 
@@ -1857,9 +1857,9 @@ fn a_size_expression_is_evaluated_against_the_monitor() {
     let (rules, notes) = rules::compile(&[rule]);
     assert!(notes.is_empty(), "{notes:?}");
     // Without a monitor there is no size — and no guess.
-    let decision = rules.decision_for("WebcamOverlay-small", "").expect("a sized window floats");
+    let decision = rules.decision_for("WebcamOverlay-small", "", "").expect("a sized window floats");
     assert_eq!(decision.size, None);
-    let placement = rules.placement_for("WebcamOverlay-small", "", &metrics_1080p()).expect("the rule matches");
+    let placement = rules.placement_for("WebcamOverlay-small", "", "", &metrics_1080p()).expect("the rule matches");
     assert_eq!(placement.size, Some(wm_core::Size::new(173, 194)), "round(172.8) x round(194.4)");
     assert_eq!(placement.position, None);
     assert!(
@@ -1884,17 +1884,17 @@ fn a_move_expression_sees_the_rules_own_size() {
     };
     let (rules, notes) = rules::compile(&[rule]);
     assert!(notes.is_empty(), "{notes:?}");
-    let placement = rules.placement_for("firefox", "pip", &metrics_1080p()).unwrap();
+    let placement = rules.placement_for("firefox", "pip", "", &metrics_1080p()).unwrap();
     assert_eq!(placement.size, Some(wm_core::Size::new(600, 338)));
     assert_eq!(placement.position, Some(wm_core::Point::new(1280, 43)));
     // A framed window's visual size includes its chrome, so the same
     // rule keeps the frame, not the content, 40 from the edge.
     let framed = wm_core::RuleMetrics { chrome: wm_core::Size::new(2, 24), ..metrics_1080p() };
-    let placement = rules.placement_for("firefox", "pip", &framed).unwrap();
+    let placement = rules.placement_for("firefox", "pip", "", &framed).unwrap();
     assert_eq!(placement.position, Some(wm_core::Point::new(1278, 43)));
     // The scale-2 desk is measured in the same logical pixels, so the
     // answer is the same; the window manager scales it back.
-    assert_eq!(rules.decision_for("firefox", "pip").and_then(|d| d.size), Some(wm_core::Size::new(600, 338)));
+    assert_eq!(rules.decision_for("firefox", "pip", "").and_then(|d| d.size), Some(wm_core::Size::new(600, 338)));
 }
 
 /// A `move` with no `size` positions the client's own size, and an
@@ -1907,7 +1907,7 @@ fn a_move_without_a_size_places_the_clients_own_size() {
     };
     let (rules, notes) = rules::compile(&[rule]);
     assert!(notes.is_empty(), "{notes:?}");
-    let placement = rules.placement_for("cam", "", &metrics_1080p()).unwrap();
+    let placement = rules.placement_for("cam", "", "", &metrics_1080p()).unwrap();
     assert_eq!(placement.size, None);
     assert_eq!(placement.position, Some(wm_core::Point::new(1280, 720)));
 
@@ -1921,7 +1921,7 @@ fn a_move_without_a_size_places_the_clients_own_size() {
     };
     let (rules, notes) = rules::compile(&[broken]);
     assert!(notes.is_empty(), "a division by zero is a map-time fact, not a parse error: {notes:?}");
-    let placement = rules.placement_for("cam", "", &metrics_1080p()).unwrap();
+    let placement = rules.placement_for("cam", "", "", &metrics_1080p()).unwrap();
     assert_eq!(placement, wm_core::RulePlacement { size: None, position: None }, "both drop, the float stays");
 }
 
@@ -1949,7 +1949,7 @@ fn unreadable_sizes_and_moves_are_reported_by_property() {
             "{name} {value:?}: {notes:?}"
         );
         assert!(notes.iter().all(|n| n.contains("property skipped")), "{notes:?}");
-        let placement = rules.placement_for("x", "", &metrics_1080p()).expect("the float survives");
+        let placement = rules.placement_for("x", "", "", &metrics_1080p()).expect("the float survives");
         assert_eq!(placement, wm_core::RulePlacement::default());
     }
     // Over-long and over-deep text is refused at compile time, with the reason.
@@ -1959,6 +1959,91 @@ fn unreadable_sizes_and_moves_are_reported_by_property() {
     };
     let (_, notes) = rules::compile(&[rule]);
     assert!(notes.iter().any(|n| n.contains("deeper than 16 levels")), "{notes:?}");
+}
+
+/// `match:xdg_tag` reads the window's `xdg_toplevel_tag_v1` tag, the
+/// third leg of the identity a rule sees at map time, in every
+/// spelling Hyprland has used for it: `xdgTag:` in the v2 form and
+/// `match:xdg_tag` in the 0.53 keyword form. A regular expression like
+/// the class and title matchers, anchored the same way, so `probe-main`
+/// does not float `probe-main-2`; and a tag rule can carry a tag for
+/// another rule to read, like any other direct matcher.
+#[test]
+fn xdg_tag_rules_match_the_toplevel_tag_at_map_time() {
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = float on, match:xdg_tag ^probe-main$\n",
+            "windowrule = size 640 480, match:class ^probe$, match:xdg_tag ^probe-(main|aux)$\n",
+            "windowrulev2 = pin, xdgTag:^pinned$\n",
+            "windowrule = tag +quake, match:xdg_tag ^quake$\n",
+            "windowrule = workspace special, match:tag quake\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let rules: Vec<directive::WindowRule> = out
+        .into_iter()
+        .filter_map(|d| match d {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (compiled, notes) = rules::compile(&rules);
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(
+        compiled.decision_for("probe", "", "probe-main"),
+        Some(wm_core::FloatDecision { size: Some(wm_core::Size::new(640, 480)), center: true }),
+        "both rules match a tagged probe window"
+    );
+    assert_eq!(
+        compiled.decision_for("other", "", "probe-main").and_then(|d| d.size),
+        None,
+        "the class matcher beside the tag still constrains the size rule"
+    );
+    assert!(compiled.decision_for("probe", "", "probe-main-2").is_none(), "the tag is matched whole");
+    assert!(compiled.decision_for("probe", "", "").is_none(), "an untagged window matches no tag rule");
+    assert!(compiled.decision_for("probe", "probe-main", "").is_none(), "the tag is not the title");
+    assert!(compiled.window_decision_for("any", "", "pinned").pin, "the v2 xdgTag: spelling");
+    assert!(!compiled.window_decision_for("any", "", "pinned-2").pin);
+    assert_eq!(
+        compiled.window_decision_for("term", "", "quake").workspace,
+        Some(wm_core::RuleWorkspace { target: wm_core::RuleWorkspaceTarget::Special("special".into()), silent: false }),
+        "a tag carried by xdg tag resolves like one carried by class"
+    );
+    assert_eq!(compiled.window_decision_for("term", "", "").workspace, None);
+    assert!(
+        compiled.descriptions().iter().any(|line| line.starts_with("xdg_tag ^probe-main$ -> float")),
+        "{:?}",
+        compiled.descriptions()
+    );
+}
+
+/// The same matcher from Lua: `match = { xdg_tag = … }`, as Hyprland's
+/// `hl.window_rule` spells it.
+#[test]
+fn xdg_tag_rules_are_read_from_lua() {
+    let root = scratch("xdg-tag-rules");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.window_rule({ match = { xdg_tag = "^probe-main$" }, float = true, size = { 875, 600 } })
+hl.window_rule({ match = { class = "^probe$", xdg_tag = "^quake$" }, pin = true })
+"#,
+    );
+    let reading = read(&Roots::under(&root));
+    let policy = &reading.float_rules;
+    assert_eq!(
+        policy.decision_for("probe", "", "probe-main").and_then(|d| d.size),
+        Some(wm_core::Size::new(875, 600))
+    );
+    assert!(policy.decision_for("probe", "", "other").is_none());
+    assert!(policy.window_decision_for("probe", "", "quake").pin);
+    assert!(!policy.window_decision_for("other", "", "quake").pin, "class and tag both constrain");
+    assert!(!policy.window_decision_for("probe", "", "").pin);
+    assert!(reading.skipped.is_empty(), "{:?}", reading.skipped);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A rule that floats and centres, with no expression anywhere, is
@@ -1971,8 +2056,8 @@ fn a_plain_float_and_center_rule_still_centers() {
     };
     let (rules, notes) = rules::compile(&[rule]);
     assert!(notes.is_empty(), "{notes:?}");
-    assert_eq!(rules.decision_for("about", ""), Some(wm_core::FloatDecision { size: None, center: true }));
-    assert_eq!(rules.placement_for("about", "", &metrics_1080p()), Some(wm_core::RulePlacement::default()));
+    assert_eq!(rules.decision_for("about", "", ""), Some(wm_core::FloatDecision { size: None, center: true }));
+    assert_eq!(rules.placement_for("about", "", "", &metrics_1080p()), Some(wm_core::RulePlacement::default()));
     // An explicit `center` is the stronger statement: a `move` beside it
     // does not win.
     let both = directive::WindowRule {
@@ -1980,9 +2065,9 @@ fn a_plain_float_and_center_rule_still_centers() {
         props: vec![("float".into(), "on".into()), ("move".into(), "0 0".into()), ("center".into(), "on".into())],
     };
     let (rules, _) = rules::compile(&[both]);
-    assert_eq!(rules.placement_for("about", "", &metrics_1080p()), Some(wm_core::RulePlacement::default()));
+    assert_eq!(rules.placement_for("about", "", "", &metrics_1080p()), Some(wm_core::RulePlacement::default()));
     // And a policy that does not float says nothing.
-    assert_eq!(rules.placement_for("other", "", &metrics_1080p()), None);
+    assert_eq!(rules.placement_for("other", "", "", &metrics_1080p()), None);
 }
 
 /// Omarchy's real `pip.lua` and `webcam-overlay.lua`, through the
@@ -2007,27 +2092,27 @@ fn omarchys_pip_and_webcam_overlay_rules_are_read_whole() {
     let metrics = metrics_1080p();
 
     // `apps/pip.lua`: a title-matched rule through the `pip` tag.
-    let pip = policy.placement_for("firefox", "Picture-in-Picture", &metrics).expect("pip floats");
+    let pip = policy.placement_for("firefox", "Picture-in-Picture", "", &metrics).expect("pip floats");
     assert_eq!(pip.size, Some(wm_core::Size::new(600, 338)));
     assert_eq!(pip.position, Some(wm_core::Point::new(1280, 43)), "top right, 40 in, 4% down");
     // Google Meet's variant, through the `chromium-based-browser` tag
     // plus its own title: bottom right.
-    let meet = policy.placement_for("chromium", "Meet - abc-defg-hij", &metrics).expect("meet floats");
+    let meet = policy.placement_for("chromium", "Meet - abc-defg-hij", "", &metrics).expect("meet floats");
     assert_eq!(meet.size, Some(wm_core::Size::new(600, 338)));
     assert_eq!(meet.position, Some(wm_core::Point::new(1280, 702)));
 
     // `apps/webcam-overlay.lua`: sized off the monitor height.
-    let small = policy.placement_for("WebcamOverlay-small", "WebcamOverlay", &metrics).expect("small floats");
+    let small = policy.placement_for("WebcamOverlay-small", "WebcamOverlay", "", &metrics).expect("small floats");
     assert_eq!(small.size, Some(wm_core::Size::new(173, 194)));
     assert_eq!(small.position, Some(wm_core::Point::new(1707, 846)));
-    let medium = policy.placement_for("WebcamOverlay-medium", "WebcamOverlay", &metrics).expect("medium floats");
+    let medium = policy.placement_for("WebcamOverlay-medium", "WebcamOverlay", "", &metrics).expect("medium floats");
     assert_eq!(medium.size, Some(wm_core::Size::new(240, 270)));
     assert_eq!(medium.position, Some(wm_core::Point::new(1640, 770)));
-    let large = policy.placement_for("WebcamOverlay-large", "WebcamOverlay", &metrics).expect("large floats");
+    let large = policy.placement_for("WebcamOverlay-large", "WebcamOverlay", "", &metrics).expect("large floats");
     assert_eq!(large.size, Some(wm_core::Size::new(324, 365)), "round(364.5) rounds away from zero");
     assert_eq!(large.position, Some(wm_core::Point::new(1556, 676)), "round(675.5)");
     // The overlay's own rule still says what it said.
-    let decision = policy.window_decision_for("WebcamOverlay-small", "WebcamOverlay");
+    let decision = policy.window_decision_for("WebcamOverlay-small", "WebcamOverlay", "");
     assert!(decision.pin && decision.no_initial_focus);
 }
 
@@ -2509,19 +2594,19 @@ fn every_window_rule_syntax_hyprland_has_shipped_is_read() {
     let (compiled, notes) = rules::compile(&rules);
     assert!(notes.is_empty(), "{notes:?}");
     assert!(
-        compiled.decision_for("v1app", "").is_some(),
+        compiled.decision_for("v1app", "", "").is_some(),
         "v1 bare-pattern form"
     );
     assert!(
-        compiled.decision_for("v2app", "Dialog").is_some(),
+        compiled.decision_for("v2app", "Dialog", "").is_some(),
         "v2 colon form"
     );
     assert!(
-        compiled.decision_for("v2app", "Other").is_none(),
+        compiled.decision_for("v2app", "Other", "").is_none(),
         "v2 title matcher must actually constrain"
     );
     assert_eq!(
-        compiled.decision_for("modern", "").and_then(|d| d.size),
+        compiled.decision_for("modern", "", "").and_then(|d| d.size),
         Some(wm_core::Size::new(400, 300)),
         "0.53+ match: form"
     );
@@ -2548,10 +2633,10 @@ fn a_scroll_touchpad_rule_sets_that_windows_touchpad_factor() {
         })
         .collect();
     let (rules, notes) = rules::compile(&parsed);
-    assert_eq!(rules.window_decision_for("foot", "").touchpad_scroll_factor, Some(1.5));
-    assert_eq!(rules.window_decision_for("com.mitchellh.ghostty", "").touchpad_scroll_factor, Some(0.2));
-    assert_eq!(rules.window_decision_for("firefox", "").touchpad_scroll_factor, None);
-    assert_eq!(rules.window_decision_for("odd", "").touchpad_scroll_factor, None);
+    assert_eq!(rules.window_decision_for("foot", "", "").touchpad_scroll_factor, Some(1.5));
+    assert_eq!(rules.window_decision_for("com.mitchellh.ghostty", "", "").touchpad_scroll_factor, Some(0.2));
+    assert_eq!(rules.window_decision_for("firefox", "", "").touchpad_scroll_factor, None);
+    assert_eq!(rules.window_decision_for("odd", "", "").touchpad_scroll_factor, None);
     assert!(notes.iter().any(|note| note.contains("\"fast\"")), "{notes:?}");
     assert!(
         !notes.iter().any(|note| note.contains("scroll_touchpad is not implemented")),
@@ -2597,7 +2682,7 @@ fn idle_inhibit_modes_are_read_by_name_and_unknown_values_are_reported() {
         ("cleared", Never),
         ("odd", Never),
     ] {
-        assert_eq!(rules.window_decision_for(class, "").idle_inhibit, mode, "{class}");
+        assert_eq!(rules.window_decision_for(class, "", "").idle_inhibit, mode, "{class}");
     }
     assert!(
         notes.iter().any(|note| note.contains("\"sometimes\"")),
@@ -2629,13 +2714,13 @@ fn suppress_event_reads_each_event_and_reports_the_rest_by_name() {
         })
         .collect();
     let (rules, notes) = rules::compile(&parsed);
-    let any = rules.window_decision_for("foot", "");
+    let any = rules.window_decision_for("foot", "", "");
     assert!(any.suppress_maximize && !any.suppress_fullscreen, "{notes:?}");
     assert_eq!(any.focus_on_activate, None);
-    let game = rules.window_decision_for("game", "");
+    let game = rules.window_decision_for("game", "", "");
     assert!(game.suppress_maximize && game.suppress_fullscreen, "{notes:?}");
     assert_eq!(game.focus_on_activate, Some(false), "activate is the activation refusal");
-    assert!(!rules.window_decision_for("odd", "").suppress_fullscreen);
+    assert!(!rules.window_decision_for("odd", "", "").suppress_fullscreen);
     assert!(notes.iter().any(|note| note.contains("\"fullscreenoutput\"")), "{notes:?}");
     assert!(
         !notes.iter().any(|note| note.contains("property suppress_event")),
@@ -2674,7 +2759,7 @@ fn non_geometric_window_rules_are_combined_property_by_property() {
         "every property in this fixture is supported: {notes:?}"
     );
 
-    let decision = rules.window_decision_for("player", "Cinema");
+    let decision = rules.window_decision_for("player", "Cinema", "");
     assert!(decision.pin);
     assert_eq!(decision.idle_inhibit, wm_core::IdleInhibitRule::Always);
     assert!(
@@ -2697,7 +2782,7 @@ fn omarchys_opacity_rules_resolve_as_authored() {
     use wm_core::OpacityRule;
     let reading = read(&machine());
     let policy = reading.float_rules;
-    let opacity = |class: &str, title: &str| policy.window_decision_for(class, title).opacity;
+    let opacity = |class: &str, title: &str| policy.window_decision_for(class, title, "").opacity;
     // A terminal: the default, through the tag alone.
     assert_eq!(
         opacity("org.codeberg.dnkl.foot", ""),
@@ -2729,11 +2814,11 @@ fn omarchys_opacity_rules_resolve_as_authored() {
         "tag removal alone takes the web app out of the default"
     );
     // The webcam overlay asks to be left alone by `dim_inactive`.
-    let overlay = policy.window_decision_for("WebcamOverlay-small", "WebcamOverlay");
+    let overlay = policy.window_decision_for("WebcamOverlay-small", "WebcamOverlay", "");
     assert!(overlay.no_dim, "the webcam overlay is never dimmed");
     assert_eq!(overlay.opacity, Some(OpacityRule { active: 1.0, inactive: 1.0, fullscreen: None }));
     assert!(
-        !policy.window_decision_for("org.codeberg.dnkl.foot", "").no_dim,
+        !policy.window_decision_for("org.codeberg.dnkl.foot", "", "").no_dim,
         "no_dim is the overlay's, not everybody's"
     );
     assert!(
@@ -2772,8 +2857,8 @@ fn tag_removal_follows_file_order() {
         "windowrule = opacity 0.9, match:tag translucent\n",
     ));
     assert!(notes.is_empty(), "{notes:?}");
-    assert_eq!(rules.window_decision_for("foot", "").opacity.map(|o| o.active), Some(0.9));
-    assert_eq!(rules.window_decision_for("mpv", "").opacity, None, "removed before the rule");
+    assert_eq!(rules.window_decision_for("foot", "", "").opacity.map(|o| o.active), Some(0.9));
+    assert_eq!(rules.window_decision_for("mpv", "", "").opacity, None, "removed before the rule");
     // Consume, add, remove: a rule above the add still sees the tag
     // (the second pass does), and the removal after it still holds.
     let (rules, notes) = compile(concat!(
@@ -2782,8 +2867,8 @@ fn tag_removal_follows_file_order() {
         "windowrule = tag -floating, match:class ^mpv$\n",
     ));
     assert!(notes.is_empty(), "{notes:?}");
-    assert!(rules.decision_for("btop", "").is_some(), "tagged below the rule that reads the tag");
-    assert!(rules.decision_for("mpv", "").is_none(), "removed below both");
+    assert!(rules.decision_for("btop", "", "").is_some(), "tagged below the rule that reads the tag");
+    assert!(rules.decision_for("mpv", "", "").is_none(), "removed below both");
     // Add, remove, add again: the last word wins.
     let (rules, _) = compile(concat!(
         "windowrule = tag +x, match:class ^a$\n",
@@ -2791,7 +2876,7 @@ fn tag_removal_follows_file_order() {
         "windowrule = tag +x, match:class ^a$\n",
         "windowrule = pin on, match:tag x\n",
     ));
-    assert!(rules.window_decision_for("a", "").pin);
+    assert!(rules.window_decision_for("a", "", "").pin);
     // A removal on the strength of another tag is followed one level,
     // exactly as Omarchy's browser file writes it.
     let (rules, notes) = compile(concat!(
@@ -2802,8 +2887,8 @@ fn tag_removal_follows_file_order() {
         "windowrule = opacity 0.985 0.96, match:tag default-opacity\n",
     ));
     assert!(notes.is_empty(), "{notes:?}");
-    assert_eq!(rules.window_decision_for("chromium", "").opacity.map(|o| o.inactive), Some(0.985));
-    assert_eq!(rules.window_decision_for("foot", "").opacity.map(|o| o.inactive), Some(0.96));
+    assert_eq!(rules.window_decision_for("chromium", "", "").opacity.map(|o| o.inactive), Some(0.985));
+    assert_eq!(rules.window_decision_for("foot", "", "").opacity.map(|o| o.inactive), Some(0.96));
     // Two levels is where following stops, loudly.
     let (rules, notes) = compile(concat!(
         "windowrule = tag +a, match:class ^x$\n",
@@ -2811,7 +2896,7 @@ fn tag_removal_follows_file_order() {
         "windowrule = tag +c, match:tag b\n",
         "windowrule = pin on, match:tag c\n",
     ));
-    assert!(!rules.window_decision_for("x", "").pin, "a chain of two tags is not followed");
+    assert!(!rules.window_decision_for("x", "", "").pin, "a chain of two tags is not followed");
     assert!(notes.iter().any(|note| note.contains("chained tags are not followed")), "{notes:?}");
 }
 
@@ -2846,7 +2931,7 @@ fn opacity_values_are_read_clamped_and_refused_when_unreadable() {
         })
         .collect();
     let (rules, notes) = rules::compile(&parsed);
-    let opacity = |class: &str| rules.window_decision_for(class, "").opacity;
+    let opacity = |class: &str| rules.window_decision_for(class, "", "").opacity;
     assert_eq!(opacity("one"), Some(OpacityRule { active: 0.8, inactive: 0.8, fullscreen: None }));
     assert_eq!(opacity("two"), Some(OpacityRule { active: 0.9, inactive: 0.7, fullscreen: None }));
     assert_eq!(opacity("three"), Some(OpacityRule { active: 0.9, inactive: 0.7, fullscreen: Some(0.5) }));
@@ -2859,8 +2944,8 @@ fn opacity_values_are_read_clamped_and_refused_when_unreadable() {
         4,
         "{notes:?}"
     );
-    assert!(rules.window_decision_for("nodim", "").no_dim);
-    assert!(!rules.window_decision_for("dimmed", "").no_dim);
+    assert!(rules.window_decision_for("nodim", "", "").no_dim);
+    assert!(!rules.window_decision_for("dimmed", "", "").no_dim);
 }
 
 /// `decoration:dim_inactive` and `dim_strength`, in both syntaxes,
@@ -2924,11 +3009,11 @@ fn unsupported_rule_properties_are_named_without_discarding_supported_siblings()
         .collect();
     let (rules, notes) = rules::compile(&parsed);
     assert!(
-        rules.window_decision_for("notes", "").pin,
+        rules.window_decision_for("notes", "", "").pin,
         "a supported sibling property remains effective"
     );
     assert!(
-        !rules.window_decision_for("xterm", "").pin,
+        !rules.window_decision_for("xterm", "", "").pin,
         "an unsupported matcher refuses the whole rule"
     );
     assert!(notes
@@ -4293,13 +4378,13 @@ fn screensaver_defaults_survive_unrelated_rules_and_allow_explicit_opt_out() {
     write(&path, "windowrule = float on, match:class ^notes$\ninput {\n touchpad {\n  disable_while_typing = false\n }\n}\n");
     let reading = read(&Roots::under(&root));
     assert_eq!(reading.input.disable_while_typing, Some(false));
-    assert!(reading.float_rules.window_decision_for("org.omarchy.screensaver", "foot").fullscreen);
+    assert!(reading.float_rules.window_decision_for("org.omarchy.screensaver", "foot", "").fullscreen);
     for other in ["foot", "org.omarchy.btop", "org.omarchy.screensaver.settings"] {
-        assert!(!reading.float_rules.window_decision_for(other, "org.omarchy.screensaver").fullscreen);
+        assert!(!reading.float_rules.window_decision_for(other, "org.omarchy.screensaver", "").fullscreen);
     }
     write(&path, "windowrule = fullscreen off, match:class ^org\\.omarchy\\.screensaver$\n");
     let reading = read(&Roots::under(&root));
-    assert!(!reading.float_rules.window_decision_for("org.omarchy.screensaver", "foot").fullscreen);
+    assert!(!reading.float_rules.window_decision_for("org.omarchy.screensaver", "foot", "").fullscreen);
 }
 
 // ---- Omarchy's toggle directory ---------------------------------------

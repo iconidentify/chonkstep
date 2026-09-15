@@ -163,6 +163,9 @@ pub struct FakeBackend {
     /// trait method serves through `WmClass` — absent means the client
     /// set no class at all (`None`).
     pub window_classes: HashMap<FakeWindowId, String>,
+    /// Per-window `xdg_toplevel_tag_v1` tags, for the windows a test
+    /// tags; absent means the client never set one.
+    pub window_xdg_tags: HashMap<FakeWindowId, String>,
     pub focused_window: Option<FakeWindowId>,
     pub raised_frames: Vec<FakeFrameId>,
     /// Declared transient parents, as `xdg_toplevel.set_parent` and
@@ -435,6 +438,10 @@ impl Backend for FakeBackend {
         self.window_classes
             .get(&window)
             .map(|class| WmClass { instance: class.to_lowercase(), class: class.clone() })
+    }
+
+    fn window_xdg_tag(&self, window: Self::WindowId) -> Option<String> {
+        self.window_xdg_tags.get(&window).cloned()
     }
 
     fn window_pid(&self, _window: Self::WindowId) -> Option<u32> {

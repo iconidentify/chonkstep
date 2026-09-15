@@ -214,6 +214,8 @@ pub mod keys {
     pub const ONE: u32 = 2;
     pub const TWO: u32 = 3;
     pub const THREE: u32 = 4;
+    /// The fullscreen probe's retag control (`xdg-tag` mode).
+    pub const T: u32 = 20;
     pub const ENTER: u32 = 28;
     pub const LEFTSHIFT: u32 = 42;
     pub const X: u32 = 45;
