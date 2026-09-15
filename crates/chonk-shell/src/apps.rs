@@ -2,7 +2,11 @@
 use std::collections::{hash_map::Entry, HashMap};
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 /// One launchable application, distilled from its `.desktop` entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,11 +60,286 @@ impl AppCategory {
     }
 }
 
+/// The most one `.desktop` file is read for. The files are
+/// user-writable and the rescan runs on a worker, so a pathological
+/// file costs worker time only — but a menu row is a handful of keys,
+/// nothing legitimate is anywhere near this, and a bound keeps that
+/// worker's time and memory proportional to a directory's file count
+/// rather than to whatever somebody dropped in it.
+const MAX_DESKTOP_FILE_BYTES: u64 = 1 << 20;
+
+/// How often the application directories' mtimes are compared, from
+/// the shell tick. A few `stat`s a second on paths that exist — the
+/// same cadence, and the same argument for polling over inotify, as
+/// `omarchy_menu` makes for its two definition files.
+const DIRECTORY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+// Generations belong to the process, not to one index's lifetime: a
+// root menu that opened against one index can outlive any number of
+// rescans, and its pick must match none of them. Starts at one so a
+// `RootMenuBounds::default()` (generation zero) never resolves an app.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    NEXT_GENERATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_add(1))
+        .expect("application index generation space exhausted")
+}
+
+/// The scanned application list as the shell holds it: an immutable,
+/// shared snapshot stamped with a generation. `Desktop` owns the one
+/// current copy and the shell reads through it, so the menu, a pick
+/// and the session-layout matcher can never disagree about which list
+/// is current; the `Arc` makes a swap a pointer exchange rather than a
+/// copy of every entry.
+///
+/// The generation is the stale-pick guard. The Applications submenu
+/// is built from one generation and a pick from it carries that
+/// generation back ([`crate::desktop::RootMenuAction::LaunchApp`]);
+/// [`Self::entry`] refuses an index from any other generation, so a
+/// menu opened before a rescan landed cannot launch whatever now sits
+/// at that position of a re-sorted list — the same guard the Omarchy
+/// submenu keeps across a definition reload.
+#[derive(Clone, Debug)]
+pub struct AppIndex {
+    entries: Arc<[AppEntry]>,
+    generation: u64,
+}
+
+impl Default for AppIndex {
+    /// An empty index with a generation of its own — never zero, so an
+    /// empty index and "no index" stay distinguishable.
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl AppIndex {
+    /// Stamps `entries` with a fresh generation.
+    pub fn new(entries: Vec<AppEntry>) -> Self {
+        Self { entries: entries.into(), generation: next_generation() }
+    }
+
+    /// The entries, name-sorted as [`collate_scanned`] delivers them.
+    pub fn entries(&self) -> &[AppEntry] {
+        &self.entries
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The entry at `index` of the index stamped `generation`, or
+    /// `None` when this is a different generation (or the index is
+    /// out of range) — the stale-menu guard the type doc describes.
+    pub fn entry(&self, generation: u64, index: usize) -> Option<&AppEntry> {
+        (generation == self.generation).then(|| self.entries.get(index)).flatten()
+    }
+}
+
+/// What identifies the watched directories: each one's mtime, `None`
+/// when it is not there — which is itself a change worth seeing, since
+/// a package can create `/usr/local/share/applications` on a machine
+/// that never had one.
+type DirectorySignature = Vec<(PathBuf, Option<SystemTime>)>;
+
+/// One completed walk of the application directories: the entries it
+/// produced and the directory mtimes it observed *before* walking, so
+/// that a file landing mid-walk still differs from this baseline and
+/// starts the next walk instead of being lost between two.
+pub struct Scan {
+    entries: Vec<AppEntry>,
+    directories: DirectorySignature,
+}
+
+impl Scan {
+    pub fn entries(&self) -> &[AppEntry] {
+        &self.entries
+    }
+
+    /// The walk's entries as a new [`AppIndex`] generation.
+    pub fn into_index(self) -> AppIndex {
+        AppIndex::new(self.entries)
+    }
+}
+
 /// Scans the XDG application directories and returns every launchable
 /// entry, deduplicated by desktop-file id (user entries override
-/// system ones), sorted by name.
-pub fn scan_applications() -> Vec<AppEntry> {
-    collate_scanned(read_desktop_sources(&xdg_application_dirs()), &program_on_path)
+/// system ones), sorted by name. Synchronous file I/O: the startup
+/// call runs before the first frame, and every later walk goes
+/// through [`Rescanner`]'s worker thread.
+pub fn scan_applications() -> Scan {
+    scan_directories(&xdg_application_dirs())
+}
+
+fn scan_directories(dirs: &[PathBuf]) -> Scan {
+    let directories = directory_signature(dirs);
+    let entries = collate_scanned(read_desktop_sources(dirs), &program_on_path);
+    Scan { entries, directories }
+}
+
+/// Every directory a walk of `dirs` reads — each root and its existing
+/// first-level subdirectories, the same one level
+/// [`read_desktop_sources`] descends — with its current mtime. A
+/// directory's mtime moves on every create, delete and rename inside
+/// it, which is exactly the set of events that add or remove a
+/// `.desktop` file (`pacman`, Omarchy's web-app installer and a user
+/// dropping a file in place all create; an override is deleted to
+/// bring the system copy back), so these few `stat`s stand in for a
+/// recursive watch. An edit that rewrites an existing file in place
+/// moves only that file's mtime and is picked up by the next reload.
+fn directory_signature(dirs: &[PathBuf]) -> DirectorySignature {
+    let mut signature = Vec::new();
+    for dir in dirs {
+        signature.push((dir.clone(), mtime(dir)));
+        let Ok(reader) = fs::read_dir(dir) else { continue };
+        let mut subdirs: Vec<PathBuf> = reader.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        subdirs.sort();
+        for subdir in subdirs {
+            let modified = mtime(&subdir);
+            signature.push((subdir, modified));
+        }
+    }
+    signature
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|meta| meta.modified()).ok()
+}
+
+/// Clears the rescanner's in-flight flag when the worker finishes —
+/// or unwinds — so a walk that panics can never wedge every later one
+/// behind a flag nobody will clear.
+struct InFlight(Arc<AtomicBool>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Keeps the application index current for the life of the session
+/// without reading a `.desktop` file on the shell thread. Two halves,
+/// both driven from [`Self::tick`]: a once-a-second comparison of the
+/// directory mtimes the last walk recorded (a handful of `stat`s, the
+/// same kind of poll `omarchy_menu` runs on its definition files), and
+/// a worker thread that re-walks the directories when one moved or
+/// when a reload asked for a fresh look.
+///
+/// At most one walk is in flight; a request that arrives while one
+/// runs is remembered and started when it lands, so two walks can
+/// never race to publish with the staler one winning. A finished walk
+/// waits in `latest` and becomes a new [`AppIndex`] generation on the
+/// next tick, which also adopts the walk's pre-walk directory
+/// signature as the poll's new baseline — anything that changed after
+/// the walk observed it still reads as a change on the next poll.
+pub struct Rescanner {
+    roots: Arc<[PathBuf]>,
+    directories: DirectorySignature,
+    last_poll: Instant,
+    pending: bool,
+    in_flight: Arc<AtomicBool>,
+    latest: Arc<Mutex<Option<Scan>>>,
+}
+
+impl Rescanner {
+    /// Watches the XDG application directories from where `scan` —
+    /// the startup walk — left off.
+    pub fn new(scan: &Scan, now: Instant) -> Self {
+        Self::watching(xdg_application_dirs(), scan, now)
+    }
+
+    fn watching(roots: Vec<PathBuf>, scan: &Scan, now: Instant) -> Self {
+        Self {
+            roots: roots.into(),
+            directories: scan.directories.clone(),
+            last_poll: now,
+            pending: false,
+            in_flight: Arc::new(AtomicBool::new(false)),
+            latest: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Asks for a fresh walk whatever the directories say — a config
+    /// reload is the user's way of saying "look again", and it is also
+    /// what catches the one change the mtime poll cannot see, a file
+    /// rewritten in place.
+    pub fn request(&mut self) {
+        self.pending = true;
+    }
+
+    /// The shell-tick hook. Never blocks: takes a landed walk if one
+    /// is waiting, compares the directory mtimes at
+    /// [`DIRECTORY_POLL_INTERVAL`], and starts a walk on its own thread
+    /// if one is due and none is running. Returns the index a landed
+    /// walk produced, for the caller to swap in.
+    pub fn tick(&mut self, now: Instant) -> Option<AppIndex> {
+        let landed = self.take_landed();
+        if now.duration_since(self.last_poll) >= DIRECTORY_POLL_INTERVAL {
+            self.last_poll = now;
+            if self.poll_directories() {
+                tracing::info!("an application directory changed; rescanning");
+                self.pending = true;
+            }
+        }
+        self.service();
+        landed
+    }
+
+    /// Whether any watched directory's mtime moved since the last look,
+    /// re-baselining every entry either way. Rebaselining on the poll
+    /// rather than on the walk that follows means a change during the
+    /// walk is seen twice at worst (once here, once against the walk's
+    /// own signature) and lost never.
+    fn poll_directories(&mut self) -> bool {
+        let mut changed = false;
+        for (path, previous) in &mut self.directories {
+            let current = mtime(path);
+            changed |= *previous != current;
+            *previous = current;
+        }
+        changed
+    }
+
+    fn take_landed(&mut self) -> Option<AppIndex> {
+        // A poisoned lock reads as "nothing landed": the worker that
+        // panicked never published, and the index in use stays in use.
+        let scan = self.latest.lock().ok()?.take()?;
+        self.directories = scan.directories.clone();
+        Some(AppIndex::new(scan.entries))
+    }
+
+    /// Starts a walk if one is due and none is running. Returns
+    /// immediately in every case.
+    fn service(&mut self) {
+        if !self.pending || self.in_flight.load(Ordering::Acquire) {
+            return;
+        }
+        self.pending = false;
+        self.in_flight.store(true, Ordering::Release);
+        let flag = InFlight(Arc::clone(&self.in_flight));
+        let latest = Arc::clone(&self.latest);
+        let roots = Arc::clone(&self.roots);
+        let spawned = std::thread::Builder::new().name("chonkstep-app-rescan".to_string()).spawn(move || {
+            // Published before the flag clears (the guard drops last),
+            // so a tick can never find the flag down and the slot empty
+            // with a walk still to come.
+            let _flag = flag;
+            let started = Instant::now();
+            let scan = scan_directories(&roots);
+            tracing::debug!(
+                count = scan.entries.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "application directories walked"
+            );
+            if let Ok(mut slot) = latest.lock() {
+                *slot = Some(scan);
+            }
+        });
+        if let Err(error) = spawned {
+            tracing::warn!(?error, "could not start the application rescan thread; the menu keeps its last index");
+        }
+    }
 }
 
 /// Parses one `.desktop` file's text. `None` for anything that should
@@ -129,8 +408,8 @@ fn xdg_application_dirs() -> Vec<PathBuf> {
 /// deeper nesting is rare in the wild and the spec's id scheme cannot
 /// distinguish it from a literal `-` anyway, so one level is where we
 /// stop. Directory listings are sorted so ids collide deterministically
-/// regardless of readdir order; unreadable or non-UTF-8 files are
-/// skipped rather than aborting the whole scan.
+/// regardless of readdir order; unreadable, non-UTF-8 or oversized
+/// files are skipped rather than aborting the whole scan.
 fn read_desktop_sources(dirs: &[PathBuf]) -> Vec<(usize, String, String)> {
     let mut sources = Vec::new();
     for (rank, dir) in dirs.iter().enumerate() {
@@ -148,19 +427,29 @@ fn read_desktop_sources(dirs: &[PathBuf]) -> Vec<(usize, String, String)> {
                         continue; // one level only
                     }
                     if let Some(stem) = desktop_stem(&sub_path) {
-                        if let Ok(text) = fs::read_to_string(&sub_path) {
+                        if let Some(text) = read_desktop_text(&sub_path) {
                             sources.push((rank, format!("{subdir_name}-{stem}"), text));
                         }
                     }
                 }
             } else if let Some(stem) = desktop_stem(&path) {
-                if let Ok(text) = fs::read_to_string(&path) {
+                if let Some(text) = read_desktop_text(&path) {
                     sources.push((rank, stem.to_string(), text));
                 }
             }
         }
     }
     sources
+}
+
+/// One `.desktop` file's text, or `None` when it is unreadable, not
+/// UTF-8, or past [`MAX_DESKTOP_FILE_BYTES`] — read through a `take`
+/// rather than sized first, so a file that grows between the two
+/// steps still cannot be read past the bound.
+fn read_desktop_text(path: &Path) -> Option<String> {
+    let mut text = String::new();
+    fs::File::open(path).ok()?.take(MAX_DESKTOP_FILE_BYTES + 1).read_to_string(&mut text).ok()?;
+    (text.len() as u64 <= MAX_DESKTOP_FILE_BYTES).then_some(text)
 }
 
 /// The desktop-file id a directory entry contributes, or `None` for
@@ -968,6 +1257,172 @@ mod tests {
         assert_eq!(sources[0].2, "alpha text");
 
         fs::remove_dir_all(&root).expect("clean up fixture tree");
+    }
+
+    #[test]
+    fn oversized_desktop_files_are_skipped_by_the_walk() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("applications");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("alpha.desktop"), named_fixture("Alpha")).unwrap();
+        // Valid text one byte past the bound: the size alone must
+        // exclude it, not a parse failure.
+        let mut huge = named_fixture("Huge");
+        huge.push('#');
+        huge.push_str(&"x".repeat(MAX_DESKTOP_FILE_BYTES as usize + 1 - huge.len()));
+        fs::write(dir.join("huge.desktop"), &huge).unwrap();
+
+        let sources = read_desktop_sources(&[dir]);
+        let ids: Vec<&str> = sources.iter().map(|(_, id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha"]);
+    }
+
+    // -- the index and its rescanner --
+
+    #[test]
+    fn an_index_resolves_a_pick_only_from_its_own_generation() {
+        let first = AppIndex::new(vec![entry("Alpha", "alpha", None), entry("Beta", "beta", None)]);
+        let second = AppIndex::new(vec![entry("Beta", "beta", None), entry("Alpha", "alpha", None)]);
+        assert!(second.generation() > first.generation(), "generations only ever advance");
+        assert_eq!(first.entry(first.generation(), 1).map(|e| e.name.as_str()), Some("Beta"));
+        // The same count, a different order: index 1 from the first
+        // generation must resolve to nothing against the second, not
+        // to whatever now sits there.
+        assert!(second.entry(first.generation(), 1).is_none());
+        assert_eq!(second.entry(second.generation(), 1).map(|e| e.name.as_str()), Some("Alpha"));
+        assert!(first.entry(first.generation(), 2).is_none(), "out of range dissolves too");
+        let empty = AppIndex::default();
+        assert!(empty.entries().is_empty());
+        assert_ne!(empty.generation(), 0, "even an empty index has a generation of its own");
+    }
+
+    fn scratch_applications() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("applications");
+        fs::create_dir(&dir).unwrap();
+        (root, dir)
+    }
+
+    fn install(dir: &Path, id: &str, name: &str) {
+        fs::write(dir.join(format!("{id}.desktop")), named_fixture(name)).unwrap();
+    }
+
+    /// A different directory mtime for sure, without sleeping past the
+    /// filesystem's timestamp granularity: set it explicitly, the way
+    /// `omarchy_follow`'s tests do for their files.
+    fn bump(dir: &Path, seconds_ahead: u64) {
+        fs::File::open(dir).unwrap().set_modified(SystemTime::now() + Duration::from_secs(seconds_ahead)).unwrap();
+    }
+
+    fn names(index: &AppIndex) -> Vec<&str> {
+        index.entries().iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// Ticks — with the synthetic clock advanced a poll interval each
+    /// time, so every tick is also a poll — until a walk lands. The
+    /// walk runs on its own thread; this is the only wait in the test.
+    fn land(rescanner: &mut Rescanner, clock: &mut Instant) -> AppIndex {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            *clock += DIRECTORY_POLL_INTERVAL;
+            if let Some(index) = rescanner.tick(*clock) {
+                return index;
+            }
+            assert!(Instant::now() < deadline, "the rescan never landed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_file_added_or_removed_after_the_scan_lands_a_new_generation_off_thread() {
+        let (_root, dir) = scratch_applications();
+        install(&dir, "alpha", "Alpha");
+        let scan = scan_directories(std::slice::from_ref(&dir));
+        let mut clock = Instant::now();
+        let mut rescanner = Rescanner::watching(vec![dir.clone()], &scan, clock);
+        let startup = scan.into_index();
+        assert_eq!(names(&startup), ["Alpha"]);
+
+        // Nothing changed: a poll finds the baseline and starts nothing.
+        clock += DIRECTORY_POLL_INTERVAL;
+        assert!(rescanner.tick(clock).is_none());
+        assert!(!rescanner.in_flight.load(Ordering::Acquire), "an unchanged directory must not cost a walk");
+
+        // An install during the session: the directory's mtime moves,
+        // the poll notices, the walk lands a new generation with the
+        // new entry in sorted place.
+        install(&dir, "beta", "Beta");
+        bump(&dir, 10);
+        let with_beta = land(&mut rescanner, &mut clock);
+        assert_eq!(names(&with_beta), ["Alpha", "Beta"]);
+        assert!(with_beta.generation() > startup.generation());
+
+        // And a removal takes the row away again.
+        fs::remove_file(dir.join("beta.desktop")).unwrap();
+        bump(&dir, 20);
+        let without = land(&mut rescanner, &mut clock);
+        assert_eq!(names(&without), ["Alpha"]);
+        assert!(without.generation() > with_beta.generation());
+        // A menu opened against the previous generation resolves its
+        // pick to nothing against this one.
+        assert!(without.entry(with_beta.generation(), 1).is_none());
+    }
+
+    #[test]
+    fn a_requested_walk_runs_without_a_directory_change_and_requests_coalesce() {
+        let (_root, dir) = scratch_applications();
+        install(&dir, "alpha", "Alpha");
+        let scan = scan_directories(std::slice::from_ref(&dir));
+        let mut clock = Instant::now();
+        let mut rescanner = Rescanner::watching(vec![dir.clone()], &scan, clock);
+        let startup = scan.into_index();
+
+        // A reload's "look again": same directories, a fresh walk.
+        rescanner.request();
+        assert!(rescanner.tick(clock).is_none(), "the walk is asynchronous; nothing lands on the tick that starts it");
+        // Requests while that walk runs fold into one more walk, not
+        // one per request.
+        rescanner.request();
+        rescanner.request();
+        let first = land(&mut rescanner, &mut clock);
+        assert_eq!(names(&first), ["Alpha"]);
+        assert!(first.generation() > startup.generation());
+        let second = land(&mut rescanner, &mut clock);
+        assert!(second.generation() > first.generation());
+        // ...and then quiet: a few more polls land nothing and start
+        // nothing.
+        for _ in 0..3 {
+            clock += DIRECTORY_POLL_INTERVAL;
+            assert!(rescanner.tick(clock).is_none());
+        }
+        assert!(!rescanner.pending);
+    }
+
+    #[test]
+    fn a_subdirectory_created_after_the_scan_joins_the_watch() {
+        let (_root, dir) = scratch_applications();
+        install(&dir, "alpha", "Alpha");
+        let scan = scan_directories(std::slice::from_ref(&dir));
+        let mut clock = Instant::now();
+        let mut rescanner = Rescanner::watching(vec![dir.clone()], &scan, clock);
+        assert_eq!(rescanner.directories.len(), 1, "the root alone, no subdirectories yet");
+
+        // Creating the subdirectory moves the root's mtime; the walk
+        // that follows records the new directory in its signature.
+        let extras = dir.join("extras");
+        fs::create_dir(&extras).unwrap();
+        bump(&dir, 10);
+        let unchanged = land(&mut rescanner, &mut clock);
+        assert_eq!(names(&unchanged), ["Alpha"]);
+        assert_eq!(rescanner.directories.len(), 2, "the walk's signature now covers the subdirectory");
+
+        // A file dropped into the subdirectory alone — the root's
+        // mtime does not move for that — is still noticed.
+        install(&extras, "gamma", "Gamma");
+        bump(&extras, 20);
+        let with_gamma = land(&mut rescanner, &mut clock);
+        assert_eq!(names(&with_gamma), ["Alpha", "Gamma"]);
+        assert_eq!(with_gamma.entries()[1].id, "extras-gamma");
     }
 
     // -- match_window_class --

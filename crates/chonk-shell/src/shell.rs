@@ -743,7 +743,7 @@ fn root_action_outcome(action: &RootMenuAction) -> ShellOutcome {
         RootMenuAction::LaunchTerminal
         | RootMenuAction::LaunchAbout
         | RootMenuAction::Help
-        | RootMenuAction::LaunchApp(_)
+        | RootMenuAction::LaunchApp { .. }
         | RootMenuAction::OmarchyCommand { .. }
         | RootMenuAction::ToggleOmarchyBar
         | RootMenuAction::SetWallpaper(_) => ShellOutcome::Continue,
@@ -953,7 +953,13 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     miniwindows: crate::miniwindows::Miniwindows<B>,
     help: crate::help::HelpPanel<B>,
     help_key: Option<KeyCombo>,
-    apps: Vec<AppEntry>,
+    /// Keeps the desktop's application index current: a directory poll
+    /// from `tick` and a walk on its own thread when one moves, so an
+    /// app installed during the session reaches the Applications
+    /// submenu without a restart — and no `.desktop` file is ever read
+    /// on this thread after startup. The index itself lives in
+    /// `Desktop`, the one place a pick is resolved.
+    app_rescan: apps::Rescanner,
     /// Everything a live change can alter, as resolved — the source
     /// `theme` below is derived from, and the base every later
     /// [`Shell::apply_session_state`] diffs against.
@@ -1190,8 +1196,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // wherever the outermost heads happen to be.
         let primary = primary_rect(&backend.monitors(), screen);
 
-        let apps = apps::scan_applications();
-        tracing::info!(count = apps.len(), "application entries scanned");
+        let now = Instant::now();
+        // The startup walk is the one synchronous read of the
+        // application directories: it runs before the first frame, and
+        // session restore below needs the index in hand to plan its
+        // relaunches. Every later walk is the rescanner's, off-thread.
+        let scan = apps::scan_applications();
+        tracing::info!(count = scan.entries().len(), "application entries scanned");
+        let app_rescan = apps::Rescanner::new(&scan, now);
+        let apps = scan.into_index();
 
         // Both chrome owners get handles to the caller's font state —
         // the one `FontSystem` this session ever builds. They used to
@@ -1213,9 +1226,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // gets the same scale/platform fixups a hand-launched one
         // would; the windows are then matched and re-placed as they
         // map, in `on_notification`.
-        let now = Instant::now();
         let restore = state.restore_session && !crate::startup::session_continues();
-        let (layout, relaunch) = SessionLayout::start(restore, &apps, now);
+        let (layout, relaunch) = SessionLayout::start(restore, apps.entries(), now);
         let mut terminals = Vec::new();
         for plan in relaunch {
             let terminal = match plan {
@@ -1289,7 +1301,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             miniwindows: crate::miniwindows::Miniwindows::default(),
             help: crate::help::HelpPanel::default(),
             help_key: None,
-            apps,
+            app_rescan,
             keymap: build_keymap(&state.keybindings),
             release_keymap: state
                 .bindings
@@ -1468,6 +1480,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // a reload is the user's way of saying "look again".
         if reload_menu {
             self.desktop.set_omarchy_menu(omarchy_menu_for(&next));
+            // The application index gets the same "look again": the
+            // walk runs on the rescanner's thread and lands in `tick`,
+            // so the reload itself stays as quick as it was.
+            self.app_rescan.request();
         }
 
         // 2. Metrics.
@@ -2704,13 +2720,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 let env = launch_env(&self.theme.id, Some(self.state.appearance), self.state.scale);
                 spawn::spawn_detached_with_env(&about_binary_path(), &[], &env, &[]);
             }
-            // Indexes the same apps vec the desktop's menu was built
-            // from, so `i` means the same entry on both sides; the
-            // bounds-safe get covers the impossible desync anyway —
-            // menus fire `Kill`-grade commands, so "impossible" still
-            // doesn't get to panic.
-            RootMenuAction::LaunchApp(i) => {
-                if let Some(entry) = self.apps.get(i) {
+            // Resolved by the desktop against the index its menu was
+            // built from — both the position and the generation have
+            // to match; the bounds-safe get covers the impossible
+            // desync anyway — menus fire `Kill`-grade commands, so
+            // "impossible" still doesn't get to panic.
+            RootMenuAction::LaunchApp { index, generation } => {
+                if let Some(entry) = self.desktop.app_entry(index, generation) {
                     let terminal = launch_app(
                         self.state.terminal.as_deref(),
                         entry,
@@ -2721,7 +2737,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     );
                     self.terminals.extend(terminal);
                 } else {
-                    tracing::warn!(index = i, count = self.apps.len(), "menu fired an out-of-range application index");
+                    // Not a bug to shout about: the menu was open
+                    // across a rescan of the index, and the generation
+                    // guard did its job — the Omarchy arm below keeps
+                    // the same contract across a definition reload.
+                    tracing::info!(index, generation, "application pick outlived its index; ignoring it");
                 }
             }
             RootMenuAction::OmarchyCommand { index, generation } => {
@@ -3128,6 +3148,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             }
         }
         self.desktop.tick_menu(wm.backend_mut(), &self.theme);
+        // The application index: a `.desktop` file installed or
+        // removed during the session reaches the Applications submenu
+        // here. The directory poll and the walk it triggers both live
+        // in the rescanner — the walk on its own thread — and only a
+        // finished index is swapped in, so this tick never reads a
+        // desktop file. A root menu already open keeps its rows; its
+        // picks carry the old generation and dissolve.
+        if let Some(apps) = self.app_rescan.tick(now) {
+            tracing::info!(count = apps.entries().len(), generation = apps.generation(), "application index rescanned");
+            self.desktop.set_apps(apps);
+        }
         // The session-layout store rides the same cadence. Most ticks
         // find the exact arrangement it already holds; prove that by
         // borrowed field comparisons so those ticks can advance the
@@ -3142,7 +3173,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         if layout_matches_clients(wm, self.layout.current()) {
             self.layout.service_current(now);
         } else {
-            self.layout.service(layout_snapshot(wm, &self.apps), now);
+            self.layout.service(layout_snapshot(wm, self.desktop.apps()), now);
         }
     }
 
@@ -3505,7 +3536,7 @@ mod tests {
         for action in [
             RootMenuAction::LaunchTerminal,
             RootMenuAction::LaunchAbout,
-            RootMenuAction::LaunchApp(0),
+            RootMenuAction::LaunchApp { index: 0, generation: 1 },
             RootMenuAction::OmarchyCommand { index: 0, generation: 1 },
             RootMenuAction::SetWallpaper(Wallpaper::LavenderGrid),
         ] {

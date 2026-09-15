@@ -433,7 +433,14 @@ line. The session lock and **Ctrl+Alt+F1..F12** outrank all of it.
   hosts Omarchy's shell) and the `Omarchy` submenu (when Omarchy is
   installed), and `Exit`. `Omarchy Bar` is bulleted when
   that column is on screen, the way the `Theme` and `Wallpaper` rows
-  mark the current choice.
+  mark the current choice. `Applications` lists the `.desktop` entries
+  in the XDG application directories and follows them for the life of
+  the session: an application installed with `pacman`, through
+  Omarchy's own `Install` rows, or by dropping a file into
+  `~/.local/share/applications` is in the submenu on the next
+  right-click, and one removed is gone. A menu already open when the
+  list changes keeps its rows; a pick from it is ignored rather than
+  launching whatever now sits at that position.
 - Right-click any titlebar: the window commands menu.
 
 
