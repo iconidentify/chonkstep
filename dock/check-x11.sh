@@ -20,7 +20,7 @@ case "$target" in /*) ;; *) target="$PWD/$target" ;; esac
 export CHONKSTEP_X11_BIN="$target/debug/chonkstep"
 export CHONK_DOCKCLOCK_BIN="$target/debug/chonk-dockclock"
 unset WAYLAND_DISPLAY WAYLAND_SOCKET CHONKSTEP_CONTROL_SOCKET
-mkdir -m700 -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/chonkstep" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+install -d -m700 "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/chonkstep" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
 cat > "$XDG_CONFIG_HOME/chonkstep/config.toml" <<'CONFIG'
 desktop='omarchy'
 hyprland_config=false
