@@ -46,6 +46,13 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Run standalone dock SDK tests
+        run: |
+          python3 -m unittest discover -s dock/bindings/python/tests
+          python3 -m unittest discover -s dock/examples/chonk-switch/tests
+          python3 -m unittest discover -s dock/tests
+          cd dock/bindings/go/chonkdock && go test ./...
+
       - name: Run the Omarchy agent plugin tests
         run: python3 -m unittest discover omarchy/plugins/chonkstep.agents/tests
 
@@ -68,6 +75,9 @@ jobs:
       - name: Validate package and installer scripts
         run: |
           bash -n \
+            dock/check.sh \
+            dock/check-x11.sh \
+            dock/install.sh \
             packaging/arch/PKGBUILD \
             packaging/arch/PKGBUILD-release \
             scripts/check.sh \
@@ -86,6 +96,9 @@ jobs:
             scripts/verify-install.sh \
             scripts/wayland-session.sh
           shellcheck \
+            dock/check.sh \
+            dock/check-x11.sh \
+            dock/install.sh \
             scripts/check.sh \
             scripts/build-release.sh \
             scripts/release-validation.sh \
@@ -130,7 +143,12 @@ jobs:
           xvfb-run -a cargo test --locked -p wm-x11 hostile_properties -- --ignored
           xvfb-run -a cargo test --locked -p wm-x11 native_system7 -- --ignored --test-threads=1
 
-      - name: Build release binaries
+      - name: Exercise the standalone X11 dock
+        # The dock's X11 fixture builds the same standalone client against a
+        # private Xvfb, including popup grabs and workarea release on exit.
+        run: dock/check-x11.sh
+
+      - name: Build release binaries for X11 smoke test
         run: cargo build --release -p chonkstep
 
       # A client that asks not to be decorated, for the framing

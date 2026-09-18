@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Install, list and remove dockapps. Requires Python 3.11+, no dependencies.
+
+Sources and registrations retain their original XDG locations. Builds run
+before replacing an existing installation. Local Cargo workspace members build
+in their workspace; their binaries are copied into the installed source tree.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+
+def valid_name(value):
+    if not isinstance(value, str) or value in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value):
+        raise ValueError("dockapp name must be 1-64 characters of [A-Za-z0-9._-], excluding . and ..")
+    return value
+
+
+def registration(source, args, fallback_name):
+    manifests = sorted(source.glob("*.dockapp"))
+    if len(manifests) > 1 and not args.exec:
+        raise ValueError("multiple .dockapp files; select a program with --exec")
+    data = tomllib.loads(manifests[0].read_text()) if manifests and not args.exec else {}
+    data["id"] = valid_name(args.name or data.get("id", fallback_name))
+    for key, value in (("name", args.label), ("tile_units", args.tile_units), ("restart", args.restart)):
+        if value is not None:
+            data[key] = value
+    if args.exec:
+        data["exec"] = [args.exec]
+    if type(data.get("tile_units", 1)) is not int or not 1 <= data.get("tile_units", 1) <= 4:
+        raise ValueError("tile_units must be 1-4")
+    if data.get("restart", "on-crash") not in ("on-crash", "always", "never"):
+        raise ValueError("restart must be on-crash, always or never")
+    if "name" in data and not isinstance(data["name"], str):
+        raise ValueError("name must be a string")
+    return data
+
+
+def build(source, stage):
+    if os.access(stage / "build.sh", os.X_OK):
+        env = os.environ.copy()
+        tool_dir = Path(__file__).resolve().parent
+        for sdk in (tool_dir / "bindings/python/chonkdock",
+                    source.parent.parent / "bindings/python/chonkdock",
+                    tool_dir.parent / "share/doc/chonkstep/dock/bindings/python/chonkdock"):
+            if sdk.is_dir():
+                env.setdefault("CHONKSTEP_SDK", str(sdk))
+                break
+        subprocess.run(["./build.sh"], cwd=stage, env=env, check=True)
+    elif (source / "Cargo.toml").is_file():
+        manifest = str((source / "Cargo.toml").resolve())
+        metadata = json.loads(subprocess.check_output([
+            "cargo", "metadata", "--no-deps", "--format-version", "1", "--manifest-path", manifest,
+        ]))
+        package = next((p for p in metadata["packages"] if p["manifest_path"] == manifest), None)
+        if package is None:
+            raise ValueError("select a Cargo package directory, not a virtual workspace root")
+        subprocess.run([
+            "cargo", "build", "--release", "--manifest-path", manifest, "-p", package["name"], "--bins",
+        ], check=True)
+        binaries = stage / "target/release"
+        binaries.mkdir(parents=True, exist_ok=True)
+        for target in package["targets"]:
+            if "bin" in target["kind"]:
+                compiled = Path(metadata["target_directory"]) / "release" / target["name"]
+                destination = binaries / target["name"]
+                if compiled.resolve() != destination.resolve():
+                    shutil.copy2(compiled, destination)
+    elif (stage / "Makefile").is_file():
+        subprocess.run(["make"], cwd=stage, check=True)
+
+
+def resolve_exec(data, stage, destination):
+    argv = data.get("exec")
+    if argv is None:
+        candidates = [stage / p for p in (
+            f"target/release/{data['id']}", f"bin/{data['id']}", data["id"],
+            f"{data['id']}.py", f"{data['id']}.sh", "main.py", "clock.py",
+        )]
+        program = next((p for p in candidates if p.is_file()), None)
+        if program is None:
+            raise ValueError("could not find a program; pass --exec PATH relative to the source")
+        argv = [str(program.relative_to(stage))]
+    if not isinstance(argv, list) or not argv or any(not isinstance(a, str) or "\0" in a for a in argv) or not argv[0].strip():
+        raise ValueError("exec must be a nonempty array of strings")
+    rewritten = []
+    for index, arg in enumerate(argv):
+        candidate = stage / arg
+        if not Path(arg).is_absolute():
+            if index == 0 and not candidate.is_file():
+                candidate = next((stage / p / arg for p in ("target/release", "bin")
+                                  if (stage / p / arg).is_file()), candidate)
+            if candidate.is_file():
+                relative = candidate.resolve().relative_to(stage.resolve())
+                if index == 0 and not os.access(candidate, os.X_OK):
+                    if candidate.suffix != ".py":
+                        raise ValueError(f"{arg} is not executable")
+                    rewritten.append("python3")
+                arg = str(destination / relative)
+        rewritten.append(arg)
+    data["exec"] = rewritten
+
+
+def encode(data):
+    # JSON strings/arrays with literal Unicode are also valid TOML values for
+    # these fields. This preserves spaces, quotes and backslashes in paths.
+    return "".join(f"{key} = {json.dumps(data[key], ensure_ascii=False)}\n"
+                   for key in ("id", "name", "exec", "tile_units", "restart") if key in data)
+
+
+def install(args, sources, registry):
+    with tempfile.TemporaryDirectory(prefix=".install-", dir=sources) as temporary:
+        scratch = Path(temporary)
+        stage = scratch / "source"
+        if re.match(r"^(https?://|git://|git@|ssh://)", args.source):
+            subprocess.run(["git", "clone", "--depth", "1", "--", args.source, str(stage)], check=True)
+            source = stage
+            fallback_name = args.source.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        else:
+            source = Path(args.source).resolve()
+            if not source.is_dir():
+                raise ValueError(f"{source} is not a directory or git URL")
+            if stage.is_relative_to(source):
+                raise ValueError("source directory contains the dockapp install directory")
+            shutil.copytree(source, stage, ignore=shutil.ignore_patterns(".git", "target", "__pycache__"))
+            fallback_name = source.name
+        data = registration(stage, args, fallback_name)
+        destination = sources / data["id"]
+        if destination.is_symlink():
+            raise ValueError(f"refusing to replace symlink {destination}")
+        build(source, stage)
+        if args.exec and (Path(args.exec).is_absolute() or not (stage / args.exec).is_file()):
+            raise ValueError("--exec must name a file relative to the source directory")
+        resolve_exec(data, stage, destination)
+        text = encode(data)
+        tomllib.loads(text)
+        # Prepare the registration on the same filesystem as its destination.
+        with tempfile.NamedTemporaryFile(mode="w", dir=registry, prefix=".install-", delete=False) as stream:
+            pending = Path(stream.name)
+            stream.write(text)
+        previous = scratch / "previous"
+        try:
+            if destination.exists():
+                destination.rename(previous)
+            try:
+                stage.rename(destination)
+                pending.replace(registry / f"{data['id']}.dockapp")
+            except OSError:
+                if destination.exists():
+                    shutil.rmtree(destination)
+                if previous.exists():
+                    previous.rename(destination)
+                raise
+        finally:
+            pending.unlink(missing_ok=True)
+        print(f"Installed {data['id']}. Restart chonk-dock to load it.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Install, list and remove Chonk Dock applications (Python 3.11+).")
+    commands = parser.add_subparsers(dest="command", required=True)
+    installer = commands.add_parser("install", help="build and register a local directory or git URL")
+    installer.add_argument("source")
+    installer.add_argument("--name", type=valid_name)
+    installer.add_argument("--exec", help="program relative to the source directory")
+    installer.add_argument("--label")
+    installer.add_argument("--tile-units", type=int, choices=range(1, 5))
+    installer.add_argument("--restart", choices=("on-crash", "always", "never"))
+    commands.add_parser("list")
+    commands.add_parser("remove").add_argument("name", type=valid_name)
+    args = parser.parse_args()
+    sources = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")).absolute() / "chonkstep/dockapps"
+    registry = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")).absolute() / "chonkstep/dockapps"
+    if args.command == "list":
+        for path in sorted(registry.glob("*.dockapp")):
+            data = tomllib.loads(path.read_text())
+            print(f"{data['id']:<24} {data['exec'][0]}")
+        return
+    sources.mkdir(parents=True, exist_ok=True)
+    registry.mkdir(parents=True, exist_ok=True)
+    with (sources / ".install.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.command == "install":
+            install(args, sources, registry)
+        else:
+            manifest = registry / f"{args.name}.dockapp"
+            source = sources / args.name
+            if not manifest.exists() and not source.exists() and not source.is_symlink():
+                raise ValueError(f"nothing installed under {args.name!r}")
+            manifest.unlink(missing_ok=True)
+            if source.is_symlink():
+                source.unlink()
+            elif source.exists():
+                shutil.rmtree(source)
+            print(f"Removed {args.name}. Restart chonk-dock to unload it.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        print(f"chonk-get: {error}", file=sys.stderr)
+        sys.exit(1)

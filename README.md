@@ -61,9 +61,10 @@ exported Omarchy themes coordinate the rest of the desktop.
 
 Themes change appearance, not architecture. **There is no built-in dock,
 launcher strip or persistent desktop workspace switcher in any theme**, on
-Wayland or X11. Omarchy provides that desktop UI externally. The old dock host,
-instruments, samplers and tile protocol have been removed from the compositor
-codebase. Future desktop components belong in separate applications or plugins.
+Wayland or X11. Omarchy provides that desktop UI externally. The NeXTSTEP dock is available on both as the separate [Chonk Dock application](dock/README.md),
+with its original instruments, panels, launchers and dockapp SDKs. Its host,
+samplers and rendering run in their own process. Omarchy mode does not start it;
+when it is stopped, it uses no runtime resources.
 
 The [theme guide](docs/modern-themes.md) covers selection, appearance overrides
 and export. [System 7 themes](docs/system7-themes.md) provide three period desktop
@@ -112,7 +113,7 @@ See [keybindings](docs/keybindings.md), [gestures](docs/gestures.md),
 
 ## Install and try it
 
-The current release is **0.6.1**. Check the
+The current release is **0.7.0**. Check the
 [release notes](https://github.com/iconidentify/chonkstep/releases) for the
 version being installed.
 
@@ -164,7 +165,7 @@ It remains available as a secondary backend.
 The backend-independent `wm-core` handles window policy; `wm-wayland` and
 `wm-x11` implement display-server behavior. `chonk-shell` supplies menus,
 transient navigation and Omarchy integration. `wm-theme` owns themed rendering,
-and `chonk-hyprland-ipc` implements the compatibility interface. Desktop plugins
+and `chonk-hyprland-ipc` implements the compatibility interface. Desktop plugins, [Chonk Dock](dock/README.md),
 and agent adapters run outside these compositor components.
 
 ```sh

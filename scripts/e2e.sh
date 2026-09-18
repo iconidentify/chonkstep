@@ -167,7 +167,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
 fi
 
 echo "Building the compositor and the harness ($profile_name)..."
-build_packages=(-p chonk-testkit)
+build_packages=(-p chonk-testkit -p chonk-dock -p chonk-dockclock)
 if [ -n "${CHONKSTEP_WAYLAND_BIN:-}" ]; then
     if [ ! -x "$CHONKSTEP_WAYLAND_BIN" ]; then
         echo "e2e.sh: CHONKSTEP_WAYLAND_BIN is not executable: $CHONKSTEP_WAYLAND_BIN" >&2

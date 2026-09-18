@@ -689,7 +689,7 @@ impl<B: Backend> WindowManager<B> {
     /// numeric value and still needs to observe that ownership edge.
     pub fn set_workareas(&mut self, areas: Vec<Rect>) {
         let before = self.effective_workareas();
-        self.workareas = areas;
+        self.workareas = areas.into_iter().map(|area| self.backend.constrain_workarea(area)).collect();
         self.workarea_revision = self.workarea_revision.wrapping_add(1);
         self.publish_workarea_union();
         // A disconnected Mac session retains its window geometry until a

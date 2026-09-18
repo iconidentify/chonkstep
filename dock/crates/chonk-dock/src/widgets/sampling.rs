@@ -1,0 +1,1973 @@
+//! The sampler runtime: the dock's half of declarative sampling.
+//!
+//! A widget declares [`Source`]s and reads [`Samples`]; *this* is where
+//! the threads, the `read_dir`s, the `Command`s and the `waitpid`s
+//! actually live. The vocabulary is `chonk-dock-widget`; the capability
+//! is here.
+//!
+//! That the two are separate crates is the enforcement, not tidiness.
+//! `chonk-instruments` depends on the vocabulary and cannot see this
+//! module at all — the dependency edge points from `chonk-shell` to the
+//! instruments, so it cannot point back — and its own `clippy.toml`
+//! makes `std::fs::File`, `std::process::Command`, `std::fs::{read,
+//! read_to_string, read_dir}` and `std::thread::spawn` build errors
+//! inside it. Everything this module does, an instrument is structurally
+//! unable to do.
+//!
+//! # Why any of this exists
+//!
+//! On 2026-08-29 the wifi tile sampled the system by calling
+//! `nmcli dev wifi` inline from `tick()`. `tick()` runs on the
+//! compositor's single repaint thread and `nmcli dev wifi` defaults to
+//! `--rescan auto`, which blocks for a full hardware scan whenever
+//! NetworkManager's cache is older than thirty seconds: ~3.6s at a
+//! time, once every ~34s, during which the desktop drew nothing, read
+//! no input, and did not collect the page-flip completion already
+//! sitting in its DRM fd. The compositor's own stall watchdog then
+//! reported a display-driver fault. Four agents found the wifi icon.
+//!
+//! Every one of the reads below used to happen on that thread:
+//!
+//! * `/proc/stat`, `/proc/meminfo` (sysload) — [`Source::File`]
+//! * `/proc/net/dev` (net) — [`Source::File`]
+//! * `read_dir` + up to four reads per supply over
+//!   `/sys/class/power_supply` (power) — [`Source::Tree`]
+//! * `read_dir` + four probes per interface over `/sys/class/net`
+//!   (wifi) — [`Source::Tree`], and the one that most needed it:
+//!   `/sys/class/net/*/speed` dispatches the driver's `ethtool` op,
+//!   which on some NICs blocks for hundreds of milliseconds and does so
+//!   uninterruptibly. On a sampler thread that stretches one sampling
+//!   interval. On the repaint thread it was a dropped frame at best and
+//!   an evicted instrument at worst.
+//! * `wpctl`, `nmcli` (sound, wifi) — [`Source::Command`], via
+//!   `BackgroundCommand`.
+//!
+//! # Built-in only, deliberately
+//!
+//! [`Source::Command`] is arbitrary-argv-by-declaration. The dock
+//! executing an argv on a third party's behalf would blur exactly the
+//! accountability line the out-of-process dockapp protocol is drawn to
+//! establish, so this registry serves built-in widgets and stays that
+//! way; a dockapp runs its own process and does its own sampling, which
+//! is the whole point of putting it in one.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use chonk_dock_widget::{Reading, Samples, Slot, Source, SourceId, TreeEntry};
+
+/// Every source every widget declared, one worker each, plus the
+/// snapshot [`Samples`] borrows from.
+///
+/// Built-in only, on purpose — see the module docs.
+pub(crate) struct SamplerRegistry {
+    samplers: Vec<Sampler>,
+    active: bool,
+    periodic: Vec<bool>,
+    /// Per source, the sampler generation already folded into
+    /// `snapshot`. Parallel to `samplers`, as is `snapshot`; three
+    /// vectors indexed by [`SourceId`] rather than one vector of
+    /// structs, because `snapshot` is what `Samples` borrows and it must
+    /// not drag a worker handle into that borrow.
+    seen: Vec<u64>,
+    snapshot: Vec<Slot>,
+}
+
+enum Sampler {
+    /// [`Source::Command`] and [`Source::File`] both. They differ only
+    /// in how the worker produces its string; from the registry's side,
+    /// and from a widget's, they are the same thing.
+    Text(Worker<String>),
+    Tree(Worker<Vec<TreeEntry>>),
+    /// No worker: reading the wall clock is a vDSO call costing tens of
+    /// nanoseconds, so a thread and a mutex to carry it across would be
+    /// more machinery than the thing being carried. `granularity` is
+    /// the declared interval in whole seconds, and truncating to it is
+    /// what makes the interval mean something: a one-second clock ticks
+    /// on the second, and a sixty-second one goes `fresh` once a minute.
+    Clock {
+        granularity: u64,
+    },
+}
+
+impl SamplerRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            samplers: Vec::new(),
+            active: true,
+            periodic: Vec::new(),
+            seen: Vec::new(),
+            snapshot: Vec::new(),
+        }
+    }
+
+    /// Hidden docks retain their readings but do no background sampling.
+    /// Workers registered while inactive do not even start a thread until
+    /// the first activation. Source ids and resample handles remain stable.
+    pub(crate) fn set_active(&mut self, active: bool) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        for sampler in &mut self.samplers {
+            match sampler {
+                Sampler::Text(worker) => worker.set_active(active),
+                Sampler::Tree(worker) => worker.set_active(active),
+                Sampler::Clock { .. } => {}
+            }
+        }
+    }
+
+    /// Registers each source and hands back the ids to read them
+    /// by, positionally matching `sources`. Called once per widget, at
+    /// the one place widgets enter the dock.
+    pub(crate) fn register(&mut self, sources: Vec<Source>) -> Vec<SourceId> {
+        sources
+            .into_iter()
+            .map(|source| {
+                let sampler = match source {
+                    Source::Command {
+                        program,
+                        args,
+                        interval,
+                    } => Sampler::Text(
+                        BackgroundCommand::spawn(program, args, interval, self.active).worker(),
+                    ),
+                    Source::File { path, interval } => {
+                        Sampler::Text(spawn_file_worker(path, interval, self.active))
+                    }
+                    Source::Tree {
+                        root,
+                        files,
+                        dirs,
+                        interval,
+                    } => Sampler::Tree(spawn_tree_worker(root, files, dirs, interval, self.active)),
+                    // `max(1)` rather than an error: a widget asking for
+                    // sub-second granularity from a tile that draws a
+                    // second hand is asking for something the face
+                    // cannot show, and rounding it up is a better answer
+                    // than a modulo by zero.
+                    Source::Clock { interval } => Sampler::Clock {
+                        granularity: interval.as_secs().max(1),
+                    },
+                };
+                self.samplers.push(sampler);
+                self.periodic.push(true);
+                self.seen.push(0);
+                self.snapshot.push(Slot::default());
+                SourceId::from_index(self.samplers.len() - 1)
+            })
+            .collect()
+    }
+
+    /// Stable source ids outlive every panel opening. Unchanged policy bits
+    /// cost no worker mutex operation on the compositor's regular tick.
+    pub(crate) fn set_periodic(&mut self, id: SourceId, periodic: bool) {
+        let Some(index) = id.index().filter(|&i| i < self.samplers.len()) else {
+            return;
+        };
+        if self.periodic[index] == periodic {
+            return;
+        }
+        self.periodic[index] = periodic;
+        self.snapshot[index].fresh = false;
+        match &mut self.samplers[index] {
+            Sampler::Text(worker) => worker.set_periodic(periodic),
+            Sampler::Tree(worker) => worker.set_periodic(periodic),
+            Sampler::Clock { .. } => {}
+        }
+    }
+
+    /// A panel may open while discovery or an action already keeps a source
+    /// active. Invalidate that old run too, rather than accepting it as the
+    /// fresh opening snapshot merely because its command completed later.
+    pub(crate) fn fresh_on_open(&mut self, id: SourceId, periodic: bool) {
+        let Some(index) = id.index().filter(|&i| i < self.samplers.len()) else {
+            return;
+        };
+        self.periodic[index] = periodic;
+        self.snapshot[index].fresh = false;
+        match &mut self.samplers[index] {
+            Sampler::Text(worker) => worker.fresh_on_open(periodic),
+            Sampler::Tree(worker) => worker.fresh_on_open(periodic),
+            Sampler::Clock { .. } => self.snapshot[index].reading = Reading::Missing,
+        }
+    }
+
+    /// Pulls whatever the workers have finished into the snapshot and
+    /// recomputes `fresh`. Exactly once per widget pass, so `fresh`
+    /// means "new since the last `update`" for every widget alike —
+    /// which is only unambiguous because sources are never shared
+    /// between widgets.
+    ///
+    /// Never blocks on a sampler: the only lock taken is that sampler's
+    /// own mutex, which its worker holds solely to swap in a finished
+    /// result.
+    pub(crate) fn refresh(&mut self) {
+        if !self.active {
+            for slot in &mut self.snapshot {
+                slot.fresh = false;
+            }
+            return;
+        }
+        for (index, sampler) in self.samplers.iter().enumerate() {
+            let seen = &mut self.seen[index];
+            let slot = &mut self.snapshot[index];
+            match sampler {
+                Sampler::Text(worker) => match worker.take_if_new(seen) {
+                    Some(fresh) => {
+                        slot.reading = fresh.reading.map_or(Reading::Missing, Reading::Text);
+                        slot.unusable = fresh.unusable;
+                        slot.fresh = true;
+                    }
+                    None => slot.fresh = false,
+                },
+                Sampler::Tree(worker) => match worker.take_if_new(seen) {
+                    Some(fresh) => {
+                        slot.reading = fresh.reading.map_or(Reading::Missing, Reading::Tree);
+                        slot.unusable = fresh.unusable;
+                        slot.fresh = true;
+                    }
+                    None => slot.fresh = false,
+                },
+                Sampler::Clock { granularity } => {
+                    if !self.periodic[index] {
+                        slot.fresh = false;
+                        continue;
+                    }
+                    let (h, m, s) = wall_clock(*granularity);
+                    let reading = Reading::Clock(h, m, s);
+                    slot.fresh = slot.reading != reading;
+                    slot.reading = reading;
+                }
+            }
+        }
+    }
+
+    /// The current pass's readings. Borrows the snapshot, not the
+    /// samplers, so the widget loop can hold this while mutating the
+    /// widget list beside it.
+    pub(crate) fn samples(&self) -> Samples<'_> {
+        Samples::from_slots(&self.snapshot)
+    }
+
+    /// A thread-safe nudge for one source, or `None` for a clock (which
+    /// has no worker to wake and is never behind).
+    pub(crate) fn resampler(&mut self, id: SourceId) -> Option<Resampler> {
+        match id.index().and_then(|index| self.samplers.get_mut(index))? {
+            Sampler::Text(worker) => {
+                worker.ensure_started();
+                Some(worker.resampler())
+            }
+            Sampler::Tree(worker) => {
+                worker.ensure_started();
+                Some(worker.resampler())
+            }
+            Sampler::Clock { .. } => None,
+        }
+    }
+}
+
+/// The wall clock as `(h, m, s)`, truncated to `granularity` seconds.
+fn wall_clock(granularity: u64) -> (u32, u32, u32) {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let today = secs % 86_400;
+    let today = today - today % granularity;
+    (
+        (today / 3600) as u32,
+        ((today % 3600) / 60) as u32,
+        (today % 60) as u32,
+    )
+}
+
+/// One external command, run on a thread of its own and never on the
+/// caller's.
+///
+/// # Why this exists
+///
+/// A widget that samples the system by shelling out used to do it
+/// inline in `tick()`, and `tick()` is called from the compositor's
+/// repaint path. That makes the slowest external command on the system
+/// a hard bound on the desktop's frame rate. It is not a theoretical
+/// bound: `nmcli dev wifi` defaults to `--rescan auto`, which blocks for
+/// a full hardware scan whenever NetworkManager's cache is older than
+/// thirty seconds. On the machine this was diagnosed on that was ~3.6
+/// seconds, once every ~34 seconds, and for the whole of it the
+/// compositor was parked in `waitpid` — not drawing, not reading input,
+/// and not collecting the page-flip completion already sitting in the
+/// DRM fd. The compositor's own stall watchdog then blamed the display
+/// driver, which was innocent and idle.
+///
+/// A slow child process should cost a stale tile, never a frozen
+/// screen. So the command runs on a worker thread and the widget reads
+/// whatever the last completed run produced.
+///
+/// # Contract
+///
+/// Sampling is *pure output collection*: the worker gets an argv and
+/// hands back stdout. Parsing, and every decision that depends on
+/// widget state, stays on the widget thread where that state lives.
+/// This deliberately keeps the shared surface to one `String`.
+///
+/// # Its place now
+///
+/// This type is [`Source::Command`]'s backend and no longer something a
+/// widget constructs. That is the generalization the incident argued
+/// for: it was already true that a command must not run on the repaint
+/// thread, and the only thing left to fix was that a widget still had
+/// to *remember* it. Now it declares a `Source` and one of these
+/// appears behind it — along with a [`Source::File`] and a
+/// [`Source::Tree`] built on the same worker, because a `read` and a
+/// `read_dir` can block that thread exactly as well as a `waitpid` can.
+pub(crate) struct BackgroundCommand(Worker<String>);
+
+impl BackgroundCommand {
+    /// Prepares the worker, starting its thread only when active.
+    pub(crate) fn spawn(
+        program: &'static str,
+        args: Vec<String>,
+        interval: Duration,
+        active: bool,
+    ) -> Self {
+        Self(Worker::spawn(
+            format!("chonkstep-sample-{program}"),
+            interval,
+            active,
+            move || {
+                // The one place in this crate where blocking on a child
+                // process is the *point*: this closure is the body of the
+                // sampler thread `Worker::spawn` started, so the only thing
+                // a wait can park here is this worker. That is exactly
+                // the property `clippy.toml`'s ban on `Command::output`
+                // exists to force someone to state out loud — see
+                // `super::SupervisedWidget` for what happens to a widget
+                // that gets it wrong and blocks the repaint thread instead.
+                //
+                // "Only this worker", though, used to mean *forever*: a
+                // bare `output()` on a program that hangs instead of
+                // exiting wedges this thread for the life of the session,
+                // and the source behind it then shows its last good reading
+                // as if it were current. `bluetoothctl` with no `org.bluez`
+                // on the bus does exactly that — blocks indefinitely,
+                // silently — which is why the deadline below is not a
+                // nicety. Stdout is drained while the command runs under
+                // that same deadline. Stderr is discarded, deliberately:
+                // change from "wherever the shell's goes": a sampler runs
+                // on a timer forever, so a command that complains on every
+                // run does not report a problem — it floods the session
+                // log until real errors are unfindable in it. The
+                // bluetooth instrument's `busctl` on a machine with no
+                // bluetooth daemon wrote "Could not activate remote peer
+                // 'org.bluez'" every few seconds and buried a live
+                // fullscreen investigation. A sampler's signal is its exit
+                // status and its stdout; both are read, and a failed run
+                // already clears the tile to its dead face, which is the
+                // honest report.
+                #[allow(clippy::disallowed_methods)]
+                let spawned = Command::new(program)
+                    .args(&args)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                match spawned {
+                    // A failed run clears the reading rather than leaving
+                    // the last good one on screen: a tile showing a network
+                    // that went away is worse than a tile admitting it does
+                    // not know. A run killed at the deadline is a failed
+                    // run by that same rule — the widget draws its dead
+                    // face rather than a stale number.
+                    Ok(child) => {
+                        Outcome::Sampled(wait_with_deadline(child, program, SAMPLE_DEADLINE))
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            ?error,
+                            program,
+                            "sampler command could not be spawned; giving up on it"
+                        );
+                        Outcome::Unusable
+                    }
+                }
+            },
+        ))
+    }
+
+    /// Unwraps to the worker the registry stores. `Source::Command` is
+    /// the only thing that constructs one of these and the registry the
+    /// only thing that holds one, so the type exists for its name and
+    /// the argument in its doc comment rather than for an API.
+    fn worker(self) -> Worker<String> {
+        self.0
+    }
+}
+
+/// [`Source::File`]'s backend: one `read_to_string` per interval, on a
+/// worker thread.
+///
+/// Never `Unusable`. A command's binary either exists or does not, but
+/// a file's absence is routinely temporary — `/sys/class/net/wlan0`
+/// appears when a USB dongle is plugged in — so this keeps looking and
+/// reports `Missing` in between. The cost of being wrong in this
+/// direction is one `openat` per second that returns ENOENT.
+fn spawn_file_worker(path: PathBuf, interval: Duration, active: bool) -> Worker<String> {
+    Worker::spawn(
+        "chonkstep-sample-file".to_string(),
+        interval,
+        active,
+        move || {
+            // Blocking `read` on a procfs or sysfs file is the point here,
+            // for the same reason `Command::output` is above: this closure
+            // *is* the worker thread. `/proc` files are synthesized by the
+            // kernel on read and can take a seqlock or a subsystem lock on
+            // the way; the repaint thread is the one place that must never
+            // wait on one.
+            Outcome::Sampled(std::fs::read_to_string(&path).ok())
+        },
+    )
+}
+
+/// [`Source::Tree`]'s backend.
+///
+/// The interesting one for latency. `/sys/class/net/*/speed` dispatches
+/// into the driver's `ethtool` `get_link_ksettings` op, which on some
+/// NICs blocks for hundreds of milliseconds and is not interruptible;
+/// `/sys/class/power_supply/*/capacity` can go out to an embedded
+/// controller over I2C. Both are fine here — a slow run stretches this
+/// worker's interval and nothing else — and both were, until this
+/// landed, executed once a second on the thread that draws the screen.
+fn spawn_tree_worker(
+    root: PathBuf,
+    files: &'static [&'static str],
+    dirs: &'static [&'static str],
+    interval: Duration,
+    active: bool,
+) -> Worker<Vec<TreeEntry>> {
+    Worker::spawn(
+        "chonkstep-sample-tree".to_string(),
+        interval,
+        active,
+        move || Outcome::Sampled(Some(read_tree(&root, files, dirs))),
+    )
+}
+
+/// The whole of a [`Source::Tree`] walk, split out from its worker so
+/// it can be tested against a fixture directory.
+///
+/// Sorted by name because `read_dir` promises no ordering, and a widget
+/// that lets a click cycle through the entries (wifi does) needs the
+/// order to be the same on the next sample as it was on this one.
+fn read_tree(root: &Path, files: &[&str], dirs: &[&str]) -> Vec<TreeEntry> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<TreeEntry> = entries
+        .flatten()
+        .map(|entry| {
+            let dir = entry.path();
+            TreeEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                // Per-field degradation, not per-entry: a supply
+                // directory with an unreadable `capacity` still
+                // contributes its `status`, and an interface whose
+                // driver refuses `speed` while the link is down still
+                // contributes its `operstate`.
+                files: files
+                    .iter()
+                    .map(|file| std::fs::read_to_string(dir.join(file)).ok())
+                    .collect(),
+                dirs: dirs.iter().map(|sub| dir.join(sub).exists()).collect(),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Runs a widget's commands **in the order it listed them**, one after
+/// another, on a single thread of the dock's own — the executor half
+/// of [`chonk_dock_widget::Effect::Run`], one command or several
+/// (`PanelReaction::RunAll`).
+///
+/// This is the click path's version of the whole argument: `wpctl
+/// set-volume` and `nmcli radio wifi off` arrive on the same repaint
+/// thread a sample would have, and are just as able to park it. The
+/// dock hands them here and returns.
+///
+/// Sequential rather than one thread per command, because the plural
+/// exists for actions whose parts are a sequence: switching the
+/// default audio sink is `pactl set-default-sink` and then one
+/// `pactl move-sink-input` per playing stream, and a widget that lists
+/// them in that order means them in that order. One thread also costs
+/// less than N and cannot interleave two commands against the same
+/// daemon.
+///
+/// Each command's `then` resample fires as soon as *that* command
+/// exits, not at the end of the run: a resample is "the reading you
+/// need is ready now", and holding the first one until the last
+/// migration finished would make the panel look slower than the
+/// system it is reporting on.
+///
+/// `env` is the desktop's launch environment (`shell::launch_env`),
+/// given to every command: an `Effect::Run` that opens a *window* —
+/// the wifi join dialog, the Bluetooth pairing dialog — must wear the
+/// theme, appearance and scale the desk is wearing, and it learns them
+/// the same way every other GUI the shell starts does. A command that
+/// draws nothing is unharmed by carrying them.
+///
+/// Every command runs under [`RUN_DEADLINE`]: a program that hangs
+/// instead of exiting is killed rather than pinning this thread (and
+/// its child) for the life of the session. `bluetoothctl` with no
+/// `org.bluez` on the bus is the case that made this non-hypothetical
+/// — it blocks forever, silently — and Omarchy's own scripts wrap
+/// every such call in `timeout 2s` for the same reason.
+pub(crate) fn run_detached(
+    commands: Vec<(&'static str, Vec<String>, Option<Resampler>)>,
+    env: Vec<(String, String)>,
+) {
+    let Some((first, _, _)) = commands.first() else {
+        return;
+    };
+    let name = format!("chonkstep-run-{first}");
+    std::thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            for (program, args, then) in commands {
+                // Audited exception to `clippy.toml`'s ban, and the one
+                // worth reading twice: `nmcli` reaches this line, and
+                // `nmcli` is the exact binary whose blocking call froze
+                // the desktop on 2026-08-29. It is safe here for one
+                // reason only — this closure is the body of this
+                // effect's own worker thread, never the compositor's
+                // repaint loop. The widget that asked for it returned
+                // an `Effect` and cannot have run anything itself.
+                //
+                // Output goes nowhere, as it did when this was an
+                // `output()` that captured and dropped both streams: an
+                // effect's answer is the next *sample*, never its
+                // chatter. Discarding rather than piping also means
+                // there is no pipe to fill, so a noisy command cannot
+                // wedge on a full buffer while this thread waits.
+                #[allow(clippy::disallowed_methods)]
+                let child = Command::new(program)
+                    .args(&args)
+                    .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                match child {
+                    Ok(child) => {
+                        if wait_with_deadline(child, program, RUN_DEADLINE).is_none() {
+                            tracing::warn!(
+                                program,
+                                "effect command exceeded its deadline and was killed"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, program, "effect command could not be started")
+                    }
+                }
+                if let Some(resampler) = then {
+                    resampler.resample_soon();
+                }
+            }
+        })
+        .map_err(|error| {
+            tracing::warn!(
+                ?error,
+                "could not start the effect thread; the commands will not run"
+            )
+        })
+        .ok();
+}
+
+/// How long any one command a widget asks for may take before the dock
+/// kills it.
+///
+/// Generous enough for the slow-but-honest ones this desktop actually
+/// runs — `nmcli dev wifi connect` negotiates with an access point,
+/// and the wifi join dialog is a *window* the user types a passphrase
+/// into — and finite, which is the whole point: the failure being
+/// prevented is a worker parked forever, not a worker parked a while.
+const RUN_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How long a *sampler's* command may take before it is killed and the
+/// reading reported as absent.
+///
+/// Much tighter than [`RUN_DEADLINE`], because a sample is a poll on a
+/// timer: anything that has not answered in this long has already
+/// missed its interval, and the widget is better told "no reading"
+/// (which it draws as a dead face) than left showing a number from
+/// before the tool wedged.
+const SAMPLE_DEADLINE: Duration = Duration::from_secs(8);
+
+/// Status replies are normally kilobytes. Allow large device/stream
+/// inventories without retaining unlimited output from a broken tool.
+/// Exceeding this limit fails the entire reading; a truncated JSON or
+/// text prefix must never be mistaken for a complete system snapshot.
+const SAMPLE_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+
+/// Waits for `child` up to `deadline`, killing it if it overruns.
+/// `Some(stdout)` for a command that exited successfully within the
+/// deadline; `None` for every other outcome — non-zero exit, unreadable
+/// or oversized output, or the deadline.
+///
+/// The pipe is nonblocking and drained while the child runs. Waiting
+/// for exit first deadlocks any legitimate reply larger than the pipe
+/// buffer; reading to EOF after exit can block forever if a descendant
+/// inherited stdout. Exit and EOF must both arrive before one deadline.
+pub(crate) fn wait_with_deadline(
+    mut child: std::process::Child,
+    program: &str,
+    deadline: Duration,
+) -> Option<String> {
+    use std::io::{ErrorKind, Read};
+    use std::os::fd::AsRawFd;
+
+    let start = std::time::Instant::now();
+    let mut pipe = child.stdout.take();
+    if let Some(pipe) = &pipe {
+        let fd = pipe.as_raw_fd();
+        // SAFETY: ChildStdout owns this live descriptor for both calls.
+        // Preserve its existing flags and change only the read endpoint.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        let nonblocking = flags >= 0 && {
+            // SAFETY: the same ChildStdout still owns fd; the valid retrieved
+            // flags are preserved while enabling nonblocking reads.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) >= 0 }
+        };
+        if !nonblocking {
+            tracing::warn!(program, error = ?std::io::Error::last_os_error(), "could not make sampler output nonblocking");
+            reap_failed_command(&mut child);
+            return None;
+        }
+    }
+    let mut output = Vec::new();
+    let mut exited = false;
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        if start.elapsed() >= deadline {
+            if !exited {
+                reap_failed_command(&mut child);
+            }
+            tracing::warn!(
+                program,
+                ?deadline,
+                "command or its output exceeded the deadline"
+            );
+            return None;
+        }
+        if let Some(reader) = &mut pipe {
+            let mut eof = false;
+            // A continuously writing tool must yield to deadline and
+            // exit checks. Four reads cap work per pass at 64 KiB.
+            for _ in 0..4 {
+                match reader.read(&mut buffer) {
+                    Ok(0) => {
+                        eof = true;
+                        break;
+                    }
+                    Ok(count) if count > SAMPLE_OUTPUT_LIMIT.saturating_sub(output.len()) => {
+                        tracing::warn!(
+                            program,
+                            limit = SAMPLE_OUTPUT_LIMIT,
+                            "sampler output exceeded its size limit"
+                        );
+                        if !exited {
+                            reap_failed_command(&mut child);
+                        }
+                        return None;
+                    }
+                    Ok(count) => {
+                        let needed = output.len() + count;
+                        if needed > output.capacity() {
+                            // Geometric growth without letting Vec's
+                            // final doubling exceed the output budget.
+                            let capacity = output
+                                .capacity()
+                                .saturating_mul(2)
+                                .max(needed)
+                                .min(SAMPLE_OUTPUT_LIMIT);
+                            output.reserve_exact(capacity - output.len());
+                        }
+                        output.extend_from_slice(&buffer[..count]);
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        tracing::warn!(?error, program, "could not read sampler output");
+                        if !exited {
+                            reap_failed_command(&mut child);
+                        }
+                        return None;
+                    }
+                }
+            }
+            if eof {
+                pipe = None;
+            }
+        }
+        if !exited {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return None;
+                    }
+                    exited = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(?error, program, "could not wait on a command");
+                    reap_failed_command(&mut child);
+                    return None;
+                }
+            }
+        }
+        if exited && pipe.is_none() && start.elapsed() < deadline {
+            return String::from_utf8(output).ok();
+        }
+        let pause = deadline
+            .saturating_sub(start.elapsed())
+            .min(Duration::from_millis(20));
+        if let Some(pipe) = &pipe {
+            let mut poll = libc::pollfd {
+                fd: pipe.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll points to one initialized descriptor owned by
+            // `pipe`, which stays alive until the bounded call returns.
+            let ready =
+                unsafe { libc::poll(&mut poll, 1, pause.as_millis().max(1) as libc::c_int) };
+            if ready < 0 && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+                tracing::warn!(program, error = ?std::io::Error::last_os_error(), "could not poll sampler output");
+                if !exited {
+                    reap_failed_command(&mut child);
+                }
+                return None;
+            }
+        } else {
+            // Effects discard stdout, and a command may close stdout
+            // before exiting. Either still needs its exit status.
+            std::thread::sleep(pause);
+        }
+    }
+}
+
+fn reap_failed_command(child: &mut std::process::Child) {
+    // This function runs only on the sampler/effect worker. Kill before
+    // waiting so an overrun cannot keep running; wait consumes its exit
+    // status instead of leaking a zombie on each sampling interval.
+    let _ = child.kill();
+    #[allow(clippy::disallowed_methods)]
+    let _ = child.wait();
+}
+
+/// The sampler thread and the mailbox it drops results into, shared by
+/// every [`Source`] variant that needs one.
+///
+/// Generic over the reading rather than duplicated per source kind: the
+/// interval loop, the condvar wake, the poisoned-lock handling and the
+/// generation counter are the parts that are easy to get subtly wrong,
+/// and there is exactly one copy of them.
+struct Worker<T> {
+    shared: Arc<Shared<T>>,
+    start: Option<Box<dyn FnOnce() + Send>>,
+}
+
+struct Shared<T> {
+    state: Mutex<SampleState<T>>,
+    /// Signals the worker to sample immediately instead of sleeping out
+    /// the rest of its interval — see [`Resampler`].
+    wake: Condvar,
+}
+
+struct SampleState<T> {
+    /// The most recent successful run's reading. `None` before the
+    /// first one completes, and again after a run that failed.
+    reading: Option<T>,
+    /// Set once the source could not be reached at all and will not be
+    /// retried. Only commands ever set it; see [`spawn_file_worker`].
+    unusable: bool,
+    /// Bumped on every completed run so a reader can distinguish a
+    /// fresh reading from the one it already consumed.
+    generation: u64,
+    /// Set by [`Resampler::resample_soon`], cleared by the worker when
+    /// it acts on it.
+    resample_now: bool,
+    active: bool,
+    periodic: bool,
+    stopping: bool,
+    /// A sample belongs to the visibility period in which it started,
+    /// not the one in which a slow command happened to finish. Old
+    /// counters must not be folded as new immediately after reopening.
+    visibility_epoch: u64,
+    reading_epoch: u64,
+}
+
+/// What one run of a sampler produced.
+enum Outcome<T> {
+    /// A run completed. `None` means it completed without a usable
+    /// reading (non-zero exit, unreadable file) — which clears the tile
+    /// rather than leaving a stale number on it.
+    Sampled(Option<T>),
+    /// The source cannot be reached at all; stop the worker. Permanent
+    /// within a session by construction, since the only thing that
+    /// produces it is a spawn failure.
+    Unusable,
+}
+
+/// A completed run, cloned out from under the worker's mutex.
+struct FreshReading<T> {
+    reading: Option<T>,
+    unusable: bool,
+}
+
+impl<T: Clone + Send + 'static> Worker<T> {
+    /// Preparing an inactive worker allocates its mailbox and closure,
+    /// but creates no thread or child process. Drop signals termination;
+    /// it never joins a possibly blocked sysfs read on the repaint thread.
+    fn spawn(
+        thread_name: String,
+        interval: Duration,
+        active: bool,
+        sample: impl FnMut() -> Outcome<T> + Send + 'static,
+    ) -> Self {
+        let shared = Arc::new(Shared {
+            state: Mutex::new(SampleState {
+                reading: None,
+                unusable: false,
+                generation: 0,
+                resample_now: false,
+                active: false,
+                periodic: true,
+                stopping: false,
+                visibility_epoch: 0,
+                reading_epoch: 0,
+            }),
+            wake: Condvar::new(),
+        });
+        let worker = Arc::clone(&shared);
+        let start = Box::new(move || {
+            let failed = Arc::clone(&worker);
+            if let Err(error) = std::thread::Builder::new()
+                .name(thread_name.clone())
+                .spawn(move || sample_loop(worker, sample, interval))
+            {
+                tracing::warn!(?error, thread = %thread_name, "could not start the sampler thread");
+                if let Ok(mut state) = failed.state.lock() {
+                    state.unusable = true;
+                    state.generation = state.generation.wrapping_add(1);
+                }
+            }
+        });
+        let mut worker = Self {
+            shared,
+            start: Some(start),
+        };
+        worker.set_active(active);
+        worker
+    }
+
+    fn set_active(&mut self, active: bool) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            if state.active != active {
+                state.active = active;
+                state.visibility_epoch = state.visibility_epoch.wrapping_add(1);
+                if active && state.periodic {
+                    state.resample_now = true;
+                }
+                self.shared.wake.notify_all();
+            }
+        }
+        let needed = self
+            .shared
+            .state
+            .lock()
+            .is_ok_and(|state| state.periodic || state.resample_now);
+        if active && needed {
+            self.ensure_started();
+        }
+    }
+
+    fn ensure_started(&mut self) {
+        if self.shared.state.lock().is_ok_and(|state| state.active) {
+            if let Some(start) = self.start.take() {
+                start();
+            }
+        }
+    }
+
+    fn set_periodic(&mut self, periodic: bool) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            if state.periodic == periodic {
+                return;
+            }
+            state.periodic = periodic;
+            if periodic {
+                state.resample_now = true;
+            }
+            self.shared.wake.notify_all();
+        }
+        if periodic {
+            self.ensure_started();
+        }
+    }
+
+    fn fresh_on_open(&mut self, periodic: bool) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.periodic = periodic;
+            state.visibility_epoch = state.visibility_epoch.wrapping_add(1);
+            state.resample_now = true;
+            self.shared.wake.notify_all();
+        }
+        self.ensure_started();
+    }
+
+    /// The latest completed run from the current visibility period, or
+    /// `None` if none is new since `seen`. Permanent source failures
+    /// remain reportable after showing. Never blocks on the source; the only lock held is the
+    /// sampler's own mutex, and the worker holds it solely to swap in a
+    /// finished result.
+    fn take_if_new(&self, seen: &mut u64) -> Option<FreshReading<T>> {
+        let state = match self.shared.state.lock() {
+            Ok(state) => state,
+            // A panicking sampler thread must not take the desktop with
+            // it: treat a poisoned lock as "no data", same as a source
+            // that has not produced anything yet.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if state.generation == *seen
+            || (!state.unusable && state.reading_epoch != state.visibility_epoch)
+        {
+            return None;
+        }
+        *seen = state.generation;
+        Some(FreshReading {
+            reading: state.reading.clone(),
+            unusable: state.unusable,
+        })
+    }
+
+    fn resampler(&self) -> Resampler {
+        Resampler {
+            shared: Arc::clone(&self.shared) as Arc<dyn Wake>,
+        }
+    }
+}
+
+impl<T> Drop for Worker<T> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.stopping = true;
+            self.shared.wake.notify_all();
+        }
+    }
+}
+
+/// The one thing a [`Resampler`] can do, as a trait so one handle type
+/// serves every reading type.
+trait Wake: Send + Sync {
+    fn resample_soon(&self);
+}
+
+impl<T: Send> Wake for Shared<T> {
+    fn resample_soon(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.resample_now = true;
+            self.wake.notify_all();
+        }
+    }
+}
+
+/// A thread-safe handle that can only ask for a resample.
+///
+/// The click paths run their `set` command off-thread — a volume change
+/// or a radio toggle is just as capable of blocking as a sample is —
+/// and want the tile to catch up when that command lands rather than up
+/// to an interval later. The authority on what a click actually did is
+/// the next sample, never the command's exit status.
+#[derive(Clone)]
+pub(crate) struct Resampler {
+    shared: Arc<dyn Wake>,
+}
+
+impl Resampler {
+    pub(crate) fn resample_soon(&self) {
+        self.shared.resample_soon();
+    }
+}
+
+fn sample_loop<T>(
+    shared: Arc<Shared<T>>,
+    mut sample: impl FnMut() -> Outcome<T>,
+    interval: Duration,
+) {
+    loop {
+        let visibility_epoch = {
+            let Ok(mut state) = shared.state.lock() else {
+                return;
+            };
+            while (!state.active || (!state.periodic && !state.resample_now)) && !state.stopping {
+                state = match shared.wake.wait(state) {
+                    Ok(state) => state,
+                    Err(_) => return,
+                };
+            }
+            if state.stopping {
+                return;
+            }
+            // Consume a nudge before sampling so an effect completed
+            // during this run still requests another, fresh reading.
+            state.resample_now = false;
+            state.visibility_epoch
+        };
+        match sample() {
+            Outcome::Sampled(reading) => {
+                if let Ok(mut state) = shared.state.lock() {
+                    state.reading = reading;
+                    state.reading_epoch = visibility_epoch;
+                    state.generation = state.generation.wrapping_add(1);
+                }
+            }
+            Outcome::Unusable => {
+                if let Ok(mut state) = shared.state.lock() {
+                    state.reading = None;
+                    state.unusable = true;
+                    state.generation = state.generation.wrapping_add(1);
+                }
+                return;
+            }
+        }
+
+        let Ok(mut state) = shared.state.lock() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + interval;
+        // Pause and teardown wake this wait too. Reusing the deadline
+        // prevents spurious wakes from extending the sampling interval.
+        while state.active && state.periodic && !state.stopping && !state.resample_now {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, timeout) = match shared.wake.wait_timeout(state, remaining) {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            state = next;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+        if state.stopping {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    const TEST_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// A real shell child announces entry, then blocks on a FIFO until
+    /// the test releases it. No scheduler-speed assumption or long-lived
+    /// sleep process is needed to prove that our caller remains runnable.
+    struct CommandGate {
+        root: PathBuf,
+        release: std::fs::File,
+    }
+
+    impl CommandGate {
+        fn new() -> Self {
+            use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let root = loop {
+                let root = std::env::temp_dir().join(format!(
+                    "chonk-sampling-gate-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                match std::fs::create_dir(&root) {
+                    Ok(()) => break root,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create command fixture: {error}"),
+                }
+            };
+            let fifo = root.join("release");
+            let path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            // SAFETY: path is a live NUL-terminated string naming a new file
+            // in our exclusively created fixture directory; mkfifo retains no pointer.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            // O_RDWR opens a Linux FIFO without waiting for the child's reader.
+            // O_NONBLOCK also keeps failure-path cleanup from blocking on a write.
+            let release = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(fifo)
+                .unwrap();
+            Self { root, release }
+        }
+
+        fn args(&self) -> Vec<String> {
+            vec![
+                "-c".into(),
+                "printf started > \"$1\"; IFS= read -r reply < \"$2\"; printf finished > \"$3\""
+                    .into(),
+                "chonk-test-command".into(),
+                self.root.join("started").to_string_lossy().into_owned(),
+                self.root.join("release").to_string_lossy().into_owned(),
+                self.root.join("finished").to_string_lossy().into_owned(),
+            ]
+        }
+
+        fn wait_started(&self) {
+            let deadline = std::time::Instant::now() + TEST_DEADLINE;
+            while !self.root.join("started").exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "child did not enter its gated command"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn unblock(&mut self) {
+            writeln!(self.release, "release").unwrap();
+        }
+    }
+
+    impl Drop for CommandGate {
+        fn drop(&mut self) {
+            // Also release a child on assertion failure. If it has not opened
+            // the FIFO yet, removing the path makes its open fail instead of hang.
+            let _ = writeln!(self.release, "release");
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    struct NotifyWake(std::sync::mpsc::Sender<()>);
+
+    impl Wake for NotifyWake {
+        fn resample_soon(&self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    fn wait_for_generation<T>(worker: &Worker<T>, generation: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if worker.shared.state.lock().unwrap().generation >= generation {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not publish generation {generation}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_closed_panel_accepts_one_shot_confirmation_but_a_hidden_dock_defers_it() {
+        let (started, starts) = std::sync::mpsc::channel();
+        let mut count = 0;
+        let mut worker = Worker::spawn(
+            "test-panel-demand".into(),
+            Duration::from_millis(1),
+            false,
+            move || {
+                count += 1;
+                let _ = started.send(count);
+                Outcome::Sampled(Some(count))
+            },
+        );
+        worker.set_periodic(false);
+        worker.set_active(true);
+        assert!(
+            worker.start.is_some(),
+            "an unopened panel creates no thread"
+        );
+        // The registry prepares a sleeping worker when handing an effect its
+        // completion handle; that callback still cannot enable periodic work.
+        worker.ensure_started();
+        let then = worker.resampler();
+        then.resample_soon();
+        assert_eq!(starts.recv_timeout(TEST_DEADLINE).unwrap(), 1);
+        wait_for_generation(&worker, 1);
+        assert!(
+            starts.recv_timeout(Duration::from_millis(30)).is_err(),
+            "one nudge must not restart a 1ms periodic source"
+        );
+
+        worker.set_active(false);
+        then.resample_soon();
+        assert!(
+            starts.recv_timeout(Duration::from_millis(30)).is_err(),
+            "hidden Dock defers even effect confirmations"
+        );
+        worker.set_active(true);
+        assert_eq!(starts.recv_timeout(TEST_DEADLINE).unwrap(), 2);
+        wait_for_generation(&worker, 2);
+        assert!(starts.recv_timeout(Duration::from_millis(30)).is_err());
+    }
+
+    #[test]
+    fn opening_invalidates_an_active_discovery_run_and_preserves_a_mid_run_nudge() {
+        let (started, starts) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let mut count = 0;
+        let mut worker = Worker::spawn(
+            "test-panel-opening".into(),
+            Duration::from_secs(3600),
+            true,
+            move || {
+                count += 1;
+                let _ = started.send(count);
+                let _ = proceed.recv();
+                Outcome::Sampled(Some(count))
+            },
+        );
+        assert_eq!(starts.recv_timeout(TEST_DEADLINE).unwrap(), 1);
+        worker.fresh_on_open(true);
+        release.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(TEST_DEADLINE).unwrap(), 2);
+        let mut seen = 0;
+        assert!(
+            worker.take_if_new(&mut seen).is_none(),
+            "bootstrap answer is not a fresh opening snapshot"
+        );
+        // Close while this opening's read is in flight, then finish an effect.
+        worker.set_periodic(false);
+        worker.resampler().resample_soon();
+        release.send(()).unwrap();
+        assert_eq!(
+            starts.recv_timeout(TEST_DEADLINE).unwrap(),
+            3,
+            "completion during a read requires a later read"
+        );
+        release.send(()).unwrap();
+        wait_for_generation(&worker, 3);
+        assert_eq!(worker.take_if_new(&mut seen).unwrap().reading, Some(3));
+        assert!(starts.recv_timeout(Duration::from_millis(30)).is_err());
+    }
+
+    #[test]
+    fn source_policy_and_opening_leave_bound_ids_and_handles_stable() {
+        let mut registry = SamplerRegistry::new();
+        registry.set_active(false);
+        let ids = registry.register(vec![
+            Source::File {
+                path: PathBuf::from("/nonexistent/chonk-panel-fixture"),
+                interval: Duration::from_secs(3600),
+            },
+            Source::Clock {
+                interval: Duration::from_secs(1),
+            },
+        ]);
+        registry.set_periodic(ids[0], false);
+        let before = registry.resampler(ids[0]).unwrap();
+        for _ in 0..10 {
+            registry.fresh_on_open(ids[0], true);
+            registry.set_periodic(ids[0], false);
+        }
+        let after = registry.resampler(ids[0]).unwrap();
+        assert!(Arc::ptr_eq(&before.shared, &after.shared));
+        assert_eq!(registry.samplers.len(), 2);
+        assert_eq!(ids, [SourceId::from_index(0), SourceId::from_index(1)]);
+        let Sampler::Text(worker) = &registry.samplers[0] else {
+            unreachable!()
+        };
+        assert!(
+            worker.start.is_some(),
+            "hidden lifecycle changes still create no thread"
+        );
+    }
+
+    #[test]
+    fn showing_a_worker_never_folds_a_counter_from_an_earlier_visibility_period() {
+        use std::sync::mpsc;
+
+        // Cover an unread result completed before hide, during hide,
+        // and a read that spans both hide and show. Folding an old byte
+        // counter on show makes the following fresh counter's delta
+        // appear to have happened in milliseconds instead of the whole
+        // hidden interval, producing an artificial network-rate spike.
+        for completion in ["before hide", "while hidden", "after show"] {
+            let (started, starts) = mpsc::channel();
+            let (release, proceed) = mpsc::channel();
+            let mut count = 0;
+            let mut worker = Worker::spawn(
+                "test-resume-counter".into(),
+                Duration::from_secs(3600),
+                true,
+                move || {
+                    count += 1;
+                    let _ = started.send(count);
+                    let _ = proceed.recv(); // Release or sender drop, never a scheduler-driven sample.
+                    Outcome::Sampled(Some(count))
+                },
+            );
+            assert_eq!(starts.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+            if completion == "before hide" {
+                release.send(()).unwrap();
+                wait_for_generation(&worker, 1);
+            }
+            worker.set_active(false);
+            if completion == "while hidden" {
+                release.send(()).unwrap();
+                wait_for_generation(&worker, 1);
+            }
+            worker.set_active(true);
+            if completion == "after show" {
+                release.send(()).unwrap();
+            }
+            assert_eq!(starts.recv_timeout(Duration::from_secs(2)).unwrap(), 2);
+            let mut seen = 0;
+            assert!(
+                worker.take_if_new(&mut seen).is_none(),
+                "{completion}: old counter is not fresh after show"
+            );
+            release.send(()).unwrap();
+            wait_for_generation(&worker, 2);
+            assert_eq!(worker.take_if_new(&mut seen).unwrap().reading, Some(2));
+        }
+    }
+
+    #[test]
+    fn a_permanently_unusable_source_stays_reportable_across_visibility_changes() {
+        let mut worker = Worker::<u32>::spawn(
+            "test-unavailable-resume".into(),
+            Duration::from_secs(1),
+            true,
+            || Outcome::Unusable,
+        );
+        wait_for_generation(&worker, 1);
+        worker.set_active(false);
+        worker.set_active(true);
+        assert!(worker.take_if_new(&mut 0).unwrap().unusable);
+    }
+
+    struct NotifyDrop(std::sync::mpsc::Sender<()>);
+
+    impl Drop for NotifyDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[test]
+    fn inactive_worker_starts_on_show_and_pauses_between_samples() {
+        use std::sync::mpsc;
+
+        let (sampled, samples) = mpsc::channel();
+        let (release, proceed) = mpsc::channel();
+        let (exited, exit) = mpsc::channel();
+        let lifetime = NotifyDrop(exited);
+        let mut worker = Worker::spawn(
+            "test-visibility".into(),
+            Duration::from_millis(1),
+            false,
+            move || {
+                let _ = &lifetime;
+                let _ = sampled.send(());
+                let _ = proceed.recv();
+                Outcome::Sampled(Some("reading".to_string()))
+            },
+        );
+        // The same effect handle must work before and after first show.
+        let resample = worker.resampler();
+        resample.resample_soon();
+        assert_eq!(
+            samples.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        worker.set_active(true);
+        samples
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first show samples");
+        // Hide while a read is in flight. It may finish, but must not
+        // poll again, including when an old effect asks for a resample.
+        worker.set_active(false);
+        release.send(()).unwrap();
+        resample.resample_soon();
+        assert_eq!(
+            samples.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        worker.set_active(true);
+        samples
+            .recv_timeout(Duration::from_secs(2))
+            .expect("show refreshes immediately");
+        worker.set_active(false);
+        release.send(()).unwrap();
+        drop(worker);
+        exit.recv_timeout(Duration::from_secs(2))
+            .expect("dropping a hidden worker releases its closure");
+        // Keeping an effect handle must not keep the sampling thread alive.
+        resample.resample_soon();
+    }
+
+    #[test]
+    fn dropping_an_idle_worker_wakes_it_without_waiting_for_its_interval() {
+        use std::sync::mpsc;
+
+        let (sampled, samples) = mpsc::channel();
+        let (exited, exit) = mpsc::channel();
+        let lifetime = NotifyDrop(exited);
+        let worker = Worker::spawn(
+            "test-teardown".into(),
+            Duration::from_secs(3600),
+            true,
+            move || {
+                let _ = &lifetime;
+                let _ = sampled.send(());
+                Outcome::Sampled(Some(1_u32))
+            },
+        );
+        samples
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker samples");
+        drop(worker);
+        exit.recv_timeout(Duration::from_secs(2))
+            .expect("teardown wakes the hour-long wait");
+    }
+
+    #[test]
+    fn an_effect_completed_during_sampling_requests_a_fresh_reading() {
+        use std::sync::mpsc;
+
+        let (sampled, samples) = mpsc::channel();
+        let (release, proceed) = mpsc::channel();
+        let worker = Worker::spawn(
+            "test-resample".into(),
+            Duration::from_secs(3600),
+            true,
+            move || {
+                let _ = sampled.send(());
+                let _ = proceed.recv();
+                Outcome::Sampled(Some(1_u32))
+            },
+        );
+        samples
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first read starts");
+        worker.resampler().resample_soon();
+        release.send(()).unwrap();
+        samples
+            .recv_timeout(Duration::from_secs(2))
+            .expect("in-flight nudge is not discarded");
+        drop(worker);
+        release.send(()).unwrap();
+    }
+
+    /// The sysfs walk with holes in it, at its new home. This used to
+    /// be `power.rs`'s `read_supplies_from` test; the walk moved onto a
+    /// sampler thread, and the coverage moved with it.
+    #[test]
+    fn read_tree_walks_a_fixture_directory_and_degrades_per_field() {
+        let root =
+            std::env::temp_dir().join(format!("chonkstep-tree-fixture-{}", std::process::id()));
+        let bat = root.join("BAT0");
+        let ac = root.join("AC");
+        std::fs::create_dir_all(&bat).unwrap();
+        std::fs::create_dir_all(&ac).unwrap();
+        std::fs::write(bat.join("type"), "Battery\n").unwrap();
+        std::fs::write(bat.join("capacity"), "73\n").unwrap();
+        // No status file at all: the field must degrade, not the entry.
+        std::fs::write(ac.join("type"), "Mains\n").unwrap();
+        std::fs::write(ac.join("online"), "1\n").unwrap();
+        std::fs::create_dir_all(ac.join("device")).unwrap();
+
+        let entries = read_tree(
+            &root,
+            &["type", "capacity", "status", "online"],
+            &["device"],
+        );
+        // Sorted by name: "AC" before "BAT0", whatever order the
+        // filesystem handed them back in.
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["AC", "BAT0"]
+        );
+        assert_eq!(entries[0].file(0), Some("Mains\n"));
+        assert_eq!(entries[0].file(3), Some("1\n"));
+        assert_eq!(
+            entries[0].file(1),
+            None,
+            "the AC supply has no capacity file"
+        );
+        assert!(entries[0].dir(0));
+        assert_eq!(entries[1].file(0), Some("Battery\n"));
+        assert_eq!(entries[1].file(1), Some("73\n"));
+        assert_eq!(
+            entries[1].file(2),
+            None,
+            "the missing status file degrades to None"
+        );
+        assert!(!entries[1].dir(0), "BAT0 has no device subdirectory");
+
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            read_tree(&root, &["type"], &[]),
+            Vec::new(),
+            "a missing root reads as no entries"
+        );
+    }
+
+    /// The registry's clock has no worker and no interval timer: it is
+    /// evaluated every pass and reports `fresh` when the truncated value
+    /// actually moved. That is both cheaper than a thread and more
+    /// accurate than a throttle would be — a one-second throttle started
+    /// at an arbitrary moment ticks the second hand up to a second late.
+    #[test]
+    fn a_clock_source_goes_fresh_exactly_when_its_truncated_value_moves() {
+        let mut registry = SamplerRegistry::new();
+        let ids = registry.register(vec![Source::Clock {
+            interval: Duration::from_secs(1),
+        }]);
+        let id = ids[0];
+
+        registry.refresh();
+        assert!(
+            registry.samples().fresh(id),
+            "the first pass is always news"
+        );
+        let first = registry.samples().hms(id);
+        registry.refresh();
+        // Two adjacent calls can straddle a real second boundary (or
+        // the test thread can be descheduled). Freshness follows the
+        // observed value, not an assumption about scheduler timing.
+        let second = registry.samples().hms(id);
+        assert_eq!(registry.samples().fresh(id), second != first);
+    }
+
+    #[test]
+    fn a_clock_sources_interval_truncates_the_reading() {
+        let minute = wall_clock(60);
+        assert_eq!(
+            minute.2, 0,
+            "a minute-granularity clock never reports seconds"
+        );
+        let hour = wall_clock(3600);
+        assert_eq!((hour.1, hour.2), (0, 0));
+        // Truncation must not round a second past its own minute.
+        assert!(wall_clock(1).2 < 60);
+    }
+
+    /// Registration is positional and ids are stable across widgets:
+    /// the second widget's first source must not collide with the
+    /// first widget's.
+    #[test]
+    fn ids_are_assigned_in_order_and_never_reused_across_widgets() {
+        let mut registry = SamplerRegistry::new();
+        let first = registry.register(vec![
+            Source::Clock {
+                interval: Duration::from_secs(1),
+            },
+            Source::Clock {
+                interval: Duration::from_secs(60),
+            },
+        ]);
+        let second = registry.register(vec![Source::Clock {
+            interval: Duration::from_secs(1),
+        }]);
+        assert_eq!(
+            first,
+            vec![SourceId::from_index(0), SourceId::from_index(1)]
+        );
+        assert_eq!(second, vec![SourceId::from_index(2)]);
+        assert!(
+            registry.resampler(first[0]).is_none(),
+            "a clock has no worker to nudge"
+        );
+    }
+
+    /// A file source that cannot read reports nothing and stays alive.
+    /// The distinction from `unusable` is the point: a missing binary
+    /// is permanent, a missing sysfs path is a dongle that has not been
+    /// plugged in yet.
+    #[test]
+    fn a_missing_file_source_is_absent_but_never_unusable() {
+        let mut registry = SamplerRegistry::new();
+        let ids = registry.register(vec![Source::File {
+            path: PathBuf::from("/nonexistent/chonkstep/definitely-not-here"),
+            interval: Duration::from_millis(5),
+        }]);
+        let id = ids[0];
+        // Spin until the worker's first run has landed rather than
+        // sleeping a fixed time: this test must not be a race on a
+        // loaded runner, and the worker's first read happens
+        // immediately (the interval is the gap *between* runs).
+        for _ in 0..2_000 {
+            registry.refresh();
+            if registry.samples().fresh(id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            registry.samples().fresh(id),
+            "the missing-file worker must publish an actual reading attempt"
+        );
+        assert_eq!(registry.samples().text(id), None);
+        assert!(
+            !registry.samples().unusable(id),
+            "a file that is not there yet may be there later"
+        );
+    }
+
+    /// The happy path of a file source, end to end through a real
+    /// worker thread: a file on disk becomes a `Samples::text`.
+    #[test]
+    fn a_file_source_delivers_its_contents_through_a_worker_thread() {
+        let path =
+            std::env::temp_dir().join(format!("chonkstep-file-fixture-{}", std::process::id()));
+        std::fs::write(&path, "MemTotal: 1 kB\n").unwrap();
+
+        let mut registry = SamplerRegistry::new();
+        let id = registry.register(vec![Source::File {
+            path: path.clone(),
+            interval: Duration::from_millis(5),
+        }])[0];
+        let mut text = None;
+        for _ in 0..2_000 {
+            registry.refresh();
+            if let Some(contents) = registry.samples().text(id) {
+                text = Some(contents.to_string());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::fs::remove_file(&path).ok();
+        assert_eq!(text.as_deref(), Some("MemTotal: 1 kB\n"));
+    }
+
+    /// A program that is not on the system is `unusable`, once, and
+    /// then its worker stops — a missing binary is permanent within a
+    /// session, and retrying it once a second forever would be a failed
+    /// spawn per second for nothing.
+    #[test]
+    fn a_command_that_cannot_spawn_is_unusable_and_stops_trying() {
+        let mut registry = SamplerRegistry::new();
+        let id = registry.register(vec![Source::Command {
+            program: "chonkstep-no-such-program-exists",
+            args: Vec::new(),
+            interval: Duration::from_millis(5),
+        }])[0];
+        for _ in 0..2_000 {
+            registry.refresh();
+            if registry.samples().unusable(id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(registry.samples().unusable(id));
+        assert_eq!(registry.samples().text(id), None);
+
+        // The worker returned, so nothing bumps the generation again:
+        // the flag persists without a single further spawn attempt.
+        registry.refresh();
+        assert!(
+            !registry.samples().fresh(id),
+            "a stopped worker produces no more readings"
+        );
+        assert!(
+            registry.samples().unusable(id),
+            "and the verdict it left behind stands"
+        );
+    }
+
+    /// The regression guard for the incident itself, stated as the
+    /// property rather than the symptom.
+    ///
+    /// `refresh` is what runs on the compositor's repaint thread. A
+    /// sampler parked in a child process must not wait on that child — the
+    /// exact opposite of what `nmcli dev wifi` did from `tick()` on
+    /// 2026-08-29, when a ~3.6s scan became a ~3.6s freeze.
+    ///
+    /// Prove ordering, not a 16 ms microbenchmark: the child cannot exit
+    /// until all refreshes have returned. The timeout is only a deadlock
+    /// watchdog, so a descheduled test thread is not mistaken for blocking I/O.
+    #[test]
+    fn a_sampler_blocked_in_a_child_process_does_not_block_refresh() {
+        let mut gate = CommandGate::new();
+        let mut registry = SamplerRegistry::new();
+        registry.register(vec![Source::Command {
+            program: "sh",
+            args: gate.args(),
+            interval: Duration::from_secs(3600),
+        }]);
+        gate.wait_started();
+        let (done, returned) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            for _ in 0..1_000 {
+                registry.refresh();
+                let _ = registry.samples();
+            }
+            registry.set_active(false);
+            let Sampler::Text(worker) = &registry.samplers[0] else {
+                unreachable!()
+            };
+            let generation = worker.shared.state.lock().unwrap().generation;
+            let _ = done.send(generation);
+            registry
+        });
+        let result = returned.recv_timeout(TEST_DEADLINE);
+        assert!(
+            !gate.root.join("finished").exists(),
+            "the child must still be gated"
+        );
+        gate.unblock();
+        let registry = caller.join().unwrap();
+        assert_eq!(result.expect("refresh must return before the child is released"), 0,
+            "refresh must finish while sampling is still blocked, not after the command deadline kills it");
+        let Sampler::Text(worker) = &registry.samplers[0] else {
+            unreachable!()
+        };
+        wait_for_generation(worker, 1); // The child has exited and has been reaped.
+    }
+
+    /// The same claim for the click path: `Effect::Run` hands the
+    /// command to a thread and returns, so a `wpctl` or `nmcli` that
+    /// hangs costs a tile that does not catch up rather than a desktop
+    /// that stops drawing. And the same for the plural — a
+    /// multi-command action (a sink switch plus its stream migrations)
+    /// is one handoff and one thread: the commands wait for each other,
+    /// the desktop waits for none of them.
+    #[test]
+    fn running_effects_returns_before_the_commands_do() {
+        for count in [1, 2] {
+            let mut gates: Vec<_> = (0..count).map(|_| CommandGate::new()).collect();
+            let (completed, completions) = std::sync::mpsc::channel();
+            let commands = gates
+                .iter()
+                .map(|gate| {
+                    (
+                        "sh",
+                        gate.args(),
+                        Some(Resampler {
+                            shared: Arc::new(NotifyWake(completed.clone())),
+                        }),
+                    )
+                })
+                .collect();
+            let (done, returned) = std::sync::mpsc::channel();
+            let caller = std::thread::spawn(move || {
+                run_detached(commands, Vec::new());
+                let _ = done.send(());
+            });
+            gates[0].wait_started();
+            let result = returned.recv_timeout(TEST_DEADLINE);
+            assert!(gates
+                .iter()
+                .all(|gate| !gate.root.join("finished").exists()));
+            if count == 2 {
+                assert!(
+                    !gates[1].root.join("started").exists(),
+                    "commands must run in sequence"
+                );
+            }
+            // Always release/reap every command before asserting the result,
+            // including when a synchronous-execution regression is detected.
+            for gate in &mut gates {
+                gate.wait_started();
+                gate.unblock();
+                completions
+                    .recv_timeout(TEST_DEADLINE)
+                    .expect("released effect is reaped and requests resampling");
+                assert!(gate.root.join("finished").exists());
+            }
+            caller.join().unwrap();
+            result.expect("run_detached must return before any child is released");
+        }
+        run_detached(Vec::new(), Vec::new());
+    }
+
+    /// The deadline, on the shape that made it necessary: a program
+    /// that never exits (`bluetoothctl` with no `org.bluez` on the bus,
+    /// and `sleep` here standing in for it) is killed and reported as
+    /// *no reading*, so its widget draws a dead face rather than a
+    /// number from before the tool wedged. Without this the worker
+    /// thread — and the child — would be parked for the life of the
+    /// session.
+    #[test]
+    fn a_command_that_never_exits_is_killed_and_reads_as_nothing() {
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sleep exists");
+        let start = std::time::Instant::now();
+        let reading = wait_with_deadline(child, "sleep", Duration::from_millis(150));
+        assert!(
+            reading.is_none(),
+            "a killed command has no reading, exactly as a failed one has none"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "and the wait ended at the deadline, not at the child's own pace"
+        );
+    }
+
+    /// The ordinary path is untouched by the deadline machinery: a
+    /// command that exits in time still hands back its stdout, which is
+    /// the whole product of a `Source::Command`.
+    #[test]
+    fn a_command_that_exits_in_time_still_yields_its_output() {
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("echo")
+            .arg("hello")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("echo exists");
+        assert_eq!(
+            wait_with_deadline(child, "echo", Duration::from_secs(5)).as_deref(),
+            Some("hello\n")
+        );
+
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("false")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("false exists");
+        assert_eq!(
+            wait_with_deadline(child, "false", Duration::from_secs(5)),
+            None,
+            "a non-zero exit is still no reading"
+        );
+    }
+
+    #[test]
+    fn a_reply_larger_than_the_pipe_is_drained_before_waiting_for_exit() {
+        // 256 KiB exceeds an ordinary Linux pipe's capacity. Waiting
+        // for `head` to exit before reading turns this valid reply into
+        // a timeout, even though neither process has useful work left.
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("head")
+            .args(["-c", "262144", "/dev/zero"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("head exists");
+        let output =
+            wait_with_deadline(child, "head", TEST_DEADLINE).expect("complete large reply");
+        assert_eq!(output.len(), 262144);
+        assert!(output.bytes().all(|byte| byte == 0));
+    }
+
+    #[test]
+    fn the_output_limit_accepts_the_boundary_and_rejects_the_whole_oversized_reply() {
+        for length in [SAMPLE_OUTPUT_LIMIT, SAMPLE_OUTPUT_LIMIT + 1] {
+            #[allow(clippy::disallowed_methods)]
+            let child = Command::new("head")
+                .args(["-c", &length.to_string(), "/dev/zero"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("head exists");
+            let output = wait_with_deadline(child, "head", TEST_DEADLINE);
+            if length == SAMPLE_OUTPUT_LIMIT {
+                assert_eq!(output.as_ref().map(String::len), Some(length));
+            } else {
+                assert_eq!(
+                    output, None,
+                    "an over-limit prefix must never become a valid reading"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_utf8_is_validated_only_when_the_complete_reply_arrives() {
+        for (script, expected) in [
+            ("printf '\\303'; sleep 0.02; printf '\\251'", Some("é")),
+            ("printf '\\377'", None),
+            ("printf plausible; exit 1", None),
+        ] {
+            #[allow(clippy::disallowed_methods)]
+            let child = Command::new("sh")
+                .args(["-c", script])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("sh exists");
+            assert_eq!(
+                wait_with_deadline(child, "sh", TEST_DEADLINE).as_deref(),
+                expected
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_inherited_stdout_writer_cannot_extend_the_deadline() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::process::Stdio;
+
+        // Two real subprocesses inherit the same write endpoint, as
+        // when a query forks a descendant before returning. Keeping
+        // both children directly owned by this test lets it reap the
+        // writer even if the deadline implementation regresses.
+        let mut descriptors = [-1; 2];
+        assert_eq!(
+            // SAFETY: the two-element array has room for both returned fds.
+            unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        // SAFETY: successful pipe2 returned two new owned descriptors.
+        let reader = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+        // SAFETY: this is the other newly owned descriptor from pipe2,
+        // distinct from reader and not previously wrapped or closed.
+        let writer = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+        #[allow(clippy::disallowed_methods)]
+        let mut query = Command::new("echo")
+            .arg("complete")
+            .stdout(Stdio::from(writer.try_clone().unwrap()))
+            .spawn()
+            .expect("echo exists");
+        query.stdout = Some(reader.into());
+        #[allow(clippy::disallowed_methods)]
+        let mut inherited = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::from(writer))
+            .spawn()
+            .expect("sleep exists");
+        let (finished, result) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let reading = wait_with_deadline(query, "echo", Duration::from_millis(150));
+            let _ = finished.send(reading);
+        });
+        let completed = result.recv_timeout(Duration::from_secs(3));
+        // Release the inherited endpoint before assertions, including
+        // on the old blocking-read path, so no test child is abandoned.
+        reap_failed_command(&mut inherited);
+        waiter.join().unwrap();
+        assert_eq!(
+            completed.expect("the worker must finish while the inherited writer remains alive"),
+            None
+        );
+    }
+
+    #[test]
+    fn stdout_eof_does_not_replace_a_successful_child_exit() {
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("sh")
+            .args(["-c", "exec 1>&-; exec sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh exists");
+        assert_eq!(
+            wait_with_deadline(child, "sh", Duration::from_millis(150)),
+            None
+        );
+    }
+}

@@ -8,6 +8,8 @@ cd "$(dirname "$0")/.."
 cargo build --release --workspace \
   --bin chonkstep \
   --bin chonkstep-wayland \
+  --bin chonk-dock \
+  --bin chonk-btpair \
   --bin chonk-netjoin \
   --bin chonk-about \
   --bin omarchy-export-themes \

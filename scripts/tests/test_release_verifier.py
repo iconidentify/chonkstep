@@ -27,7 +27,7 @@ class ReleaseVerifierTests(unittest.TestCase):
                 from pathlib import Path
 
                 binaries = ("chonkstep", "chonkstep-wayland", "chonk-about",
-                            "chonk-netjoin", "omarchy-export-themes")
+                            "chonk-netjoin", "chonk-dock", "chonk-btpair", "omarchy-export-themes")
                 if sys.argv[1] == "-xOf":
                     print("pkgname = chonkstep")
                     print("pkgver = 9.8.7-1")
@@ -43,6 +43,11 @@ class ReleaseVerifierTests(unittest.TestCase):
                     stage = Path(sys.argv[sys.argv.index("-C") + 1])
                     (stage / "usr/bin").mkdir(parents=True)
                     (stage / "usr/lib/chonkstep").mkdir(parents=True)
+                    (stage / "usr/share/applications").mkdir(parents=True)
+                    (stage / "usr/share/applications/chonk-dock.desktop").write_text("[Desktop Entry]\nType=Application\nName=Chonk Dock\nExec=chonk-dock\n")
+                    installer = stage / "usr/bin/chonk-get"
+                    installer.write_text("#!/bin/sh\nexit 0\n")
+                    installer.chmod(0o755)
                     verifier = stage / "usr/lib/chonkstep/verify-install.sh"
                     verifier.write_text("#!/bin/sh\nexit 0\n")
                     verifier.chmod(0o755)

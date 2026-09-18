@@ -5,6 +5,26 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-18
+
+- Restore the NeXTSTEP dock as `chonk-dock`, a standalone application in the
+  `dock/` subproject with native Wayland and X11 backends. Neither compositor
+  links the dock; Omarchy starts no dock process, samplers or hidden surfaces.
+- Restore the original instrument artwork, audio/network/Bluetooth panels,
+  application pins and running indicators, workspace Clip, tile reordering,
+  and minimized-window restore tiles.
+- Restore dockapp hosting, Rust/Python/Go SDKs, the clock, Shelf and appearance
+  switch examples, and `chonk-get`. Stopping the dock shuts down its dockapps
+  and releases its screen reservation. Installations do not register examples
+  or enable autostart.
+- Follow live Wayland output scales and X11 Xft DPI, support explicit output
+  selection, and provide display-specific start/status/stop/toggle controls.
+- Honor external EWMH dock struts in the X11 window manager, including live
+  reservation changes and release when the owning application exits.
+- Include the optional dock and helpers in the Arch and Debian/LCOS binary
+  packages. Add native X11 and Wayland lifecycle/input/scaling tests and SDK
+  checks to CI.
+
 ## [0.6.1] - 2026-09-15
 
 - Read Omarchy's default and per-workspace layouts, evaluate window-rule size
