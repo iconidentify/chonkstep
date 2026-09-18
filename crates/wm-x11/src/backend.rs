@@ -18,6 +18,7 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE};
 
 mod frame_shape;
+mod struts;
 use frame_shape::FrameShape;
 
 // GetProperty's length is in 32-bit words, even for 8-bit strings. Bound
@@ -101,6 +102,8 @@ pub enum X11BackendError {
 /// not window-manager-core concerns — `wm-core` has no notion of a dock
 /// or a root menu.
 pub struct X11Backend {
+    external_struts: HashMap<Window, [u32; 12]>,
+    struts_dirty: bool,
     conn: RustConnection,
     root: Window,
     screen_width: u16,
@@ -491,6 +494,8 @@ impl X11Backend {
         conn.flush()?;
 
         Ok(Self {
+            external_struts: HashMap::new(),
+            struts_dirty: false,
             conn,
             root,
             screen_width: screen.width_in_pixels,
@@ -1215,9 +1220,11 @@ impl X11Backend {
                 // into a gap between "we know the window" and "we
                 // selected for its property changes".
                 self.watch_client_properties(e.window);
+                self.refresh_strut(e.window, true);
                 Some(BackendEvent::MapRequest(XWindow(e.window)))
             }
             Event::UnmapNotify(e) => {
+                self.struts_dirty |= self.external_struts.remove(&e.window).is_some();
                 if self.known_clients.remove(&e.window) {
                     Some(BackendEvent::Unmapped(XWindow(e.window)))
                 } else {
@@ -1225,6 +1232,7 @@ impl X11Backend {
                 }
             }
             Event::DestroyNotify(e) => {
+                self.struts_dirty |= self.external_struts.remove(&e.window).is_some();
                 self.known_clients.remove(&e.window);
                 self.frame_to_client.retain(|_, client| *client != e.window);
                 Some(BackendEvent::Destroyed(XWindow(e.window)))
@@ -1288,6 +1296,11 @@ impl X11Backend {
                 Some(BackendEvent::KeyRelease(KeyCombo { keysym, modifiers }))
             }
             Event::PropertyNotify(e) => {
+                if e.atom == self.ewmh.net_wm_strut || e.atom == self.ewmh.net_wm_strut_partial {
+                    let mapped = self.conn.get_window_attributes(e.window).ok()
+                        .and_then(|c| c.reply().ok()).is_some_and(|r| r.map_state == MapState::VIEWABLE);
+                    self.refresh_strut(e.window, mapped);
+                }
                 if !self.known_clients.contains(&e.window) {
                     return None;
                 }
@@ -1506,6 +1519,8 @@ fn workspace_index_from_ewmh(desktop: u32) -> Option<usize> {
 /// group (the title-reading path needed them first) and stay where they
 /// were.
 struct EwmhAtoms {
+    net_wm_strut: Atom,
+    net_wm_strut_partial: Atom,
     net_supported: Atom,
     net_supporting_wm_check: Atom,
     net_active_window: Atom,
@@ -1544,6 +1559,8 @@ struct EwmhAtoms {
 impl EwmhAtoms {
     fn intern(conn: &RustConnection) -> Result<Self, X11BackendError> {
         Ok(Self {
+            net_wm_strut: conn.intern_atom(false, b"_NET_WM_STRUT")?.reply()?.atom,
+            net_wm_strut_partial: conn.intern_atom(false, b"_NET_WM_STRUT_PARTIAL")?.reply()?.atom,
             net_supported: conn.intern_atom(false, b"_NET_SUPPORTED")?.reply()?.atom,
             net_supporting_wm_check: conn.intern_atom(false, b"_NET_SUPPORTING_WM_CHECK")?.reply()?.atom,
             net_active_window: conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom,
@@ -1654,6 +1671,8 @@ impl EwmhAtoms {
     /// interned elsewhere — see `X11Backend::net_wm_name`).
     fn supported(&self, net_wm_name: Atom) -> Vec<Atom> {
         vec![
+            self.net_wm_strut,
+            self.net_wm_strut_partial,
             self.net_supported,
             self.net_supporting_wm_check,
             self.net_active_window,
@@ -2397,6 +2416,7 @@ impl Backend for X11Backend {
                 // already up when this WM started — so this is their
                 // only chance to be put under property watch.
                 self.watch_client_properties(win);
+                self.refresh_strut(win, true);
                 result.push(XWindow(win));
             }
         }
@@ -2409,6 +2429,9 @@ impl Backend for X11Backend {
     /// which monitor index means which screen.
     fn monitors(&self) -> Vec<MonitorInfo> {
         self.monitors.clone()
+    }
+    fn constrain_workarea(&self, area: Rect) -> Rect {
+        struts::constrain(area, self.screen_size(), self.external_struts.values().copied())
     }
 
     fn monitors_ref(&self) -> &[MonitorInfo] {

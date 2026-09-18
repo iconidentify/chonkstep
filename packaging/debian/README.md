@@ -14,6 +14,7 @@ on Debian and Devuan too.
 | --- | --- | --- |
 | `/usr/bin/chonkstep` | `chonkstep-wayland` | The Wayland session wants DRM, libinput and libseat. LCOS has no logind and no seat manager. |
 | `chonk-about`, `chonk-netjoin`, `chonkstep-bugreport` | `omarchy-export-themes`, `omarchy-install-desktop-chonkstep` | There is no Omarchy here to export to. |
+| `chonk-dock`, `chonk-btpair`, `chonk-get` and the dock launcher | a dock autostart service | The dock is an optional, separate X11/Wayland client. Installing it starts no process. |
 | `/usr/lib/chonkstep/xsession.sh` and the reload/restart/verify helpers | `wayland-session.sh`, `chonkstep-session` | Same as above. |
 | `/usr/share/xsessions/chonkstep.desktop` | the SDDM theme, the uwsm session entries | LCOS's display manager is LightDM. |
 | the X11-relevant docs | portal, screen-sharing, Wayland and Omarchy docs | Shipping them would promise features this package does not have. |

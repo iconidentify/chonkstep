@@ -169,6 +169,9 @@ pub trait Backend {
     /// A backend without real multi-monitor support yet reports a
     /// single primary entry spanning the whole screen.
     fn monitors(&self) -> Vec<MonitorInfo>;
+    /// Constrain a workarea by native external-panel reservations, if any.
+    /// X11 uses EWMH struts; other adapters can retain the supplied baseline.
+    fn constrain_workarea(&self, area: Rect) -> Rect { area }
     /// The same stable monitor ledger by reference, for hot read-only
     /// paths that must not deep-copy every output name merely to inspect
     /// an index or a rectangle.

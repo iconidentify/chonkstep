@@ -359,6 +359,9 @@ fn main() {
             shell.on_screen_resize(&mut wm, new_size);
             wm.set_workarea(shell.workarea(new_size));
         }
+        if wm.backend_mut().take_workarea_change() {
+            shell.apply_workareas(&mut wm);
+        }
 
         // Shell-surface clicks drain to the shell, with the one routing
         // decision the shell cannot make for itself (see `root` above):

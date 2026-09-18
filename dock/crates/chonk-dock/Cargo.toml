@@ -1,0 +1,33 @@
+[package]
+name = "chonk-dock"
+description = "The standalone X11/Wayland NeXTSTEP dock, instruments, launchers and dockapp host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chonk-dock-proto = { path = "../chonk-dock-proto" }
+chonk-dock-widget = { path = "../chonk-dock-widget" }
+chonk-instruments = { path = "../chonk-instruments" }
+wm-theme = { package = "chonk-dock-theme", path = "../chonk-dock-theme" }
+wm-theme-api = { path = "../../../crates/wm-theme-api" }
+wm-core = { path = "../../../crates/wm-core" }
+chonk-ipc = { path = "../../../crates/chonk-ipc" }
+cosmic-text = "0.19"
+tiny-skia = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+tempfile = "3"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", features = ["randr"] }
+
+[dev-dependencies]
+wm-core = { path = "../../../crates/wm-core", features = ["test-support"] }
+x11rb = { version = "0.13", features = ["xtest"] }

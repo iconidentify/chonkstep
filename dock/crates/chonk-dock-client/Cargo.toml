@@ -1,0 +1,12 @@
+[package]
+name = "chonk-dock-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chonk-dock-proto = { path = "../chonk-dock-proto" }
+wm-theme = { package = "chonk-dock-theme", path = "../chonk-dock-theme" }
+toml = "0.9"
+tracing = "0.1"
+tiny-skia = "0.11"

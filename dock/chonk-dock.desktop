@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Chonk Dock
+Comment=NeXTSTEP dock, launchers and instruments
+Exec=chonk-dock --toggle
+Icon=preferences-desktop
+Terminal=false
+Categories=Utility;
+Keywords=dock;nextstep;instruments;

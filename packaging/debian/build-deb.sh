@@ -67,12 +67,18 @@ echo "==> building chonkstep $VERSION-$REVISION ($ARCH), X11 session only"
 # 26,996,816 bytes and this one 29,666,504, and no LCOS string appears
 # in the former at all.
 cargo build --release --locked --features lcos \
-    -p chonkstep -p chonk-about -p chonk-netjoin
+    -p chonkstep -p chonk-about -p chonk-netjoin -p chonk-dock -p chonk-btpair
 
 echo "==> staging package tree"
 install -Dm755 "$CARGO_TARGET_DIR/release/chonkstep"     "$STAGE/usr/bin/chonkstep"
 install -Dm755 "$CARGO_TARGET_DIR/release/chonk-about"   "$STAGE/usr/bin/chonk-about"
 install -Dm755 "$CARGO_TARGET_DIR/release/chonk-netjoin" "$STAGE/usr/bin/chonk-netjoin"
+install -Dm755 "$CARGO_TARGET_DIR/release/chonk-dock" "$STAGE/usr/bin/chonk-dock"
+install -Dm755 "$CARGO_TARGET_DIR/release/chonk-btpair" "$STAGE/usr/bin/chonk-btpair"
+install -Dm755 dock/chonk-get "$STAGE/usr/bin/chonk-get"
+install -Dm644 dock/chonk-dock.desktop "$STAGE/usr/share/applications/chonk-dock.desktop"
+install -Dm644 dock/README.md "$STAGE/usr/share/doc/chonkstep/dock/README.md"
+cp -a dock/bindings dock/docs dock/examples "$STAGE/usr/share/doc/chonkstep/dock/"
 install -Dm755 scripts/chonkstep-bugreport                "$STAGE/usr/bin/chonkstep-bugreport"
 
 # The session launcher and the two live-reload helpers the running
@@ -126,7 +132,7 @@ install -d "$STAGE/DEBIAN"
 mkdir -p "$STAGE/debian"
 touch "$STAGE/debian/control"
 SHLIB_DEPS="$(cd "$STAGE" && dpkg-shlibdeps -O --ignore-missing-info \
-    usr/bin/chonkstep usr/bin/chonk-about usr/bin/chonk-netjoin 2>/dev/null \
+    usr/bin/chonkstep usr/bin/chonk-about usr/bin/chonk-netjoin usr/bin/chonk-dock usr/bin/chonk-btpair 2>/dev/null \
     | sed 's/^shlibs:Depends=//')"
 rm -rf "$STAGE/debian"
 : "${SHLIB_DEPS:=libc6}"
@@ -159,12 +165,13 @@ Architecture: $ARCH
 Maintainer: chonkstep maintainers <noreply@github.com>
 Depends: $SHLIB_DEPS, dbus, x-terminal-emulator
 Recommends: picom, fonts-dejavu-core
-Suggests: x11-xserver-utils, fonts-jetbrains-mono, fonts-noto-core, xinit, fonts-urw-base35
+Suggests: x11-xserver-utils, fonts-jetbrains-mono, fonts-noto-core, xinit, fonts-urw-base35, python3 (>= 3.11)
 Homepage: https://github.com/iconidentify/chonkstep
 Description: NeXTSTEP-style X11 window manager for LCOS
  chonkstep is a traditional floating window manager whose chrome, dock and
  menus follow the NeXTSTEP look: chiseled bevels, a titlebar carrying a
- miniaturize box and a close box, and a dock of live instrument tiles.
+ miniaturize box and a close box. The optional chonk-dock application
+ provides live instrument tiles in its own process and is not autostarted.
  .
  This package ships the X11 session only. It runs against any X server
  that speaks X11R6, including the XLibre server used by LCOS, and pulls in

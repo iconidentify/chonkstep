@@ -1,0 +1,70 @@
+# The instrument crate's own lint. Clippy resolves `clippy.toml` from
+# `CARGO_MANIFEST_DIR` upward and stops at the first file it finds, so
+# this one applies to exactly this crate — and, for the same reason,
+# *replaces* the workspace file rather than extending it. The
+# workspace's three bans are therefore repeated at the bottom; dropping
+# them here would silently un-ban blocking on a child process in the one
+# crate whose history most argues for the ban.
+#
+# # What this is for
+#
+# `DockWidget::update` is a fold over data that has already been
+# collected. `render` draws that state. `on_input` returns an intent.
+# None of the three has any business opening a file, spawning a process,
+# or starting a thread — every one of those either arrives as a
+# `Source` or leaves as an `Effect`, and the dock does the work on a
+# thread of its own.
+#
+# That was already the documented rule. It was documented for the whole
+# life of the code that broke it. On 2026-08-29 `wifi.rs` sampled the
+# system with `nmcli dev wifi` straight out of `tick()`, which runs on
+# the compositor's single repaint thread; `--rescan auto` blocks for a
+# real hardware scan whenever NetworkManager's cache is older than
+# thirty seconds, so the desktop froze for ~3.6s once every ~34s, drew
+# nothing, read no input, and left the page-flip completion unread in
+# its DRM fd. Its own stall watchdog reported the display driver. Four
+# agents and a tour of DRM internals later, the culprit was a wifi icon.
+# And it was not alone: `sysload` read `/proc/stat` and `/proc/meminfo`,
+# `net` read `/proc/net/dev`, `power` walked `/sys/class/power_supply`
+# with up to four reads per supply, and `wifi` walked `/sys/class/net`
+# probing `/sys/class/net/*/speed`, which dispatches the driver's
+# `ethtool` op and can block for hundreds of milliseconds
+# uninterruptibly. All on the repaint thread. All perfectly readable.
+#
+# The failure mode is that a synchronous read looks exactly like a
+# synchronous read wherever it is written. Nothing in any of those
+# diffs looked wrong, because the entire difference is which thread
+# reaches the line, and that is not visible in the line. So the rule
+# stops being something a reviewer has to notice and becomes something
+# the build refuses.
+#
+# # If you are here because the lint fired
+#
+# You do not want an `#[allow]`. You want a `Source`: declare what you
+# need in `DockWidget::sources` (a command, a file, a sysfs subtree, an
+# interval), read it back out of `Samples` in `update`, and let the tile
+# go stale while the dock's sampler thread waits. If what you want is to
+# *do* something rather than read something, return an `Effect::Run`.
+# If neither fits, the thing you are building may not be an instrument —
+# it may be a dockapp (`chonk-dock-proto`), which is its own process
+# precisely so that it may block itself and nobody else.
+
+# Types whose mere construction is the problem.
+disallowed-types = [
+    { path = "std::process::Command", reason = "an instrument must not run a program. Declare `Source::Command` (the dock runs it on a sampler thread and hands you the stdout) or return `Effect::Run` from `on_input` (the dock runs it off the repaint thread). Both of those exist because this crate did it inline once and froze the desktop for 3.6 seconds at a time." },
+    { path = "std::fs::File", reason = "an instrument must not open a file. Declare `Source::File` for one path or `Source::Tree` for a sysfs subtree; the read happens on a sampler thread and arrives in `Samples`." },
+]
+
+disallowed-methods = [
+    { path = "std::fs::read_to_string", reason = "reads on the compositor's repaint thread. Declare `Source::File { path, interval }` and read it back with `Samples::text`." },
+    { path = "std::fs::read", reason = "reads on the compositor's repaint thread. Declare `Source::File { path, interval }` and read it back with `Samples::text`." },
+    { path = "std::fs::read_dir", reason = "walks a directory on the compositor's repaint thread — this is what `power` and `wifi` did over `/sys/class/power_supply` and `/sys/class/net`. Declare `Source::Tree { root, files, dirs, interval }` and read it back with `Samples::tree`." },
+    { path = "std::thread::spawn", reason = "the dock owns every thread an instrument's work runs on, so that there is exactly one place where 'how often, and on what thread' is decided. A widget that starts its own thread has no supervision, no interval, and no way for the dock to tell whether its readings are current — see `Samples::fresh`." },
+    { path = "std::net::TcpStream::connect", reason = "a connect() on the repaint thread blocks for the SYN timeout, which is measured in seconds and is not interruptible. An instrument that needs the network needs a `Source::Command` in front of a tool that already has a timeout, or it needs to be a dockapp." },
+
+    # Repeated from the workspace `clippy.toml` because this file
+    # shadows it rather than extending it. Same reasons, in full there.
+    { path = "std::process::Command::output", reason = "blocks the calling thread until the child exits; on the compositor's repaint thread that is a frozen desktop, and it will be misreported as a display-driver stall. In this crate the answer is `Source::Command` or `Effect::Run`, never an allow." },
+    { path = "std::process::Command::status", reason = "same wait as Command::output, minus the output." },
+    { path = "std::process::Child::wait", reason = "blocks the calling thread until the child exits. An instrument has no children to reap; if you have one here, something has already gone wrong." },
+]

@@ -1,11 +1,6 @@
-# Desktop actions
+# Chonk Dock
 
-The built-in dock, instrument host, tile protocol and dock SDKs were retired in
-0.6.0 on both Wayland and X11. Their earlier design is
-available in Git history. They are no longer built or installed.
+The dock and its instruments now run in the standalone [Chonk Dock application](../dock/README.md).
+They are not part of the compositor and are not started by the Omarchy preset.
 
-Omarchy supplies system panels and workspace indicators through its menu bar.
-See [Omarchy mode](omarchy-mode.md) and the
-[Agent Sessions plugin](../omarchy/plugins/chonkstep.agents/README.md) for the
-current desktop integration. Separate applications can use the
-[control socket](control-socket.md) or [Hyprland-compatible IPC](hyprland-ipc.md).
+See the restored [instrument actions reference](../dock/docs/instrument-actions.md).

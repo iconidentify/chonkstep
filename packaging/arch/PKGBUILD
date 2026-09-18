@@ -140,6 +140,13 @@ package() {
   # The SDK showcase launched by both desktop About menu entries. It
   # must be a sibling of the installed compositor or available on PATH.
   install -Dm755 target/release/chonk-about "$pkgdir/usr/bin/chonk-about"
+  # Optional desktop client: installed, never autostarted by Omarchy mode.
+  install -Dm755 target/release/chonk-dock "$pkgdir/usr/bin/chonk-dock"
+  install -Dm755 dock/chonk-get "$pkgdir/usr/bin/chonk-get"
+  install -Dm755 target/release/chonk-btpair "$pkgdir/usr/bin/chonk-btpair"
+  install -Dm644 dock/chonk-dock.desktop "$pkgdir/usr/share/applications/chonk-dock.desktop"
+  install -Dm644 dock/README.md "$pkgdir/usr/share/doc/chonkstep/dock/README.md"
+  cp -a dock/bindings dock/docs dock/examples "$pkgdir/usr/share/doc/chonkstep/dock/"
   # The Omarchy bridge: writes chonkstep's built-in themes out as
   # Omarchy themes, so `omarchy-theme-set` can dress the rest of the
   # machine to match (see README, "Installing on Omarchy").

@@ -1,0 +1,14 @@
+[package]
+name = "chonk-dock-theme"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chonk-theme = { package = "wm-theme", path = "../../../crates/wm-theme" }
+wm-theme-api = { path = "../../../crates/wm-theme-api" }
+cosmic-text = "0.19"
+tiny-skia = "0.11"
+
+[dev-dependencies]
+chonk-test-support = { path = "../../../crates/chonk-test-support" }

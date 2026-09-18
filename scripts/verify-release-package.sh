@@ -82,6 +82,8 @@ release_binaries=(
     chonkstep-wayland
     chonk-about
     chonk-netjoin
+    chonk-dock
+    chonk-btpair
     omarchy-export-themes
 )
 for binary in "${release_binaries[@]}"; do
@@ -125,6 +127,14 @@ for binary in "${release_binaries[@]}"; do
         exit 1
     fi
 done
+
+# The dock is a separately runnable package component, with an opt-in launcher.
+grep -Fxq -- "chonk-dock $package_version" <<<"$("$stage/usr/bin/chonk-dock" --version)" || {
+    echo 'chonk-dock reports the wrong package version' >&2; exit 1;
+}
+[ -x "$stage/usr/bin/chonk-get" ] || { echo 'missing chonk-get installer' >&2; exit 1; }
+[ -f "$stage/usr/share/applications/chonk-dock.desktop" ] || { echo 'missing dock launcher' >&2; exit 1; }
+desktop-file-validate "$stage/usr/share/applications/chonk-dock.desktop"
 
 # Both session binaries name the exact source used before it became a
 # source archive and read their actual linker's GNU build-ID note. Check

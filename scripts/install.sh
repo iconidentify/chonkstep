@@ -313,6 +313,10 @@ if [ -x "${repo}/target/release/omarchy-export-themes" ]; then
 fi
 # Keep the independent network-join helper available to external launchers.
 ln -sfn "${repo}/target/release/chonk-netjoin" "$bin/chonk-netjoin"
+ln -sfn "${repo}/target/release/chonk-dock" "$bin/chonk-dock"
+ln -sfn "${repo}/dock/chonk-get" "$bin/chonk-get"
+ln -sfn "${repo}/target/release/chonk-btpair" "$bin/chonk-btpair"
+install -Dm644 "${repo}/dock/chonk-dock.desktop" "${XDG_DATA_HOME:-$HOME/.local/share}/applications/chonk-dock.desktop"
 bin_on_path=""
 case ":${PATH}:" in
     *":${bin}:"*) bin_on_path="yes" ;;
