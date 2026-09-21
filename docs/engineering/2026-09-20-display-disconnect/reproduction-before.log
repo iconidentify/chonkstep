@@ -1,0 +1,15 @@
+2026-09-21T03:27:48.399929Z  INFO wm_wayland::state: connector hotplug reconciled across the desktop outputs=2 parked=0
+2026-09-21T03:27:48.400003Z  INFO dispatch_pass: wm_wayland::state: output resized width=1280 height=800
+2026-09-21T03:27:48.414325Z  INFO wm_wayland::state: connector hotplug reconciled across the desktop outputs=1 parked=0
+2026-09-21T03:27:48.414395Z  INFO dispatch_pass: wm_wayland::state: output resized width=1280 height=800
+2026-09-21T03:27:48.460441Z DEBUG dispatch_pass: wm_core::manager: map request — client's own geometry at map time window=WlWindowId(1) content=Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 700, h: 487 } }
+2026-09-21T03:27:48.528976Z DEBUG dispatch_pass: wm_core::manager: map request — client's own geometry at map time window=WlWindowId(3) content=Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 700, h: 487 } }
+2026-09-21T03:27:48.579988Z  INFO wm_wayland::state: connector hotplug reconciled across the desktop outputs=0 parked=0
+2026-09-21T03:27:48.580038Z  INFO dispatch_pass: wm_wayland::state: output resized width=0 height=0
+2026-09-21T03:27:48.650918Z  WARN dispatch_pass: wm_wayland::xdg: client-declared xdg window geometry exceeded the desktop allocation limit; using bounded buffer geometry surface=ObjectId(wl_surface@3[1], 32) requested=Size { w: 700, h: 487 } accepted=Size { w: 1, h: 1 }
+2026-09-21T03:27:48.652150Z DEBUG dispatch_pass: wm_core::manager: configure request from a managed client — applying id=ClientId(1v1) requested=Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 1, h: 1 } } size=Size { w: 1, h: 1 } maximized_h=false maximized_v=false
+2026-09-21T03:27:49.453607Z  INFO wm_wayland::state: connector hotplug reconciled across the desktop outputs=1 parked=0
+2026-09-21T03:27:49.453659Z  INFO dispatch_pass: wm_wayland::state: output resized width=1280 height=800
+2026-09-21T03:27:49.568356Z TRACE surface_commit: wm_wayland::xdg: committed client geometry differs from desired geometry id=WlWindowId(1) committed=Size { w: 700, h: 487 } desired=Size { w: 1, h: 1 } client_behind=true staged=false
+2026-09-21T03:27:49.568465Z TRACE surface_commit: wm_wayland::xdg: committed client geometry differs from desired geometry id=WlWindowId(1) committed=Size { w: 7, h: 17 } desired=Size { w: 1, h: 1 } client_behind=false staged=false
+2026-09-21T03:27:49.568705Z DEBUG dispatch_pass: wm_core::manager: configure request from a managed client — applying id=ClientId(1v1) requested=Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 7, h: 17 } } size=Size { w: 7, h: 17 } maximized_h=false maximized_v=false

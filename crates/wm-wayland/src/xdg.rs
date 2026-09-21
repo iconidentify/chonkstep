@@ -1681,12 +1681,20 @@ impl WaylandBackend {
                 // client still has to hear an answer, and the answer is
                 // the state it already has.
                 let _ = toplevel.send_configure();
-            } else if !staged_configure_sent && record.mapped && !self.layout_scene.transitioning(window) {
+            } else if !staged_configure_sent
+                && record.mapped
+                && !self.monitors.is_empty()
+                && !self.layout_scene.transitioning(window)
+            {
                 // Two physical resize requests can round to the same logical
                 // configure at fractional scale. If the client already committed
                 // its answer, Smithay deduplicates this request and no new commit
                 // will arrive to fit the frame. Reuse that answer without another
                 // configure/commit round trip.
+                // With no outputs, focus cleanup also restages unchanged
+                // toplevels. The empty desktop is not a geometry constraint:
+                // measuring their retained buffers against it manufactures a
+                // 1x1 client resize that would take effect on reconnect.
                 let root = toplevel.wl_surface();
                 if !resize_pending(self, window, root) {
                     if let Some(size) = committed_content_size(root, self.window_surface_scale(record), self.output_size) {

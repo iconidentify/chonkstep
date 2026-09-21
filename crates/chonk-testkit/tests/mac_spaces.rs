@@ -518,6 +518,48 @@ fn geometry(w: &WindowInfo) -> (i32, i32, u32, u32) {
     (w.x, w.y, w.w, w.h)
 }
 
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn monitor_disconnect_preserves_terminal_sizes() {
+    let mut s = boot_with_config("spaces-terminal-disconnect", "interaction_mode = 'spaces'\nkeyboard_mode = 'desktop'\n");
+    s.door().set_virtual_outputs("single").unwrap();
+    for title in ["Disconnect Background", "Disconnect Focused"] {
+        s.launch("foot", &["--title", title, "sh", "-c", "while :; do printf '. '; sleep 0.1; done"]).unwrap();
+        s.wait_for_window(title).unwrap();
+    }
+    s.door().barrier().unwrap();
+    let before = s.world().unwrap();
+    let clients_before = json(&s, "clients");
+    for cycle in 0..3 {
+        s.door().set_virtual_outputs("none").unwrap();
+        // Allow deactivation configures and client commits to cross while
+        // the physical output ledger is empty, as during an input switch.
+        std::thread::sleep(Duration::from_millis(800));
+        s.door().barrier().unwrap();
+        let headless = s.world().unwrap();
+        let clients_headless = json(&s, "clients");
+        for title in ["Disconnect Background", "Disconnect Focused"] {
+            let original = before.window_matching(title).unwrap();
+            let parked = headless.window_matching(title).unwrap();
+            assert_eq!((parked.w, parked.h), (original.w, original.h), "{title}, headless cycle {cycle}");
+            // The backend can retain the old buffer rectangle even after the
+            // policy geometry is corrupted; inspect both ledgers while parked.
+            let original_client = clients_before.as_array().unwrap().iter().find(|c| c["title"] == title).unwrap();
+            let parked_client = clients_headless.as_array().unwrap().iter().find(|c| c["title"] == title).unwrap();
+            assert_eq!(parked_client["size"], original_client["size"], "{title}, headless policy cycle {cycle}");
+        }
+        s.door().set_virtual_outputs("single").unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        s.door().barrier().unwrap();
+        let after = s.world().unwrap();
+        for title in ["Disconnect Background", "Disconnect Focused"] {
+            let original = before.window_matching(title).unwrap();
+            let restored = after.window_matching(title).unwrap();
+            assert_eq!((restored.w, restored.h), (original.w, original.h), "{title}, reconnect cycle {cycle}");
+        }
+    }
+}
+
 /// One typo in `interaction_mode` on a live reload costs that key and
 /// nothing else. The running mode is the fallback, not the default, so
 /// the Spaces session stays one — each display keeps its own Space —

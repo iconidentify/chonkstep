@@ -1,0 +1,14 @@
+2026-09-16T06:12:19.470032Z  INFO dispatch_pass: wm_wayland::session: connector unplugged; output removed from scanout output=DP-1
+2026-09-16T06:12:19.539580Z  INFO dispatch_pass: wm_wayland::state: connector hotplug reconciled across the desktop outputs=0
+2026-09-16T06:12:19.539597Z  INFO dispatch_pass: wm_wayland::state: output resized width=0 height=0
+2026-09-16T06:12:19.545024Z  WARN dispatch_pass: wm_wayland::xdg: client-declared xdg window geometry exceeded the desktop allocation limit; using bounded buffer geometry surface=ObjectId(wl_surface@3[10], 32) requested=Size { w: 1226, h: 1856 } accepted=Size { w: 1, h: 1 }
+2026-09-16T06:12:19.545047Z  WARN dispatch_pass: wm_wayland::xdg: client-declared xdg window geometry exceeded the desktop allocation limit; using bounded buffer geometry surface=ObjectId(wl_surface@3[14], 32) requested=Size { w: 1434, h: 893 } accepted=Size { w: 1, h: 1 }
+2026-09-16T06:12:19.545054Z  WARN dispatch_pass: wm_wayland::xdg: client-declared xdg window geometry exceeded the desktop allocation limit; using bounded buffer geometry surface=ObjectId(wl_surface@32[15], 41) requested=Size { w: 1920, h: 1230 } accepted=Size { w: 1, h: 1 }
+2026-09-21T03:11:47.879997Z  INFO dispatch_pass: wm_wayland::session: connector unplugged; output removed from scanout output=DP-1
+2026-09-21T03:11:47.942019Z  INFO dispatch_pass: wm_wayland::state: connector hotplug reconciled across the desktop outputs=0
+2026-09-21T03:11:47.942025Z  INFO dispatch_pass: wm_wayland::state: output resized width=0 height=0
+2026-09-21T03:12:10.117178Z  INFO dispatch_pass: wm_wayland::session: connector unplugged; output removed from scanout output=DP-1
+2026-09-21T03:12:10.241038Z  INFO dispatch_pass: wm_wayland::state: connector hotplug reconciled across the desktop outputs=0
+2026-09-21T03:12:10.241052Z  INFO dispatch_pass: wm_wayland::state: output resized width=0 height=0
+2026-09-21T03:12:10.948963Z  INFO dispatch_pass: wm_wayland::state: connector hotplug reconciled across the desktop outputs=1
+2026-09-21T03:12:10.948987Z  INFO dispatch_pass: wm_wayland::state: output resized width=3840 height=2160
