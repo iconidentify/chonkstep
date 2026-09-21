@@ -63,7 +63,7 @@ pub fn encoded(layout: &DecorationLayout, surface: &DecorationSurface) -> Vec<u8
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     for (kind, rect) in &layout.button_hitboxes {
-        let kind = match kind { ButtonKind::Close => 0, ButtonKind::Miniaturize => 1, ButtonKind::Maximize => 2 };
+        let kind = match kind { ButtonKind::Menu => 3, ButtonKind::Close => 0, ButtonKind::Miniaturize => 1, ButtonKind::Maximize => 2 };
         for value in [kind, rect.pos.x as u32, rect.pos.y as u32, rect.size.w, rect.size.h] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }

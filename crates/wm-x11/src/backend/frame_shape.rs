@@ -337,6 +337,46 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "private X server: xvfb-run -a cargo test -p wm-x11 native_os2warp -- --ignored --test-threads=1"]
+    fn native_os2warp_uploads_original_pixels_and_clears_a_previous_tab_shape() {
+        let mut backend = X11Backend::connect_and_become_wm(None, 1.0).unwrap();
+        let fonts = FontState::new();
+        for scale in [1, 2] {
+            let engine = RasterThemeEngine::with_fonts_at_scale(wm_theme::default_theme::theme_by_id("os2-warp-4").unwrap().scaled(scale as f32), fonts.clone(), scale as f32)
+                .with_style(DecorationStyle::Auto).unwrap();
+            let request = DecorationRequest { content_size: Size::new(320*scale,140*scale), title: "OS/2 Warp 4".into(), focused: true, resizable: true, buttons: Vec::new() };
+            let tab_engine = RasterThemeEngine::with_fonts(wm_theme::default_theme::theme_by_id("beos").unwrap(), fonts.clone()).with_style(DecorationStyle::Auto).unwrap();
+            let tab = tab_engine.layout_at(&request, scale as f32);
+            let client = backend.conn.generate_id().unwrap();
+            backend.conn.create_window(COPY_DEPTH_FROM_PARENT, client, backend.root, 0, 0, request.content_size.w as u16, request.content_size.h as u16, 0,
+                WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::new()).unwrap().check().unwrap();
+            let frame = backend.create_decoration(XWindow(client), &tab);
+            backend.set_frame_geometry(frame, Rect::new(Point::new(100,100), tab.frame_size));
+            backend.map_frame(frame);
+            backend.paint_decoration(frame, &tab_engine.render_surface_at(&request, &tab, scale as f32));
+            let layout = engine.layout(&request);
+            backend.set_decoration_layout(frame, &layout);
+            backend.set_frame_geometry(frame, Rect::new(Point::new(100,100), layout.frame_size));
+            backend.position_client(XWindow(client), layout.client_offset);
+            let surface = engine.render_surface(&request, &layout);
+            backend.paint_decoration(frame, &surface);
+            let shape = backend.conn.shape_get_rectangles(frame.0, SK::BOUNDING).unwrap().reply().unwrap();
+            assert_eq!(shape.rectangles.len(), 1);
+            assert_eq!((u32::from(shape.rectangles[0].width),u32::from(shape.rectangles[0].height)), (layout.frame_size.w,layout.frame_size.h));
+            for part in &surface.parts {
+                let pixels = backend.conn.get_image(ImageFormat::Z_PIXMAP, frame.0, part.offset.x as i16, part.offset.y as i16,
+                    part.buffer.width as u16, part.buffer.height as u16, u32::MAX).unwrap().reply().unwrap();
+                assert_eq!(pixels.data.len(), part.buffer.pixels.len());
+                for (index, (actual, expected)) in pixels.data.as_chunks::<4>().0.iter().zip(part.buffer.pixels.as_chunks::<4>().0).enumerate() {
+                    let actual = match backend.image_byte_order { ImageOrder::MSB_FIRST => u32::from_be_bytes(*actual), _ => u32::from_le_bytes(*actual) };
+                    assert_eq!(actual & 0xffffff, pixel_from_rgb((expected[0],expected[1],expected[2])), "{scale}x server upload part {:?} pixel ({},{})", part.offset, index as u32 % part.buffer.width, index as u32 / part.buffer.width);
+                }
+            }
+            backend.destroy_decoration(frame);
+        }
+    }
+
+    #[test]
     fn modern_compressed_frames_preserve_every_transparent_corner() {
         let fonts=FontState::new();
         for (name,_) in wm_theme::modern::CHOICES {

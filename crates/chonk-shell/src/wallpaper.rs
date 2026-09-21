@@ -25,6 +25,7 @@ pub enum Wallpaper {
     Washi,
     Relay,
     BeOSBlue,
+    OS2Warp,
     System7Classic,
     System7LightGray,
     System7DarkGray,
@@ -178,7 +179,7 @@ impl Wallpaper {
     /// The embedded artworks, in menu order. [`Self::Omarchy`] is not
     /// one: it has no pixels of its own.
     #[cfg(not(feature = "lcos"))]
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
         Self::TealBlueprint,
@@ -191,6 +192,7 @@ impl Wallpaper {
         Self::Washi,
         Self::Relay,
         Self::BeOSBlue,
+        Self::OS2Warp,
         Self::System7Classic,
         Self::System7LightGray,
         Self::System7DarkGray,
@@ -200,7 +202,7 @@ impl Wallpaper {
     /// rather than concatenated so each array's length is compile-time
     /// checked.
     #[cfg(feature = "lcos")]
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
         Self::TealBlueprint,
@@ -213,6 +215,7 @@ impl Wallpaper {
         Self::Washi,
         Self::Relay,
         Self::BeOSBlue,
+        Self::OS2Warp,
         Self::System7Classic,
         Self::System7LightGray,
         Self::System7DarkGray,
@@ -236,6 +239,7 @@ impl Wallpaper {
             Self::Washi => "Washi",
             Self::Relay => "Relay",
             Self::BeOSBlue => "BeOS Blue",
+            Self::OS2Warp => "OS/2 Warp 4",
             Self::System7Classic => "System 7 Classic",
             Self::System7LightGray => "System 7 Light Gray",
             Self::System7DarkGray => "System 7 Dark Gray",
@@ -266,6 +270,7 @@ impl Wallpaper {
             Self::Washi => "washi",
             Self::Relay => "relay",
             Self::BeOSBlue => "beos-blue",
+            Self::OS2Warp => "os2-warp-4",
             Self::System7Classic => "system-7-classic-pattern",
             Self::System7LightGray => "system-7-light-gray-pattern",
             Self::System7DarkGray => "system-7-dark-gray-pattern",
@@ -360,6 +365,7 @@ impl Wallpaper {
     pub const fn background_color(self, appearance: Appearance) -> (u8, u8, u8) {
         match (self, appearance) {
             (Self::BeOSBlue, _) => (48, 100, 152),
+            (Self::OS2Warp, _) => (0, 0, 85),
             (Self::System7Classic, _) => (128,128,128),
             (Self::System7LightGray, _) => (191,191,191),
             (Self::System7DarkGray, _) => (64,64,64),
@@ -443,6 +449,7 @@ impl Wallpaper {
             (Self::LundukeNavy, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/lunduke-navy-light.png")),
             #[cfg(feature = "lcos")]
             (Self::WalnutGround | Self::DeskGround | Self::OakGround, _) => None,
+            (Self::OS2Warp, _) => Some(include_bytes!("../assets/wallpapers/os2-warp-4-1024.png")),
             (Self::Omarchy, _) => None,
             (Self::HostArt(_), _) => None,
         }
@@ -454,6 +461,7 @@ impl Wallpaper {
     /// artwork, and for an image that cannot be read — the caller
     /// paints [`Self::background_color`] instead.
     pub fn render(self, screen: Size, appearance: Appearance) -> Option<DecorationBuffer> {
+        if self == Self::OS2Warp { return warp_art(screen); }
         if let Some(rows) = self.pattern_rows() {
             return quickdraw_pattern(rows, screen);
         }
@@ -494,6 +502,31 @@ impl Wallpaper {
             None => Self::GraphiteFold.render(screen, appearance),
         }
     }
+}
+
+/// IBM's native 256-color artwork, sampled without interpolation. Select the
+/// original size when available; wider displays crop a proportional cover.
+fn warp_art(screen: Size) -> Option<DecorationBuffer> {
+    if screen.w == 0 || screen.h == 0 || screen.w > 16384 || screen.h > 16384 { return None; }
+    let bytes: &[u8] = if screen.w <= 640 && screen.h <= 480 {
+        include_bytes!("../assets/wallpapers/os2-warp-4-640.png")
+    } else if screen.w <= 800 && screen.h <= 600 {
+        include_bytes!("../assets/wallpapers/os2-warp-4-800.png")
+    } else { include_bytes!("../assets/wallpapers/os2-warp-4-1024.png") };
+    let source = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).ok()?.into_rgba8();
+    let scale = (f64::from(screen.w) / f64::from(source.width())).max(f64::from(screen.h) / f64::from(source.height()));
+    let crop_x = (f64::from(source.width()) - f64::from(screen.w) / scale) / 2.0;
+    let crop_y = (f64::from(source.height()) - f64::from(screen.h) / scale) / 2.0;
+    let mut pixels = vec![0; screen.w as usize * screen.h as usize * 4];
+    for y in 0..screen.h {
+        let sy = (crop_y + f64::from(y) / scale).floor() as u32;
+        for x in 0..screen.w {
+            let sx = (crop_x + f64::from(x) / scale).floor() as u32;
+            let offset = (y as usize * screen.w as usize + x as usize) * 4;
+            pixels[offset..offset + 4].copy_from_slice(&source.get_pixel(sx.min(source.width()-1), sy.min(source.height()-1)).0);
+        }
+    }
+    Some(DecorationBuffer { width: screen.w, height: screen.h, pixels })
 }
 
 /// Original rasterization of the documented QuickDraw bit patterns, without
@@ -654,6 +687,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn warp_native_resolutions_preserve_original_pixels_in_both_appearances() {
+        for (size, bytes) in [
+            (Size::new(640,480), include_bytes!("../assets/wallpapers/os2-warp-4-640.png").as_slice()),
+            (Size::new(800,600), include_bytes!("../assets/wallpapers/os2-warp-4-800.png").as_slice()),
+            (Size::new(1024,768), include_bytes!("../assets/wallpapers/os2-warp-4-1024.png").as_slice()),
+        ] {
+            let original = image::load_from_memory(bytes).unwrap().into_rgba8();
+            for appearance in [Appearance::Light, Appearance::Dark] {
+                let rendered = Wallpaper::OS2Warp.render(size, appearance).unwrap();
+                assert_eq!(rendered.pixels, original.as_raw().as_slice());
+            }
+        }
+        assert!(Wallpaper::OS2Warp.render(Size::new(0,0), Appearance::Light).is_none());
+        assert!(Wallpaper::OS2Warp.render(Size::new(20000,20000), Appearance::Light).is_none());
+    }
+
+    #[test]
     fn theme_reload_follows_default_artwork_and_preserves_a_separate_choice() {
         let paper = Wallpaper::Obsidian.following_theme("obsidian", "washi");
         assert_eq!(paper, Wallpaper::Washi);
@@ -698,7 +748,7 @@ mod tests {
             let sum: u64 = buffer.pixels.as_chunks::<4>().0.iter().map(|px| (px[0] as u64 + px[1] as u64 + px[2] as u64) / 3).sum();
             (sum / (u64::from(buffer.width) * u64::from(buffer.height))) as i64
         };
-        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| !w.is_solid_colour() && w.pattern_rows().is_none()) {
+        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| !w.is_solid_colour() && w.pattern_rows().is_none() && *w != Wallpaper::OS2Warp) {
             let light = wallpaper.render(Size::new(160, 90), Appearance::Light).unwrap();
             let dark = wallpaper.render(Size::new(160, 90), Appearance::Dark).unwrap();
             assert!(
@@ -710,7 +760,7 @@ mod tests {
             );
         }
         let lum = |(r, g, b): (u8, u8, u8)| (r as i64 + g as i64 + b as i64) / 3;
-        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| w.pattern_rows().is_none() && *w != Wallpaper::BeOSBlue) {
+        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| w.pattern_rows().is_none() && !matches!(w, Wallpaper::BeOSBlue | Wallpaper::OS2Warp)) {
             assert!(
                 lum(wallpaper.background_color(Appearance::Light)) > lum(wallpaper.background_color(Appearance::Dark)),
                 "{}: background colors must follow the artwork's moods",

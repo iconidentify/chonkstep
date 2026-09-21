@@ -14,6 +14,8 @@ pub enum DecorationStyle {
     System7,
     /// BeOS R5 tabbed window chrome.
     BeOS,
+    /// OS/2 Warp 4 Workplace Shell chrome.
+    OS2Warp,
     /// Modern, token-driven chrome shared by present and future themes.
     Modern,
 }
@@ -26,6 +28,7 @@ impl DecorationStyle {
             "windowmaker" => Some(Self::WindowMaker),
             "system7" => Some(Self::System7),
             "beos" => Some(Self::BeOS),
+            "os2warp" => Some(Self::OS2Warp),
             "modern" => Some(Self::Modern),
             _ => None,
         }
@@ -38,6 +41,7 @@ impl DecorationStyle {
             Self::WindowMaker => "windowmaker",
             Self::System7 => "system7",
             Self::BeOS => "beos",
+            Self::OS2Warp => "os2warp",
             Self::Modern => "modern",
         }
     }
@@ -50,6 +54,8 @@ impl DecorationStyle {
 /// desktop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ButtonKind {
+    /// Opens the window commands menu (the Workplace Shell title icon).
+    Menu,
     Close,
     Miniaturize,
     Maximize,

@@ -232,6 +232,7 @@ fn colors_toml(theme_name: &str, palette: &wm_theme::omarchy::OmarchyPalette) ->
 /// Omarchy merges ~/.config/omarchy/shell.toml over this theme-owned file.
 fn shell_toml(theme: &wm_theme::Theme) -> Option<String> {
     use std::fmt::Write;
+    let os2warp = theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::OS2Warp;
     let beos = theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::BeOS;
     let system7 = theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::System7;
     let chrome = if beos {
@@ -244,6 +245,17 @@ fn shell_toml(theme: &wm_theme::Theme) -> Option<String> {
         chrome.selection = wm_theme::beos::MENU_SELECTION;
         chrome.accent = wm_theme::beos::YELLOW;
         chrome.danger = wm_theme::beos::BLUE;
+        chrome
+    } else if os2warp {
+        let mut chrome = wm_theme::modern::Chrome::from_theme_at_scale(theme, 1.0);
+        chrome.background = wm_theme::os2warp::DESKTOP;
+        chrome.surface = wm_theme::os2warp::PANEL;
+        chrome.panel = wm_theme::os2warp::PANEL;
+        chrome.text = wm_theme::os2warp::INK;
+        chrome.line = wm_theme::os2warp::SHADE;
+        chrome.selection = wm_theme::os2warp::BLUE;
+        chrome.accent = wm_theme::os2warp::TITLE;
+        chrome.danger = wm_theme::os2warp::BLUE;
         chrome
     } else if system7 {
         let mut chrome = wm_theme::modern::Chrome::from_theme_at_scale(theme, 1.0);
@@ -267,7 +279,7 @@ fn shell_toml(theme: &wm_theme::Theme) -> Option<String> {
     section("notifications",&[("background",chrome.panel),("text",chrome.text),("border",chrome.accent),("countdown",chrome.accent)],&[]);
     for name in ["menu","launcher"] {
         section(name,&[("background",chrome.panel),("text",chrome.text),("border",chrome.line),
-            ("scrim",chrome.background),("selected-background",chrome.selection),("selected-text",if beos { wm_theme::beos::INK } else if system7 { theme.terminal.bg } else { chrome.text }),
+            ("scrim",chrome.background),("selected-background",chrome.selection),("selected-text",if beos { wm_theme::beos::INK } else if os2warp { wm_theme::os2warp::WHITE } else if system7 { theme.terminal.bg } else { chrome.text }),
             ("selected-border",chrome.line)],&[("background-alpha",1.0),("selected-background-alpha",1.0),("selected-border-alpha",0.0)]);
     }
     Some(out)
@@ -455,6 +467,17 @@ mod tests {
         }
         for theme in wm_theme::default_theme::all_themes().into_iter().filter(|theme|theme.chrome.is_none() && theme.preferred_decoration_style.is_none()) {
             assert!(shell_toml(&theme).is_none(),"classic exports retain Omarchy's own default surface mapping");
+        }
+    }
+
+    #[test]
+    fn warp_export_keeps_white_selection_ink_and_fixed_workplace_shell_gray() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let theme = wm_theme::default_theme::theme_variant("os2-warp-4", appearance).unwrap();
+            let shell: toml::Value = toml::from_str(&shell_toml(&theme).unwrap()).unwrap();
+            assert_eq!(shell["bar"]["background"].as_str(), Some("#cfcfcf"));
+            assert_eq!(shell["menu"]["selected-background"].as_str(), Some("#0000aa"));
+            assert_eq!(shell["menu"]["selected-text"].as_str(), Some("#ffffff"));
         }
     }
 

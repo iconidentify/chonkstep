@@ -1,0 +1,65 @@
+{
+  "captures": [
+    {
+      "file": "editor.png",
+      "url": "https://guidebookgallery.org/pics/gui/applications/office/texteditor/os2warp4-1-1.png?original=1",
+      "sha256": "3dbf9710aa2039124f64a5b9d988f4b77e2b2bda69ffe2bb364ed762d6b46869"
+    },
+    {
+      "file": "desktop.png",
+      "url": "https://guidebookgallery.org/pics/gui/desktop/full/os2warp4.png?original=1",
+      "sha256": "105073a61b9ed5d78df506805c6c34772740d8b49ab51e4a3689e78484650083"
+    },
+    {
+      "file": "empty.png",
+      "url": "https://guidebookgallery.org/pics/gui/desktop/empty/os2warp4.png?original=1",
+      "sha256": "f8bb862eb7cc8f487e58289368ec203c276e04e8537a969372bab08610c396dd"
+    },
+    {
+      "file": "menus.png",
+      "url": "https://toastytech.com/guis/os24_warpbar.png",
+      "sha256": "348d39c37256118dfc01de4a0ec47fd813738a62b2e9eb08b42b969b1497f3b0"
+    }
+  ],
+  "fonts": [
+    {
+      "file": "Helv_8-96x96dpi.yaff",
+      "url": "https://raw.githubusercontent.com/robhagemans/hoard-of-bitfonts/240a23ec828810504b45e6d9b0c5bd8065ab5d5c/os-2/os2_warp4/helv/Helv_8-96x96dpi.yaff",
+      "sha256": "f387ecdb54a57b17763bb95a967cd29dfedc548117ca6764e03c8f6807fb8140"
+    },
+    {
+      "file": "WarpSans_Bold_9-96x96dpi.yaff",
+      "url": "https://raw.githubusercontent.com/robhagemans/hoard-of-bitfonts/240a23ec828810504b45e6d9b0c5bd8065ab5d5c/os-2/os2_warp4/system/WarpSans_Bold_9-96x96dpi.yaff",
+      "sha256": "e3313bff348c1baa51fcbc67edb3e5a31dc157874a38b17bf52016a6a7c3734c"
+    }
+  ],
+  "wallpaper": {
+    "url": "https://archive.org/download/IBMOS2Warp4Collection/OS2WARP4-EN.iso",
+    "iso_sha256": "b366f540b616bd430c6991231f9067d903c27ef0d4f3ec76333fa8c0492119b3",
+    "member": "OS2IMAGE/DISK_16/REQUIRED: OS2/BITMAP/WARPD.BMP",
+    "bitmap_sha256": "ad3623de4da91c037866a2a504d5b9c62c48224a1b399b5cbb72fb6b5a5f5230",
+    "decoder": "https://gist.github.com/DJm00n/a55fa145a5a0c6f0f6d3940e64de4c7f"
+  },
+  "assets": [
+    {
+      "file": "crates/wm-theme/src/styles/os2warp/regular.atlas",
+      "sha256": "e4f73ae0501b4aad17cd112e3a8b92a16a53d7aab2205dcc7d37a378852658ee"
+    },
+    {
+      "file": "crates/wm-theme/src/styles/os2warp/bold.atlas",
+      "sha256": "cefbab3aa71a25584e5c8c17364ea43234843aaa0d24c4e25523a5dea9659187"
+    },
+    {
+      "file": "crates/chonk-shell/assets/wallpapers/os2-warp-4-640.png",
+      "sha256": "0853eb1833542f0af87d2626f9807d0b24b82cb7180b2d82d5bb7d4f4008fad7"
+    },
+    {
+      "file": "crates/chonk-shell/assets/wallpapers/os2-warp-4-800.png",
+      "sha256": "9b374f4cfd32e0a7c935e05a16ba85fb1d3024d9bb4a16afb078b935b85b9432"
+    },
+    {
+      "file": "crates/chonk-shell/assets/wallpapers/os2-warp-4-1024.png",
+      "sha256": "78bde4a5a3acc2b35219b4c191244d15df238478f0836186890fac50e80c8271"
+    }
+  ]
+}

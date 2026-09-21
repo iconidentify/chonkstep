@@ -66,6 +66,7 @@ with its original instruments, panels, launchers and dockapp SDKs. Its host,
 samplers and rendering run in their own process. Omarchy mode does not start it;
 when it is stopped, it uses no runtime resources.
 
+[OS/2 Warp 4](docs/os2-warp-theme.md) recreates the 1996 Workplace Shell, bitmap typography and original textured desktop.
 [BeOS R5](docs/beos-theme.md) adds short yellow tabs, Tracker-style menus and the original blue desktop.
 
 The [theme guide](docs/modern-themes.md) covers selection, appearance overrides

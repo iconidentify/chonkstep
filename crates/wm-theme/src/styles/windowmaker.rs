@@ -37,7 +37,7 @@ pub(crate) fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> D
         let size = style.size as u32;
         let y = border as i32 + ((titlebar_height as i32 - size as i32) / 2).max(0);
         let rect = match style.kind {
-            ButtonKind::Miniaturize => {
+            ButtonKind::Miniaturize | ButtonKind::Menu => {
                 let r = Rect::new(Point::new(left_x, y), Size::new(size, size));
                 left_x += size as i32 + button_margin;
                 r
@@ -533,6 +533,10 @@ const MAXIMIZE_GLYPH: [&str; 10] = [
 pub(crate) fn draw_button_glyph(pixmap: &mut Pixmap, kind: ButtonKind, rect: Rect, color: crate::model::Color, pressed: bool) {
     let mask: &[&str; 10] = match kind {
         ButtonKind::Close => &CLOSE_GLYPH,
+        ButtonKind::Menu => &[
+            "..........", ".########.", ".########.", "..........", ".########.",
+            ".########.", "..........", ".########.", ".########.", "..........",
+        ],
         ButtonKind::Miniaturize => &ICONIFY_GLYPH,
         ButtonKind::Maximize => &MAXIMIZE_GLYPH,
     };

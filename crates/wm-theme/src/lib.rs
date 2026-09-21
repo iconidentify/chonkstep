@@ -6,6 +6,7 @@ pub mod cascade;
 pub mod default_theme;
 pub mod system7;
 pub mod beos;
+pub mod os2warp;
 pub mod icon;
 pub mod menu;
 pub mod model;

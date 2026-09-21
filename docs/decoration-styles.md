@@ -5,13 +5,13 @@ The palette and frame recipe are independent:
 ```toml
 theme = "nextstep-classic"         # or another palette, including "omarchy"
 appearance = "dark"                # session palette preference
-decoration_style = "auto"           # auto | windowmaker | system7 | beos | modern
+decoration_style = "auto"           # auto | windowmaker | system7 | beos | os2warp | modern
 overview_style = "classic"          # classic (default) | cards
 ```
 
 Edit `~/.config/chonkstep/config.toml` and run `/usr/lib/chonkstep/reload.sh`. The selector is
 config-only; there is no competing state file, request file or root-menu picker.
-The default `auto` follows the theme: BeOS R5 selects BeOS, System 7 themes select System 7, themes
+The default `auto` follows the theme: OS/2 Warp 4 selects `os2warp`, BeOS R5 selects BeOS, System 7 themes select System 7, themes
 with modern chrome tokens select Modern, and existing palettes select WindowMaker.
 System 7 Classic, Light Gray, and Dark Gray are available through the ordinary
 [theme picker](system7-themes.md). An explicit recipe overrides
@@ -92,6 +92,14 @@ cannot represent all its rows is rejected without taking input grabs; hidden
 rows cannot remain keyboard-activatable. Very large switchers show a bounded
 window of entries around the selected client. These limits do not change the
 underlying window list or the selected window.
+
+## OS/2 Warp 4
+
+`os2warp` selects the original 1996 PM frame and custom Workplace Shell surfaces.
+Choose **OS/2 Warp 4** with `auto` for the original blue textured wallpaper too.
+The left title icon opens the window menu; the right controls close, minimize,
+and maximize/restore. See the [theme guide](os2-warp-theme.md) and
+[capture specification](decoration-styles/os2warp.md).
 
 ## BeOS R5
 

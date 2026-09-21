@@ -2969,6 +2969,12 @@ impl<B: Backend> WindowManager<B> {
 
         if still_over {
             match active.kind {
+                ButtonKind::Menu => {
+                    if let Some(client) = self.clients.get(id) {
+                        let at = Point::new(client.geometry.pos.x, client.geometry.pos.y);
+                        self.notifications.push_back(Notification::WindowMenuRequested { id, at });
+                    }
+                }
                 ButtonKind::Close => {
                     self.close_client(id);
                 }
@@ -5333,7 +5339,7 @@ impl<B: Backend> WindowManager<B> {
     }
 
     fn decoration_request(client: &Client<B>, pressed_button: Option<ButtonKind>) -> DecorationRequest {
-        DecorationRequest {
+        let mut request = DecorationRequest {
             content_size: client.geometry.size,
             title: client.title.clone(),
             focused: client.flags.contains(ClientFlags::FOCUSED),
@@ -5355,7 +5361,11 @@ impl<B: Backend> WindowManager<B> {
                     pressed: pressed_button == Some(ButtonKind::Miniaturize),
                 },
             ],
+        };
+        if pressed_button == Some(ButtonKind::Menu) {
+            request.buttons.push(ButtonRuntimeState { kind: ButtonKind::Menu, hovered: false, pressed: true });
         }
+        request
     }
 }
 
@@ -11421,6 +11431,7 @@ mod tests {
     mod restyle;
     mod system7;
     mod beos;
+    mod os2warp;
     fn mac_windows() -> (WindowManager<FakeBackend>, [ClientId; 3]) {
         let mut backend = FakeBackend::new();
         let windows = [backend.create_window(), backend.create_window(), backend.create_window()];

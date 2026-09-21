@@ -20,7 +20,7 @@ fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
 /// struct just to list them. `registry_matches_choices` pins this to
 /// `all_themes()`.
 #[cfg(not(feature = "lcos"))]
-pub const CHOICES: [(&str, &str); 15] = [
+pub const CHOICES: [(&str, &str); 16] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
@@ -33,6 +33,7 @@ pub const CHOICES: [(&str, &str); 15] = [
     ("washi", "Washi"),
     ("relay", "Relay"),
     ("beos", "BeOS R5"),
+    ("os2-warp-4", "OS/2 Warp 4"),
     ("system-7-classic", "System 7 Classic"),
     ("system-7-light-gray", "System 7 Light Gray"),
     ("system-7-dark-gray", "System 7 Dark Gray"),
@@ -43,7 +44,7 @@ pub const CHOICES: [(&str, &str); 15] = [
 /// must stay in step, and `every_choice_resolves` fails loudly if they
 /// do not.
 #[cfg(feature = "lcos")]
-pub const CHOICES: [(&str, &str); 19] = [
+pub const CHOICES: [(&str, &str); 20] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
@@ -56,6 +57,7 @@ pub const CHOICES: [(&str, &str); 19] = [
     ("washi", "Washi"),
     ("relay", "Relay"),
     ("beos", "BeOS R5"),
+    ("os2-warp-4", "OS/2 Warp 4"),
     ("system-7-classic", "System 7 Classic"),
     ("system-7-light-gray", "System 7 Light Gray"),
     ("system-7-dark-gray", "System 7 Dark Gray"),
@@ -86,6 +88,7 @@ pub fn all_themes() -> Vec<Theme> {
         crate::modern::theme("washi", Appearance::Light).unwrap(),
         crate::modern::theme("relay", Appearance::Dark).unwrap(),
         crate::beos::theme("beos", Appearance::Light).unwrap(),
+        crate::os2warp::theme("os2-warp-4", Appearance::Light).unwrap(),
         crate::system7::theme("system-7-classic", Appearance::Light).unwrap(),
         crate::system7::theme("system-7-light-gray", Appearance::Light).unwrap(),
         crate::system7::theme("system-7-dark-gray", Appearance::Light).unwrap(),
@@ -134,6 +137,7 @@ pub fn native_appearance(id: &str) -> Option<Appearance> {
 /// menu palette, terminal scheme, and which rendition of the wallpaper
 /// artwork the shell composes underneath.
 pub fn theme_variant(id: &str, appearance: Appearance) -> Option<Theme> {
+    if let Some(theme) = crate::os2warp::theme(id, appearance) { return Some(theme); }
     if let Some(theme) = crate::beos::theme(id, appearance) { return Some(theme); }
     if let Some(theme) = crate::system7::theme(id, appearance) { return Some(theme); }
     if let Some(theme) = crate::modern::theme(id, appearance) { return Some(theme); }
@@ -1907,11 +1911,11 @@ mod tests {
     /// `theme_by_id` (and `all_themes`) answer the native rendition, so
     /// nothing that predates the axis changes what it gets — and the
     /// native map is what it historically was: Ivory Halftone light,
-    /// Washi, System 7 and BeOS light; the remaining themes dark.
+    /// Washi, System 7, BeOS and OS/2 light; the remaining themes dark.
     #[test]
     fn native_renditions_are_what_each_theme_originally_shipped_as() {
         for (id, _) in CHOICES {
-            let expected = if matches!(id,"ivory-halftone" | "washi" | "beos") || id.starts_with("system-7-") { Appearance::Light } else { Appearance::Dark };
+            let expected = if matches!(id,"ivory-halftone" | "washi" | "beos" | "os2-warp-4") || id.starts_with("system-7-") { Appearance::Light } else { Appearance::Dark };
             assert_eq!(native_appearance(id), Some(expected), "{id}");
             let by_id = theme_by_id(id).unwrap();
             assert_eq!(by_id.appearance, expected, "{id}");
@@ -1989,9 +1993,9 @@ mod tests {
             let light = theme_variant(id, Appearance::Light).unwrap();
             let dark = theme_variant(id, Appearance::Dark).unwrap();
             assert_ne!(light.terminal, dark.terminal, "{id}");
-            if light.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::BeOS {
-                assert_eq!(light.menu.background, dark.menu.background, "{id}: BeOS keeps its historical menu gray");
-                assert_eq!(light.titlebar, dark.titlebar, "{id}: BeOS chrome is independent of app appearance");
+            if matches!(light.resolve_style(wm_theme_api::DecorationStyle::Auto), wm_theme_api::DecorationStyle::BeOS | wm_theme_api::DecorationStyle::OS2Warp) {
+                assert_eq!(light.menu.background, dark.menu.background, "{id}: historical menu gray is independent of app appearance");
+                assert_eq!(light.titlebar, dark.titlebar, "{id}: historical chrome is independent of app appearance");
             } else {
                 assert_ne!(light.menu.background, dark.menu.background, "{id}");
             }

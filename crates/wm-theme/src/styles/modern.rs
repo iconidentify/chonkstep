@@ -567,6 +567,9 @@ fn title(
         );
         let t = border.min(s).max(1);
         match kind {
+            ButtonKind::Menu => {
+                for dy in [0, s / 2, s.saturating_sub(t)] { paint::fill_rect(&mut image, gx, gy + dy as i32, s, t, ink); }
+            }
             ButtonKind::Miniaturize => {
                 paint::fill_rect(&mut image, gx, gy + s as i32 / 2, s, t, ink)
             }

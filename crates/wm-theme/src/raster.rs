@@ -14,7 +14,7 @@ use wm_theme_api::{
 };
 
 use crate::model::Theme;
-use crate::styles::{beos, modern, system7, windowmaker, FrameStyle, UnsupportedDecorationStyle};
+use crate::styles::{os2warp, beos, modern, system7, windowmaker, FrameStyle, UnsupportedDecorationStyle};
 pub(crate) use windowmaker::draw_button_glyph;
 
 #[derive(Clone)]
@@ -330,6 +330,7 @@ impl ThemeEngine for RasterThemeEngine {
             FrameStyle::WindowMaker => windowmaker::layout_decoration(&self.theme, request),
             FrameStyle::System7 => system7::layout(request, self.system7_metrics),
             FrameStyle::BeOS => beos::layout(request, self.base_scale, false),
+            FrameStyle::OS2Warp => os2warp::layout(request, self.base_scale, false),
             FrameStyle::Modern => modern::layout(&self.theme, request),
         }
     }
@@ -341,11 +342,12 @@ impl ThemeEngine for RasterThemeEngine {
             &mut self.fonts.swash(),
             request,
             layout,
-        ), FrameStyle::System7 | FrameStyle::BeOS | FrameStyle::Modern => system7::flatten(self.render_surface(request, layout)) }
+        ), FrameStyle::System7 | FrameStyle::BeOS | FrameStyle::OS2Warp | FrameStyle::Modern => system7::flatten(self.render_surface(request, layout)) }
     }
 
     fn layout_at(&self, request: &DecorationRequest, scale: f32) -> DecorationLayout {
         if matches!(self.style, FrameStyle::BeOS) { return beos::layout(request, scale, false); }
+        if matches!(self.style, FrameStyle::OS2Warp) { return os2warp::layout(request, scale, false); }
         if same_scale(scale, self.base_scale) {
             return self.layout(request);
         }
@@ -362,6 +364,7 @@ impl ThemeEngine for RasterThemeEngine {
 
     fn edges_layout_at(&self, request: &DecorationRequest, scale: f32) -> DecorationLayout {
         if matches!(self.style, FrameStyle::BeOS) { return beos::layout(request, scale, true); }
+        if matches!(self.style, FrameStyle::OS2Warp) { return os2warp::layout(request, scale, true); }
         if matches!(self.style, FrameStyle::System7) {
             if same_scale(scale, self.base_scale) {
                 return system7::layout_edges(request, self.system7_metrics);
@@ -386,6 +389,7 @@ impl ThemeEngine for RasterThemeEngine {
 
     fn render_edges_at(&self, request: &DecorationRequest, layout: &DecorationLayout, scale: f32) -> DecorationSurface {
         if matches!(self.style, FrameStyle::BeOS) { return beos::render(request, layout, scale, &self.fonts, &mut self.title_cache.borrow_mut()); }
+        if matches!(self.style, FrameStyle::OS2Warp) { return os2warp::render(request, layout, scale, &self.fonts, &mut self.title_cache.borrow_mut()); }
         let same = same_scale(scale, self.base_scale);
         if matches!(self.style, FrameStyle::System7) {
             return system7::render_edges(self.system7_roles, if same { self.base_scale } else { normalized_scale(scale) }, layout);
@@ -416,6 +420,7 @@ impl ThemeEngine for RasterThemeEngine {
         ), FrameStyle::System7 => system7::render_sparse(self.system7_roles, self.base_scale,
             &mut self.title_cache.borrow_mut(), &mut self.fonts.system7_fallback.borrow_mut(), request, layout),
             FrameStyle::BeOS => beos::render(request, layout, self.base_scale, &self.fonts, &mut self.title_cache.borrow_mut()),
+            FrameStyle::OS2Warp => os2warp::render(request, layout, self.base_scale, &self.fonts, &mut self.title_cache.borrow_mut()),
             FrameStyle::Modern => modern::render(&self.theme, &mut self.fonts.modern_system(), &mut self.fonts.modern_swash(),
                 &mut self.modern_title_cache.borrow_mut(), self.base_scale.to_bits(), request, layout) }
     }
@@ -427,6 +432,7 @@ impl ThemeEngine for RasterThemeEngine {
         scale: f32,
     ) -> DecorationSurface {
         if matches!(self.style, FrameStyle::BeOS) { return beos::render(request, layout, scale, &self.fonts, &mut self.title_cache.borrow_mut()); }
+        if matches!(self.style, FrameStyle::OS2Warp) { return os2warp::render(request, layout, scale, &self.fonts, &mut self.title_cache.borrow_mut()); }
         if same_scale(scale, self.base_scale) {
             return self.render_surface(request, layout);
         }

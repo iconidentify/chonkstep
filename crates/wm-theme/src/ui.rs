@@ -8,6 +8,7 @@ pub struct UiChrome {
     legacy: crate::styles::system7::ui::UiChrome,
     modern: Option<crate::modern_ui::ModernUi>,
     beos: Option<crate::styles::beos::ui::BeosUi>,
+    os2warp: Option<crate::styles::os2warp::ui::Os2Ui>,
     style: DecorationStyle,
 }
 
@@ -20,6 +21,7 @@ impl UiChrome {
         Self {
             legacy: crate::styles::system7::ui::UiChrome::new(theme, fonts.clone(), style, scale),
             beos: (style == DecorationStyle::BeOS).then(|| crate::styles::beos::ui::BeosUi::new(fonts.clone(), scale)),
+            os2warp: (style == DecorationStyle::OS2Warp).then(|| crate::styles::os2warp::ui::Os2Ui::new(fonts.clone(), scale)),
             modern: (style == DecorationStyle::Modern)
                 .then(|| crate::modern_ui::ModernUi::new(theme, fonts, scale)),
             style,
@@ -30,6 +32,7 @@ impl UiChrome {
     }
     pub fn overview_ink(&self) -> Option<([u8; 3], u32)> {
         if let Some(ui) = &self.beos { return Some(ui.overview_ink()); }
+        if let Some(ui) = &self.os2warp { return Some(ui.overview_ink()); }
         self.modern
             .as_ref()
             .map_or_else(|| self.legacy.overview_ink(), |ui| Some(ui.overview_ink()))
@@ -45,6 +48,7 @@ impl UiChrome {
         closable: bool,
     ) -> menu::MenuRender {
         if let Some(ui) = &self.beos { return ui.menu(title, items, highlighted, closable); }
+        if let Some(ui) = &self.os2warp { return ui.menu(title, items, highlighted, closable); }
         match &self.modern {
             Some(ui) => ui.menu(
                 theme,
@@ -70,6 +74,7 @@ impl UiChrome {
         preview: Option<&DecorationBuffer>,
     ) -> DecorationBuffer {
         if let Some(ui) = &self.beos { return ui.icon(size, title, preview); }
+        if let Some(ui) = &self.os2warp { return ui.icon(size, title, preview); }
         match &self.modern {
             Some(ui) => ui.icon(
                 theme,
@@ -92,6 +97,7 @@ impl UiChrome {
         tile: u32,
     ) -> DecorationBuffer {
         if let Some(ui) = &self.beos { return ui.switcher(entries, selected, tile); }
+        if let Some(ui) = &self.os2warp { return ui.switcher(entries, selected, tile); }
         match &self.modern {
             Some(ui) => ui.switcher(
                 theme,
@@ -118,6 +124,7 @@ impl UiChrome {
         inverted: bool,
     ) -> DecorationBuffer {
         if let Some(ui) = &self.beos { return ui.label(text, width, height, inverted); }
+        if let Some(ui) = &self.os2warp { return ui.label(text, width, height, inverted); }
         match &self.modern {
             Some(ui) => ui.label(
                 theme,
@@ -143,6 +150,7 @@ impl UiChrome {
         layout: &overview::OverviewLayout,
     ) -> DecorationBuffer {
         if let Some(ui) = &self.beos { return ui.overview(entries, workspace, layout); }
+        if let Some(ui) = &self.os2warp { return ui.overview(entries, workspace, layout); }
         match &self.modern {
             Some(ui) => ui.overview(
                 theme,
@@ -159,6 +167,7 @@ impl UiChrome {
     }
     pub fn workspace_close(&self, edge: u32) -> DecorationBuffer {
         if let Some(ui) = &self.beos { return ui.workspace_close(edge); }
+        if let Some(ui) = &self.os2warp { return ui.workspace_close(edge); }
         match &self.modern {
             Some(ui) => ui.workspace_close(edge),
             None => self.legacy.workspace_close(edge),
@@ -175,6 +184,7 @@ impl UiChrome {
         pad: u32,
     ) -> DecorationBuffer {
         if let Some(ui) = &self.beos { return ui.selection(entry, cell, pad); }
+        if let Some(ui) = &self.os2warp { return ui.selection(entry, cell, pad); }
         match &self.modern {
             Some(ui) => ui.selection(
                 theme,

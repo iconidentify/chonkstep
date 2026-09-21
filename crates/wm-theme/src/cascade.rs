@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn historical_cascades_use_their_painted_rows_and_release_every_popup_and_grab() {
-        for style in [wm_theme_api::DecorationStyle::System7, wm_theme_api::DecorationStyle::BeOS] {
+        for style in [wm_theme_api::DecorationStyle::System7, wm_theme_api::DecorationStyle::BeOS, wm_theme_api::DecorationStyle::OS2Warp] {
             for scale in [1.0, 2.0] {
                 let mut f = Fixture::new();
                 f.theme = f.theme.scaled(scale);
