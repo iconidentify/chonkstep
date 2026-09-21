@@ -24,6 +24,7 @@ pub enum Wallpaper {
     Obsidian,
     Washi,
     Relay,
+    BeOSBlue,
     System7Classic,
     System7LightGray,
     System7DarkGray,
@@ -177,7 +178,7 @@ impl Wallpaper {
     /// The embedded artworks, in menu order. [`Self::Omarchy`] is not
     /// one: it has no pixels of its own.
     #[cfg(not(feature = "lcos"))]
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
         Self::TealBlueprint,
@@ -189,6 +190,7 @@ impl Wallpaper {
         Self::Obsidian,
         Self::Washi,
         Self::Relay,
+        Self::BeOSBlue,
         Self::System7Classic,
         Self::System7LightGray,
         Self::System7DarkGray,
@@ -198,7 +200,7 @@ impl Wallpaper {
     /// rather than concatenated so each array's length is compile-time
     /// checked.
     #[cfg(feature = "lcos")]
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
         Self::TealBlueprint,
@@ -210,6 +212,7 @@ impl Wallpaper {
         Self::Obsidian,
         Self::Washi,
         Self::Relay,
+        Self::BeOSBlue,
         Self::System7Classic,
         Self::System7LightGray,
         Self::System7DarkGray,
@@ -232,6 +235,7 @@ impl Wallpaper {
             Self::Obsidian => "Obsidian",
             Self::Washi => "Washi",
             Self::Relay => "Relay",
+            Self::BeOSBlue => "BeOS Blue",
             Self::System7Classic => "System 7 Classic",
             Self::System7LightGray => "System 7 Light Gray",
             Self::System7DarkGray => "System 7 Dark Gray",
@@ -261,6 +265,7 @@ impl Wallpaper {
             Self::Obsidian => "obsidian",
             Self::Washi => "washi",
             Self::Relay => "relay",
+            Self::BeOSBlue => "beos-blue",
             Self::System7Classic => "system-7-classic-pattern",
             Self::System7LightGray => "system-7-light-gray-pattern",
             Self::System7DarkGray => "system-7-dark-gray-pattern",
@@ -330,11 +335,11 @@ impl Wallpaper {
     pub const fn is_solid_colour(self) -> bool {
         #[cfg(feature = "lcos")]
         {
-            matches!(self, Self::ClassicLavender | Self::WalnutGround | Self::DeskGround | Self::OakGround)
+            matches!(self, Self::BeOSBlue | Self::ClassicLavender | Self::WalnutGround | Self::DeskGround | Self::OakGround)
         }
         #[cfg(not(feature = "lcos"))]
         {
-            matches!(self, Self::ClassicLavender)
+            matches!(self, Self::BeOSBlue | Self::ClassicLavender)
         }
     }
 
@@ -354,6 +359,7 @@ impl Wallpaper {
     /// composition in the selected mood.
     pub const fn background_color(self, appearance: Appearance) -> (u8, u8, u8) {
         match (self, appearance) {
+            (Self::BeOSBlue, _) => (48, 100, 152),
             (Self::System7Classic, _) => (128,128,128),
             (Self::System7LightGray, _) => (191,191,191),
             (Self::System7DarkGray, _) => (64,64,64),
@@ -424,7 +430,7 @@ impl Wallpaper {
             (Self::TealBlueprint, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/teal-blueprint-light.png")),
             (Self::GraphiteFold, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/graphite-fold.png")),
             (Self::GraphiteFold, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/graphite-fold-light.png")),
-            (Self::ClassicLavender | Self::Obsidian | Self::Washi | Self::Relay | Self::System7Classic | Self::System7LightGray | Self::System7DarkGray, _) => None,
+            (Self::BeOSBlue | Self::ClassicLavender | Self::Obsidian | Self::Washi | Self::Relay | Self::System7Classic | Self::System7LightGray | Self::System7DarkGray, _) => None,
             (Self::JadeTerrace, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/jade-terrace.png")),
             (Self::JadeTerrace, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/jade-terrace-light.png")),
             (Self::IvoryOrb, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/ivory-orb.png")),
@@ -704,7 +710,7 @@ mod tests {
             );
         }
         let lum = |(r, g, b): (u8, u8, u8)| (r as i64 + g as i64 + b as i64) / 3;
-        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| w.pattern_rows().is_none()) {
+        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| w.pattern_rows().is_none() && *w != Wallpaper::BeOSBlue) {
             assert!(
                 lum(wallpaper.background_color(Appearance::Light)) > lum(wallpaper.background_color(Appearance::Dark)),
                 "{}: background colors must follow the artwork's moods",

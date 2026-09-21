@@ -20,7 +20,7 @@ Omit `appearance` to use the selected theme's native appearance: Obsidian and
 Relay are dark, Washi is light. Each also supplies a companion appearance.
 Changing the configured theme also changes its default artwork while preserving
 a separately chosen wallpaper.
-Explicit `windowmaker`, `system7` and `modern` frame selections still work;
+Explicit `windowmaker`, `system7`, `beos` and `modern` frame selections still work;
 the Omarchy bar remains the desktop's navigation surface under each override.
 
 The Omarchy installer registers the built-in themes in the user's theme picker.

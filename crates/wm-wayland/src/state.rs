@@ -791,6 +791,7 @@ pub(crate) struct FrameRecord {
     pub window: WlWindowId,
     pub geometry: Rect,
     pub input_margin: u32,
+    pub input_exclusion: Option<Rect>,
     pub parts: Vec<FramePart>,
     pub solids: Vec<FrameSolid>,
     pub effects: Option<crate::frame_effects::FrameEffects>,
@@ -6488,6 +6489,7 @@ mod tests {
                 frame_id,
                 FrameRecord {
                     input_margin: 0,
+                    input_exclusion: None,
                     window,
                     geometry: Rect::default(),
                     parts: Vec::new(),

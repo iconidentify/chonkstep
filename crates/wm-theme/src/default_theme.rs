@@ -20,7 +20,7 @@ fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
 /// struct just to list them. `registry_matches_choices` pins this to
 /// `all_themes()`.
 #[cfg(not(feature = "lcos"))]
-pub const CHOICES: [(&str, &str); 14] = [
+pub const CHOICES: [(&str, &str); 15] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
@@ -32,6 +32,7 @@ pub const CHOICES: [(&str, &str); 14] = [
     ("obsidian", "Obsidian"),
     ("washi", "Washi"),
     ("relay", "Relay"),
+    ("beos", "BeOS R5"),
     ("system-7-classic", "System 7 Classic"),
     ("system-7-light-gray", "System 7 Light Gray"),
     ("system-7-dark-gray", "System 7 Dark Gray"),
@@ -42,7 +43,7 @@ pub const CHOICES: [(&str, &str); 14] = [
 /// must stay in step, and `every_choice_resolves` fails loudly if they
 /// do not.
 #[cfg(feature = "lcos")]
-pub const CHOICES: [(&str, &str); 18] = [
+pub const CHOICES: [(&str, &str); 19] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
@@ -54,6 +55,7 @@ pub const CHOICES: [(&str, &str); 18] = [
     ("obsidian", "Obsidian"),
     ("washi", "Washi"),
     ("relay", "Relay"),
+    ("beos", "BeOS R5"),
     ("system-7-classic", "System 7 Classic"),
     ("system-7-light-gray", "System 7 Light Gray"),
     ("system-7-dark-gray", "System 7 Dark Gray"),
@@ -83,6 +85,7 @@ pub fn all_themes() -> Vec<Theme> {
         crate::modern::theme("obsidian", Appearance::Dark).unwrap(),
         crate::modern::theme("washi", Appearance::Light).unwrap(),
         crate::modern::theme("relay", Appearance::Dark).unwrap(),
+        crate::beos::theme("beos", Appearance::Light).unwrap(),
         crate::system7::theme("system-7-classic", Appearance::Light).unwrap(),
         crate::system7::theme("system-7-light-gray", Appearance::Light).unwrap(),
         crate::system7::theme("system-7-dark-gray", Appearance::Light).unwrap(),
@@ -131,6 +134,7 @@ pub fn native_appearance(id: &str) -> Option<Appearance> {
 /// menu palette, terminal scheme, and which rendition of the wallpaper
 /// artwork the shell composes underneath.
 pub fn theme_variant(id: &str, appearance: Appearance) -> Option<Theme> {
+    if let Some(theme) = crate::beos::theme(id, appearance) { return Some(theme); }
     if let Some(theme) = crate::system7::theme(id, appearance) { return Some(theme); }
     if let Some(theme) = crate::modern::theme(id, appearance) { return Some(theme); }
     let theme = match (id, appearance) {
@@ -1804,13 +1808,13 @@ mod tests {
         assert!(theme_by_id("not-a-theme").is_none());
     }
 
-    /// Themes restyle only the dress: every built-in must share the
+    /// WindowMaker themes restyle only the dress: they share the
     /// flagship's chrome geometry so hit-testing, button placement,
     /// and resize zones behave identically across all of them.
     #[test]
     fn legacy_themes_share_the_flagship_chrome_geometry() {
         let flagship = nextstep_classic();
-        for theme in all_themes().into_iter().filter(|theme| theme.chrome.is_none()) {
+        for theme in all_themes().into_iter().filter(|theme| theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::WindowMaker) {
             assert_eq!(theme.titlebar.height, flagship.titlebar.height, "{}", theme.id);
             assert_eq!(theme.titlebar.button_margin, flagship.titlebar.button_margin, "{}", theme.id);
             assert_eq!(theme.resize_bar.height, flagship.resize_bar.height, "{}", theme.id);
@@ -1883,14 +1887,14 @@ mod tests {
         assert!(theme_variant("not-a-theme", Appearance::Dark).is_none());
     }
 
-    /// Both renditions of a theme share the flagship chrome geometry —
+    /// Both renditions of a WindowMaker theme share its chrome geometry —
     /// the appearance axis restyles the dress exactly the way a theme
     /// pick does, so hit-testing and layout cannot move on a switch.
     #[test]
     fn both_renditions_share_the_flagship_chrome_geometry() {
         let flagship = nextstep_classic();
         for appearance in [Appearance::Light, Appearance::Dark] {
-            for theme in all_themes_in(appearance).into_iter().filter(|theme| theme.chrome.is_none()) {
+            for theme in all_themes_in(appearance).into_iter().filter(|theme| theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::WindowMaker) {
                 assert_eq!(theme.titlebar.height, flagship.titlebar.height, "{}", theme.id);
                 assert_eq!(theme.titlebar.button_margin, flagship.titlebar.button_margin, "{}", theme.id);
                 assert_eq!(theme.resize_bar.height, flagship.resize_bar.height, "{}", theme.id);
@@ -1903,11 +1907,11 @@ mod tests {
     /// `theme_by_id` (and `all_themes`) answer the native rendition, so
     /// nothing that predates the axis changes what it gets — and the
     /// native map is what it historically was: Ivory Halftone light,
-    /// everything else dark.
+    /// Washi, System 7 and BeOS light; the remaining themes dark.
     #[test]
     fn native_renditions_are_what_each_theme_originally_shipped_as() {
         for (id, _) in CHOICES {
-            let expected = if matches!(id,"ivory-halftone" | "washi") || id.starts_with("system-7-") { Appearance::Light } else { Appearance::Dark };
+            let expected = if matches!(id,"ivory-halftone" | "washi" | "beos") || id.starts_with("system-7-") { Appearance::Light } else { Appearance::Dark };
             assert_eq!(native_appearance(id), Some(expected), "{id}");
             let by_id = theme_by_id(id).unwrap();
             assert_eq!(by_id.appearance, expected, "{id}");
@@ -1924,7 +1928,7 @@ mod tests {
     /// inverts its focus bar is a desk where focus stops being legible.
     #[test]
     fn every_rendition_carries_its_mood_and_keeps_focus_ink() {
-        for theme in all_themes_in(Appearance::Light).into_iter().filter(|theme|theme.chrome.is_none()) {
+        for theme in all_themes_in(Appearance::Light).into_iter().filter(|theme| theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::WindowMaker) {
             let id = &theme.id;
             assert!(lum(theme.terminal.bg) > 200, "{id}: light terminal is paper");
             assert!(lum(theme.terminal.fg) < 100, "{id}: on which the text is ink");
@@ -1934,7 +1938,7 @@ mod tests {
             assert!(lum(solid(&theme.titlebar.active)) < 64, "{id}: the focused bar stays ink");
             assert!(lum(theme.titlebar.text_color_active) > 150, "{id}: with a pale title");
         }
-        for theme in all_themes_in(Appearance::Dark).into_iter().filter(|theme|theme.chrome.is_none()) {
+        for theme in all_themes_in(Appearance::Dark).into_iter().filter(|theme| theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::WindowMaker) {
             let id = &theme.id;
             assert!(lum(theme.terminal.bg) < 100, "{id}: dark terminal is dark");
             assert!(lum(theme.terminal.fg) > 120, "{id}: with light text");
@@ -1985,7 +1989,12 @@ mod tests {
             let light = theme_variant(id, Appearance::Light).unwrap();
             let dark = theme_variant(id, Appearance::Dark).unwrap();
             assert_ne!(light.terminal, dark.terminal, "{id}");
-            assert_ne!(light.menu.background, dark.menu.background, "{id}");
+            if light.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::BeOS {
+                assert_eq!(light.menu.background, dark.menu.background, "{id}: BeOS keeps its historical menu gray");
+                assert_eq!(light.titlebar, dark.titlebar, "{id}: BeOS chrome is independent of app appearance");
+            } else {
+                assert_ne!(light.menu.background, dark.menu.background, "{id}");
+            }
             assert_eq!(light.wallpaper, dark.wallpaper, "{id}");
         }
     }

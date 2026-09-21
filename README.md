@@ -66,6 +66,8 @@ with its original instruments, panels, launchers and dockapp SDKs. Its host,
 samplers and rendering run in their own process. Omarchy mode does not start it;
 when it is stopped, it uses no runtime resources.
 
+[BeOS R5](docs/beos-theme.md) adds short yellow tabs, Tracker-style menus and the original blue desktop.
+
 The [theme guide](docs/modern-themes.md) covers selection, appearance overrides
 and export. [System 7 themes](docs/system7-themes.md) provide three period desktop
 patterns with their native window chrome through the same picker.

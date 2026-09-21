@@ -120,6 +120,7 @@ pub(crate) fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> D
 
     DecorationLayout {
         input_margin: 0,
+        input_exclusion: None,
         frame_size,
         client_offset: Point::new(border as i32, (border + titlebar_height) as i32),
         titlebar_height,
@@ -156,6 +157,7 @@ pub(crate) fn layout_edges(theme: &Theme, request: &DecorationRequest) -> Decora
     };
     DecorationLayout {
         input_margin: margin,
+        input_exclusion: None,
         frame_size,
         client_offset: Point::new(inset as i32, inset as i32),
         titlebar_height: 0,

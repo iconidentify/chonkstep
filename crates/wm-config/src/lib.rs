@@ -2049,7 +2049,7 @@ pub fn parse_in_session(
                 Some(style) => config.decoration_style = style,
                 None => refuse!(
                     config.diagnostics,
-                    "config: decoration_style must be \"auto\", \"windowmaker\", \"system7\" or \"modern\", keeping default (got {})",
+                    "config: decoration_style must be \"auto\", \"windowmaker\", \"system7\", \"beos\" or \"modern\", keeping default (got {})",
                     shown(value)
                 ),
             },
@@ -4103,7 +4103,7 @@ numlock_by_default = false
         for text in ["", "theme = \"omarchy\""] {
             assert_eq!(parse(text).unwrap().decoration_style, DecorationStyle::Auto);
         }
-        for style in [DecorationStyle::WindowMaker, DecorationStyle::System7] {
+        for style in [DecorationStyle::WindowMaker, DecorationStyle::System7, DecorationStyle::BeOS] {
             let config = parse(&format!("decoration_style = {:?}", style.name())).unwrap();
             assert_eq!(config.decoration_style, style);
             assert!(config.diagnostics.is_empty());

@@ -7,6 +7,7 @@ use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
 pub(super) struct FrameShape {
     pub geometry: Rect,
     pub margin: u32,
+    pub input_exclusion: Option<Rect>,
     pub corner: u32,
     modern_shape: Option<Vec<Rectangle>>,
     reset_shape: bool,
@@ -22,7 +23,7 @@ impl FrameShape {
     }
 
     pub fn new(layout: &DecorationLayout) -> Self {
-        Self { geometry: Rect::new(Point::new(0, 0), layout.frame_size), margin: layout.input_margin,
+        Self { geometry: Rect::new(Point::new(0, 0), layout.frame_size), margin: layout.input_margin, input_exclusion: layout.input_exclusion,
             corner: 0, modern_shape: None, reset_shape: false, mapped: false, ring: None, applied: None, ring_applied: None }
     }
 }
@@ -82,11 +83,11 @@ impl X11Backend {
 
     pub(super) fn update_frame_shape_pixels(&mut self, frame: Window, surface: &wm_theme_api::DecorationSurface) {
         if let Some(shape) = self.frame_shapes.get_mut(&frame) {
-            if !surface.solids.is_empty() {
+            if !surface.solids.is_empty() || shape.input_exclusion.is_some() {
                 // Flat modern frames may split the title into several bands.
                 // Reconstruct their binary silhouette from actual transparent
                 // raster texels, with the client interior and solids visible.
-                let regions = surface_regions(surface, shape.margin).unwrap_or_default();
+                let regions = surface_regions(surface, shape.margin, shape.input_exclusion).unwrap_or_default();
                 if shape.modern_shape.as_ref().is_none_or(|old| !same_rectangles(old, &regions)) {
                     shape.modern_shape = Some(regions);
                     shape.applied = None;
@@ -194,7 +195,7 @@ fn buffer_regions(buffer: &DecorationBuffer) -> Option<Vec<Rectangle>> {
     Some(regions)
 }
 
-fn surface_regions(surface: &wm_theme_api::DecorationSurface, margin: u32) -> Option<Vec<Rectangle>> {
+fn surface_regions(surface: &wm_theme_api::DecorationSurface, margin: u32, exclusion: Option<Rect>) -> Option<Vec<Rectangle>> {
     let size = surface.frame_size;
     if size.w > 16384 || size.h > 16384 { return None; }
     let margin = margin.min(size.w/2).min(size.h/2);
@@ -203,6 +204,16 @@ fn surface_regions(surface: &wm_theme_api::DecorationSurface, margin: u32) -> Op
     let mut holes = Vec::new();
     for y in margin..size.h-margin {
         holes.clear();
+        // Sparse BeOS tabs do not allocate the empty area beside them. The
+        // layout supplies that hole explicitly, unlike alpha inside a band.
+        if let Some(hole) = exclusion {
+            let local_y = i64::from(y) - i64::from(hole.pos.y);
+            if local_y >= 0 && local_y < i64::from(hole.size.h) {
+                let a = i64::from(hole.pos.x).clamp(i64::from(left), i64::from(right)) as u32;
+                let b = (i64::from(hole.pos.x) + i64::from(hole.size.w)).clamp(i64::from(left), i64::from(right)) as u32;
+                if a < b { holes.push((a,b)); }
+            }
+        }
         if let Some(shape)=surface.shape {
             let radius=u32::from(shape.normalized().radius);
             let mut edge=left;
@@ -288,6 +299,44 @@ mod tests {
     use wm_theme_api::{DecorationRequest, ThemeEngine};
 
     #[test]
+    #[ignore = "private X server: xvfb-run -a cargo test -p wm-x11 native_beos -- --ignored --test-threads=1"]
+    fn native_beos_tabs_keep_their_holes_and_restore_rectangular_shapes() {
+        let mut backend = X11Backend::connect_and_become_wm(None, 1.0).unwrap();
+        let fonts = FontState::new();
+        let engine = RasterThemeEngine::with_fonts(wm_theme::default_theme::theme_by_id("beos").unwrap(), fonts.clone())
+            .with_style(DecorationStyle::Auto).unwrap();
+        let client = backend.conn.generate_id().unwrap();
+        backend.conn.create_window(COPY_DEPTH_FROM_PARENT, client, backend.root, 0, 0, 400, 200, 0,
+            WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::new()).unwrap().check().unwrap();
+        let mut request = DecorationRequest { content_size: Size::new(400,200), title: "A".into(), focused: true, resizable: true, buttons: Vec::new() };
+        let layout = engine.layout(&request);
+        let frame = backend.create_decoration(XWindow(client), &layout);
+        backend.set_frame_geometry(frame, Rect::new(Point::new(100,100),layout.frame_size));
+        backend.map_frame(frame);
+        for title in ["A", "A longer terminal title", "B"] {
+            request.title = title.into();
+            let layout = engine.layout(&request);
+            backend.set_decoration_layout(frame, &layout);
+            backend.paint_decoration(frame, &engine.render_surface(&request, &layout));
+            let actual = backend.conn.shape_get_rectangles(frame.0, SK::BOUNDING).unwrap().reply().unwrap();
+            for y in 0..layout.frame_size.h { for x in 0..layout.frame_size.w {
+                let point = Point::new(x as i32,y as i32);
+                let covered = actual.rectangles.iter().any(|r| Rect::new(Point::new(r.x.into(),r.y.into()), Size::new(r.width.into(),r.height.into())).contains(point));
+                assert_eq!(covered, !layout.input_exclusion.is_some_and(|hole| hole.contains(point)), "{title}: ({x},{y})");
+            }}
+        }
+        let classic = RasterThemeEngine::with_fonts(wm_theme::default_theme::nextstep_classic(), fonts);
+        let layout = classic.layout(&request);
+        backend.set_decoration_layout(frame, &layout);
+        backend.set_frame_geometry(frame, Rect::new(Point::new(100,100), layout.frame_size));
+        backend.paint_decoration(frame, &classic.render_surface(&request, &layout));
+        let actual = backend.conn.shape_get_rectangles(frame.0, SK::BOUNDING).unwrap().reply().unwrap();
+        assert_eq!(actual.rectangles.len(), 1);
+        assert_eq!((u32::from(actual.rectangles[0].width),u32::from(actual.rectangles[0].height)),(layout.frame_size.w,layout.frame_size.h));
+        backend.destroy_decoration(frame);
+    }
+
+    #[test]
     fn modern_compressed_frames_preserve_every_transparent_corner() {
         let fonts=FontState::new();
         for (name,_) in wm_theme::modern::CHOICES {
@@ -297,7 +346,7 @@ mod tests {
                 let request=DecorationRequest {content_size:Size::new(120,80),title:"Frame".into(),focused:true,resizable:true,buttons:Vec::new()};
                 let layout=engine.layout_at(&request,scale);
                 let surface=engine.render_surface_at(&request,&layout,scale);
-                let regions=surface_regions(&surface,layout.input_margin).unwrap();
+                let regions=surface_regions(&surface,layout.input_margin,layout.input_exclusion).unwrap();
                 let full=engine.render(&request,&layout);
                 {
                     let client=Rect::new(layout.client_offset,request.content_size);
@@ -334,7 +383,7 @@ mod tests {
             backend.map_frame(frame);
             backend.paint_decoration(frame,&surface);
             let actual=backend.conn.shape_get_rectangles(frame.0,SK::BOUNDING).unwrap().reply().unwrap();
-            let expected=surface_regions(&surface,layout.input_margin).unwrap();
+            let expected=surface_regions(&surface,layout.input_margin,layout.input_exclusion).unwrap();
             // The server may normalize adjacent rectangles; compare coverage.
             for y in 0..layout.frame_size.h { for x in 0..layout.frame_size.w {
                 let has=|rects:&[Rectangle]| rects.iter().any(|r|Rect::new(Point::new(r.x as i32,r.y as i32),

@@ -66,6 +66,7 @@ fn frame_layout(request: &DecorationRequest, m: Metrics, title: u32) -> Decorati
     let mut result = DecorationLayout {
         frame_size: size,
         input_margin: margin,
+        input_exclusion: None,
         client_offset: Point::new((margin + m.line) as i32, (margin + m.line + title) as i32),
         titlebar_height: title,
         // Without a title bar there is nothing to roll up into.

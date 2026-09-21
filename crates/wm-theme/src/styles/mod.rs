@@ -3,6 +3,7 @@
 pub(crate) mod windowmaker;
 pub(crate) mod system7;
 pub(crate) mod modern;
+pub(crate) mod beos;
 
 use wm_theme_api::{DecorationStyle, Point, Rect, ResizeEdge, Size};
 
@@ -38,18 +39,19 @@ pub(crate) fn edge_ring(frame: Size, top: u32, right: u32, bottom: u32, left: u3
 
 /// Renderers actually implemented in this build. Tests/benchmarks iterate this
 /// list; reserved names must never silently fall back to another style's pixels.
-pub const SUPPORTED_DECORATION_STYLES: &[DecorationStyle] = &[DecorationStyle::WindowMaker, DecorationStyle::System7, DecorationStyle::Modern];
+pub const SUPPORTED_DECORATION_STYLES: &[DecorationStyle] = &[DecorationStyle::WindowMaker, DecorationStyle::System7, DecorationStyle::BeOS, DecorationStyle::Modern];
 
 #[derive(Clone, Copy)]
 pub(crate) enum FrameStyle {
     WindowMaker,
     System7,
+    BeOS,
     Modern,
 }
 
 impl FrameStyle {
     pub(crate) const fn name(self) -> DecorationStyle {
-        match self { Self::WindowMaker => DecorationStyle::WindowMaker, Self::System7 => DecorationStyle::System7, Self::Modern => DecorationStyle::Modern }
+        match self { Self::WindowMaker => DecorationStyle::WindowMaker, Self::System7 => DecorationStyle::System7, Self::BeOS => DecorationStyle::BeOS, Self::Modern => DecorationStyle::Modern }
     }
 }
 
@@ -72,6 +74,7 @@ impl TryFrom<DecorationStyle> for FrameStyle {
         match style {
             DecorationStyle::WindowMaker => Ok(Self::WindowMaker),
             DecorationStyle::System7 => Ok(Self::System7),
+            DecorationStyle::BeOS => Ok(Self::BeOS),
             DecorationStyle::Modern => Ok(Self::Modern),
             DecorationStyle::Auto => Err(UnsupportedDecorationStyle(style)),
         }
@@ -89,7 +92,7 @@ mod tests {
         #[derive(serde::Serialize, serde::Deserialize)]
         struct Config { style: DecorationStyle }
         assert_eq!(DecorationStyle::default(), DecorationStyle::WindowMaker);
-        for style in [DecorationStyle::WindowMaker, DecorationStyle::System7] {
+        for style in [DecorationStyle::WindowMaker, DecorationStyle::System7, DecorationStyle::BeOS] {
             assert_eq!(DecorationStyle::from_name(style.name()), Some(style));
             let encoded = toml::to_string(&Config { style }).unwrap();
             assert_eq!(toml::from_str::<Config>(&encoded).unwrap().style, style);

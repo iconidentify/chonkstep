@@ -652,27 +652,29 @@ mod tests {
     }
 
     #[test]
-    fn system7_cascades_use_their_painted_rows_and_release_every_popup_and_grab() {
-        for scale in [1.0, 2.0] {
-            let mut f = Fixture::new();
-            f.theme = f.theme.scaled(scale);
-            f.cascade.set_chrome(Some(crate::UiChrome::new(&f.theme, crate::FontState::new(),
-                wm_theme_api::DecorationStyle::System7, scale)));
-            f.open(vec![action("Terminal", 7), submenu("Applications", vec![action("Notes", 42)])]);
-            let row = f.cascade.levels[0].item_rects[1];
-            let parent = f.only_open_window();
-            assert_eq!(f.click(parent, Point::new(row.pos.x + 2, row.pos.y + 2)), Some(MenuClick::OpenedSubmenu));
-            assert_eq!(f.cascade.levels.len(), 2);
-            let child = f.cascade.levels[1].window;
-            let row = f.cascade.levels[1].item_rects[0];
-            assert_eq!(f.click(child, Point::new(row.pos.x + 2, row.pos.y + 2)), Some(MenuClick::Action(42)));
-            assert!(f.host.open.is_empty());
-            assert_eq!(f.host.grabs, f.host.ungrabs);
-            assert_eq!(f.host.keyboard_grabs, f.host.keyboard_ungrabs);
-            f.cascade.set_chrome(None);
-            f.open(vec![action("WindowMaker again", 9)]);
-            assert_eq!(f.key(MenuKey::Enter), Some(MenuClick::Action(9)));
-            assert!(f.host.open.is_empty());
+    fn historical_cascades_use_their_painted_rows_and_release_every_popup_and_grab() {
+        for style in [wm_theme_api::DecorationStyle::System7, wm_theme_api::DecorationStyle::BeOS] {
+            for scale in [1.0, 2.0] {
+                let mut f = Fixture::new();
+                f.theme = f.theme.scaled(scale);
+                f.cascade.set_chrome(Some(crate::UiChrome::new(&f.theme, crate::FontState::new(),
+                    style, scale)));
+                f.open(vec![action("Terminal", 7), submenu("Applications", vec![action("Notes", 42)])]);
+                let row = f.cascade.levels[0].item_rects[1];
+                let parent = f.only_open_window();
+                assert_eq!(f.click(parent, Point::new(row.pos.x + 2, row.pos.y + 2)), Some(MenuClick::OpenedSubmenu));
+                assert_eq!(f.cascade.levels.len(), 2);
+                let child = f.cascade.levels[1].window;
+                let row = f.cascade.levels[1].item_rects[0];
+                assert_eq!(f.click(child, Point::new(row.pos.x + 2, row.pos.y + 2)), Some(MenuClick::Action(42)));
+                assert!(f.host.open.is_empty());
+                assert_eq!(f.host.grabs, f.host.ungrabs);
+                assert_eq!(f.host.keyboard_grabs, f.host.keyboard_ungrabs);
+                f.cascade.set_chrome(None);
+                f.open(vec![action("WindowMaker again", 9)]);
+                assert_eq!(f.key(MenuKey::Enter), Some(MenuClick::Action(9)));
+                assert!(f.host.open.is_empty());
+            }
         }
     }
 

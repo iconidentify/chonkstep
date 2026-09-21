@@ -7,6 +7,7 @@ use wm_theme_api::{DecorationBuffer, DecorationStyle, Size};
 pub struct UiChrome {
     legacy: crate::styles::system7::ui::UiChrome,
     modern: Option<crate::modern_ui::ModernUi>,
+    beos: Option<crate::styles::beos::ui::BeosUi>,
     style: DecorationStyle,
 }
 
@@ -18,6 +19,7 @@ impl UiChrome {
         }
         Self {
             legacy: crate::styles::system7::ui::UiChrome::new(theme, fonts.clone(), style, scale),
+            beos: (style == DecorationStyle::BeOS).then(|| crate::styles::beos::ui::BeosUi::new(fonts.clone(), scale)),
             modern: (style == DecorationStyle::Modern)
                 .then(|| crate::modern_ui::ModernUi::new(theme, fonts, scale)),
             style,
@@ -27,6 +29,7 @@ impl UiChrome {
         self.style
     }
     pub fn overview_ink(&self) -> Option<([u8; 3], u32)> {
+        if let Some(ui) = &self.beos { return Some(ui.overview_ink()); }
         self.modern
             .as_ref()
             .map_or_else(|| self.legacy.overview_ink(), |ui| Some(ui.overview_ink()))
@@ -41,6 +44,7 @@ impl UiChrome {
         highlighted: Option<usize>,
         closable: bool,
     ) -> menu::MenuRender {
+        if let Some(ui) = &self.beos { return ui.menu(title, items, highlighted, closable); }
         match &self.modern {
             Some(ui) => ui.menu(
                 theme,
@@ -65,6 +69,7 @@ impl UiChrome {
         title: &str,
         preview: Option<&DecorationBuffer>,
     ) -> DecorationBuffer {
+        if let Some(ui) = &self.beos { return ui.icon(size, title, preview); }
         match &self.modern {
             Some(ui) => ui.icon(
                 theme,
@@ -86,6 +91,7 @@ impl UiChrome {
         selected: usize,
         tile: u32,
     ) -> DecorationBuffer {
+        if let Some(ui) = &self.beos { return ui.switcher(entries, selected, tile); }
         match &self.modern {
             Some(ui) => ui.switcher(
                 theme,
@@ -111,6 +117,7 @@ impl UiChrome {
         height: u32,
         inverted: bool,
     ) -> DecorationBuffer {
+        if let Some(ui) = &self.beos { return ui.label(text, width, height, inverted); }
         match &self.modern {
             Some(ui) => ui.label(
                 theme,
@@ -135,6 +142,7 @@ impl UiChrome {
         workspace: (usize, usize),
         layout: &overview::OverviewLayout,
     ) -> DecorationBuffer {
+        if let Some(ui) = &self.beos { return ui.overview(entries, workspace, layout); }
         match &self.modern {
             Some(ui) => ui.overview(
                 theme,
@@ -150,6 +158,7 @@ impl UiChrome {
         }
     }
     pub fn workspace_close(&self, edge: u32) -> DecorationBuffer {
+        if let Some(ui) = &self.beos { return ui.workspace_close(edge); }
         match &self.modern {
             Some(ui) => ui.workspace_close(edge),
             None => self.legacy.workspace_close(edge),
@@ -165,6 +174,7 @@ impl UiChrome {
         cell: Size,
         pad: u32,
     ) -> DecorationBuffer {
+        if let Some(ui) = &self.beos { return ui.selection(entry, cell, pad); }
         match &self.modern {
             Some(ui) => ui.selection(
                 theme,

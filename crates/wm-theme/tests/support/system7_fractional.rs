@@ -17,7 +17,11 @@ pub fn cases(mut visit: impl FnMut(String, Vec<u8>)) {
                             if shaded { layout.frame_size.h = layout.shaded_frame_height; }
                             let surface = engine.render_surface_at(&request, &layout, scale);
                             let name = format!("{scale}/{focused}/{resizable}/{shaded}/{pressed:?}/{title}");
-                            let mut bytes = format!("{layout:?}\n").into_bytes();
+                            // The frozen debug encoding predates BeOS's tab
+                            // cutout. Keep the old oracle bytes and check the
+                            // new field independently for System 7.
+                            assert!(layout.input_exclusion.is_none());
+                            let mut bytes = format!("{layout:?}\n").replace("input_exclusion: None, ", "").into_bytes();
                             for part in surface.parts {
                                 bytes.extend_from_slice(format!("{:?}/{}/{}\n", part.offset, part.buffer.width, part.buffer.height).as_bytes());
                                 bytes.extend_from_slice(&part.buffer.pixels);

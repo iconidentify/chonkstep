@@ -2532,6 +2532,19 @@ impl<B: Backend> WindowManager<B> {
         }
         client.title = title;
         self.bump_protocol_state_revision();
+        // A short title tab can grow/shrink when its label changes. Refresh
+        // its hitboxes and desktop cutout without configuring the client or
+        // moving its content. Rectangular recipes keep their existing layout.
+        let client = &self.clients[id];
+        let layout = self.chrome_layout(client.chrome, &Self::decoration_request(client, None), self.client_decoration_scale(id));
+        if layout != client.layout {
+            if layout.frame_size != client.layout.frame_size || layout.client_offset != client.layout.client_offset {
+                self.reflow_frame_internal(id, ReflowReason::Geometry);
+                return;
+            }
+            if let Some(frame) = client.frame { self.backend.set_decoration_layout(frame, &layout); }
+            self.clients[id].layout = layout;
+        }
         self.repaint_decoration(id);
     }
 
@@ -3350,6 +3363,7 @@ impl<B: Backend> WindowManager<B> {
             client.geometry = monitor;
             client.layout = DecorationLayout {
                 input_margin: 0,
+                input_exclusion: None,
                 frame_size: monitor.size,
                 client_offset: Point::new(0, 0),
                 titlebar_height: 0,
@@ -5363,6 +5377,7 @@ impl<B: Backend> WindowManager<B> {
 fn frameless_layout(content: Size) -> DecorationLayout {
     DecorationLayout {
         input_margin: 0,
+        input_exclusion: None,
         frame_size: content,
         client_offset: Point::new(0, 0),
         titlebar_height: 0,
@@ -8970,7 +8985,14 @@ mod tests {
                     }
                 } else {
                     assert_ne!(before.parts[0], after.parts[0], "title pixels must actually change");
-                    assert_eq!(before.parts[1..], after.parts[1..], "non-title pixels must remain unchanged");
+                    if style == wm_theme::DecorationStyle::BeOS && transition == 1 {
+                        assert_ne!(before.parts[1..], after.parts[1..], "BeOS lightens its frame when inactive");
+                    } else {
+                        // BeOS's separately stored tab joins the top frame
+                        // band; its join grows with a changed title.
+                        let first = if style == wm_theme::DecorationStyle::BeOS && transition == 0 { 2 } else { 1 };
+                        assert_eq!(before.parts[first..], after.parts[first..], "non-title pixels must remain unchanged");
+                    }
                 }
             }
             // Cancel the held close box by releasing outside it.
@@ -11398,6 +11420,7 @@ mod tests {
     mod special;
     mod restyle;
     mod system7;
+    mod beos;
     fn mac_windows() -> (WindowManager<FakeBackend>, [ClientId; 3]) {
         let mut backend = FakeBackend::new();
         let windows = [backend.create_window(), backend.create_window(), backend.create_window()];

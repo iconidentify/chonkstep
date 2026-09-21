@@ -60,7 +60,7 @@ impl Fallback {
 
     /// One shaped Unicode run at the 1x source resolution. Replication happens
     /// in the frame painter, keeping integer output scales exactly nearest.
-    pub(super) fn render(&mut self, text: &str, max_width: u32) -> Mask {
+    pub(crate) fn render(&mut self, text: &str, max_width: u32) -> Mask {
         if self.fonts.db().faces().next().is_none() {
             let width = (text.chars().count().saturating_mul(7) as u32).max(1).min(max_width.max(1));
             let mut mask = Mask { width, pixels: vec![false; width as usize * 15] };
@@ -107,7 +107,7 @@ impl Fallback {
     }
 }
 
-pub(super) struct Mask { pub width: u32, pub pixels: Vec<bool> }
+pub(crate) struct Mask { pub width: u32, pub pixels: Vec<bool> }
 
 impl Mask {
     fn set(&mut self, x: i32, y: i32) {

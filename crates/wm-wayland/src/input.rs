@@ -3244,7 +3244,7 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         }) {
             return hit;
         }
-        if !record.geometry.contains(at) || record.effects.as_ref().is_some_and(|effects|
+        if !record.geometry.contains(at) || record.input_exclusion.is_some_and(|rect| rect.contains(local_to(at, record.geometry.pos))) || record.effects.as_ref().is_some_and(|effects|
             !effects.accepts_input(local_to(at,record.geometry.pos))) {
             continue;
         }

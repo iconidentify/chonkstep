@@ -2976,6 +2976,7 @@ impl Backend for X11Backend {
     fn set_decoration_layout(&mut self, frame: Self::FrameId, layout: &DecorationLayout) {
         if let Some(shape) = self.frame_shapes.get_mut(&frame.0) {
             shape.margin = layout.input_margin;
+            shape.input_exclusion = layout.input_exclusion;
             if layout.titlebar_height == 0 { shape.corner = 0; shape.clear_modern(); }
         }
         if layout.titlebar_height == 0 && layout.input_margin == 0 && layout.client_offset == Point::new(0, 0) {

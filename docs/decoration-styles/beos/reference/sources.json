@@ -1,0 +1,60 @@
+[
+  {
+    "file": "beFresh.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/01_basics/art/beFresh.gif",
+    "sha256": "9a32a41712b6a69e70b83018c4e69aaa95ae37c36780776971e199f6be176bad"
+  },
+  {
+    "file": "beMenu1.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/01_basics/art/beMenu1.gif",
+    "sha256": "09d2bab5a7de4c71f0eaa9f7dec1af3134f54a6dc8ce0850fa69d74a4fdba560"
+  },
+  {
+    "file": "desktopContext.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/01_basics/art/desktopContext.gif",
+    "sha256": "c6e9035ec97212d097441611ecc7e9544b4e83e4dc3ac2c3fb32810dd8cca493"
+  },
+  {
+    "file": "3PartDeskbar.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/01_basics/art/3PartDeskbar.gif",
+    "sha256": "de256fd8b8fe106b01a40203637df68126267b15c1d41f870885ecd4c322a26c"
+  },
+  {
+    "file": "Window1.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/06_appendices/art/Window1.gif",
+    "sha256": "b61f98cf904c7a3abaa7cabbd1dc0845589a3b43d5f045b2a88543b7563e6d20"
+  },
+  {
+    "file": "Window2.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/06_appendices/art/Window2.gif",
+    "sha256": "587d24e2dcff7d364770b659880875895fa93705dc0cc8ed40db076be82aa894"
+  },
+  {
+    "file": "resizeControls.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/06_appendices/art/resizeControls.gif",
+    "sha256": "1c8903529ae5f773f2147d2f3d5f5c5839d9713a827ecc3568713c41ef8dd1c1"
+  },
+  {
+    "file": "activeWindow.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/06_appendices/art/activeWindow.gif",
+    "sha256": "2830b6272af0f7e08bc92f8d9e8c875d8bf0060532b704eeac8415bf8362ee4d"
+  },
+  {
+    "file": "r5-desktop.png",
+    "url": "https://upload.wikimedia.org/wikipedia/commons/b/b4/Screenshot_from_2023-02-26_15-38-37.png?utm_campaign=index&utm_content=original&utm_source=commons.wikimedia.org",
+    "sha256": "fd83b09b9892391db76b52c7f8e091f376d22c9ccaaa9804a35507a5a2bbad6b",
+    "author": "M0J01812",
+    "license": "CC-BY-SA-4.0",
+    "source_page": "https://commons.wikimedia.org/wiki/File:Screenshot_from_2023-02-26_15-38-37.png"
+  },
+  {
+    "file": "menu1.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/06_appendices/art/menu1.gif",
+    "sha256": "c71c97047e5f037fc0671e2749b4707a8c88c5fff8e9f9206570d018f21521ce"
+  },
+  {
+    "file": "contextMenu.gif",
+    "url": "https://asleson.org/public/mirrors/www.be.com/documentation/User%27s%20Guide/06_appendices/art/contextMenu.gif",
+    "sha256": "2ebbe455af8a45703c15b557efd19133f7a18a5ee535f1e1a021b67486288561"
+  }
+]

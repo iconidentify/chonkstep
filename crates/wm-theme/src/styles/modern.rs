@@ -76,6 +76,7 @@ pub(crate) fn layout(theme: &Theme, request: &DecorationRequest) -> DecorationLa
     DecorationLayout {
         frame_size,
         input_margin: margin,
+        input_exclusion: None,
         client_offset: Point::new((margin + border) as i32, (margin + title) as i32),
         titlebar_height: title,
         button_hitboxes: buttons,
@@ -106,6 +107,7 @@ pub(crate) fn layout_edges(theme: &Theme, request: &DecorationRequest) -> Decora
     DecorationLayout {
         frame_size,
         input_margin: margin,
+        input_exclusion: None,
         client_offset: Point::new(inset as i32, inset as i32),
         titlebar_height: 0,
         button_hitboxes: Vec::new(),

@@ -15,6 +15,7 @@ pub enum HitTarget {
 /// regions are checked before the general titlebar-height band, since a
 /// resize corner can sit within that band near the frame's top edge.
 pub fn hit_test(layout: &DecorationLayout, point: Point) -> HitTarget {
+    if layout.input_exclusion.is_some_and(|rect| rect.contains(point)) { return HitTarget::ClientArea; }
     if let Some((kind, _)) = layout.button_hitboxes.iter().find(|(_, rect)| rect.contains(point)) {
         return HitTarget::Button(*kind);
     }
@@ -36,6 +37,7 @@ mod tests {
     fn sample_layout() -> DecorationLayout {
         DecorationLayout {
             input_margin: 0,
+            input_exclusion: None,
             frame_size: Size::new(200, 220),
             client_offset: Point::new(0, 20),
             titlebar_height: 20,

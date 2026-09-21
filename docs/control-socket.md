@@ -206,7 +206,7 @@ socket is not blind, and so it can correlate focus with a workspace.
 
 - `id`, `name` — the active theme.
 - `appearance` — `"dark"` or `"light"`.
-- `decoration_style` — `"windowmaker"`, `"system7"` or `"modern"`, the active frame recipe.
+- `decoration_style` — `"windowmaker"`, `"system7"`, `"beos"` or `"modern"`, the active frame recipe.
   The configuration's `"auto"` policy is resolved before this event is published.
   This additive field defaults to `"windowmaker"` when reading an older snapshot.
   A config reload changing only style still publishes a new theme event.

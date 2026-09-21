@@ -12,6 +12,8 @@ pub enum DecorationStyle {
     WindowMaker,
     /// Classic System 7.5 document-window chrome.
     System7,
+    /// BeOS R5 tabbed window chrome.
+    BeOS,
     /// Modern, token-driven chrome shared by present and future themes.
     Modern,
 }
@@ -23,6 +25,7 @@ impl DecorationStyle {
             "auto" => Some(Self::Auto),
             "windowmaker" => Some(Self::WindowMaker),
             "system7" => Some(Self::System7),
+            "beos" => Some(Self::BeOS),
             "modern" => Some(Self::Modern),
             _ => None,
         }
@@ -34,6 +37,7 @@ impl DecorationStyle {
             Self::Auto => "auto",
             Self::WindowMaker => "windowmaker",
             Self::System7 => "system7",
+            Self::BeOS => "beos",
             Self::Modern => "modern",
         }
     }
@@ -94,6 +98,9 @@ pub struct DecorationLayout {
     /// all four sides. Included in frame_size and client_offset; excluded
     /// from placement, snapping, previews and opaque regions.
     pub input_margin: u32,
+    /// Transparent space beside a short title tab. Both backends must let
+    /// pointer input pass through this frame-local rectangle.
+    pub input_exclusion: Option<Rect>,
     pub client_offset: Point,
     pub titlebar_height: u32,
     pub button_hitboxes: Vec<(ButtonKind, Rect)>,
@@ -138,6 +145,7 @@ impl DecorationLayout {
         DecorationLayout {
             frame_size,
             input_margin: self.input_margin,
+            input_exclusion: None,
             client_offset: Point::new(self.client_offset.x, top),
             titlebar_height: 0,
             button_hitboxes: Vec::new(),
@@ -276,6 +284,7 @@ mod tests {
         let full = DecorationLayout {
             frame_size: Size::new(120, 122),
             input_margin: 0,
+            input_exclusion: None,
             client_offset: Point::new(1, 21),
             titlebar_height: 20,
             button_hitboxes: vec![(ButtonKind::Close, Rect::new(Point::new(4, 4), Size::new(14, 14)))],

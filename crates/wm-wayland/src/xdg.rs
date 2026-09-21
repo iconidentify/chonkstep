@@ -2321,6 +2321,7 @@ mod tests {
                 frame,
                 FrameRecord {
                     input_margin: 0,
+                    input_exclusion: None,
                     window,
                     geometry: Rect::default(),
                     parts: Vec::new(),
@@ -2334,6 +2335,7 @@ mod tests {
                 other_frame,
                 FrameRecord {
                     input_margin: 0,
+                    input_exclusion: None,
                     window: other,
                     geometry: Rect::default(),
                     parts: Vec::new(),
@@ -2376,6 +2378,7 @@ mod tests {
             frame,
             FrameRecord {
                 input_margin: 0,
+                input_exclusion: None,
                 window,
                 geometry: Rect::default(),
                 parts: Vec::new(),

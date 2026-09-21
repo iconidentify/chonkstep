@@ -657,6 +657,7 @@ impl ThemeEngine for FakeTheme {
         let frame_size = Size::new(request.content_size.w, request.content_size.h + TITLEBAR_HEIGHT);
         DecorationLayout {
             input_margin: 0,
+            input_exclusion: None,
             frame_size,
             client_offset: Point::new(0, TITLEBAR_HEIGHT as i32),
             titlebar_height: TITLEBAR_HEIGHT,
@@ -710,6 +711,7 @@ impl ThemeEngine for FakeTheme {
         let corner = |x: i32, y: i32| Rect::new(Point::new(x, y), Size::new(b, b));
         DecorationLayout {
             input_margin: 0,
+            input_exclusion: None,
             frame_size,
             client_offset: Point::new(e, e),
             titlebar_height: 0,

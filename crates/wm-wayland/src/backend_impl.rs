@@ -1098,6 +1098,7 @@ impl Backend for WaylandBackend {
                 window,
                 geometry,
                 input_margin: layout.input_margin,
+                input_exclusion: layout.input_exclusion,
                 parts: Vec::new(),
                 solids: Vec::new(),
                 effects: None,
@@ -1326,6 +1327,7 @@ impl Backend for WaylandBackend {
         let mut retired = false;
         if let Some(record) = self.frames.get_mut(&frame) {
             record.input_margin = layout.input_margin;
+            record.input_exclusion = layout.input_exclusion;
             // Fullscreen explicitly supplies a frameless layout and skips
             // decoration painting. Retire its previous pixels AND silhouette:
             // every scene/input walker reads this same retained frame record.
@@ -2414,7 +2416,7 @@ mod tests {
         use wm_theme_api::{DecorationRequest, ThemeEngine};
         let display = smithay::reexports::wayland_server::Display::<crate::state::Compositor>::new().unwrap();
         let mut backend = WaylandBackend::new(display.handle(), Vec::new(), 1.0);
-        for style in [DecorationStyle::WindowMaker, DecorationStyle::System7, DecorationStyle::Modern] {
+        for style in [DecorationStyle::WindowMaker, DecorationStyle::System7, DecorationStyle::BeOS, DecorationStyle::Modern] {
             let engine = RasterThemeEngine::nextstep_classic().with_style(style).unwrap();
             let request = DecorationRequest { content_size: Size::new(400, 300), title: "Lifecycle".into(), focused: true, resizable: true, buttons: Vec::new() };
             let layout = engine.layout(&request);
@@ -2422,10 +2424,11 @@ mod tests {
             let frame = backend.create_decoration(WlWindowId(42), &layout);
             backend.paint_decoration(frame, &surface);
             assert!(!backend.frames[&frame].parts.is_empty());
-            let fullscreen = DecorationLayout { frame_size: Size::new(1280, 800), input_margin: 0, client_offset: Point::new(0, 0), titlebar_height: 0, button_hitboxes: Vec::new(), resize_hitboxes: Vec::new(), shaded_frame_height: 0 };
+            let fullscreen = DecorationLayout { frame_size: Size::new(1280, 800), input_margin: 0, input_exclusion: None, client_offset: Point::new(0, 0), titlebar_height: 0, button_hitboxes: Vec::new(), resize_hitboxes: Vec::new(), shaded_frame_height: 0 };
             backend.full_damage_required = false;
             backend.set_decoration_layout(frame, &fullscreen);
             let record = &backend.frames[&frame];
+            assert!(record.input_exclusion.is_none());
             assert!(record.parts.is_empty() && record.solids.is_empty() && record.effects.is_none(), "{style:?}: fullscreen has no stale visual or input mask");
             assert!(backend.full_damage_required);
             backend.full_damage_required = false;

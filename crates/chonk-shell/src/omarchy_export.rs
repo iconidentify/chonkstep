@@ -232,8 +232,20 @@ fn colors_toml(theme_name: &str, palette: &wm_theme::omarchy::OmarchyPalette) ->
 /// Omarchy merges ~/.config/omarchy/shell.toml over this theme-owned file.
 fn shell_toml(theme: &wm_theme::Theme) -> Option<String> {
     use std::fmt::Write;
+    let beos = theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::BeOS;
     let system7 = theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::System7;
-    let chrome = if system7 {
+    let chrome = if beos {
+        let mut chrome = wm_theme::modern::Chrome::from_theme_at_scale(theme, 1.0);
+        chrome.background = wm_theme::beos::DESKTOP;
+        chrome.surface = wm_theme::beos::PANEL;
+        chrome.panel = wm_theme::beos::PANEL;
+        chrome.text = wm_theme::beos::INK;
+        chrome.line = wm_theme::model::Color::rgb(96,96,96);
+        chrome.selection = wm_theme::beos::MENU_SELECTION;
+        chrome.accent = wm_theme::beos::YELLOW;
+        chrome.danger = wm_theme::beos::BLUE;
+        chrome
+    } else if system7 {
         let mut chrome = wm_theme::modern::Chrome::from_theme_at_scale(theme, 1.0);
         chrome.line = wm_theme::model::Color::rgb(0, 0, 0);
         chrome.selection = chrome.line;
@@ -255,7 +267,7 @@ fn shell_toml(theme: &wm_theme::Theme) -> Option<String> {
     section("notifications",&[("background",chrome.panel),("text",chrome.text),("border",chrome.accent),("countdown",chrome.accent)],&[]);
     for name in ["menu","launcher"] {
         section(name,&[("background",chrome.panel),("text",chrome.text),("border",chrome.line),
-            ("scrim",chrome.background),("selected-background",chrome.selection),("selected-text",if system7 { theme.terminal.bg } else { chrome.text }),
+            ("scrim",chrome.background),("selected-background",chrome.selection),("selected-text",if beos { wm_theme::beos::INK } else if system7 { theme.terminal.bg } else { chrome.text }),
             ("selected-border",chrome.line)],&[("background-alpha",1.0),("selected-background-alpha",1.0),("selected-border-alpha",0.0)]);
     }
     Some(out)
@@ -378,7 +390,7 @@ mod tests {
             let background = dir.join("backgrounds").join(format!("{}.png", theme.wallpaper));
             let bytes = std::fs::read(&background).unwrap_or_else(|e| panic!("{}: {e}", background.display()));
             let decoded=tiny_skia::Pixmap::decode_png(&bytes).expect("a PNG Omarchy can set");
-            if theme.chrome.is_some() || theme.preferred_decoration_style.is_some() {
+            if !Wallpaper::from_id(&theme.wallpaper).unwrap().is_solid_colour() {
                 assert!(decoded.pixels().iter().any(|pixel|*pixel!=decoded.pixels()[0]),"{}: modern procedural artwork must not become a flat ground",theme.id);
             }
             let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
@@ -488,7 +500,10 @@ mod tests {
             // Its titlebar. A frame that drew puts something else here;
             // a frame that did not leaves the content colour.
             let titlebar = at(600, 311);
-            if theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::System7 {
+            if theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::BeOS {
+                assert_eq!(at(355,311), (252,200,0), "BeOS must paint a short yellow tab");
+                assert_eq!(titlebar, content, "space beside the tab reveals the back window");
+            } else if theme.resolve_style(wm_theme_api::DecorationStyle::Auto) == wm_theme_api::DecorationStyle::System7 {
                 // System 7 has white title paper and white content. Its six
                 // continuous horizontal stripes distinguish a rendered frame
                 // from the alternating pixels of the desktop behind it.
