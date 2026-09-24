@@ -217,8 +217,18 @@ pub(crate) fn init(
     let render_node = session_render_node.and_then(actual_render_node).or_else(|| render_node_for_renderer(renderer));
     let default = match default_feedback(renderer, &formats, render_node, &scanout_formats) {
         Some(feedback) => {
-            let _global =
-                state.create_global_with_default_feedback::<Compositor>(display_handle, &feedback);
+            // Unset guard: the original unfiltered global. See client_mesa.rs.
+            let _global = match crate::client_mesa::ClientMesaGuard::from_env() {
+                None => state.create_global_with_default_feedback::<Compositor>(display_handle, &feedback),
+                Some(guard) => {
+                    let display = display_handle.clone();
+                    state.create_global_with_filter_and_default_feedback::<Compositor, _>(
+                        display_handle,
+                        &feedback,
+                        move |client| guard.allows(client, &display),
+                    )
+                }
+            };
             tracing::info!(
                 formats = formats.indexset().len(),
                 scanout_formats = scanout_formats.indexset().len(),

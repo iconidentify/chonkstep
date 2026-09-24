@@ -255,6 +255,22 @@ CHONKSTEP_TEST_DISPLAY_ONLY_PAIR=/dev/dri/renderD128,/dev/dri/card0 \
   -- --ignored --nocapture
 ```
 
+### Restricting linux-dmabuf to one Mesa build
+
+`CHONKSTEP_DMABUF_REQUIRE_MESA=<prefix>` is an opt-in guard for sessions whose
+render GPU can be driven safely by only one separately installed Mesa. On the
+Apple M3, the distribution's Mesa accepts the GPU but submits work for an older
+generation, and one fault ends the GPU until reboot. linux-dmabuf is shown only
+to a client that meets one of two conditions. Either its process maps a library
+from the prefix, or its environment will load the prefix when graphics start:
+`LD_LIBRARY_PATH` names `<prefix>/lib`, every Vulkan driver manifest is inside
+the prefix, and the process is not secure-exec. A process that maps a Mesa
+driver library from elsewhere never sees the global, and neither does a process
+whose `/proc` entries are unreadable. Such clients use shared memory and render
+in software. Denials are logged with the client's PID and executable. The guard
+cannot stop a process from opening the render node itself. Unset, every client
+sees linux-dmabuf as before.
+
 This supports a fixed render/target pair and the connected outputs of **one KMS
 controller**. Adopting another KMS controller, render-device hotplug/migration,
 and changing GPU selection during a session require further work. Physical

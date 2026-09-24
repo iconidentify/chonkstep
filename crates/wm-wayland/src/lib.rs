@@ -71,6 +71,8 @@ mod gesture_scene;
 mod layout_scene;
 mod selection;
 mod multi_gpu;
+// Opt-in: linux-dmabuf only for clients running one Mesa build (M3 session).
+mod client_mesa;
 mod session;
 mod sleep_bus;
 mod termination;
