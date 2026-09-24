@@ -746,6 +746,30 @@ impl EGLDisplay {
             ]));
         };
 
+        // Local patch (chonkstep, see vendor/README.md): `has_modifier()`
+        // treats LINEAR as implicit, so LINEAR images are created without
+        // modifier attributes. Drivers that cannot import implicit-modifier
+        // buffers (Honeykrisp via zink) then refuse every LINEAR dmabuf. The
+        // original request stays the first attempt; only its failure retries
+        // with LINEAR spelled out, when EGL accepts explicit modifiers.
+        let image = self.create_image_from_dmabuf_attributes(dmabuf, dmabuf.has_modifier());
+        if image.is_err()
+            && dmabuf.format().modifier == Modifier::Linear
+            && self
+                .extensions
+                .iter()
+                .any(|s| s == "EGL_EXT_image_dma_buf_import_modifiers")
+        {
+            return self.create_image_from_dmabuf_attributes(dmabuf, true);
+        }
+        image
+    }
+
+    fn create_image_from_dmabuf_attributes(
+        &self,
+        dmabuf: &Dmabuf,
+        explicit_modifier: bool,
+    ) -> Result<EGLImage, Error> {
         let mut out: Vec<c_int> = Vec::with_capacity(50);
 
         out.extend([
@@ -802,7 +826,7 @@ impl EGLDisplay {
                 names[i][2] as i32,
                 stride as i32,
             ]);
-            if dmabuf.has_modifier() {
+            if explicit_modifier {
                 out.extend([
                     names[i][3] as i32,
                     (Into::<u64>::into(dmabuf.format().modifier) & 0xFFFFFFFF) as i32,
