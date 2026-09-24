@@ -1484,7 +1484,7 @@ pub(crate) fn init(
     // SAFETY: the context was just created on this thread, is not
     // current anywhere else, and `GlesRenderer` takes ownership of it —
     // the conditions its `new` documents.
-    let renderer = unsafe { GlesRenderer::new(egl_context) }
+    let mut renderer = unsafe { GlesRenderer::new(egl_context) }
         .map_err(|error| format!("GLES renderer init failed on {}: {error}", device_path.display()))?;
     // EGL knows the renderer, which may be a different DRM device from
     // the KMS display controller (kmsro on split hardware). Prefer that
@@ -1493,6 +1493,15 @@ pub(crate) fn init(
     // `render_node_for_fd` deliberately declines a primary-node guess.
     let mut render_node = crate::dmabuf::render_node_for_renderer(&renderer)
         .or_else(|| render_node_for_fd(drm.device_fd()));
+    // A display-only KMS device (no render node of its own, e.g. simpledrm)
+    // can only be drawn by a CPU rasterizer. Mesa's EGL device query may still
+    // name another GPU's render node for it (a kms_swrast screen chosen by
+    // driver name reports the display's "compatible render-only device"), and
+    // taking that at face value would make a CHONKSTEP_RENDER_DEVICE request
+    // for that very GPU look like the single-GPU path.
+    if render_node_for_fd(drm.device_fd()).is_none() && crate::multi_gpu::renderer_is_software(&mut renderer) {
+        render_node = None;
+    }
     match render_node {
         Some(node) => tracing::info!(render_node = %node, "session backend: renderer device identified"),
         None => tracing::warn!(

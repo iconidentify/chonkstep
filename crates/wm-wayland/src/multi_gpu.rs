@@ -104,6 +104,13 @@ fn display_target_identity(renderer: &mut GlesRenderer) -> (EglIdentity<DrmNode>
     (egl_identity(renderer), name)
 }
 
+/// Whether `renderer` is one of Mesa's CPU rasterizers, by the name it reports
+/// in `GL_RENDERER`. Unlike the EGL device query, this cannot be misled by a
+/// kms_swrast screen that names the display's render-only companion device.
+pub(crate) fn renderer_is_software(renderer: &mut GlesRenderer) -> bool {
+    gl_renderer_name(renderer).as_deref().is_some_and(is_software_gl_renderer)
+}
+
 fn gl_renderer_name(renderer: &mut GlesRenderer) -> Option<String> {
     renderer
         .with_context(|gl| {
