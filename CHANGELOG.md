@@ -5,6 +5,16 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- `CHONKSTEP_RENDER_DEVICE` composes into a display-only KMS device such as
+  simpledrm, which has no render node. Its software renderer receives the
+  finished frames, and no client buffers go to its planes.
+- Import LINEAR dma-bufs on drivers that refuse implicit modifiers (zink on
+  Honeykrisp). This fixes the fallback to CPU copies.
+- Add the opt-in `CHONKSTEP_DMABUF_REQUIRE_MESA` guard, which offers
+  linux-dmabuf only to clients running one Mesa build.
+- Add an experimental Apple M3 GPU session
+  (`scripts/wayland-session-m3gpu.sh`, `scripts/install-m3gpu-session.sh`).
+
 ## [0.7.0] - 2026-09-18
 
 - Restore the NeXTSTEP dock as `chonk-dock`, a standalone application in the

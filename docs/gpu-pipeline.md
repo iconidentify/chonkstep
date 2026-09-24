@@ -272,6 +272,15 @@ cannot stop a process from opening the render node itself. The value `none`
 hides the global from every client, so only the compositor renders on the GPU.
 Unset, every client sees linux-dmabuf as before.
 
+### Apple M3 session
+
+`scripts/wayland-session-m3gpu.sh` is the opt-in login session built on these
+pieces. It sets `CHONKSTEP_RENDER_DEVICE`, `CHONKSTEP_DMABUF_REQUIRE_MESA`,
+the private Mesa environment and `XWAYLAND_NO_GLAMOR=1`, then runs the
+ordinary `scripts/wayland-session.sh`. `scripts/install-m3gpu-session.sh`
+adds the uwsm entry "chonkstep (M3 GPU, experimental)", and `--remove` takes
+it away again. Neither script changes the ordinary session entries.
+
 This supports a fixed render/target pair and the connected outputs of **one KMS
 controller**. Adopting another KMS controller, render-device hotplug/migration,
 and changing GPU selection during a session require further work. Physical
