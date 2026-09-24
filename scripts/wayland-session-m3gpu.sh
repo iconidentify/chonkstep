@@ -203,17 +203,19 @@ if [ "$MODE" = dcp ]; then
     render_nodes=(/sys/class/drm/renderD*)
     [ "${#render_nodes[@]}" -eq 1 ] && [ "${render_nodes[0]##*/}" = "${RENDER_NODE##*/}" ] \
         || fail "kmsro would pick from several render nodes (${render_nodes[*]##*/}); only ${RENDER_NODE##*/} is qualified"
-    # The display card appears during the takeover just before autologin, and its connector can
-    # still read "unknown" for a moment afterwards: wait for it (up to 15 s) rather than refuse.
+    # A connector's sysfs status stays "unknown" until a DRM client first probes it (the
+    # compositor does that when it opens the card), so on a fresh takeover it is never
+    # "connected" yet. Accept "unknown"; refuse only when no connector exists or all of them
+    # report "disconnected". Wait briefly for the connector to appear after the takeover.
     connected=0
-    for _ in $(seq 1 150); do
+    for _ in $(seq 1 50); do
         for status_file in "/sys/class/drm/${KMS_DEVICE##*/}"-*/status; do
-            [ "$(cat "$status_file" 2>/dev/null)" = connected ] && connected=1
+            case "$(cat "$status_file" 2>/dev/null)" in connected|unknown) connected=1 ;; esac
         done
         [ "$connected" = 1 ] && break
         sleep 0.1
     done
-    [ "$connected" = 1 ] || fail "the native display card $KMS_DEVICE has no connected connector (waited 15 s)"
+    [ "$connected" = 1 ] || fail "the native display card $KMS_DEVICE has no connector that is connected or unprobed"
     unset render_nodes connected status_file
 fi
 unset render_driver kms_sys
