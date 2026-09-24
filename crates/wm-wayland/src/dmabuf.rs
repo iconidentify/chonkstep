@@ -220,14 +220,11 @@ pub(crate) fn init(
             // Unset guard: the original unfiltered global. See client_mesa.rs.
             let _global = match crate::client_mesa::ClientMesaGuard::from_env() {
                 None => state.create_global_with_default_feedback::<Compositor>(display_handle, &feedback),
-                Some(guard) => {
-                    let display = display_handle.clone();
-                    state.create_global_with_filter_and_default_feedback::<Compositor, _>(
-                        display_handle,
-                        &feedback,
-                        move |client| guard.allows(client, &display),
-                    )
-                }
+                Some(guard) => state.create_global_with_filter_and_default_feedback::<Compositor, _>(
+                    display_handle,
+                    &feedback,
+                    move |client| guard.allows(client),
+                ),
             };
             tracing::info!(
                 formats = formats.indexset().len(),

@@ -22,6 +22,14 @@
 //! It does not stop a process from opening the render node on its own; only
 //! the kernel can refuse that.
 //!
+//! The process is the peer recorded when the connection was admitted
+//! ([`record_peer`]). The filter must not ask the display for it: global
+//! filters run while wayland-backend holds its state lock (while it answers
+//! `wl_display.get_registry`), and `Client::get_credentials` takes that lock
+//! again. That froze the M3 session before its first frame as soon as the
+//! first GPU client connected. Connections without a recorded peer (the
+//! compositor's own in-process sockets, XWayland) do not see the global.
+//!
 //! The value `none` hides linux-dmabuf from every client: only the
 //! compositor renders on the GPU, and clients draw in software.
 //!
@@ -30,6 +38,8 @@
 use std::path::{Path, PathBuf};
 
 use smithay::reexports::wayland_server::{Client, DisplayHandle};
+
+use crate::state::ClientState;
 
 const VARIABLE: &str = "CHONKSTEP_DMABUF_REQUIRE_MESA";
 
@@ -71,14 +81,14 @@ impl ClientMesaGuard {
         Some(Self { prefix: Some(prefix) })
     }
 
-    /// The linux-dmabuf global filter.
-    pub(crate) fn allows(&self, client: &Client, display: &DisplayHandle) -> bool {
+    /// The linux-dmabuf global filter. Runs under the display's lock: it
+    /// reads only the client's data and `/proc`, never the display.
+    pub(crate) fn allows(&self, client: &Client) -> bool {
         let Some(prefix) = self.prefix.as_deref() else { return false };
-        let Ok(credentials) = client.get_credentials(display) else {
-            tracing::info!("linux-dmabuf hidden from a client without peer credentials");
+        let Some(&pid) = client.get_data::<ClientState>().and_then(|data| data.peer_pid.get()) else {
+            tracing::info!("linux-dmabuf hidden from a client without a recorded peer process");
             return false;
         };
-        let pid = credentials.pid;
         let proc_dir = PathBuf::from(format!("/proc/{pid}"));
         let verdict = match std::fs::read_to_string(proc_dir.join("maps")) {
             Err(_) => Verdict::Unreadable,
@@ -104,6 +114,19 @@ impl ClientMesaGuard {
         tracing::info!(pid, executable = %executable.display(), reason = ?verdict,
             "linux-dmabuf hidden: client does not run the required Mesa; it falls back to shared memory");
         false
+    }
+}
+
+/// Records the peer process of a newly admitted connection for
+/// [`ClientMesaGuard::allows`]. Call it right after `insert_client`, never
+/// from a global filter or anything else the display runs under its lock.
+pub(crate) fn record_peer(client: &Client, display: &DisplayHandle) {
+    let Some(data) = client.get_data::<ClientState>() else { return };
+    match client.get_credentials(display) {
+        Ok(credentials) => {
+            let _ = data.peer_pid.set(credentials.pid);
+        }
+        Err(error) => tracing::debug!(?error, "no peer credentials for an admitted client"),
     }
 }
 
@@ -298,15 +321,78 @@ mod tests {
         let display = Display::<()>::new().unwrap();
         let mut handle = display.handle();
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let client = handle.insert_client(socket, std::sync::Arc::new(())).unwrap();
-        // Every mapped file lies under "/": required, and nothing is foreign.
+        let client = handle.insert_client(socket, std::sync::Arc::new(ClientState::default())).unwrap();
         let everything = ClientMesaGuard { prefix: Some(PathBuf::from("/")) };
-        assert!(everything.allows(&client, &handle));
+        assert!(!everything.allows(&client), "no recorded peer: hidden");
+        record_peer(&client, &handle);
+        // Every mapped file lies under "/": required, and nothing is foreign.
+        assert!(everything.allows(&client));
         // Nothing is mapped from here, and this environment does not select it.
         let elsewhere = ClientMesaGuard { prefix: Some(PathBuf::from("/nonexistent/chonkstep-mesa-prefix")) };
-        assert!(!elsewhere.allows(&client, &handle));
+        assert!(!elsewhere.allows(&client));
         let unusable = ClientMesaGuard { prefix: None };
-        assert!(!unusable.allows(&client, &handle), "an unusable prefix fails closed");
+        assert!(!unusable.allows(&client), "an unusable prefix fails closed");
+    }
+
+    /// The filter runs inside the display's own dispatch of
+    /// `wl_display.get_registry`, with wayland-backend's state lock held.
+    /// Asking the display for credentials there deadlocked the compositor;
+    /// this dispatches a real `get_registry` through a global filtered by the
+    /// guard, on a thread, and fails instead of hanging if that comes back.
+    #[test]
+    fn the_filter_runs_inside_a_real_registry_dispatch_without_deadlock() {
+        use smithay::reexports::wayland_server::{
+            backend::GlobalId, protocol::wl_output::WlOutput, DataInit, Display, GlobalDispatch, New,
+        };
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static VIEWED: AtomicUsize = AtomicUsize::new(0);
+        struct State;
+        impl GlobalDispatch<WlOutput, ClientMesaGuard> for State {
+            fn bind(_: &mut Self, _: &DisplayHandle, _: &Client, _: New<WlOutput>, _: &ClientMesaGuard,
+                _: &mut DataInit<'_, Self>) {}
+            fn can_view(client: Client, guard: &ClientMesaGuard) -> bool {
+                let allowed = guard.allows(&client);
+                VIEWED.fetch_add(1, Ordering::SeqCst);
+                allowed
+            }
+        }
+        impl smithay::reexports::wayland_server::Dispatch<WlOutput, ()> for State {
+            fn request(_: &mut Self, _: &Client, _: &WlOutput,
+                _: <WlOutput as smithay::reexports::wayland_server::Resource>::Request, _: &(),
+                _: &DisplayHandle, _: &mut DataInit<'_, Self>) {}
+        }
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut display = Display::<State>::new().unwrap();
+            let mut handle = display.handle();
+            let _global: GlobalId = handle.create_global::<State, WlOutput, _>(
+                4, ClientMesaGuard { prefix: Some(PathBuf::from("/")) });
+            let (server, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let client = handle.insert_client(server, std::sync::Arc::new(ClientState::default())).unwrap();
+            record_peer(&client, &handle);
+            // wl_display.get_registry(new id 2), then wl_display.sync(new id 3).
+            let mut request = Vec::new();
+            for (opcode, id) in [(1u32, 2u32), (0, 3)] {
+                request.extend_from_slice(&1u32.to_ne_bytes());
+                request.extend_from_slice(&((12u32 << 16) | opcode).to_ne_bytes());
+                request.extend_from_slice(&id.to_ne_bytes());
+            }
+            peer.write_all(&request).unwrap();
+            display.dispatch_clients(&mut State).unwrap();
+            display.flush_clients().unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            let mut events = [0u8; 4096];
+            let read = peer.read(&mut events).unwrap_or(0);
+            done_tx.send(read).unwrap();
+        });
+        let read = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the registry dispatch deadlocked inside the global filter");
+        assert!(read > 0, "the client got no registry events");
+        assert!(VIEWED.load(Ordering::SeqCst) >= 1, "the filter was never consulted");
     }
 
     #[test]
