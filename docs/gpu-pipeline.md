@@ -268,8 +268,9 @@ the prefix, and the process is not secure-exec. A process that maps a Mesa
 driver library from elsewhere never sees the global, and neither does a process
 whose `/proc` entries are unreadable. Such clients use shared memory and render
 in software. Denials are logged with the client's PID and executable. The guard
-cannot stop a process from opening the render node itself. Unset, every client
-sees linux-dmabuf as before.
+cannot stop a process from opening the render node itself. The value `none`
+hides the global from every client, so only the compositor renders on the GPU.
+Unset, every client sees linux-dmabuf as before.
 
 This supports a fixed render/target pair and the connected outputs of **one KMS
 controller**. Adopting another KMS controller, render-device hotplug/migration,

@@ -22,6 +22,9 @@
 //! It does not stop a process from opening the render node on its own; only
 //! the kernel can refuse that.
 //!
+//! The value `none` hides linux-dmabuf from every client: only the
+//! compositor renders on the GPU, and clients draw in software.
+//!
 //! Unset (the default), every client sees linux-dmabuf exactly as before.
 
 use std::path::{Path, PathBuf};
@@ -36,17 +39,26 @@ const AT_SECURE: usize = 23;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ClientMesaGuard {
-    /// `None` when the variable held an unusable value: then no client
-    /// sees linux-dmabuf (fail closed), rather than every client.
+    /// `None` for `none`, or when the variable held an unusable value:
+    /// then no client sees linux-dmabuf (fail closed), rather than every
+    /// client.
     prefix: Option<PathBuf>,
 }
 
 impl ClientMesaGuard {
     /// The guard configured for this process, or `None` when unset.
     pub(crate) fn from_env() -> Option<Self> {
-        let value = std::env::var_os(VARIABLE)?;
+        Self::from_value(std::env::var_os(VARIABLE)?)
+    }
+
+    fn from_value(value: std::ffi::OsString) -> Option<Self> {
         if value.is_empty() {
             return None;
+        }
+        if value == "none" {
+            tracing::warn!(variable = VARIABLE,
+                "linux-dmabuf is hidden from every client; clients render in software");
+            return Some(Self { prefix: None });
         }
         let prefix = PathBuf::from(value);
         if !prefix.is_absolute() {
@@ -258,6 +270,15 @@ mod tests {
 
     fn auxv(pairs: &[(usize, usize)]) -> Vec<u8> {
         pairs.iter().flat_map(|(key, value)| key.to_ne_bytes().into_iter().chain(value.to_ne_bytes())).collect()
+    }
+
+    #[test]
+    fn the_variable_parses_to_off_all_hidden_or_one_prefix() {
+        let parse = |value: &str| ClientMesaGuard::from_value(value.into()).map(|guard| guard.prefix);
+        assert_eq!(parse(""), None, "empty is unset: no filter at all");
+        assert_eq!(parse("none"), Some(None), "every client hidden");
+        assert_eq!(parse("mesa-prefix"), Some(None), "a relative prefix fails closed");
+        assert_eq!(parse(PREFIX), Some(Some(PathBuf::from(PREFIX))));
     }
 
     #[test]
