@@ -222,6 +222,39 @@ CHONKSTEP_TEST_GPU_PAIR=/dev/dri/renderD128,/dev/dri/renderD129 \
   -- --ignored --nocapture
 ```
 
+### Display-only KMS targets
+
+The KMS device may have no render node at all: simpledrm on a boot
+framebuffer, as on Apple silicon machines whose display controller has no
+driver yet. Its primary node then names the target inside the GPU manager
+(`target_kind=display-only` in diagnostics). It is never published as a render
+device: linux-dmabuf feedback names only the selected render node. The target
+renderer must be a software rasterizer (llvmpipe through kms_swrast) on that
+KMS fd. Startup refuses a GPU found behind the display-only fd, such as Mesa's
+kmsro wrapping of the render GPU. Proof uses `GL_RENDERER`, because Mesa's EGL
+device query names the display's "compatible render-only device" for
+kms_swrast screens selected through drirc. There is no cross-device
+scanout-feedback probe for this target. Client buffers are never offered to
+its planes, because a display-only device could show another GPU's buffer only
+by copying it on the CPU in the kernel. Composition still copies each frame
+into the target's own swapchain.
+
+On the Apple M3 (J516S, `renderD128` with Honeykrisp/zink, `card0`
+simpledrm), both transfer directions of the hardware test pass on a
+separately built Mesa: full 3456×2160 frames and a 31×23 partial update, in
+XRGB8888 and ARGB8888. All eight transfers are DMA copies: llvmpipe samples
+the LINEAR buffer zink rendered. Without the vendored Smithay LINEAR retry
+(see `vendor/README.md`) the same test passes through CPU copies. Reproduce it
+with Mesa's environment pointing at a build that drives the render node
+natively and pins the display device to kms_swrast:
+
+```sh
+CHONKSTEP_TEST_DISPLAY_ONLY_PAIR=/dev/dri/renderD128,/dev/dri/card0 \
+  cargo test --locked -p wm-wayland --lib \
+  multi_gpu::tests::a_render_node_composes_into_a_display_only_kms_target \
+  -- --ignored --nocapture
+```
+
 This supports a fixed render/target pair and the connected outputs of **one KMS
 controller**. Adopting another KMS controller, render-device hotplug/migration,
 and changing GPU selection during a session require further work. Physical

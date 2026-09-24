@@ -17,6 +17,8 @@
 //!   its own crtc, `DrmCompositor`, and page-flip bookkeeping. An explicit
 //!   `CHONKSTEP_RENDER_DEVICE` selects a second GPU for composition, with
 //!   Smithay MultiRenderer transferring into the KMS device's swapchain.
+//!   That KMS device may be display-only (no render node, e.g. simpledrm):
+//!   its software renderer then only receives the finished frames.
 //!   Additional KMS devices are not driven concurrently.
 //! - **The startup layout is a guess; the running layout is
 //!   configurable.** Outputs come up left to right in
@@ -1348,9 +1350,12 @@ impl SessionGraphics {
     }
 
     /// Device clients should prefer for buffers intended for this KMS target.
+    /// A display-only target's primary node is never offered: clients cannot
+    /// render there, and its planes never take client buffers.
     pub(crate) fn scanout_node(&self) -> Option<DrmNode> {
         match &self.render_stack {
             crate::multi_gpu::Stack::Single(_) => self.render_node,
+            crate::multi_gpu::Stack::Multi(multi) if multi.display_only => self.render_node,
             crate::multi_gpu::Stack::Multi(multi) => Some(multi.target),
         }
     }
@@ -1505,14 +1510,19 @@ pub(crate) fn init(
         let path = PathBuf::from(path);
         let requested = DrmNode::from_path(&path).map_err(|error| format!("requested render device: {error}"))?;
         if requested.ty() != NodeType::Render { return Err("CHONKSTEP_RENDER_DEVICE must name a DRM render node".into()); }
-        let target = render_node.ok_or("multi-GPU requires an identified target renderer device")?;
+        // The renderer's proven render node, or, for a KMS device with no
+        // render node at all, that device's primary node. The primary names
+        // the target inside the GPU manager only; `render_node` below becomes
+        // the selected render GPU, never the display-only primary.
+        let target = crate::multi_gpu::target_node(render_node, DrmNode::from_file(drm.device_fd()).ok())
+            .ok_or("multi-GPU requires an identified target renderer device")?;
         if requested != target {
             let mut multi = crate::multi_gpu::CrossGpu::new(&path, target, drm.device_fd().device_fd())?;
             // The scanout swapchain belongs to the target GPU. Its renderable
             // formats, not the source GPU's, constrain DRM allocation.
             render_formats = multi.target_formats();
             render_node = Some(multi.render);
-            tracing::warn!(render = %multi.render, target = %multi.target,
+            tracing::warn!(render = %multi.render, target = %multi.target, display_only = multi.display_only,
                 "experimental multi-GPU composition enabled; DMA transfer preferred, CPU fallback possible");
             render_stack = crate::multi_gpu::Stack::Multi(Box::new(multi));
         }
@@ -1532,7 +1542,7 @@ pub(crate) fn init(
     for target in connectors {
         let name = connector_name(&target.info);
         let position = Point::new(next_x, 0);
-        match attach_output(&mut drm, &gbm, render_node, &render_formats, &target, position) {
+        match attach_output(&mut drm, &gbm, render_stack.client_scanout_node(render_node), &render_formats, &target, position) {
             Ok((session_output, setup)) => {
                 tracing::info!(
                     output = %name,
@@ -1944,7 +1954,7 @@ pub(crate) fn init(
 fn attach_output(
     drm: &mut DrmDevice,
     gbm: &GbmDevice<DrmDeviceFd>,
-    render_node: Option<DrmNode>,
+    client_scanout_node: Option<DrmNode>,
     render_formats: &[Format],
     target: &ConnectorTarget,
     position: Point,
@@ -2014,8 +2024,10 @@ fn attach_output(
     // Filter client buffers against the renderer's exact GPU before
     // even trying direct scanout. Passing no import node disables that
     // path in Smithay. On a split display/render system this is the
-    // renderer's node, not the display-only KMS primary.
-    let framebuffer_exporter = GbmFramebufferExporter::new(gbm.clone(), render_node);
+    // renderer's node, not the display-only KMS primary; a multi-GPU
+    // session into a display-only target passes none at all
+    // (`Stack::client_scanout_node`).
+    let framebuffer_exporter = GbmFramebufferExporter::new(gbm.clone(), client_scanout_node);
     // A *static* mode source, deliberately not the `Output`: the
     // output advertises the session's UI scale to clients
     // (`state.rs`'s `advertise_scale`), and an auto-tracking source
@@ -2610,7 +2622,8 @@ pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Optio
         })
         .max()
         .unwrap_or(0);
-    match attach_output(&mut session.drm, &session.gbm, session.render_node, &session.render_formats, &target, Point::new(next_x, 0)) {
+    let client_scanout_node = session.render_stack.client_scanout_node(session.render_node);
+    match attach_output(&mut session.drm, &session.gbm, client_scanout_node, &session.render_formats, &target, Point::new(next_x, 0)) {
         Ok((output, setup)) => {
             session.parked.remove(at);
             tracing::info!(output = %name, ?crtc, "output unparked: re-adopted on a fresh crtc");
