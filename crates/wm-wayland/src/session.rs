@@ -19,6 +19,10 @@
 //!   Smithay MultiRenderer transferring into the KMS device's swapchain.
 //!   That KMS device may be display-only (no render node, e.g. simpledrm):
 //!   its software renderer then only receives the finished frames.
+//!   A display controller that Mesa's kmsro pairs with a GPU (no render
+//!   node of its own, e.g. Apple's DCP) needs no such variable: EGL renders
+//!   on the paired GPU straight into its scanout buffers, the single-GPU
+//!   case (see `renderer_render_node`).
 //!   Additional KMS devices are not driven concurrently.
 //! - **The startup layout is a guess; the running layout is
 //!   configurable.** Outputs come up left to right in
@@ -1424,6 +1428,40 @@ fn render_node_for_fd(fd: &DrmDeviceFd) -> Option<DrmNode> {
     primary.node_with_type(NodeType::Render).and_then(Result::ok)
 }
 
+/// The render node the session's own renderer (EGL on the KMS device's GBM)
+/// draws on, or `None` when that cannot be established.
+fn renderer_render_node(renderer: &mut GlesRenderer, kms: &DrmDeviceFd) -> Option<DrmNode> {
+    choose_render_node(crate::dmabuf::render_node_for_renderer(renderer), render_node_for_fd(kms), || {
+        crate::multi_gpu::renderer_is_software(renderer)
+    })
+}
+
+/// The pure half of [`renderer_render_node`], generic so tests need no
+/// `/dev/dri`. `egl` is the render node EGL names for the renderer, `kms`
+/// the KMS device's own render node, `software` whether the renderer is a
+/// Mesa CPU rasterizer (asked only for a display-only KMS device).
+///
+/// EGL knows the renderer, which may be a different DRM device from the KMS
+/// display controller, so its answer wins. That is Mesa's kmsro on split
+/// hardware: a display-only controller (Apple's DCP, `m3-dcp`/`apple`) whose
+/// buffers the paired GPU (the M3's renderD128) renders straight into. EGL
+/// names that GPU, and the session stays on the single-GPU path, composing
+/// directly in scanout memory. If the optional EGL query extension is absent,
+/// pairing the KMS node is safe only when a real render node exists;
+/// `render_node_for_fd` deliberately declines a primary-node guess.
+///
+/// A display-only KMS device drawn by a CPU rasterizer is the exception. A
+/// kms_swrast screen chosen by driver name reports the display's "compatible
+/// render-only device" just as kmsro does, although nothing renders there;
+/// taking that at face value would make a CHONKSTEP_RENDER_DEVICE request for
+/// that very GPU look like the single-GPU path.
+fn choose_render_node<N>(egl: Option<N>, kms: Option<N>, software: impl FnOnce() -> bool) -> Option<N> {
+    if kms.is_none() && software() {
+        return None;
+    }
+    egl.or(kms)
+}
+
 /// What [`init`] hands back to `run`: the graphics stack plus every
 /// output it discovered, each already configured with its mode and its
 /// position in the global space. Any event sources the session needs
@@ -1486,22 +1524,7 @@ pub(crate) fn init(
     // the conditions its `new` documents.
     let mut renderer = unsafe { GlesRenderer::new(egl_context) }
         .map_err(|error| format!("GLES renderer init failed on {}: {error}", device_path.display()))?;
-    // EGL knows the renderer, which may be a different DRM device from
-    // the KMS display controller (kmsro on split hardware). Prefer that
-    // exact identity. If the optional EGL query extension is absent,
-    // pairing the KMS node is safe only when a real render node exists;
-    // `render_node_for_fd` deliberately declines a primary-node guess.
-    let mut render_node = crate::dmabuf::render_node_for_renderer(&renderer)
-        .or_else(|| render_node_for_fd(drm.device_fd()));
-    // A display-only KMS device (no render node of its own, e.g. simpledrm)
-    // can only be drawn by a CPU rasterizer. Mesa's EGL device query may still
-    // name another GPU's render node for it (a kms_swrast screen chosen by
-    // driver name reports the display's "compatible render-only device"), and
-    // taking that at face value would make a CHONKSTEP_RENDER_DEVICE request
-    // for that very GPU look like the single-GPU path.
-    if render_node_for_fd(drm.device_fd()).is_none() && crate::multi_gpu::renderer_is_software(&mut renderer) {
-        render_node = None;
-    }
+    let mut render_node = renderer_render_node(&mut renderer, drm.device_fd());
     match render_node {
         Some(node) => tracing::info!(render_node = %node, "session backend: renderer device identified"),
         None => tracing::warn!(
@@ -4041,6 +4064,181 @@ mod tests {
 
     fn handle(id: u32) -> connector::Handle {
         connector::Handle::from(std::num::NonZeroU32::new(id).unwrap())
+    }
+
+    #[test]
+    fn a_gpu_behind_a_display_only_kms_device_is_the_renderers_device() {
+        // kmsro (the M3's DCP card drawn by zink on renderD128): EGL names
+        // the paired GPU, so the session composes on it directly.
+        assert_eq!(choose_render_node(Some(128), None, || false), Some(128));
+        // An ordinary GPU: EGL and the KMS device agree.
+        assert_eq!(choose_render_node(Some(128), Some(128), || unreachable!()), Some(128));
+        // No EGL device query: only a real render node of the KMS device.
+        assert_eq!(choose_render_node(None, Some(129), || unreachable!()), Some(129));
+        assert_eq!(choose_render_node::<u32>(None, None, || false), None);
+    }
+
+    #[test]
+    fn a_cpu_rasterizer_on_a_display_only_kms_device_has_no_render_node() {
+        // kms_swrast on simpledrm: EGL still names renderD128, nothing renders there.
+        assert_eq!(choose_render_node(Some(128), None, || true), None);
+        assert_eq!(choose_render_node::<u32>(None, None, || true), None);
+    }
+
+    /// The Apple M3 with its native display controller (the J516S DCP card,
+    /// `m3-dcp`): a KMS device without a render node that Mesa's kmsro pairs
+    /// with the M3 render node, the Asahi M1/M2 model. Runs the session's own
+    /// device steps without a seat: GBM and EGL on the KMS fd, the renderer's
+    /// device identity, the single-GPU stack, a swapchain buffer allocated
+    /// and exported as `attach_output`'s allocator and framebuffer exporter
+    /// do, then chonkstep's scene elements drawn into it. The pixels are read
+    /// from the KMS device's own dma-buf of that buffer, i.e. the memory the
+    /// display scans out: no copy, no second GPU. The KMS fd is opened like
+    /// any unprivileged client: no DRM master, no modeset, no page flip; the
+    /// framebuffer is removed with the test. The Mesa that runs this must
+    /// select zink (kmsro) for the KMS device; see docs/gpu-pipeline.md.
+    #[test]
+    #[ignore = "requires CHONKSTEP_TEST_KMSRO_DISPLAY=<render node>,<display-only KMS primary rendered through kmsro>"]
+    fn a_kmsro_display_is_composed_by_its_gpu_in_scanout_memory() {
+        use crate::multi_gpu::Stack;
+        use crate::renderer::SceneElement;
+        use smithay::backend::allocator::dmabuf::{AsDmabuf, DmabufMappingMode, DmabufSyncFlags};
+        use smithay::backend::allocator::Allocator;
+        use smithay::backend::drm::exporter::{ExportBuffer, ExportFramebuffer};
+        use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+        use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement};
+        use smithay::backend::renderer::utils::CommitCounter;
+        use smithay::backend::renderer::{Bind, Color32F, Frame, Renderer as _};
+        use smithay::reexports::drm::buffer::{Buffer as _, PlanarBuffer};
+        use smithay::reexports::drm::control::Device as _;
+        use smithay::reexports::drm::{ClientCapability, Device as _};
+        use smithay::utils::{Physical, Rectangle, Size};
+        use std::os::unix::fs::MetadataExt;
+
+        let pair = std::env::var("CHONKSTEP_TEST_KMSRO_DISPLAY")
+            .expect("set <render node>,<display-only KMS primary>, e.g. /dev/dri/renderD128,/dev/dri/card2");
+        let (render_path, kms_path) = pair.split_once(',').expect("two comma-separated paths");
+        let render = DrmNode::from_path(render_path).unwrap();
+        assert_eq!(render.ty(), NodeType::Render);
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(kms_path).unwrap();
+        let fd = DrmDeviceFd::new(DeviceFd::from(std::os::fd::OwnedFd::from(file)));
+        assert!(render_node_for_fd(&fd).is_none(), "{kms_path} must be display-only (no render node)");
+
+        // init()'s render stack: EGL on the KMS device's GBM, the renderer's
+        // proven device, and no CHONKSTEP_RENDER_DEVICE.
+        let gbm = GbmDevice::new(fd.clone()).unwrap();
+        // SAFETY: `gbm` outlives the display; Smithay validates the handle.
+        let egl_display = unsafe { EGLDisplay::new(gbm.clone()) }.unwrap();
+        let context = EGLContext::new(&egl_display).unwrap();
+        // SAFETY: a fresh context, current nowhere else, owned by the renderer.
+        let mut renderer = unsafe { GlesRenderer::new(context) }.unwrap();
+        assert!(!crate::multi_gpu::renderer_is_software(&mut renderer), "kmsro must render on the GPU");
+        let render_node = renderer_render_node(&mut renderer, &fd);
+        assert_eq!(render_node, Some(render), "EGL must name the render node kmsro renders on");
+        let render_formats: Vec<Format> = renderer.egl_context().dmabuf_render_formats().iter().copied().collect();
+        let stack = Stack::Single(Box::new(renderer));
+        assert_eq!(stack.diagnostics(), "multi_gpu=disabled");
+        assert_eq!(stack.client_scanout_node(render_node), Some(render));
+        let Stack::Single(mut renderer) = stack else { unreachable!() };
+
+        // The panel: the connector's own preferred mode, read without a probe.
+        fd.set_client_capability(ClientCapability::UniversalPlanes, true).unwrap();
+        let resources = fd.resource_handles().unwrap();
+        let mode = resources
+            .connectors()
+            .iter()
+            .filter_map(|handle| fd.get_connector(*handle, false).ok())
+            .filter(|info| info.state() == connector::State::Connected)
+            .find_map(|info| preferred_mode(&info))
+            .expect("a connected connector with a mode");
+        let (width, height) = (mode.size().0 as u32, mode.size().1 as u32);
+        // attach_output's swapchain: the first COLOR_FORMATS entry the
+        // primary plane scans out, LINEAR (the only modifier it offers).
+        let plane_formats: Vec<u32> = fd
+            .plane_handles()
+            .unwrap()
+            .iter()
+            .filter_map(|plane| fd.get_plane(*plane).ok())
+            .flat_map(|plane| plane.formats().to_vec())
+            .collect();
+        let code = *COLOR_FORMATS
+            .iter()
+            .find(|code| plane_formats.contains(&(**code as u32)))
+            .expect("a swapchain colour format the plane scans out");
+        assert!(render_formats.contains(&Format { code, modifier: Modifier::Linear }), "zink renders LINEAR {code:?}");
+        let mut allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
+        let buffer = allocator.create_buffer(width, height, code, &[Modifier::Linear]).unwrap();
+        let (pitch, offset) = (PlanarBuffer::pitches(&buffer)[0], PlanarBuffer::offsets(&buffer)[0]);
+        eprintln!("{kms_path}: {width}x{height} {code:?} LINEAR swapchain buffer, pitch {pitch}, offset {offset}");
+        assert_eq!(smithay::backend::allocator::Buffer::format(&buffer).modifier, Modifier::Linear);
+        assert!(pitch >= width * 4 && pitch % 64 == 0 && offset == 0, "the DCP plane's layout rules");
+        let exporter = GbmFramebufferExporter::new(gbm.clone(), render_node);
+        let framebuffer = exporter
+            .add_framebuffer(&fd, ExportBuffer::Allocator(&buffer), false)
+            .unwrap()
+            .expect("the display accepts the swapchain buffer as a framebuffer");
+
+        // The buffer the renderer binds is the display's own GEM object:
+        // the dma-buf the swapchain exports and the one the KMS device
+        // exports for the framebuffer's GEM handle are the same file.
+        let mut dma = buffer.export().unwrap();
+        let kms_dmabuf = fd.buffer_to_prime_fd(buffer.handle(), 0).unwrap();
+        let inode = |fd: std::os::fd::BorrowedFd<'_>| std::fs::File::from(fd.try_clone_to_owned().unwrap()).metadata().unwrap().ino();
+        assert_eq!(
+            inode(dma.handles().next().unwrap()),
+            inode(std::os::fd::AsFd::as_fd(&kms_dmabuf)),
+            "the swapchain buffer must be the display device's memory"
+        );
+
+        let extent = Size::<i32, Physical>::from((width as i32, height as i32));
+        let whole = Rectangle::from_size(extent);
+        let partial = Rectangle::new((13, 17).into(), (31, 23).into());
+        {
+            let mut target = renderer.bind(&mut dma).unwrap();
+            let mut frame = renderer.render(&mut target, extent, Transform::Normal).unwrap();
+            for (dst, color) in [(whole, [32u8, 64, 128]), (partial, [192, 32, 64])] {
+                let element: SceneElement = SolidColorRenderElement::new(
+                    Id::new(),
+                    dst,
+                    CommitCounter::default(),
+                    Color32F::new(color[0] as f32 / 255.0, color[1] as f32 / 255.0, color[2] as f32 / 255.0, 1.0),
+                    Kind::Unspecified,
+                )
+                .into();
+                <SceneElement as RenderElement<GlesRenderer>>::draw(
+                    &element,
+                    &mut frame,
+                    element.src(),
+                    dst,
+                    &[Rectangle::from_size(dst.size)],
+                    &[Rectangle::from_size(dst.size)],
+                )
+                .unwrap();
+            }
+            frame.finish().unwrap().wait().unwrap();
+        }
+
+        dma.sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::READ).unwrap();
+        let mapping = dma.map_plane(0, DmabufMappingMode::READ).unwrap();
+        // SAFETY: a live read-only mapping of the whole plane; nothing writes
+        // the buffer while it is inspected (the render above has finished).
+        let bytes = unsafe { std::slice::from_raw_parts(mapping.ptr() as *const u8, mapping.length()) };
+        assert!(bytes.len() >= pitch as usize * height as usize);
+        let mut wrong = 0usize;
+        for y in 0..height as i32 {
+            for x in 0..width as i32 {
+                // ARGB8888 is B, G, R, A in memory; row 0 is the top of the output.
+                let [r, g, b] = if partial.contains((x, y)) { [192, 32, 64] } else { [32, 64, 128] };
+                let at = y as usize * pitch as usize + x as usize * 4;
+                if bytes[at..at + 4] != [b, g, r, 255] {
+                    wrong += 1;
+                }
+            }
+        }
+        dma.sync_plane(0, DmabufSyncFlags::END | DmabufSyncFlags::READ).unwrap();
+        drop(framebuffer);
+        eprintln!("{kms_path}: {} pixels composed by {render_path} in scanout memory, {wrong} wrong", width * height);
+        assert_eq!(wrong, 0, "scanout memory must hold exactly what was composed");
     }
 
     #[test]

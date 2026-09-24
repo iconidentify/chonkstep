@@ -255,6 +255,36 @@ CHONKSTEP_TEST_DISPLAY_ONLY_PAIR=/dev/dri/renderD128,/dev/dri/card0 \
   -- --ignored --nocapture
 ```
 
+### Display controllers paired through kmsro
+
+A real display controller without a render node of its own (Apple's DCP,
+Rockchip, Mediatek and similar SoCs) is usually rendered by Mesa's kmsro: the
+GBM/EGL screen on the KMS fd renders with the paired GPU's render node,
+straight into the display device's scanout buffers. EGL names that render node
+as the renderer's device, and the session keeps its ordinary single-GPU stack
+(`multi_gpu=disabled`): no intermediate buffer, no copy. The session decides
+this in `renderer_render_node`: EGL's render node wins over the KMS device's
+(absent) one unless `GL_RENDERER` is a Mesa CPU rasterizer, which marks the
+kms_swrast case above. linux-dmabuf feedback and client scanout name the
+render node, as on Asahi M1/M2.
+
+On the Apple M3 (J516S) with its native display card (`m3-dcp`, devicetree
+`apple,t6030-display-subsystem`), a Mesa whose drirc selects zink for that
+card renders with zink on `renderD128` into the card's dumb buffers. The
+ignored hardware test below runs the session's device steps without a seat or
+DRM master: EGL on the KMS fd's GBM, the render-node decision, the single
+stack, an ARGB8888 LINEAR swapchain buffer from `attach_output`'s allocator
+and framebuffer exporter, and chonkstep's own scene elements drawn into it.
+It then reads the pixels from the display device's dma-buf of that buffer,
+which is the memory the display scans out: all 3456×2234 pixels match.
+
+```sh
+CHONKSTEP_TEST_KMSRO_DISPLAY=/dev/dri/renderD128,/dev/dri/card2 \
+  cargo test --locked -p wm-wayland --lib \
+  session::tests::a_kmsro_display_is_composed_by_its_gpu_in_scanout_memory \
+  -- --ignored --nocapture
+```
+
 ### Restricting linux-dmabuf to one Mesa build
 
 `CHONKSTEP_DMABUF_REQUIRE_MESA=<prefix>` is an opt-in guard for sessions whose
