@@ -14,6 +14,10 @@ crate and both session binaries carry the same number.
   linux-dmabuf only to clients running one Mesa build.
 - Add an experimental Apple M3 GPU session
   (`scripts/wayland-session-m3gpu.sh`, `scripts/install-m3gpu-session.sh`).
+- The Apple M3 session drives the native display card (DCP) when it exists:
+  Mesa's kmsro renders with zink on the M3 directly into the display's scanout
+  buffers, on the single-GPU path with no copy. The simpledrm cross-GPU mode
+  is unchanged. A hardware test covers a kmsro-paired display controller.
 
 ## [0.7.0] - 2026-09-18
 

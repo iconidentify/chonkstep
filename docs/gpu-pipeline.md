@@ -305,11 +305,28 @@ Unset, every client sees linux-dmabuf as before.
 ### Apple M3 session
 
 `scripts/wayland-session-m3gpu.sh` is the opt-in login session built on these
-pieces. It sets `CHONKSTEP_RENDER_DEVICE`, `CHONKSTEP_DMABUF_REQUIRE_MESA`,
-the private Mesa environment and `XWAYLAND_NO_GLAMOR=1`, then runs the
-ordinary `scripts/wayland-session.sh`. `scripts/install-m3gpu-session.sh`
-adds the uwsm entry "chonkstep (M3 GPU, experimental)", and `--remove` takes
-it away again. Neither script changes the ordinary session entries.
+pieces. It sets the private Mesa environment, `CHONKSTEP_DMABUF_REQUIRE_MESA`
+and `XWAYLAND_NO_GLAMOR=1`, then runs the ordinary `scripts/wayland-session.sh`.
+It has two display modes, `CHONKSTEP_M3_DISPLAY` or a leading
+`--display=auto|dcp|simpledrm` argument (`auto`, the default, picks `dcp` when
+the native display card exists):
+
+- `simpledrm`: `CHONKSTEP_RENDER_DEVICE` composes on the M3 and copies each
+  frame into the display-only boot framebuffer (the display-only target above).
+- `dcp`: the native display card, found by its devicetree node
+  (`apple,t6030-display-subsystem`), never by number. No
+  `CHONKSTEP_RENDER_DEVICE`: kmsro renders on the M3 straight into the card's
+  scanout buffers (the kmsro section above). The pre-flight requires the
+  prefix drirc to select zink for `asahi`, `m3-dcp` and `apple`, a connected
+  connector, the M3 as the only render node, and a kernel log without GPU
+  faults, rejected compute jobs or failed DCP flips. Direct scanout of client
+  buffers stays off (`CHONKSTEP_NO_DIRECT_SCANOUT=1`) unless
+  `CHONKSTEP_M3_DIRECT_SCANOUT=1`.
+
+`scripts/install-m3gpu-session.sh` adds the uwsm entry "chonkstep (M3 GPU,
+experimental)", and `--remove` takes it away again. Neither script changes the
+ordinary session entries. Under uwsm, pass the argument after `--`
+(`uwsm start ... -- scripts/chonkstep-session-m3gpu --display=dcp`).
 
 This supports a fixed render/target pair and the connected outputs of **one KMS
 controller**. Adopting another KMS controller, render-device hotplug/migration,
