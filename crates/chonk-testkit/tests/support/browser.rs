@@ -195,6 +195,26 @@ impl Browser {
         }
         Ok(value["result"]["value"].clone())
     }
+
+    /// Wait for a debugger stop after injected input, before any intervening
+    /// CDP call could consume the event. Never injects browser input.
+    #[allow(dead_code)] // browser_selection shares this helper but never pauses JavaScript.
+    pub fn wait_for_pause(&mut self) -> Result<Value, String> {
+        let deadline = Instant::now() + IO_TIMEOUT;
+        for _ in 0..1024 {
+            let remaining = deadline.checked_duration_since(Instant::now())
+                .ok_or("DevTools pause timed out")?;
+            self.socket.get_mut().set_read_timeout(Some(remaining))
+                .map_err(|error| error.to_string())?;
+            if let Message::Text(text) = self.socket.read().map_err(|error| error.to_string())? {
+                let value: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+                if value["method"] == "Debugger.paused" {
+                    return Ok(value["params"].clone());
+                }
+            }
+        }
+        Err("DevTools event stream exceeded the test's event limit".into())
+    }
 }
 
 #[cfg(test)]

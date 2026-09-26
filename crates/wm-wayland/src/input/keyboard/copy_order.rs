@@ -22,11 +22,14 @@ pub(crate) struct Key {
 pub(crate) struct CopyOrder {
     pending: Option<(KeyboardFocus, Instant)>,
     keys: VecDeque<Key>,
+    // Only the explicitly enabled test door can freeze this clock. Client
+    // dispatch and keyboard routing still use the ordinary production paths.
+    test_now: Option<Instant>,
 }
 
 impl CopyOrder {
     pub fn copied(&mut self, focus: KeyboardFocus) {
-        self.pending = Some((focus, Instant::now() + MAX_WAIT));
+        self.pending = Some((focus, self.now() + MAX_WAIT));
     }
     pub fn offered(&mut self) {
         self.pending = None;
@@ -39,8 +42,31 @@ impl CopyOrder {
         !self.keys.is_empty()
     }
     pub fn deadline(&self) -> Option<Instant> {
+        // A frozen pending deadline cannot be serviced by wall time. Returning
+        // its old Instant after it passes would spin the compositor's loop.
+        if self.test_now.is_some() && self.pending.is_some() {
+            return None;
+        }
         self.queued()
             .then(|| self.pending.as_ref().map_or_else(Instant::now, |(_, at)| *at))
+    }
+    fn now(&self) -> Instant {
+        self.test_now.unwrap_or_else(Instant::now)
+    }
+    pub(crate) fn test_status(&self) -> (bool, usize) {
+        (self.pending.is_some(), self.keys.len())
+    }
+    pub(crate) fn test_clock(&mut self, frozen: bool) -> Result<(), &'static str> {
+        if self.pending.is_some() || self.queued() {
+            return Err("copy-order clock can only change while idle");
+        }
+        self.test_now = frozen.then(Instant::now);
+        Ok(())
+    }
+    pub(crate) fn test_advance(&mut self, elapsed: Duration) -> Result<(), &'static str> {
+        let now = self.test_now.ok_or("copy-order clock is not frozen")?;
+        self.test_now = Some(now.checked_add(elapsed).ok_or("copy-order clock overflow")?);
+        Ok(())
     }
     fn expire(&mut self, focus: Option<KeyboardFocus>, now: Instant) {
         if self
@@ -68,7 +94,7 @@ pub(crate) fn defer(comp: &mut Compositor, key: Key) -> bool {
     }
     let focus = comp.seat.get_keyboard().and_then(|keyboard| keyboard.current_focus());
     let order = &mut comp.mac_copy_order;
-    order.expire(focus, Instant::now());
+    order.expire(focus, order.now());
     if !order.queued() && (order.pending.is_none() || key.state == KeyState::Released) {
         return false;
     }
@@ -94,7 +120,7 @@ pub(crate) fn service(comp: &mut Compositor) {
         return;
     }
     let focus = comp.seat.get_keyboard().and_then(|keyboard| keyboard.current_focus());
-    comp.mac_copy_order.expire(focus, Instant::now());
+    comp.mac_copy_order.expire(focus, comp.mac_copy_order.now());
     if comp.mac_copy_order.pending.is_some() {
         return;
     }

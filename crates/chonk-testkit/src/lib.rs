@@ -1804,6 +1804,28 @@ impl Door {
         ))
     }
 
+    /// Observe copy waiting and deferred physical keys without a frame barrier
+    /// (a barrier would itself wait for these keys to be replayed).
+    pub fn copy_order(&mut self) -> Result<(bool, usize), String> {
+        self.send("copy-order")?;
+        let line = self.read_line()?;
+        if !line.starts_with("copy-order ") {
+            return Err(format!("unexpected copy-order reply: {line}"));
+        }
+        Ok((
+            field(&line, "pending=").ok_or_else(|| format!("missing pending state: {line}"))?,
+            field(&line, "queued=").ok_or_else(|| format!("missing queued count: {line}"))?,
+        ))
+    }
+
+    /// Control only the copy deadline: `freeze`, `advance MS`, or `realtime`.
+    /// Clipboard offers and key dispatch remain real client/compositor work.
+    pub fn copy_order_clock(&mut self, command: &str) -> Result<(), String> {
+        self.send(&format!("copy-order-clock {command}"))?;
+        let line = self.read_line()?;
+        if line == "ok" { Ok(()) } else { Err(format!("copy-order clock: {line}")) }
+    }
+
     /// Number of protocol snapshots/synchronizations attempted so far.
     /// Unlike counting output events, this detects an expensive full diff
     /// that rebuilt state only to discover that nothing changed.

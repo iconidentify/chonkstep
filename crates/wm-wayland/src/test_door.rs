@@ -80,6 +80,8 @@
 //! | `memory-stats` | opt-in memory-profile builds only: Rust, allocator and glyph-cache counters; no payloads |
 //! | `selection-devices` | read-only retained core/primary/wlr/ext device counts, including dead resources |
 //! | `selection-transfers` | read-only retained XWM incoming/outgoing transfer counts; no cleanup or payloads |
+//! | `copy-order` | pending copy and queued physical-key count, without servicing either |
+//! | `copy-order-clock freeze\|realtime\|advance MS` | control only the Mac copy deadline clock; freeze/realtime require idle copy state |
 //! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime\|lock` from the production scene hit-test |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
 //! | `windows` | replies one line per ledger entry (see below), then `done` |
@@ -931,6 +933,24 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 ).as_bytes());
             } else {
                 let _ = stream.write_all(b"selection-transfers unavailable\n");
+            }
+        }
+        Some("copy-order") => {
+            let (pending, queued) = comp.mac_copy_order.test_status();
+            let _ = stream.write_all(format!("copy-order pending={pending} queued={queued}\n").as_bytes());
+        }
+        Some("copy-order-clock") => {
+            let result = match (words.next(), words.next(), words.next()) {
+                (Some("freeze"), None, None) => comp.mac_copy_order.test_clock(true),
+                (Some("realtime"), None, None) => comp.mac_copy_order.test_clock(false),
+                (Some("advance"), Some(ms), None) => ms.parse::<u64>()
+                    .map_err(|_| "copy-order-clock advance wants milliseconds")
+                    .and_then(|ms| comp.mac_copy_order.test_advance(std::time::Duration::from_millis(ms))),
+                _ => Err("copy-order-clock wants freeze, realtime or advance MS"),
+            };
+            match result {
+                Ok(()) => { let _ = stream.write_all(b"ok\n"); }
+                Err(error) => reply_err(stream, error),
             }
         }
         Some("heap-in-use") => {

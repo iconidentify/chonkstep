@@ -1142,15 +1142,33 @@ fn delayed_real_copy_followed_by_one_burst_switch_and_paste_keeps_clipboard_orde
     poll_until(WAIT, "source text selected", || {
         (source.evaluate("source.selectionEnd-source.selectionStart === source.value.length").ok()? == true).then_some(())
     }).unwrap();
-    // Delay ordinary handling, never synthesize a copy or write the clipboard.
-    source.evaluate("document.addEventListener('keydown',e=>{if(e.ctrlKey && e.key==='c'){const end=performance.now()+150;while(performance.now()<end){}}});true").unwrap();
+    // Stop actual copy handling until the later input is observably queued.
+    // A 150 ms busy wait raced the compositor's 250 ms deadline on loaded CI.
+    // Freeze only that deadline; no clipboard data or input is synthesized by
+    // DevTools. The browser will still publish its ordinary Wayland offer.
+    source.call("Debugger.enable", serde_json::json!({})).unwrap();
+    source.evaluate("document.addEventListener('keydown', function pauseCopy(e) { if(e.ctrlKey && e.key==='c') { document.removeEventListener('keydown', pauseCopy); debugger; } }); true").unwrap();
+    s.door().copy_order_clock("freeze").unwrap();
     chord(&mut s, &[CMD], 46);
+    let paused = source.wait_for_pause().unwrap();
+    assert_eq!(paused["callFrames"][0]["functionName"], "pauseCopy");
+    let source_focus = s.world().unwrap().logical_focus;
+    assert!(source_focus.is_some());
     // No barriers between Tab and Paste. Each WM focus change must settle
     // before routing the later client key, including queued releases.
     for (code, pressed) in [(CMD,true),(15,true),(15,false),(CMD,false),(CMD,true),(47,true),(47,false),(CMD,false)] {
         s.door().key(code, pressed).unwrap();
     }
+    assert_eq!(s.door().copy_order().unwrap(), (true, 8));
+    assert_eq!(s.world().unwrap().logical_focus, source_focus);
+    assert!(std::fs::read(&output).unwrap().is_empty());
+    s.door().copy_order_clock("advance 249").unwrap();
+    assert_eq!(s.door().copy_order().unwrap(), (true, 8));
+    // The clock stays below the deadline: only the real clipboard offer can
+    // release this queue. A compositor barrier cannot substitute for it.
+    source.call("Debugger.resume", serde_json::json!({})).unwrap();
     s.door().barrier().unwrap();
+    assert_eq!(s.door().copy_order().unwrap(), (false, 0));
     let expected = CONTENT.replace('\n', "\r");
     poll_until(WAIT, "delayed source pasted into the actual terminal", || {
         (std::fs::read(&output).ok()? == expected.as_bytes()).then_some(())
@@ -1167,14 +1185,36 @@ fn delayed_real_copy_followed_by_one_burst_switch_and_paste_keeps_clipboard_orde
     // wait must expire and still deliver a later switch and ordinary typing.
     chord(&mut s, &[CMD], 15);
     focus(&mut s, &mut source, "source");
-    source.evaluate("source.setSelectionRange(0,0);true").unwrap();
+    source.evaluate("source.setSelectionRange(0,0);events.length=0;true").unwrap();
     chord(&mut s, &[CMD], 46);
-    let started = std::time::Instant::now();
-    chord(&mut s, &[CMD], 15);
-    assert!(started.elapsed() < Duration::from_secs(1), "a no-op Copy must not hold input indefinitely");
-    s.door().tap_key(30).unwrap();
+    poll_until(WAIT, "browser handled copy with no selected text", || {
+        (source.evaluate("events.some(e=>e.type==='keydown' && e.ctrl && e.key==='c')").ok()? == true).then_some(())
+    }).unwrap();
+    for (code, pressed) in [(CMD,true),(15,true),(15,false),(CMD,false),(30,true),(30,false)] {
+        s.door().key(code, pressed).unwrap();
+    }
+    assert_eq!(s.door().copy_order().unwrap(), (true, 6));
+    s.door().copy_order_clock("advance 249").unwrap();
+    assert_eq!(s.door().copy_order().unwrap(), (true, 6));
+    assert_eq!(s.world().unwrap().logical_focus, source_focus);
+    assert!(std::fs::read(&output).unwrap().ends_with(&[3]));
+    s.door().copy_order_clock("advance 1").unwrap();
+    s.door().barrier().unwrap();
+    assert_eq!(s.door().copy_order().unwrap(), (false, 0));
     poll_until(WAIT, "typing after clipboard wait expires", || {
         std::fs::read(&output).ok()?.ends_with(&[3, b'a']).then_some(())
+    }).unwrap();
+    s.door().copy_order_clock("realtime").unwrap();
+    // The normal wall-clock path must still schedule a no-offer timeout.
+    // Its exact 250 ms boundary was checked above without a scheduling race.
+    chord(&mut s, &[CMD], 15);
+    focus(&mut s, &mut source, "source");
+    source.evaluate("source.setSelectionRange(0,0);true").unwrap();
+    chord(&mut s, &[CMD], 46);
+    chord(&mut s, &[CMD], 15);
+    s.door().tap_key(48).unwrap();
+    poll_until(WAIT, "typing after the real-clock clipboard timeout", || {
+        std::fs::read(&output).ok()?.ends_with(&[3, b'a', b'b']).then_some(())
     }).unwrap();
     assert!(s.compositor_alive());
 }
