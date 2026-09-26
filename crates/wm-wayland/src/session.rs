@@ -926,6 +926,9 @@ pub(crate) struct SessionGraphics {
     /// logs each newly reserved headset once rather than per rescan,
     /// and so a lease path can advertise the same set startup skipped.
     non_desktop: Vec<connector::Handle>,
+    /// Keeps the machine awake with the lid closed while an external
+    /// output is driven. See [`crate::lid_bus`].
+    lid: crate::lid_bus::LidInhibitor,
     /// Connected connectors kept out of the layout — a laptop panel
     /// behind a closed lid. Not in `outputs`, so nothing positional
     /// reaches them; a rescan treats them as present, and an unplug
@@ -1909,6 +1912,8 @@ pub(crate) fn init(
         "strict buffer release (hold client buffers until their page flip completes; \
          CHONKSTEP_STRICT_BUFFER_RELEASE overrides)"
     );
+    let mut lid = crate::lid_bus::LidInhibitor::start();
+    lid.update(session_outputs.iter().map(|output| output.name.as_str()));
     Ok(SessionInit {
         graphics: Graphics::Session(Box::new(SessionGraphics {
             device_path,
@@ -1926,6 +1931,7 @@ pub(crate) fn init(
             strict_release,
             hotplug_due: None,
             non_desktop,
+            lid,
             parked: Vec::new(),
         })),
         outputs: setups,
@@ -2280,6 +2286,11 @@ pub(crate) fn service_connector_hotplug(comp: &mut Compositor) {
             }
         }
         Err(error) => tracing::warn!(%error, "connector rescan failed; keeping the current output set"),
+    }
+    // The driven set may have changed: re-evaluate clamshell mode.
+    if let Graphics::Session(session) = &mut comp.graphics {
+        let SessionGraphics { lid, outputs, .. } = &mut **session;
+        lid.update(outputs.iter().map(|output| output.name.as_str()));
     }
 }
 

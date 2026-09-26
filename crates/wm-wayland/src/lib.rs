@@ -51,6 +51,7 @@ mod global_shortcuts;
 mod idle;
 mod image_capture;
 mod inhibit_bus;
+mod lid_bus;
 mod input;
 mod layers;
 mod lock;
