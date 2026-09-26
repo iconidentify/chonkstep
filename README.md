@@ -165,6 +165,9 @@ It remains available as a secondary backend.
 
 ## Development
 
+The [roadmap](docs/roadmap.md) prioritizes current Omarchy gaps, reliability,
+performance and contributor work against the live issue backlog.
+
 The backend-independent `wm-core` handles window policy; `wm-wayland` and
 `wm-x11` implement display-server behavior. `chonk-shell` supplies menus,
 transient navigation and Omarchy integration. `wm-theme` owns themed rendering,
