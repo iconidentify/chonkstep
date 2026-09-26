@@ -28,6 +28,8 @@ name = Path(sys.argv[0]).name
 with open(os.environ["CHONK_CHECK_TEST_LOG"], "a") as log:
     log.write(json.dumps({"tool": name, "args": sys.argv[1:],
                           "rustdocflags": os.environ.get("RUSTDOCFLAGS", ""),
+                          "software": os.environ.get("LIBGL_ALWAYS_SOFTWARE", ""),
+                          "driver": os.environ.get("GALLIUM_DRIVER", ""),
                           "cwd": os.getcwd()}) + "\\n")
 if name + ":" + sys.argv[1] == os.environ.get("CHONK_CHECK_TEST_FAIL"):
     sys.exit(42)
@@ -48,13 +50,15 @@ if name + ":" + sys.argv[1] == os.environ.get("CHONK_CHECK_TEST_FAIL"):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([(item["tool"], item["args"][0]) for item in commands],
                          [("cargo", "clippy"), ("cargo", "doc"), ("cargo", "test"),
-                          ("cargo", "test"), ("python3", "-B")])
+                          ("cargo", "test"), ("python3", "scripts/check-native-tests.py"),
+                          ("python3", "scripts/check-native-tests.py"), ("python3", "-B")])
         for item in commands:
             self.assertEqual(item["cwd"], str(CHECK.parent.parent))
             if item["tool"] == "cargo":
                 self.assertIn("--locked", item["args"])
                 self.assertNotIn("--release", item["args"])
-        self.assertEqual(commands[3]["args"], ["test", "--locked", "-p", "wm-wayland"])
+        self.assertEqual(commands[3]["args"],
+                         ["test", "--locked", "-p", "wm-wayland", "-p", "chonkstep-wayland"])
 
     def test_lint_keeps_every_ci_safety_gate_enabled(self):
         result, commands = self.run_check("lint")
@@ -78,13 +82,34 @@ if name + ":" + sys.argv[1] == os.environ.get("CHONK_CHECK_TEST_FAIL"):
         for mode, tool, expected in [
             ("unit", "cargo", ["test", "--locked", "--workspace", "--exclude", "wm-wayland",
                                "--exclude", "chonkstep-wayland"]),
-            ("wayland-unit", "cargo", ["test", "--locked", "-p", "wm-wayland"]),
+            ("wayland-unit", "cargo", ["test", "--locked", "-p", "wm-wayland",
+                                       "-p", "chonkstep-wayland"]),
             ("harness", "python3", ["-B", "-m", "unittest", "discover", "-s", "scripts/tests", "-v"]),
         ]:
             with self.subTest(mode=mode):
                 result, commands = self.run_check(mode)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual([(item["tool"], item["args"]) for item in commands], [(tool, expected)])
+
+    def test_gles_runs_compositor_and_vendor_serially_with_software_rendering(self):
+        result, commands = self.run_check("gles")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(commands), 2)
+        for item in commands:
+            self.assertEqual(item["tool"], "python3")
+            self.assertEqual(item["software"], "1")
+            self.assertEqual(item["driver"], "llvmpipe")
+            self.assertIn("--ignored", item["args"])
+            self.assertIn("--test-threads=1", item["args"])
+        self.assertEqual(commands[0]["args"].count("--require"), 5)
+        self.assertEqual(commands[1]["args"].count("--require"), 2)
+        manifest = commands[1]["args"][commands[1]["args"].index("--manifest-path") + 1]
+        self.assertFalse(Path(manifest).exists(), "isolated vendor source is cleaned")
+
+    def test_gles_failure_does_not_run_the_vendor_gate(self):
+        result, commands = self.run_check("gles", fail="python3:scripts/check-native-tests.py")
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertEqual(len(commands), 1)
 
     def test_all_fails_immediately_without_retrying_or_masking_errors(self):
         for stage, count in [("clippy", 1), ("doc", 2), ("test", 3)]:

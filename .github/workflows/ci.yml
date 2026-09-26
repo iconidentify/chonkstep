@@ -81,6 +81,7 @@ jobs:
             packaging/arch/PKGBUILD \
             packaging/arch/PKGBUILD-release \
             scripts/check.sh \
+            scripts/check-vendored-smithay-tests.sh \
             scripts/build-release.sh \
             scripts/release-validation.sh \
             scripts/release-metadata.sh \
@@ -100,6 +101,7 @@ jobs:
             dock/check-x11.sh \
             dock/install.sh \
             scripts/check.sh \
+            scripts/check-vendored-smithay-tests.sh \
             scripts/build-release.sh \
             scripts/release-validation.sh \
             scripts/release-metadata.sh \
@@ -142,6 +144,7 @@ jobs:
         run: |
           xvfb-run -a cargo test --locked -p wm-x11 hostile_properties -- --ignored
           xvfb-run -a cargo test --locked -p wm-x11 native_system7 -- --ignored --test-threads=1
+          xvfb-run -a cargo test --locked -p wm-x11 native_modern -- --ignored --test-threads=1
 
       - name: Exercise the standalone X11 dock
         # The dock's X11 fixture builds the same standalone client against a
@@ -426,7 +429,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
+            libxkbcommon-dev libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri libwayland-dev \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev \
             weston xwayland foot xterm alacritty zenity grim wayland-utils wlr-randr wtype \
             wl-clipboard wf-recorder ffmpeg libnotify-bin xdg-user-dirs xdg-utils \
@@ -439,8 +442,11 @@ jobs:
       - name: Build the Wayland compositor and binary
         run: cargo build -p wm-wayland -p chonkstep-wayland --locked
 
-      - name: Run the wm-wayland test suite
+      - name: Run the Wayland library and binary test suites
         run: scripts/check.sh wayland-unit
+
+      - name: Run surfaceless GLES and vendored renderer regressions
+        run: scripts/check.sh gles
 
       # Weston provides the host display a nested compositor needs,
       # with Mesa's software renderer on runners that expose no GPU.

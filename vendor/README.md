@@ -253,8 +253,11 @@ coordinates back to physical scene pixels. Existing rendering methods and their
 defaults are unchanged. Only bounded corner squares use the custom mask shader;
 the client interior keeps the existing texture path.
 
-`cargo test -p wm-wayland native_gles_rounded_texture_crop_relocation_and_shadow_pixels -- --ignored`
-is the explicit surfaceless GLES gate. It checks every pixel across all eight
+`scripts/check.sh gles` runs the five compositor regressions and the vendored
+renderer tests under Mesa llvmpipe, serially and without a display or GPU. It
+runs in pull-request CI and in `scripts/check.sh all`; a missing or renamed
+required test fails the gate even if Cargo reports success with zero tests.
+The rounded-texture regression checks every pixel across all eight
 output transforms, nonuniform scaling, cropping and relocation, as well as the
 zero-blur shadow. Remove these accessors when an adopted Smithay version provides
 equivalent allocation-free retained shader overrides and passes that gate.
@@ -271,9 +274,15 @@ unlocking. No per-frame allocation or client-buffer ownership change is added.
 The ignored native regression in `gles/read_batch_tests.rs` covers held writer
 locks, nested scopes, conflicting textures, error and unwind cleanup, and exact
 pixels with and without fence support. Because this dependency is excluded from
-the workspace, run its library test through an isolated copy of its manifest
-with `--no-default-features --features renderer_gl`; the Chonkstep native gate
-above also exercises actual mutable client textures and warm allocation bounds.
+the workspace, `scripts/check-vendored-smithay-tests.sh` copies its source and
+manifest into a temporary directory and runs both `read_batch_tests` with
+`--no-default-features --features renderer_gl`. Build artifacts stay in a
+separate `target/smithay-gles-tests` cache (under `CARGO_TARGET_DIR` when set).
+The disposable lockfile starts with the workspace's locked versions and may
+add upstream test-only dependencies; neither the vendor tree nor the workspace
+lockfile is modified. The ChonkStep native gate above also exercises actual
+mutable client textures and warm allocation bounds. These software-renderer
+checks do not establish hardware GPU coverage.
 
 `GlesRenderer::compile_custom_pixel_shader_with_vertex` adds a vertex stage to
 the existing pixel-shader constructor. It retains the same damage-instance and
