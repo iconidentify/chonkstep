@@ -178,7 +178,7 @@ fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
                 },
             )
             .unwrap_or_else(|e| panic!("{e}: {scale}/{mode}\n{}", s.log()));
-            assert_pixels(&mut s, w, h);
+            assert_frame_pixels(&mut s, w, h, has_title_tab(*style));
             // Changing back also must not be suppressed by prior physical asks.
             change_density(&act, "1");
             poll_until(Duration::from_secs(10), "density restored", || {
@@ -212,13 +212,24 @@ fn mapped_buffer_and_viewport_density_changes_keep_pixels_inside_the_frame() {
                 },
             )
             .unwrap();
-            assert_pixels(&mut s, changed.0, changed.1);
+            assert_frame_pixels(&mut s, changed.0, changed.1, has_title_tab(*style));
         }
     }
     }
 }
 
+/// A title tab narrower than its frame leaves the band beside it transparent
+/// by design (the layout's input exclusion), so the top band cannot be used to
+/// prove the chrome reached the new right edge.
+fn has_title_tab(style: wm_theme::DecorationStyle) -> bool {
+    style == wm_theme::DecorationStyle::BeOS
+}
+
 fn assert_pixels(s: &mut Session, w: u32, h: u32) {
+    assert_frame_pixels(s, w, h, false);
+}
+
+fn assert_frame_pixels(s: &mut Session, w: u32, h: u32, title_tab: bool) {
     s.door().barrier().unwrap();
     let world = s.world().unwrap();
     let c = world.window_matching("scale-change-probe").unwrap();
@@ -255,10 +266,20 @@ fn assert_pixels(s: &mut Session, w: u32, h: u32) {
         ),
         "actual painted pixels disagree with geometry"
     );
-    // The theme's top band must actually reach the new right edge.
-    let bar_y = (f.y + (c.y - f.y) / 2) as u32;
+    // The chrome must actually reach the new right edge: the theme's top band,
+    // or for tabbed chrome the side border beside the client.
     let visual_right = f.x + f.w as i32 - f.input_margin as i32;
-    let near_right = image.pixel((visual_right - 8) as u32, bar_y);
-    let outside = image.pixel((visual_right + 8) as u32, bar_y);
-    assert_ne!(near_right, outside, "titlebar stopped short of its frame");
+    let (near_x, probe_y) = if title_tab {
+        (visual_right - 3, (c.y + h as i32 / 2) as u32)
+    } else {
+        (visual_right - 8, (f.y + (c.y - f.y) / 2) as u32)
+    };
+    let near_right = image.pixel(near_x as u32, probe_y);
+    let outside = image.pixel((visual_right + 8) as u32, probe_y);
+    assert_ne!(
+        near_right,
+        outside,
+        "{} stopped short of its frame",
+        if title_tab { "side border" } else { "titlebar" }
+    );
 }
