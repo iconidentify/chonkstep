@@ -39,31 +39,39 @@ Require bounded client-driven work, lock and capture privacy, consistent render
 and input order, and evidence for performance claims. Preserve the secondary
 X11 backend, while prioritizing Wayland and Omarchy.
 
+## Completed locally, pending upstream review
+
+- [#183](https://github.com/iconidentify/chonkstep/issues/183): renderer and
+  binary test gates now run in local preflight and PR CI. The gates require all
+  five surfaceless compositor tests and both vendored renderer tests by name;
+  CI also runs native modern X11 chrome and Wayland version tests. Local
+  preflight and the native X11 check passed.
+- [#310](https://github.com/iconidentify/chonkstep/issues/310): the real-browser
+  clipboard regression now observes queued input while the browser is paused,
+  then requires its real clipboard offer to release that input. An opt-in test
+  clock verifies the exact timeout boundary without changing the production
+  250 ms deadline. Ten consecutive runs on one CPU passed; disabling key
+  deferral made the regression fail. See the
+  [implementation and validation record](engineering/2026-09-26-copy-order-test.md).
+
+These changes are local and unpublished. GitHub issues and the open-issue
+counts above remain unchanged. Refresh main and competing work before publishing.
+
 ## Immediate queue
 
-The first implementation is #183: make existing renderer regressions run on
-every PR before changing more rendering and output code. The remaining entries
-are ordered follow-ups, not simultaneous claims.
+The next implementation is #256. Entries are ordered follow-ups, not
+simultaneous claims.
 
 | Order | Work | Why now / completion evidence |
 | --- | --- | --- |
-| 1 | [#183](https://github.com/iconidentify/chonkstep/issues/183): renderer and binary test gates | Run all five surfaceless compositor tests, both vendored renderer tests, native modern X11 chrome, and Wayland version tests in CI. Missing tests must fail, not silently select zero. |
-| 2 | [#310](https://github.com/iconidentify/chonkstep/issues/310): clipboard test determinism | Preserve real Copy → switch → Paste coverage and bounded input waiting. Reproduce under CI-like load; a clipboard-ready wait alone would remove the ordering race the test is meant to exercise. |
-| 3 | [#256](https://github.com/iconidentify/chonkstep/issues/256): bound focus grabs and virtual input | Bound memory and uninterrupted work; hostile-client tests must show bystander responsiveness, ordered input, and unchanged lock behavior. |
-| 4 | [#281](https://github.com/iconidentify/chonkstep/issues/281): actionable crash evidence | Preserve panic/XWayland diagnostics and durable recovery history. A report after recovery must identify what failed. |
-| 5 | [#201](https://github.com/iconidentify/chonkstep/issues/201): hung-loop recovery | Detect a stalled loop from outside that loop, preserve evidence, and enter the existing locked recovery path. Prove suspend, inactive VT and slow modesets do not cause false recovery. |
-| 6 | [#181](https://github.com/iconidentify/chonkstep/issues/181): isolate launched applications | Under uwsm, put supported application launches in application scopes. Verify cgroup ownership, activation tokens, argv and non-uwsm fallback. |
-| 7 | [#191](https://github.com/iconidentify/chonkstep/issues/191): touch/tablet output mapping | A laptop touchscreen must still hit its own panel when an external display is attached; test rotation, scaling and reconnect. |
-| 8 | [#199](https://github.com/iconidentify/chonkstep/issues/199): screen-share chooser | Offer both window and monitor sharing through the actual portal, with cancellation and protected-window coverage. |
-| 9 | [#198](https://github.com/iconidentify/chonkstep/issues/198): background work off the event loop | Decode/cache off-thread, discard stale results, and measure input/frame tails during theme changes and monitor resize. |
-| 10 | [#248](https://github.com/iconidentify/chonkstep/issues/248): event-driven idle upkeep | Replace recurring file polls with watches and bounded recovery. Measure truly idle wakeups and CPU before/after. |
-
-Local investigation of #310 found a 150 ms JavaScript busy wait competing with
-the compositor's 250 ms copy-order deadline. The real-client test passed once
-on this machine; the first attempt of
-[CI run 36267464273](https://github.com/iconidentify/chonkstep/actions/runs/36267464273/attempts/1)
-failed waiting for terminal paste. This supports investigating timing, but is
-not proof of the complete root cause or a fix. Keep the issue open.
+| 1 | [#256](https://github.com/iconidentify/chonkstep/issues/256): bound focus grabs and virtual input | Bound memory and uninterrupted work; hostile-client tests must show bystander responsiveness, ordered input, and unchanged lock behavior. |
+| 2 | [#281](https://github.com/iconidentify/chonkstep/issues/281): actionable crash evidence | Preserve panic/XWayland diagnostics and durable recovery history. A report after recovery must identify what failed. |
+| 3 | [#201](https://github.com/iconidentify/chonkstep/issues/201): hung-loop recovery | Detect a stalled loop from outside that loop, preserve evidence, and enter the existing locked recovery path. Prove suspend, inactive VT and slow modesets do not cause false recovery. |
+| 4 | [#181](https://github.com/iconidentify/chonkstep/issues/181): isolate launched applications | Under uwsm, put supported application launches in application scopes. Verify cgroup ownership, activation tokens, argv and non-uwsm fallback. |
+| 5 | [#191](https://github.com/iconidentify/chonkstep/issues/191): touch/tablet output mapping | A laptop touchscreen must still hit its own panel when an external display is attached; test rotation, scaling and reconnect. |
+| 6 | [#199](https://github.com/iconidentify/chonkstep/issues/199): screen-share chooser | Offer both window and monitor sharing through the actual portal, with cancellation and protected-window coverage. |
+| 7 | [#198](https://github.com/iconidentify/chonkstep/issues/198): background work off the event loop | Decode/cache off-thread, discard stale results, and measure input/frame tails during theme changes and monitor resize. |
+| 8 | [#248](https://github.com/iconidentify/chonkstep/issues/248): event-driven idle upkeep | Replace recurring file polls with watches and bounded recovery. Measure truly idle wakeups and CPU before/after. |
 
 ## Delivery tracks and the remaining backlog
 
