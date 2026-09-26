@@ -1534,14 +1534,12 @@ pub(crate) fn init(
         let position = Point::new(next_x, 0);
         match attach_output(&mut drm, &gbm, render_node, &render_formats, &target, position) {
             Ok((session_output, setup)) => {
+                // The mode actually driven: the fallback, when the
+                // chosen one was refused.
+                let driven = session_output.drm_modes.first().copied().unwrap_or(target.mode);
                 tracing::info!(
                     output = %name,
-                    mode = %format!(
-                        "{}x{}@{}",
-                        target.mode.size().0,
-                        target.mode.size().1,
-                        target.mode.vrefresh()
-                    ),
+                    mode = %format!("{}x{}@{}", driven.size().0, driven.size().1, driven.vrefresh()),
                     x = position.x,
                     y = position.y,
                     "session backend: output up"
@@ -1941,7 +1939,57 @@ pub(crate) fn init(
 /// into the output's wayland state too, so `wl_output`'s geometry and
 /// `xdg_output`'s logical position tell clients the same story the
 /// compositor's own hit-testing does.
+///
+/// `target.mode` is tried first. When the kernel refuses it (a display
+/// behind a bandwidth-limited link still advertises modes the link
+/// cannot carry), the connector's other modes are tried in
+/// [`adoption_mode_order`] and the output comes up on the first one
+/// that can be driven; it stays dark only when none can.
 fn attach_output(
+    drm: &mut DrmDevice,
+    gbm: &GbmDevice<DrmDeviceFd>,
+    render_node: Option<DrmNode>,
+    render_formats: &[Format],
+    target: &ConnectorTarget,
+    position: Point,
+) -> Result<(SessionOutput, OutputSetup), String> {
+    let name = connector_name(&target.info);
+    let candidates = adoption_modes(&target.info, target.mode);
+    let mut first_error: Option<String> = None;
+    for (attempt, mode) in candidates.iter().enumerate() {
+        let candidate = ConnectorTarget { info: target.info.clone(), crtc: target.crtc, mode: *mode };
+        // A refused attempt returns before anything escapes it: the
+        // surface, allocator and compositor it built are dropped (and
+        // the surface's state cleared) before the next one binds the
+        // same crtc.
+        match attach_output_at(drm, gbm, render_node, render_formats, &candidate, position) {
+            Ok(attached) => {
+                if attempt > 0 {
+                    tracing::info!(
+                        output = %name,
+                        mode = %mode_label(mode),
+                        refused = attempt,
+                        "output driven at a fallback mode"
+                    );
+                }
+                return Ok(attached);
+            }
+            Err(error) => {
+                tracing::warn!(output = %name, mode = %mode_label(mode), %error, "mode refused; trying the next candidate");
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    Err(format!(
+        "none of {} candidate modes could be driven; first refusal: {}",
+        candidates.len(),
+        first_error.unwrap_or_else(|| "the connector advertises no modes".into())
+    ))
+}
+
+/// Brings one output up at exactly `target.mode`. [`attach_output`]
+/// walks the connector's modes through this until one is driven.
+fn attach_output_at(
     drm: &mut DrmDevice,
     gbm: &GbmDevice<DrmDeviceFd>,
     render_node: Option<DrmNode>,
@@ -3958,6 +4006,98 @@ fn preferred_mode(connector: &connector::Info) -> Option<DrmMode> {
         .copied()
 }
 
+/// How many modes adoption tries before an output is given up as dark.
+/// Each attempt costs a surface setup and an atomic test; the ceiling
+/// keeps a connector whose every mode is refused (for a reason that has
+/// nothing to do with the mode) from stalling a hotplug.
+const ADOPTION_MODE_ATTEMPTS: usize = 8;
+
+/// What the adoption fallback ranks a mode by: its pixel size, its
+/// refresh in millihertz, and whether the connector marks it preferred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ModeRank {
+    width: u16,
+    height: u16,
+    refresh_mhz: i32,
+    preferred: bool,
+}
+
+impl ModeRank {
+    fn of(mode: &DrmMode) -> Self {
+        let (width, height) = mode.size();
+        ModeRank {
+            width,
+            height,
+            refresh_mhz: OutputMode::from(*mode).refresh,
+            preferred: mode.mode_type().contains(ModeTypeFlags::PREFERRED),
+        }
+    }
+
+    fn same_timing(&self, other: &ModeRank) -> bool {
+        self.width == other.width && self.height == other.height && self.refresh_mhz == other.refresh_mhz
+    }
+
+    fn area(&self) -> u32 {
+        u32::from(self.width) * u32::from(self.height)
+    }
+}
+
+/// The order adoption tries `modes` in, as indices, at most `limit` of
+/// them, each (size, refresh) once:
+///
+/// 1. `first`, the mode chosen for the connector;
+/// 2. the mode the connector marks preferred, when that is not `first`;
+/// 3. `first`'s resolution at lower refresh rates, fastest first;
+/// 4. everything else, largest first, then fastest.
+///
+/// A display behind a bandwidth-limited link (a dock's DisplayPort
+/// tunnel, a protocol converter) still advertises modes the link cannot
+/// carry, and its preferred mode is often one of them. The same picture
+/// at a lower refresh is the smallest step down that fits, so it comes
+/// before any change of resolution.
+fn adoption_mode_order(first: usize, modes: &[ModeRank], limit: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = Vec::new();
+    let push = |order: &mut Vec<usize>, index: usize| {
+        if order.len() < limit && !order.iter().any(|&held| modes[held].same_timing(&modes[index])) {
+            order.push(index);
+        }
+    };
+    let Some(chosen) = modes.get(first) else { return order };
+    push(&mut order, first);
+    if let Some(preferred) = modes.iter().position(|mode| mode.preferred) {
+        push(&mut order, preferred);
+    }
+    let mut slower: Vec<usize> = (0..modes.len())
+        .filter(|&index| {
+            let mode = &modes[index];
+            mode.width == chosen.width && mode.height == chosen.height && mode.refresh_mhz < chosen.refresh_mhz
+        })
+        .collect();
+    slower.sort_by_key(|&index| std::cmp::Reverse(modes[index].refresh_mhz));
+    for index in slower {
+        push(&mut order, index);
+    }
+    let mut rest: Vec<usize> = (0..modes.len()).collect();
+    rest.sort_by_key(|&index| std::cmp::Reverse((modes[index].area(), modes[index].refresh_mhz)));
+    for index in rest {
+        push(&mut order, index);
+    }
+    order
+}
+
+/// The modes adoption tries for `connector`, starting from `first`
+/// (see [`adoption_mode_order`]).
+fn adoption_modes(connector: &connector::Info, first: DrmMode) -> Vec<DrmMode> {
+    let modes: Vec<DrmMode> = std::iter::once(first).chain(connector.modes().iter().copied()).collect();
+    let ranks: Vec<ModeRank> = modes.iter().map(ModeRank::of).collect();
+    adoption_mode_order(0, &ranks, ADOPTION_MODE_ATTEMPTS).into_iter().map(|index| modes[index]).collect()
+}
+
+fn mode_label(mode: &DrmMode) -> String {
+    let (width, height) = mode.size();
+    format!("{width}x{height}@{:.2}", f64::from(OutputMode::from(*mode).refresh) / 1000.0)
+}
+
 /// Finds a crtc — the scanout engine — able to drive this connector and
 /// not already assigned to another one. The encoder already attached to
 /// it is tried first because reusing the kernel's existing routing
@@ -4019,6 +4159,60 @@ mod tests {
 
     fn handle(id: u32) -> connector::Handle {
         connector::Handle::from(std::num::NonZeroU32::new(id).unwrap())
+    }
+
+    fn rank(width: u16, height: u16, hz: f64, preferred: bool) -> ModeRank {
+        ModeRank { width, height, refresh_mhz: (hz * 1000.0).round() as i32, preferred }
+    }
+
+    #[test]
+    fn adoption_falls_back_to_the_same_picture_at_a_lower_refresh_first() {
+        // A 4K120 monitor behind a link that cannot carry 120 Hz: the
+        // same resolution slower comes before any change of resolution,
+        // and a faster mode of the same size only after those.
+        let modes = [
+            rank(3840, 2160, 120.0, true),
+            rank(3840, 2160, 60.0, false),
+            rank(2560, 1440, 120.0, false),
+            rank(3840, 2160, 59.94, false),
+            rank(3840, 2160, 144.0, false),
+            rank(1920, 1080, 60.0, false),
+        ];
+        assert_eq!(adoption_mode_order(0, &modes, 8), vec![0, 1, 3, 4, 2, 5]);
+    }
+
+    #[test]
+    fn adoption_keeps_a_chosen_mode_first_and_the_preferred_one_next() {
+        let modes = [
+            rank(3840, 2160, 120.0, true),
+            rank(3840, 2160, 60.0, false),
+            rank(2560, 1440, 120.0, false),
+            rank(3840, 2160, 59.94, false),
+        ];
+        assert_eq!(adoption_mode_order(3, &modes, 8), vec![3, 0, 1, 2]);
+    }
+
+    #[test]
+    fn adoption_tries_each_timing_once() {
+        // `adoption_modes` puts the chosen mode ahead of the connector's
+        // own list, which contains it again; kernels also repeat modes.
+        let modes = [
+            rank(3840, 2160, 120.0, true),
+            rank(3840, 2160, 120.0, true),
+            rank(3840, 2160, 60.0, false),
+            rank(3840, 2160, 60.0, false),
+        ];
+        assert_eq!(adoption_mode_order(0, &modes, 8), vec![0, 2]);
+    }
+
+    #[test]
+    fn adoption_attempts_are_bounded() {
+        let modes: Vec<ModeRank> = (0..20).map(|step| rank(3840, 2160, 120.0 - f64::from(step), step == 0)).collect();
+        let order = adoption_mode_order(0, &modes, ADOPTION_MODE_ATTEMPTS);
+        assert_eq!(order.len(), ADOPTION_MODE_ATTEMPTS);
+        assert_eq!(order[..3], [0, 1, 2]);
+        assert!(adoption_mode_order(0, &modes, 0).is_empty());
+        assert!(adoption_mode_order(99, &modes, 8).is_empty());
     }
 
     #[test]
