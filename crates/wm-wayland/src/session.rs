@@ -3800,23 +3800,77 @@ fn open_first_usable_device(
 /// GBM/EGL creation and, crucially, does not construct a `DrmDevice`
 /// with connector-reset enabled; it observes other GPUs without
 /// disturbing whichever compositor currently owns their display state.
-fn connected_desktop_connectors(
-    seat_session: &mut LibSeatSession,
-    path: &Path,
-) -> Result<Vec<String>, String> {
+///
+/// The descriptor is only borrowed for the look, so it goes back to the
+/// seat on every path, success included.
+fn connected_desktop_connectors<S: Session>(seat_session: &mut S, path: &Path) -> Result<Vec<String>, String> {
     let fd = seat_session.open(path, DEVICE_FLAGS).map_err(|error| format!("the seat would not open it: {error:?}"))?;
-    let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+    with_seat_device(
+        DeviceFd::from(fd),
+        |fd| connector_names(&DrmDeviceFd::new(fd)),
+        |_| true,
+        |fd| seat_session.close(fd).map_err(|error| format!("the seat would not take it back: {error:?}")),
+    )
+}
+
+fn connector_names(fd: &DrmDeviceFd) -> Result<Vec<String>, String> {
     let resources = fd.resource_handles().map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
     let mut names = Vec::new();
     for handle in resources.connectors() {
         let Ok(info) = fd.get_connector(*handle, true) else {
             continue;
         };
-        if info.state() == connector::State::Connected && !connector_is_non_desktop(&fd, *handle) {
+        if info.state() == connector::State::Connected && !connector_is_non_desktop(fd, *handle) {
             names.push(connector_name(&info));
         }
     }
     Ok(names)
+}
+
+/// Runs `body` on a device the seat opened, then hands the descriptor back
+/// to the seat when `release` says so: always for a look-only probe, only
+/// on failure when a successful result takes ownership of the device.
+///
+/// A seat-opened descriptor is recorded in libseat's device table, and only
+/// `Session::close` removes that record; dropping the fd leaves it behind,
+/// and the seat can then refuse the same device later (another session, a
+/// compositor restart, adopting the card again). One reference stays out
+/// here while `body` runs, so by the time the descriptor is recovered every
+/// DRM, GBM and notifier user `body` created has already dropped, including
+/// its hold on DRM master. The exact original fd goes to `close`, once.
+fn with_seat_device<T>(
+    keeper: DeviceFd,
+    body: impl FnOnce(DeviceFd) -> Result<T, String>,
+    release: impl FnOnce(&Result<T, String>) -> bool,
+    close: impl FnOnce(std::os::fd::OwnedFd) -> Result<(), String>,
+) -> Result<T, String> {
+    let result = body(keeper.clone());
+    if !release(&result) {
+        return result;
+    }
+    // Something `body` created is still alive: closing now would pull the
+    // descriptor out from under it, so leave it and say why.
+    let fd: std::os::fd::OwnedFd = match keeper.try_into() {
+        Ok(fd) => fd,
+        Err(_) => {
+            let reason = "the device is still in use, so it was not handed back to the seat";
+            return match result {
+                Ok(value) => {
+                    tracing::warn!(reason, "seat device release skipped");
+                    Ok(value)
+                }
+                Err(error) => Err(format!("{error}; {reason}")),
+            };
+        }
+    };
+    match (result, close(fd)) {
+        (result, Ok(())) => result,
+        (Ok(value), Err(close_error)) => {
+            tracing::warn!(error = %close_error, "seat device release failed");
+            Ok(value)
+        }
+        (Err(error), Err(close_error)) => Err(format!("{error}; {close_error}")),
+    }
 }
 
 /// Candidate DRM nodes, best first and deduplicated: an explicit
@@ -3883,15 +3937,20 @@ fn candidate_devices(seat_name: &str) -> Vec<PathBuf> {
 /// this session: it must do mode setting and it must have a connected
 /// connector with a mode and a crtc to drive it.
 ///
-/// On failure the fd is dropped rather than handed back to libseat with
-/// `close`. libseat forgets it when the session ends; the alternative is
-/// threading a close through every early return of a function that runs
-/// at most a handful of times before the process either has a screen or
-/// exits.
-fn probe_device(seat_session: &mut LibSeatSession, path: &Path) -> Result<Device, String> {
+/// A device that does not qualify goes back to the seat (see
+/// [`with_seat_device`]) after everything built on it has dropped. A device
+/// that does is owned by the returned [`Device`] and stays open.
+fn probe_device<S: Session>(seat_session: &mut S, path: &Path) -> Result<Device, String> {
     let fd = seat_session.open(path, DEVICE_FLAGS).map_err(|error| format!("the seat would not open it: {error:?}"))?;
-    let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+    with_seat_device(
+        DeviceFd::from(fd),
+        |fd| probe_open_device(DrmDeviceFd::new(fd)),
+        |result| result.is_err(),
+        |fd| seat_session.close(fd).map_err(|error| format!("the seat would not take it back: {error:?}")),
+    )
+}
 
+fn probe_open_device(fd: DrmDeviceFd) -> Result<Device, String> {
     // `true`: start with every connector disabled. smithay enables the
     // ones it drives when a surface is attached, so anything we do not
     // use stays dark instead of showing whatever the previous session
@@ -4624,5 +4683,169 @@ mod tests {
         health = CommitHealth::default();
         assert_eq!(health.note_failure(later), None);
         assert_eq!(health.backoff, COMMIT_RESET_BACKOFF_INITIAL);
+    }
+}
+
+#[cfg(test)]
+mod seat_device_tests {
+    use super::{connected_desktop_connectors, probe_device, with_seat_device};
+    use smithay::backend::session::Session;
+    use smithay::reexports::rustix::fs::OFlags;
+    use smithay::utils::DeviceFd;
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashSet;
+    use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+    use std::path::Path;
+    use std::rc::Rc;
+
+    fn fd() -> DeviceFd {
+        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        fd.into()
+    }
+
+    /// Stands in for libseat: hands out `/dev/null` descriptors and records
+    /// which ones are still registered, the way libseat's device table does.
+    #[derive(Default)]
+    struct FakeSeat {
+        live: HashSet<RawFd>,
+        opens: usize,
+        closes: usize,
+    }
+
+    impl Session for FakeSeat {
+        type Error = ();
+        fn open(&mut self, _path: &Path, _flags: OFlags) -> Result<OwnedFd, ()> {
+            let fd: OwnedFd = std::fs::File::open("/dev/null").map_err(|_| ())?.into();
+            self.live.insert(fd.as_raw_fd());
+            self.opens += 1;
+            Ok(fd)
+        }
+        fn close(&mut self, fd: OwnedFd) -> Result<(), ()> {
+            assert!(self.live.remove(&fd.as_raw_fd()), "closed a descriptor the seat did not open");
+            self.closes += 1;
+            Ok(())
+        }
+        fn change_vt(&mut self, _vt: i32) -> Result<(), ()> {
+            Ok(())
+        }
+        fn is_active(&self) -> bool {
+            true
+        }
+        fn seat(&self) -> String {
+            "seat0".into()
+        }
+    }
+
+    #[test]
+    fn a_device_that_fails_the_probe_goes_back_to_the_seat() {
+        let mut seat = FakeSeat::default();
+        // `/dev/null` is not a DRM device, so the real probe fails after opening.
+        assert!(probe_device(&mut seat, Path::new("/dev/null")).is_err());
+        assert_eq!((seat.opens, seat.closes), (1, 1));
+        assert!(seat.live.is_empty());
+    }
+
+    #[test]
+    fn a_connector_look_always_hands_the_device_back() {
+        let mut seat = FakeSeat::default();
+        assert!(connected_desktop_connectors(&mut seat, Path::new("/dev/null")).is_err());
+        assert_eq!((seat.opens, seat.closes), (1, 1));
+        assert!(seat.live.is_empty());
+    }
+
+    #[test]
+    fn repeated_probes_and_reopens_leave_nothing_registered() {
+        let mut seat = FakeSeat::default();
+        for _ in 0..5 {
+            let _ = connected_desktop_connectors(&mut seat, Path::new("/dev/null"));
+            let _ = probe_device(&mut seat, Path::new("/dev/null"));
+        }
+        assert_eq!((seat.opens, seat.closes), (10, 10));
+        assert!(seat.live.is_empty());
+    }
+
+    #[test]
+    fn failure_returns_the_original_descriptor_once_after_its_users_drop() {
+        struct User {
+            _fd: DeviceFd,
+            dropped: Rc<Cell<bool>>,
+        }
+        impl Drop for User {
+            fn drop(&mut self) {
+                self.dropped.set(true);
+            }
+        }
+        let keeper = fd();
+        let raw = keeper.as_raw_fd();
+        let dropped = Rc::new(Cell::new(false));
+        let closes = Cell::new(0);
+        let result: Result<(), String> = with_seat_device(
+            keeper,
+            |device| {
+                let _user = User { _fd: device, dropped: dropped.clone() };
+                Err("probe failed".into())
+            },
+            |result| result.is_err(),
+            |original| {
+                assert!(dropped.get(), "released while a user was still alive");
+                assert_eq!(original.as_raw_fd(), raw, "not the descriptor the seat opened");
+                closes.set(closes.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("probe failed".into()));
+        assert_eq!(closes.get(), 1);
+    }
+
+    #[test]
+    fn a_successful_probe_keeps_the_device_open() {
+        let keeper = fd();
+        let raw = keeper.as_raw_fd();
+        let adopted = with_seat_device(keeper, Ok, |result| result.is_err(), |_| panic!("released an adopted device")).unwrap();
+        assert_eq!(adopted.as_raw_fd(), raw);
+        let original: OwnedFd = adopted.try_into().unwrap();
+        assert_eq!(original.as_raw_fd(), raw);
+    }
+
+    #[test]
+    fn a_look_only_probe_releases_on_success_too() {
+        let closes = Cell::new(0);
+        let result = with_seat_device(
+            fd(),
+            |_| Ok(vec!["DP-1".to_string()]),
+            |_| true,
+            |_| {
+                closes.set(closes.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Ok(vec!["DP-1".to_string()]));
+        assert_eq!(closes.get(), 1);
+    }
+
+    #[test]
+    fn a_failed_release_keeps_the_probe_error_first() {
+        let result: Result<(), String> =
+            with_seat_device(fd(), |_| Err("GBM failed".into()), |_| true, |_| Err("seat refused".into()));
+        assert_eq!(result, Err("GBM failed; seat refused".into()));
+        let ok = with_seat_device(fd(), |_| Ok(3), |_| true, |_| Err("seat refused".into()));
+        assert_eq!(ok, Ok(3), "a look that succeeded is still worth its answer");
+    }
+
+    #[test]
+    fn a_descriptor_still_in_use_is_not_released() {
+        let escaped = RefCell::new(None);
+        let result: Result<(), String> = with_seat_device(
+            fd(),
+            |device| {
+                *escaped.borrow_mut() = Some(device);
+                Err("leaked a user".into())
+            },
+            |_| true,
+            |_| panic!("released a descriptor something still uses"),
+        );
+        assert!(result.unwrap_err().contains("still in use"));
+        let original: OwnedFd = escaped.borrow_mut().take().unwrap().try_into().unwrap();
+        assert!(std::fs::read_link(format!("/proc/self/fd/{}", original.as_raw_fd())).is_ok());
     }
 }
