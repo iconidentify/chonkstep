@@ -39,7 +39,7 @@ Require bounded client-driven work, lock and capture privacy, consistent render
 and input order, and evidence for performance claims. Preserve the secondary
 X11 backend, while prioritizing Wayland and Omarchy.
 
-## Completed locally, pending upstream review
+## Implemented and locally validated
 
 - [#183](https://github.com/iconidentify/chonkstep/issues/183): renderer and
   binary test gates now run in local preflight and PR CI. The gates require all
@@ -54,8 +54,8 @@ X11 backend, while prioritizing Wayland and Omarchy.
   deferral made the regression fail. See the
   [implementation and validation record](engineering/2026-09-26-copy-order-test.md).
 
-These changes are local and unpublished. GitHub issues and the open-issue
-counts above remain unchanged. Refresh main and competing work before publishing.
+The open-issue counts above describe the review snapshot. These implementations
+have passed local validation; GitHub issue closure is tracked separately.
 
 ## Immediate queue
 

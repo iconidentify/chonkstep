@@ -79,5 +79,6 @@ including all 13 Mac-mode tests, selection transfers, session lock and restore,
 XWayland input, and the normal stability smoke workload. This was software
 rendering, not a native GPU or sustained release-build soak run.
 
-A final fetch still found main at `6eb4ab6`, no open pull requests, and no claim
-or competing discussion on #310. All changes and evidence remain local.
+The pre-publication fetch still found main at `6eb4ab6`, no open pull requests,
+and no claim or competing discussion on #310. Validation was completed locally
+before publication.
