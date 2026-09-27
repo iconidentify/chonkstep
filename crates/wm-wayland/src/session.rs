@@ -13,17 +13,11 @@
 //! Scope, stated up front so the omissions read as decisions rather
 //! than gaps:
 //!
-//! - **One KMS device, every connected connector on it.** Each output has
-//!   its own crtc, `DrmCompositor`, and page-flip bookkeeping. An explicit
-//!   `CHONKSTEP_RENDER_DEVICE` selects a second GPU for composition, with
-//!   Smithay MultiRenderer transferring into the KMS device's swapchain.
-//!   That KMS device may be display-only (no render node, e.g. simpledrm):
-//!   its software renderer then only receives the finished frames.
-//!   A display controller that Mesa's kmsro pairs with a GPU (no render
-//!   node of its own, e.g. Apple's DCP) needs no such variable: EGL renders
-//!   on the paired GPU straight into its scanout buffers, the single-GPU
-//!   case (see `renderer_render_node`).
-//!   Additional KMS devices are not driven concurrently.
+//! - **Primary KMS plus opted-in shadow outputs.** The primary retains one
+//!   GLES renderer; explicit secondary cards have separate scanout buffers and
+//!   device-tagged outputs/events. llvmpipe is supported directly. M3 kmsro/zink
+//!   additionally requires this boot's successful private cross-card probe.
+//!   Explicit render-GPU offload remains a separate single-KMS path.
 //! - **The startup layout is a guess; the running layout is
 //!   configurable.** Outputs come up left to right in
 //!   connector-enumeration order at their preferred modes — nothing at
@@ -35,15 +29,10 @@
 //! - **Per-surface output tracking.** Scene membership sends enter/leave and
 //!   output-specific allocation feedback. Retained rendered visibility chooses
 //!   each surface's primary presentation output and callback cadence.
-//! - **No GPU hot-plug.** The udev source logs device add/remove and
-//!   does not act on it. Adopting a GPU that appeared after startup
-//!   means re-running every step of [`init`] against it while the old
-//!   one is still scanning out; a laptop being docked is a session
-//!   restart today.
-//! - **Connector hot-plug on the active GPU.** Udev changes are
-//!   debounced, the connector set is re-probed, and outputs, protocol
-//!   globals, layout state, gamma slots, and stranded windows are
-//!   reconciled together. GPU hot-plug remains separate and unsupported.
+//! - **Explicit extra-device and connector hotplug.** Only configured extra
+//!   cards are adopted; udev removal retires that device's outputs and event
+//!   source. Connector changes reconcile the owning device's outputs into the
+//!   shared Wayland layout. Arbitrary GPU adoption is intentionally excluded.
 //! - The pointer uses the hardware cursor plane when the driver offers
 //!   one (see [`FRAME_FLAGS`]); the nested backend composites it
 //!   instead, because a window on someone else's desktop has no planes
@@ -84,7 +73,7 @@ use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
 use smithay::output::{Mode as OutputMode, Output, OutputModeSource, PhysicalProperties};
-use smithay::reexports::calloop::LoopHandle;
+use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 use smithay::reexports::drm::control::{
     connector, crtc, plane, Device as ControlDevice, Mode as DrmMode, ModeFlags, ModeTypeFlags,
     PlaneType, ResourceHandles,
@@ -205,7 +194,7 @@ fn plane_kind(drm: &DrmDeviceFd, plane: plane::Handle) -> Option<PlaneType> {
 /// one both creates an invisible desktop region and can evict a real
 /// monitor. Missing/unreadable properties retain the kernel's historic
 /// desktop default.
-fn connector_is_non_desktop(drm: &DrmDeviceFd, connector: connector::Handle) -> bool {
+fn connector_is_non_desktop(drm: &impl ControlDevice, connector: connector::Handle) -> bool {
     let Ok(props) = drm.get_properties(connector) else {
         return false;
     };
@@ -311,6 +300,20 @@ fn rescan_plan(
         .map(|(handle, _)| *handle)
         .collect();
     RescanPlan { remove, adopt, reserved }
+}
+
+/// Convert a one-device connector diff into the flat Wayland output order.
+fn device_rescan_plan(
+    device: KmsDeviceId,
+    outputs: &[(KmsDeviceId, connector::Handle)],
+    probed: &[(connector::Handle, ConnectorUse)],
+    keep: &[connector::Handle],
+) -> RescanPlan {
+    let owned = owned_output_indices(outputs.iter().map(|(owner, _)| *owner), device);
+    let driven: Vec<_> = owned.iter().map(|index| outputs[*index].1).collect();
+    let mut plan = rescan_plan(&driven, probed, keep);
+    plan.remove = plan.remove.into_iter().map(|index| owned[index]).collect();
+    plan
 }
 
 /// `DRM_MODE_LINK_STATUS_BAD`: enum value 1 of the `link-status`
@@ -862,27 +865,30 @@ pub(crate) fn full_damage_forced() -> bool {
 /// `comp.graphics` against [`Graphics::Session`] — because calloop
 /// hands every callback `&mut Compositor` and nothing else. That is
 /// also the path [`change_vt`] takes on behalf of `input.rs`.
-pub(crate) struct SessionGraphics {
-    /// Primary KMS node selected for this session, retained for live
-    /// system information instead of forcing a user to reconstruct it
-    /// from startup-only logs.
-    device_path: PathBuf,
-    /// Kernel DRM driver name for the selected node.
+// Slots are never renumbered: late DRM events cannot alias another device.
+// A removed device is retained as an inactive tombstone until session teardown.
+type KmsDeviceId = usize;
+struct KmsDevice {
+    path: PathBuf,
     driver_name: String,
+    drm: DrmDevice,
+    gbm: GbmDevice<DrmDeviceFd>,
+    hotplug_due: Option<Instant>,
+    non_desktop: Vec<connector::Handle>,
+    removed: bool,
+    notifier: Option<RegistrationToken>,
+}
+
+pub(crate) struct SessionGraphics {
+    devices: Vec<KmsDevice>,
     /// Seat handle for opening devices and for [`change_vt`]. Cloned
     /// from the notifier that calloop owns; if that notifier were ever
     /// dropped this handle's inner `Weak` would go dangling and every
     /// operation on it would start failing, which is why the notifier
     /// is inserted into the loop and never touched again.
     seat_session: LibSeatSession,
-    /// The KMS device. Held for `pause`/`activate` across VT switches
-    /// and for the `is_active` guard on the render path — the surfaces
-    /// inside the DRM compositors keep their own references for
-    /// commits.
-    drm: DrmDevice,
     /// The GLES renderer every scene element is imported into and
-    /// drawn with — one renderer for every output, because all of them
-    /// hang off the same EGL display on the same device. `pub(crate)`
+    /// drawn with — one EGL renderer importing each KMS device's buffers. `pub(crate)`
     /// because it is the one piece of this struct the rest of the crate
     /// legitimately needs: `capture.rs` renders the same scene
     /// offscreen through it, and `dmabuf.rs` asks it which hardware
@@ -897,10 +903,6 @@ pub(crate) struct SessionGraphics {
     /// publishing that primary node as a render device crashes clients
     /// such as xdg-desktop-portal-wlr. See [`render_node_for_fd`].
     render_node: Option<DrmNode>,
-    /// Retained because a connector appearing after startup needs the
-    /// same allocator and renderer-format intersection as the outputs
-    /// built during `init`.
-    gbm: GbmDevice<DrmDeviceFd>,
     render_formats: Vec<Format>,
     /// One per connected connector, in the order [`init`] enumerated
     /// them. That order is load-bearing: it is the order
@@ -923,15 +925,6 @@ pub(crate) struct SessionGraphics {
     /// them completes — see [`strict_release_configured`] for the
     /// mechanism and the NVIDIA-shaped reason it exists.
     strict_release: bool,
-    /// Debounced connector rescan deadline. A physical plug produces a
-    /// burst of udev changes and every forced connector probe may block;
-    /// one absolute deadline coalesces that burst into one walk.
-    hotplug_due: Option<Instant>,
-    /// Connectors the kernel marks `non-desktop`, as of the last
-    /// enumeration. Never driven; kept so a burst of hotplug events
-    /// logs each newly reserved headset once rather than per rescan,
-    /// and so a lease path can advertise the same set startup skipped.
-    non_desktop: Vec<connector::Handle>,
     /// Keeps the machine awake with the lid closed while an external
     /// output is driven. See [`crate::lid_bus`].
     lid: crate::lid_bus::LidInhibitor,
@@ -951,6 +944,7 @@ pub(crate) struct SessionGraphics {
 /// when [`release_parked_crtc`] gives this one up and the return goes
 /// through [`attach_output`] instead.
 struct ParkedConnector {
+    device: KmsDeviceId,
     /// Connector name, which is what every route names the output by.
     name: String,
     connector: connector::Handle,
@@ -969,6 +963,7 @@ struct ParkedConnector {
 /// moments, so "is a flip in flight" and "does this need redrawing"
 /// are questions with one answer each per output.
 struct SessionOutput {
+    device: KmsDeviceId,
     telemetry: crate::gpu_stats::OutputStats,
     primary_formats: FormatSet,
     overlay_formats: FormatSet,
@@ -1347,7 +1342,7 @@ impl SessionGraphics {
     /// (`dmabuf::init_syncobj`), which imports client syncobj
     /// timelines into this device to wait on them.
     pub(crate) fn drm_device_fd(&self) -> DrmDeviceFd {
-        self.drm.device_fd().clone()
+        self.devices[0].drm.device_fd().clone()
     }
 
     /// The actual render node backing this session's EGL renderer.
@@ -1372,6 +1367,7 @@ impl SessionGraphics {
     /// assignment can always fall back to composition.
     pub(crate) fn output_scanout_formats(&self, index: usize) -> FormatSet {
         let Some(output) = self.outputs.get(index) else { return FormatSet::default(); };
+        if output.device != 0 { return FormatSet::default(); }
         let flags = frame_flags();
         let mut formats = Vec::new();
         if flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY) {
@@ -1401,8 +1397,8 @@ pub(crate) fn graphics_diagnostics(graphics: &Graphics) -> String {
         Graphics::Winit(_) => "backend=nested-winit renderer=GLES host_output=true".to_string(),
         Graphics::Session(session) => format!(
             "backend=drm-session kms_device={} drm_driver={} render_node={} parked_outputs={} {}",
-            session.device_path.display(),
-            session.driver_name,
+            session.devices[0].path.display(),
+            session.devices[0].driver_name,
             session
                 .render_node
                 .map_or_else(|| "unknown".to_string(), |node| node.to_string()),
@@ -1577,7 +1573,7 @@ pub(crate) fn init(
     for target in connectors {
         let name = connector_name(&target.info);
         let position = Point::new(next_x, 0);
-        match attach_output(&mut drm, &gbm, render_stack.client_scanout_node(render_node), &render_formats, &target, position) {
+        match attach_output(0, &mut drm, &gbm, render_stack.client_scanout_node(render_node), &render_formats, &target, position) {
             Ok((session_output, setup)) => {
                 // The mode actually driven: the fallback, when the
                 // chosen one was refused.
@@ -1616,152 +1612,54 @@ pub(crate) fn init(
     // if the ledger is still dirty. Keeping the decision in one place
     // means the session and nested backends schedule redraws by exactly
     // the same rule — "damage, then draw".
-    loop_handle
-        .insert_source(drm_notifier, |event, metadata, comp: &mut Compositor| {
-            let Compositor {
-                graphics,
-                wm,
-                outputs,
-                cursor_status,
-                pointer_location,
-                start_time,
-                ..
-            } = comp;
-            let Graphics::Session(session) = graphics else {
-                return;
-            };
-            match event {
-                DrmEvent::VBlank(crtc) => {
-                    // Per crtc: the device hands every output's flip
-                    // completion through this one source, and only the
-                    // output that owns that crtc is free to draw again.
-                    let Some(output_index) = session.outputs.iter().position(|output| output.crtc == crtc)
-                    else {
-                        tracing::debug!(?crtc, "page flip completed on a crtc we do not drive");
-                        return;
-                    };
-                    let completed_frame = {
-                        let output = &mut session.outputs[output_index];
-                        let vblank_at = match metadata.map(|meta| meta.time) {
-                            Some(DrmEventTime::Monotonic(time)) => drm_monotonic_instant(time),
-                            _ => Instant::now(),
-                        };
-                        output.frame_clock.note_vblank(vblank_at);
-                        let pending = output.frame_pending.take();
-                        let completed_frame = pending.is_some();
-                        let monotonic_metadata = metadata.and_then(|meta| match meta.time {
-                            DrmEventTime::Monotonic(time) => Some((time, meta.sequence as u64)),
-                            _ => None,
-                        });
-                        if let Some(last_vblank) = monotonic_metadata {
-                            output.last_vblank = Some(last_vblank);
-                        }
-                        if let Some(mut feedback) = output.presentation.take() {
-                            let hw_flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
-                                | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock
-                                | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwCompletion;
-                            match monotonic_metadata {
-                                Some((time, sequence)) => {
-                                    crate::renderer::present_at(
-                                        &mut feedback,
-                                        time,
-                                        output.refresh,
-                                        sequence,
-                                        hw_flags,
-                                    );
-                                }
-                                _ => crate::renderer::present_now(
-                                    &mut feedback,
-                                    output.refresh,
-                                    smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
-                                        | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwCompletion,
-                                ),
-                            }
-                        }
-                        // A composited frame can release its sampled
-                        // buffers now. A direct-scanout frame cannot:
-                        // this vblank made its client buffer current.
-                        if let Some(pending) = pending {
-                            // Use the kernel clock, not delayed event-loop
-                            // receipt, to distinguish a missed GPU deadline.
-                            let late = monotonic_metadata.is_some()
-                                && output.frame_clock.observe_presentation(pending.target_vblank, vblank_at);
-                            {
-                                let mut stats = output.telemetry.stats.borrow_mut();
-                                stats.flips = stats.flips.saturating_add(1);
-                                stats.late_presentations = stats.late_presentations.saturating_add(u64::from(late));
-                                stats.stage(9, vblank_at.saturating_duration_since(pending.queued_at));
-                            }
-                            let changed = complete_scene_flip(
-                                &mut output.pending_scene,
-                                &mut output.scanout_scene,
-                                &mut output.client_scanout_active,
-                                pending.client_scanout,
-                            );
-                            if changed {
-                                tracing::info!(
-                                    output = %output.name,
-                                    active = pending.client_scanout,
-                                    "DRM client-plane scanout changed"
-                                );
-                            }
-                        }
-                        if let Err(error) = output.drm_compositor.frame_submitted() {
-                            tracing::warn!(?error, output = %output.name, "page-flip completion was rejected by the DRM compositor");
-                        }
-                        completed_frame
-                    };
-                    if completed_frame {
-                        crate::renderer::note_frame_success();
-                        if let (Some(entry), Some(monitor)) =
-                            (outputs.get(output_index), wm.backend().monitors.get(output_index))
-                        {
-                            crate::renderer::send_frame_callbacks(
-                                wm.backend(),
-                                &entry.output,
-                                monitor.geometry,
-                                cursor_status,
-                                *pointer_location,
-                                start_time.elapsed(),
-                            );
-                        }
+    let primary_notifier = register_drm_notifier(loop_handle, drm_notifier, 0)?;
+
+    // Only explicitly opted-in extra cards are adopted. Preserve primary choice.
+    let udev_backend = UdevBackend::new(&seat_name)
+        .map_err(|error| format!("could not watch udev for seat {seat_name}: {error}"))?;
+    let gpu_loop = loop_handle.clone();
+    loop_handle.insert_source(udev_backend, move |event, _, comp: &mut Compositor| {
+        let Graphics::Session(session) = &mut comp.graphics else { return };
+        match event {
+            UdevEvent::Added { path, .. } => {
+                if extra_device_paths().iter().any(|allowed| same_device_path(allowed, &path)) {
+                    if let Err(error) = adopt_secondary_device(session, &path, &gpu_loop) {
+                        tracing::warn!(%error, path = %path.display(), "could not adopt opted-in extra KMS device");
                     }
                 }
-                DrmEvent::Error(error) => {
-                    tracing::error!(?error, "the DRM device reported an error");
-                }
-            }
-        })
-        .map_err(|error| format!("failed to register the DRM event source: {error}"))?;
-
-    // udev. Connector changes on the device we own arm one debounced
-    // rescan; GPU add/remove remains outside this single-device backend.
-    let udev_backend =
-        UdevBackend::new(&seat_name).map_err(|error| format!("could not watch udev for seat {seat_name}: {error}"))?;
-    loop_handle
-        .insert_source(udev_backend, |event, _, comp: &mut Compositor| match event {
-            UdevEvent::Added { device_id, path } => {
-                tracing::info!(?device_id, path = %path.display(), "a DRM device appeared; chonkstep drives one KMS device and will not adopt another during this session");
             }
             UdevEvent::Changed { device_id } => {
-                let Graphics::Session(session) = &mut comp.graphics else { return };
-                if session.drm.device_id() == device_id {
-                    // The rescan also reads `link-status` on every
-                    // driven connector: a link that failed to train
-                    // arrives as exactly this event, with the connector
-                    // set unchanged. Reading it here would put one
-                    // property walk per connector on a callback that
-                    // fires in bursts.
-                    session.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
-                    tracing::debug!(?device_id, "connector change noticed; debounced rescan armed");
+                // Smithay remembers Added even if our proof gate refused the
+                // device. Retry a pending allowlisted card on Changed after
+                // the probe publishes its proof; never reopen an adopted card.
+                let adopted = session.devices.iter().any(|device|
+                    !device.removed && device.drm.device_id() == device_id);
+                for path in extra_device_paths() {
+                    if pending_extra_matches(&path, device_id, adopted) {
+                        if let Err(error) = adopt_secondary_device(session, &path, &gpu_loop) {
+                            tracing::warn!(%error, path = %path.display(), "pending extra KMS retry refused");
+                        }
+                        break;
+                    }
+                }
+                for device in &mut session.devices {
+                    if !device.removed && device.drm.device_id() == device_id {
+                        device.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
+                    }
                 }
             }
             UdevEvent::Removed { device_id } => {
-                crate::input::gestures::cancel(comp);
-                tracing::warn!(?device_id, "a DRM device went away; if it is ours the session will stop painting");
+                for device in &mut session.devices {
+                    if !device.removed && device.drm.device_id() == device_id {
+                        device.drm.pause();
+                        if let Some(token) = device.notifier.take() { gpu_loop.remove(token); }
+                        device.removed = true;
+                        device.hotplug_due = Some(Instant::now());
+                    }
+                }
             }
-        })
-        .map_err(|error| format!("failed to register the udev event source: {error}"))?;
+        }
+    }).map_err(|error| format!("failed to register udev event source: {error}"))?;
 
     // Input. The context opens devices through the same seat as the
     // GPU, so a VT switch revokes both together, and the events land in
@@ -1798,7 +1696,7 @@ pub(crate) fn init(
                     };
                     tracing::info!("session paused: releasing the DRM device and input");
                     session.libinput.suspend();
-                    session.drm.pause();
+                    for device in &mut session.devices { if !device.removed { device.drm.pause(); } }
                     // A flip queued before the pause will never complete
                     // — the device is gone — so dropping it keeps the
                     // render path from waiting forever for a vblank that
@@ -1842,14 +1740,18 @@ pub(crate) fn init(
                     // and rules out the atomic-commit test failures that
                     // an optimistic resume produces when the other
                     // session rearranged things.
-                    if let Err(error) = session.drm.activate(true) {
-                        tracing::error!(?error, "could not reactivate the DRM device; the screen will stay dark");
+                    for device in &mut session.devices {
+                        if device.removed { continue; }
+                        if let Err(error) = device.drm.activate(true) {
+                            tracing::error!(?error, path = %device.path.display(), "could not reactivate DRM device");
+                        }
                     }
                     // The connector set may have changed while udev and the
                     // DRM fd were suspended. Reconcile once the fd is usable
                     // again even if no hotplug event survived the VT switch.
-                    session.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
+                    for device in &mut session.devices { if !device.removed { device.hotplug_due = Some(Instant::now() + Duration::from_millis(120)); } }
                     for output in session.outputs.iter_mut() {
+                        if session.devices[output.device].removed || !session.devices[output.device].drm.is_active() { continue; }
                         if let Err(error) = output.drm_compositor.reset_state() {
                             tracing::error!(
                                 ?error,
@@ -1891,6 +1793,7 @@ pub(crate) fn init(
                     // it. Re-clear each one the way a powered-off
                     // output is re-cleared above.
                     for parked in session.parked.iter_mut() {
+                        if session.devices[parked.device].removed || !session.devices[parked.device].drm.is_active() { continue; }
                         let Some(output) = parked.output.as_mut() else { continue };
                         if let Err(error) = output.drm_compositor.reset_state() {
                             tracing::error!(?error, output = %parked.name, "could not reset a parked crtc after resuming");
@@ -1954,28 +1857,294 @@ pub(crate) fn init(
     );
     let mut lid = crate::lid_bus::LidInhibitor::start();
     lid.update(session_outputs.iter().map(|output| output.name.as_str()));
-    Ok(SessionInit {
-        graphics: Graphics::Session(Box::new(SessionGraphics {
-            device_path,
-            driver_name,
-            seat_session,
-            drm,
-            render_stack,
-            render_node,
-            gbm,
-            render_formats,
-            outputs: session_outputs,
-            libinput,
-            input_devices: Vec::new(),
-            last_service: Instant::now(),
-            strict_release,
-            hotplug_due: None,
-            non_desktop,
-            lid,
-            parked: Vec::new(),
-        })),
-        outputs: setups,
-    })
+    let mut graphics = SessionGraphics {
+        devices: vec![KmsDevice { path: device_path, driver_name, drm, gbm, hotplug_due: None, non_desktop, removed: false, notifier: Some(primary_notifier) }],
+        seat_session,
+        render_stack,
+        render_node,
+        render_formats,
+        outputs: session_outputs,
+        libinput,
+        input_devices: Vec::new(),
+        last_service: Instant::now(),
+        strict_release,
+        lid,
+        parked: Vec::new(),
+    };
+    for path in extra_device_paths() {
+        if let Err(error) = adopt_secondary_device(&mut graphics, &path, loop_handle) {
+            tracing::warn!(%error, path = %path.display(), "extra KMS device unavailable; primary session retained");
+        }
+    }
+    Ok(SessionInit { graphics: Graphics::Session(Box::new(graphics)), outputs: setups })
+}
+
+fn extra_device_paths() -> Vec<PathBuf> {
+    std::env::var_os("CHONKSTEP_EXTRA_DRM_DEVICES")
+        .map(|paths| std::env::split_paths(&paths).collect()).unwrap_or_default()
+}
+
+fn same_device_path(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+fn same_kms_object<T: PartialEq>(device: KmsDeviceId, object: T, owner: KmsDeviceId, candidate: T) -> bool {
+    device == owner && object == candidate
+}
+
+fn owned_output_indices(owners: impl DoubleEndedIterator<Item = KmsDeviceId>, device: KmsDeviceId) -> Vec<usize> {
+    owners.enumerate().filter_map(|(i, owner)| (owner == device).then_some(i)).collect()
+}
+
+const M3_SHADOW_PROBE: &str = "linear-xrgb8888-prime-egl-readback-v2";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct M3ShadowProof {
+    schema: u32,
+    probe: String,
+    boot_id: String,
+    primary_drm: PathBuf,
+    target_drm: PathBuf,
+    render_node: PathBuf,
+    gl_renderer: String,
+    libgl_drivers_path: String,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+    modifier: u64,
+}
+
+fn m3_shadow_renderer(name: &str, primary_driver: &str, has_render_node: bool) -> bool {
+    has_render_node && matches!(primary_driver, "apple" | "m3-dcp") &&
+        name.starts_with("zink ") && name.contains("Apple M3") && name.contains("MESA_HONEYKRISP")
+}
+
+fn m3_proof_identity_matches(proof: &M3ShadowProof, boot_id: &str, renderer: &str, driver_path: &str) -> bool {
+    proof.schema == 2 && proof.probe == M3_SHADOW_PROBE && m3_proof_layout_valid(proof) &&
+        !boot_id.is_empty() && proof.boot_id == boot_id &&
+        proof.gl_renderer == renderer && !driver_path.is_empty() && proof.libgl_drivers_path == driver_path
+}
+
+// This candidate qualifies exactly the fixed 4K shadow scanout mode. A
+// successful smaller import says nothing about 4K allocation/transfer limits.
+fn m3_proof_layout_valid(proof: &M3ShadowProof) -> bool {
+    proof.width == 3840 && proof.height == 2160 &&
+        proof.format == Fourcc::Xrgb8888 as u32 && proof.modifier == 0 &&
+        proof.stride >= proof.width * 4 && proof.stride.is_multiple_of(4) &&
+        u64::from(proof.stride) * u64::from(proof.height) <= 64 * 1024 * 1024
+}
+
+fn shadow_4k_mode_valid(width: u32, height: u32, refresh: i32) -> bool {
+    width == 3840 && height == 2160 && refresh == 60000
+}
+
+fn pending_extra_matches(allowed: &Path, device_id: u64, adopted: bool) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    !adopted && std::fs::metadata(allowed).is_ok_and(|metadata|
+        metadata.file_type().is_char_device() && metadata.rdev() == device_id)
+}
+
+fn read_m3_shadow_proof(proof_path: &Path) -> Result<M3ShadowProof, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new().read(true)
+        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32).open(proof_path)
+        .map_err(|error| format!("M3 shadow proof open: {error}"))?;
+    let metadata = file.metadata().map_err(|error| format!("M3 proof metadata: {error}"))?;
+    let own_uid = std::fs::metadata("/proc/self").map_err(|error| format!("process identity: {error}"))?.uid();
+    if !metadata.is_file() || metadata.len() > 4096 || metadata.mode() & 0o022 != 0 ||
+        (metadata.uid() != 0 && metadata.uid() != own_uid) {
+        return Err("M3 shadow proof must be a private regular root/user-owned file <=4096 bytes".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes).map_err(|error| format!("M3 proof read: {error}"))?;
+    if bytes.len() > 4096 { return Err("M3 shadow proof grew beyond size limit".into()); }
+    serde_json::from_slice(&bytes).map_err(|error| format!("M3 proof JSON: {error}"))
+}
+
+fn validate_m3_shadow_proof(session: &SessionGraphics, target: &Path, renderer: &str) -> Result<M3ShadowProof, String> {
+    if !m3_shadow_renderer(renderer, &session.devices[0].driver_name, session.render_node.is_some()) {
+        return Err("extra GPU shadow KMS requires identified M3 Honeykrisp/zink on native DCP".into());
+    }
+    let proof_path = std::env::var_os("CHONKSTEP_EXTRA_DRM_M3_PROOF")
+        .ok_or("M3 shadow output awaits CHONKSTEP_EXTRA_DRM_M3_PROOF from this boot's private import probe")?;
+    let proof = read_m3_shadow_proof(Path::new(&proof_path))?;
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map_err(|error| format!("current boot identity: {error}"))?;
+    let driver_path = std::env::var("LIBGL_DRIVERS_PATH").unwrap_or_default();
+    if !m3_proof_identity_matches(&proof, boot_id.trim(), renderer, &driver_path) ||
+        !same_device_path(&proof.primary_drm, &session.devices[0].path) ||
+        !same_device_path(&proof.target_drm, target) ||
+        DrmNode::from_path(&proof.render_node).ok() != session.render_node {
+        return Err("M3 shadow proof does not match this boot, renderer, Mesa path or device identities".into());
+    }
+    tracing::info!(path = %target.display(), %renderer, "accepted this boot's private M3 cross-card import proof");
+    Ok(proof)
+}
+
+fn adopt_secondary_device(
+    session: &mut SessionGraphics, path: &Path, loop_handle: &LoopHandle<'static, Compositor>,
+) -> Result<(), String> {
+    if session.devices.iter().any(|device| !device.removed && same_device_path(&device.path, path)) { return Ok(()); }
+    if !matches!(session.render_stack, crate::multi_gpu::Stack::Single(_)) {
+        return Err("extra shadow KMS requires one shared primary GLES renderer".into());
+    }
+    let renderer_name = session.renderer().with_context(|gl| {
+        // SAFETY: with_context made the owning context current. Copy the
+        // driver's static NUL-terminated string after checking for null.
+        let name = unsafe { gl.GetString(smithay::backend::renderer::gles::ffi::RENDERER) };
+        if name.is_null() { String::new() } else {
+            // SAFETY: the current GL context returned a non-null, NUL-terminated
+            // renderer string; it remains valid while copied inside this closure.
+            unsafe { std::ffi::CStr::from_ptr(name.cast()) }.to_string_lossy().into_owned()
+        }
+    }).map_err(|error| format!("primary renderer identity: {error}"))?;
+    let proof = if !renderer_name.starts_with("llvmpipe") {
+        Some(validate_m3_shadow_proof(session, path, &renderer_name)?)
+    } else { None };
+    let Device { drm, notifier, gbm, non_desktop, .. } =
+        probe_device(&mut session.seat_session, path, Some("apple-dcpext-shadow"), proof.as_ref())?;
+    let device = session.devices.len();
+    let notifier = register_drm_notifier(loop_handle, notifier, device)?;
+    session.devices.push(KmsDevice {
+        path: path.to_path_buf(), driver_name: "apple-dcpext-shadow".into(), drm, gbm,
+        hotplug_due: Some(Instant::now()), non_desktop, removed: false, notifier: Some(notifier),
+    });
+    tracing::info!(device, path = %path.display(), "extra software KMS device registered; connector adoption pending");
+    Ok(())
+}
+
+fn register_drm_notifier(
+    loop_handle: &LoopHandle<'static, Compositor>,
+    drm_notifier: DrmDeviceNotifier,
+    device: KmsDeviceId,
+) -> Result<RegistrationToken, String> {
+    loop_handle
+        .insert_source(drm_notifier, move |event, metadata, comp: &mut Compositor| {
+            let Compositor {
+                graphics,
+                wm,
+                outputs,
+                cursor_status,
+                pointer_location,
+                start_time,
+                ..
+            } = comp;
+            let Graphics::Session(session) = graphics else {
+                return;
+            };
+            if session.devices.get(device).is_none_or(|device| device.removed) { return; }
+            match event {
+                DrmEvent::VBlank(crtc) => {
+                    // Per crtc: the device hands every output's flip
+                    // completion through this one source, and only the
+                    // output that owns that crtc is free to draw again.
+                    let Some(output_index) = session.outputs.iter().position(|output| same_kms_object(device, crtc, output.device, output.crtc))
+                    else {
+                        tracing::debug!(?crtc, "page flip completed on a crtc we do not drive");
+                        return;
+                    };
+                    let completed_frame = {
+                        let output = &mut session.outputs[output_index];
+                        let vblank_at = match metadata.filter(|_| device == 0).map(|meta| meta.time) {
+                            Some(DrmEventTime::Monotonic(time)) => drm_monotonic_instant(time),
+                            _ => Instant::now(),
+                        };
+                        // Shadow KMS completion reports CPU-copy completion, not
+                        // a physical vblank. Keep synthetic pacing, no HW claims.
+                        output.frame_clock.note_vblank(vblank_at);
+                        let pending = output.frame_pending.take();
+                        let completed_frame = pending.is_some();
+                        let monotonic_metadata = metadata.filter(|_| device == 0).and_then(|meta| match meta.time {
+                            DrmEventTime::Monotonic(time) => Some((time, meta.sequence as u64)),
+                            _ => None,
+                        });
+                        if let Some(last_vblank) = monotonic_metadata {
+                            output.last_vblank = Some(last_vblank);
+                        }
+                        if let Some(mut feedback) = output.presentation.take() {
+                            let hw_flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
+                                | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock
+                                | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwCompletion;
+                            match monotonic_metadata {
+                                Some((time, sequence)) => {
+                                    crate::renderer::present_at(
+                                        &mut feedback,
+                                        time,
+                                        output.refresh,
+                                        sequence,
+                                        hw_flags,
+                                    );
+                                }
+                                _ => crate::renderer::present_now(
+                                    &mut feedback,
+                                    output.refresh,
+                                    if device == 0 {
+                                        smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
+                                            | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwCompletion
+                                    } else {
+                                        smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty()
+                                    },
+                                ),
+                            }
+                        }
+                        // A composited frame can release its sampled
+                        // buffers now. A direct-scanout frame cannot:
+                        // this vblank made its client buffer current.
+                        if let Some(pending) = pending {
+                            // Use the kernel clock, not delayed event-loop
+                            // receipt, to distinguish a missed GPU deadline.
+                            let late = monotonic_metadata.is_some()
+                                && output.frame_clock.observe_presentation(pending.target_vblank, vblank_at);
+                            {
+                                let mut stats = output.telemetry.stats.borrow_mut();
+                                stats.flips = stats.flips.saturating_add(1);
+                                stats.late_presentations = stats.late_presentations.saturating_add(u64::from(late));
+                                stats.stage(9, vblank_at.saturating_duration_since(pending.queued_at));
+                            }
+                            let changed = complete_scene_flip(
+                                &mut output.pending_scene,
+                                &mut output.scanout_scene,
+                                &mut output.client_scanout_active,
+                                pending.client_scanout,
+                            );
+                            if changed {
+                                tracing::info!(
+                                    output = %output.name,
+                                    active = pending.client_scanout,
+                                    "DRM client-plane scanout changed"
+                                );
+                            }
+                        }
+                        if let Err(error) = output.drm_compositor.frame_submitted() {
+                            tracing::warn!(?error, output = %output.name, "page-flip completion was rejected by the DRM compositor");
+                        }
+                        completed_frame
+                    };
+                    if completed_frame {
+                        crate::renderer::note_frame_success();
+                        if let (Some(entry), Some(monitor)) =
+                            (outputs.get(output_index), wm.backend().monitors.get(output_index))
+                        {
+                            crate::renderer::send_frame_callbacks(
+                                wm.backend(),
+                                &entry.output,
+                                monitor.geometry,
+                                cursor_status,
+                                *pointer_location,
+                                start_time.elapsed(),
+                            );
+                        }
+                    }
+                }
+                DrmEvent::Error(error) => {
+                    tracing::error!(?error, "the DRM device reported an error");
+                }
+            }
+        })
+        .map_err(|error| format!("failed to register the DRM event source: {error}"))
 }
 
 /// Brings one connector up: the wayland [`Output`] clients see, the DRM
@@ -1994,6 +2163,7 @@ pub(crate) fn init(
 /// [`adoption_mode_order`] and the output comes up on the first one
 /// that can be driven; it stays dark only when none can.
 fn attach_output(
+    device: KmsDeviceId,
     drm: &mut DrmDevice,
     gbm: &GbmDevice<DrmDeviceFd>,
     client_scanout_node: Option<DrmNode>,
@@ -2010,7 +2180,7 @@ fn attach_output(
         // surface, allocator and compositor it built are dropped (and
         // the surface's state cleared) before the next one binds the
         // same crtc.
-        match attach_output_at(drm, gbm, client_scanout_node, render_formats, &candidate, position) {
+        match attach_output_at(device, drm, gbm, client_scanout_node, render_formats, &candidate, position) {
             Ok(attached) => {
                 if attempt > 0 {
                     tracing::info!(
@@ -2038,6 +2208,7 @@ fn attach_output(
 /// Brings one output up at exactly `target.mode`. [`attach_output`]
 /// walks the connector's modes through this until one is driven.
 fn attach_output_at(
+    device: KmsDeviceId,
     drm: &mut DrmDevice,
     gbm: &GbmDevice<DrmDeviceFd>,
     client_scanout_node: Option<DrmNode>,
@@ -2225,6 +2396,7 @@ fn attach_output_at(
 
     Ok((
         SessionOutput {
+            device,
             telemetry: crate::gpu_stats::OutputStats::new(name.clone()),
             primary_formats,
             overlay_formats,
@@ -2275,7 +2447,7 @@ fn attach_output_at(
 }
 
 pub(crate) fn input_active(graphics: &Graphics) -> bool {
-    match graphics { Graphics::Winit(_) => true, Graphics::Session(session) => session.drm.is_active() }
+    match graphics { Graphics::Winit(_) => true, Graphics::Session(session) => session.devices.iter().any(|device| !device.removed && device.drm.is_active()) }
 }
 
 /// Whether any output is still waiting for a frame it has not been able
@@ -2321,13 +2493,10 @@ pub(crate) fn next_render_deadline(graphics: &Graphics) -> Option<Instant> {
     let Graphics::Session(session) = graphics else {
         return None;
     };
-    if !session.drm.is_active() {
-        return None;
-    }
     session
         .outputs
         .iter()
-        .filter(|output| output.dirty && output.frame_pending.is_none())
+        .filter(|output| !session.devices[output.device].removed && session.devices[output.device].drm.is_active() && output.dirty && output.frame_pending.is_none())
         .filter_map(|output| output.frame_clock.deadline)
         .min()
 }
@@ -2337,7 +2506,7 @@ pub(crate) fn next_hotplug_deadline(graphics: &Graphics) -> Option<Instant> {
     let Graphics::Session(session) = graphics else {
         return None;
     };
-    session.hotplug_due
+    session.devices.iter().filter_map(|device| device.hotplug_due).min()
 }
 
 /// Performs one due connector rescan and hands the structural delta to
@@ -2345,25 +2514,55 @@ pub(crate) fn next_hotplug_deadline(graphics: &Graphics) -> Option<Instant> {
 /// callback itself, so a burst is coalesced before any potentially slow
 /// connector query runs.
 pub(crate) fn service_connector_hotplug(comp: &mut Compositor) {
+    let count = match &comp.graphics { Graphics::Session(session) => session.devices.len(), _ => return };
+    for device in 0..count { service_device_hotplug(comp, device); }
+}
+
+fn remove_device_outputs(session: &mut SessionGraphics, device: KmsDeviceId) -> RescanDelta {
+    let mut removed = owned_output_indices(session.outputs.iter().map(|output| output.device), device);
+    removed.reverse();
+    for index in &removed {
+        let mut output = session.outputs.remove(*index);
+        if let Some(mut feedback) = output.presentation.take() { feedback.discarded(); }
+    }
+    let mut unplugged = Vec::new();
+    session.parked.retain_mut(|parked| {
+        if parked.device != device { return true; }
+        if let Some(output) = &mut parked.output {
+            if let Some(mut feedback) = output.presentation.take() { feedback.discarded(); }
+        }
+        unplugged.push(parked.name.clone());
+        false
+    });
+    RescanDelta { removed, added: Vec::new(), unplugged }
+}
+
+fn service_device_hotplug(comp: &mut Compositor, device: KmsDeviceId) {
     let now = Instant::now();
     let Graphics::Session(session) = &mut comp.graphics else {
         return;
     };
-    if !session.hotplug_due.is_some_and(|deadline| deadline <= now) {
+    if !session.devices[device].hotplug_due.is_some_and(|deadline| deadline <= now) {
         return;
     }
-    session.hotplug_due = None;
-    if !session.drm.is_active() {
+    session.devices[device].hotplug_due = None;
+    if session.devices[device].removed {
+        let delta = remove_device_outputs(session, device);
+        crate::state::drop_parked_outputs(comp, &delta.unplugged);
+        if !delta.removed.is_empty() { crate::state::apply_connector_hotplug(comp, &delta.removed, delta.added); }
+        return;
+    }
+    if !session.devices[device].drm.is_active() {
         // Resume re-arms a scan below; probing a revoked fd only creates
         // noise and can block in the session implementation.
-        session.hotplug_due = Some(now + Duration::from_millis(120));
+        session.devices[device].hotplug_due = Some(now + Duration::from_millis(120));
         return;
     }
 
     // Before the presence diff: a connector whose link failed to train
     // is still present, still driven, and skipped by the diff below.
-    retrain_bad_links(session);
-    match rescan_session_outputs(session) {
+    retrain_bad_links(session, device);
+    match rescan_session_outputs(session, device) {
         Ok(RescanDelta { removed, added, unplugged }) => {
             // A parked connector that left needs no layout work, only
             // its record dropped, so its disabled head and `monitors
@@ -2393,9 +2592,9 @@ pub(crate) fn service_connector_hotplug(comp: &mut Compositor) {
 /// modeset would switch them back on. Nothing here touches the crtc
 /// directly — the retrain rides the next frame, which is built from
 /// the ledger like any other, so a locked session repaints locked.
-fn retrain_bad_links(session: &mut SessionGraphics) {
+fn retrain_bad_links(session: &mut SessionGraphics, device: KmsDeviceId) {
     for output in session.outputs.iter_mut() {
-        if !output.powered || !connector_link_bad(session.drm.device_fd(), output.connector) {
+        if output.device != device || !output.powered || !connector_link_bad(session.devices[output.device].drm.device_fd(), output.connector) {
             continue;
         }
         if !output.drm_compositor.request_link_retrain() {
@@ -2426,7 +2625,7 @@ pub(crate) fn note_system_resumed(comp: &mut Compositor) {
     tracing::info!("system resumed from sleep: rescanning connectors and checking every link");
     // The rescan reads `link-status` on every output before the
     // presence diff, so one armed scan covers both.
-    session.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
+    for device in &mut session.devices { if !device.removed { device.hotplug_due = Some(Instant::now() + Duration::from_millis(120)); } }
     let backend = wm.backend_mut();
     backend.mark_damaged();
     backend.full_damage_required = true;
@@ -2460,25 +2659,25 @@ fn plan_parked<H: PartialEq + Copy>(parked: &[H], connected: &[H]) -> (Vec<H>, V
 /// newly drivable connectors are adopted. The non-desktop property is
 /// read fresh after every forced probe — never cached — because the
 /// kernel rewrites it from each new sink's EDID.
-fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<RescanDelta, String> {
-    let resources = session
+fn rescan_session_outputs(session: &mut SessionGraphics, device: KmsDeviceId) -> Result<RescanDelta, String> {
+    let resources = session.devices[device]
         .drm
         .resource_handles()
         .map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
     let mut probed: Vec<(connector::Handle, ConnectorUse)> = Vec::new();
     let mut drivable: Vec<connector::Info> = Vec::new();
     for handle in resources.connectors() {
-        match session.drm.get_connector(*handle, true) {
+        match session.devices[device].drm.get_connector(*handle, true) {
             Ok(info) => {
                 let use_ = connector_use(
                     info.state(),
-                    connector_is_non_desktop(session.drm.device_fd(), *handle),
+                    connector_is_non_desktop(session.devices[device].drm.device_fd(), *handle),
                     !info.modes().is_empty(),
                 );
                 probed.push((*handle, use_));
                 match use_ {
                     ConnectorUse::Drive => drivable.push(info),
-                    ConnectorUse::NonDesktop if !session.non_desktop.contains(handle) => tracing::info!(
+                    ConnectorUse::NonDesktop if !session.devices[device].non_desktop.contains(handle) => tracing::info!(
                         connector = %connector_name(&info),
                         "connector is marked non-desktop; reserved for a lease/VR runtime, not driven"
                     ),
@@ -2498,11 +2697,11 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<RescanDelta, 
         .filter(|(_, use_)| *use_ == ConnectorUse::Drive)
         .map(|(handle, _)| *handle)
         .collect();
-    let parked_handles: Vec<connector::Handle> = session.parked.iter().map(|parked| parked.connector).collect();
+    let parked_handles: Vec<connector::Handle> = session.parked.iter().filter(|parked| parked.device == device).map(|parked| parked.connector).collect();
     let (parked_present, parked_gone) = plan_parked(&parked_handles, &connected_handles);
-    let driven: Vec<connector::Handle> = session.outputs.iter().map(|output| output.connector).collect();
-    let plan = rescan_plan(&driven, &probed, &parked_present);
-    session.non_desktop = plan.reserved;
+    let outputs: Vec<_> = session.outputs.iter().map(|output| (output.device, output.connector)).collect();
+    let plan = device_rescan_plan(device, &outputs, &probed, &parked_present);
+    session.devices[device].non_desktop = plan.reserved;
     let removed = plan.remove;
     for index in &removed {
         let mut output = session.outputs.remove(*index);
@@ -2513,7 +2712,7 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<RescanDelta, 
     }
     let mut unplugged = Vec::new();
     session.parked.retain_mut(|parked| {
-        if parked_gone.contains(&parked.connector) {
+        if parked.device == device && parked_gone.contains(&parked.connector) {
             if let Some(mut output) = parked.output.take() {
                 if let Some(mut feedback) = output.presentation.take() {
                     feedback.discarded();
@@ -2541,6 +2740,12 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<RescanDelta, 
         if !plan.adopt.contains(&info.handle()) {
             continue;
         }
+        let name = connector_name(&info);
+        if session.outputs.iter().any(|output| output.name == name) ||
+            session.parked.iter().any(|parked| parked.name == name) {
+            tracing::warn!(device, %name, "refusing colliding connector name across KMS devices");
+            continue;
+        }
         let Some(mode) = preferred_mode(&info) else { continue };
         // A parked output keeps its crtc, so it is spoken for here —
         // unless nothing else can drive the new connector, when the
@@ -2548,21 +2753,23 @@ fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<RescanDelta, 
         let taken: Vec<crtc::Handle> = session
             .outputs
             .iter()
-            .map(|output| output.crtc)
-            .chain(session.parked.iter().filter_map(|parked| parked.output.as_ref().map(|output| output.crtc)))
+            .filter(|output| output.device == device).map(|output| output.crtc)
+            .chain(session.parked.iter().filter(|parked| parked.device == device).filter_map(|parked| parked.output.as_ref().filter(|output| output.device == device).map(|output| output.crtc)))
             .collect();
-        let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken)
-            .or_else(|| release_parked_crtc(session, &resources, &info))
+        let Some(crtc) = crtc_for(&session.devices[device].drm, &resources, &info, &taken)
+            .or_else(|| release_parked_crtc(session, device, &resources, &info))
         else {
             tracing::warn!(output = %connector_name(&info), "hot-plugged connector has no free crtc");
             continue;
         };
         let target = ConnectorTarget { info, crtc, mode };
         let position = Point::new(next_x, 0);
+        let kms = &mut session.devices[device];
         match attach_output(
-            &mut session.drm,
-            &session.gbm,
-            session.render_node,
+            device,
+            &mut kms.drm,
+            &kms.gbm,
+            if device == 0 { session.render_stack.client_scanout_node(session.render_node) } else { None },
             &session.render_formats,
             &target,
             position,
@@ -2596,14 +2803,15 @@ fn candidate_crtcs(drm: &DrmDevice, resources: &ResourceHandles, connector: &con
 /// through [`attach_output`] with whatever crtc is free then.
 fn release_parked_crtc(
     session: &mut SessionGraphics,
+    device: KmsDeviceId,
     resources: &ResourceHandles,
     connector: &connector::Info,
 ) -> Option<crtc::Handle> {
-    let candidates = candidate_crtcs(&session.drm, resources, connector);
+    let candidates = candidate_crtcs(&session.devices[device].drm, resources, connector);
     let parked = session
         .parked
         .iter_mut()
-        .find(|parked| parked.output.as_ref().is_some_and(|output| candidates.contains(&output.crtc)))?;
+        .find(|parked| parked.device == device && parked.output.as_ref().is_some_and(|output| candidates.contains(&output.crtc)))?;
     let mut output = parked.output.take()?;
     if let Some(mut feedback) = output.presentation.take() {
         feedback.discarded();
@@ -2648,7 +2856,7 @@ pub(crate) fn park_output(graphics: &mut Graphics, index: usize) -> Result<(), S
         feedback.discarded();
     }
     tracing::info!(output = %output.name, "output parked: connector kept, crtc cleared, out of the layout");
-    session.parked.push(ParkedConnector { name: output.name.clone(), connector: output.connector, output: Some(output) });
+    session.parked.push(ParkedConnector { device: output.device, name: output.name.clone(), connector: output.connector, output: Some(output) });
     Ok(())
 }
 
@@ -2682,12 +2890,13 @@ pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Optio
     // Keep the parked record until adoption succeeds. Any probe or
     // allocation can fail (including across a VT switch); the next
     // enable must still find the connector and be able to retry.
+    let device = session.parked[at].device;
     let connector = session.parked[at].connector;
-    let resources = session
+    let resources = session.devices[device]
         .drm
         .resource_handles()
         .map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
-    let info = session
+    let info = session.devices[device]
         .drm
         .get_connector(connector, false)
         .map_err(|error| format!("could not read connector {name}: {error}"))?;
@@ -2697,10 +2906,10 @@ pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Optio
     let taken: Vec<crtc::Handle> = session
         .outputs
         .iter()
-        .map(|output| output.crtc)
-        .chain(session.parked.iter().filter_map(|parked| parked.output.as_ref().map(|output| output.crtc)))
+        .filter(|output| output.device == device).map(|output| output.crtc)
+        .chain(session.parked.iter().filter(|parked| parked.device == device).filter_map(|parked| parked.output.as_ref().filter(|output| output.device == device).map(|output| output.crtc)))
         .collect();
-    let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken) else {
+    let Some(crtc) = crtc_for(&session.devices[device].drm, &resources, &info, &taken) else {
         return Err(format!("{name} has no free crtc to come back on"));
     };
     let target = ConnectorTarget { info, crtc, mode };
@@ -2713,8 +2922,9 @@ pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Optio
         })
         .max()
         .unwrap_or(0);
-    let client_scanout_node = session.render_stack.client_scanout_node(session.render_node);
-    match attach_output(&mut session.drm, &session.gbm, client_scanout_node, &session.render_formats, &target, Point::new(next_x, 0)) {
+    let client_scanout_node = if device == 0 { session.render_stack.client_scanout_node(session.render_node) } else { None };
+    let kms = &mut session.devices[device];
+    match attach_output(device, &mut kms.drm, &kms.gbm, client_scanout_node, &session.render_formats, &target, Point::new(next_x, 0)) {
         Ok((output, setup)) => {
             session.parked.remove(at);
             tracing::info!(output = %name, ?crtc, "output unparked: re-adopted on a fresh crtc");
@@ -2774,7 +2984,7 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
         );
     }
 
-    let mut needs_reset = false;
+    let mut needs_reset = Vec::new();
     for output in session.outputs.iter_mut() {
         let Some(flip) = output.frame_pending.as_mut() else {
             continue;
@@ -2789,9 +2999,9 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
                  arrives or the stall watchdog resets the device"
             );
         }
-        needs_reset |= waited > FLIP_STALL_RECOVERY;
+        if waited > FLIP_STALL_RECOVERY && !needs_reset.contains(&output.device) { needs_reset.push(output.device); }
     }
-    if !needs_reset {
+    if needs_reset.is_empty() {
         return false;
     }
 
@@ -2802,20 +3012,20 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
     // `!set_active(true)`, and `set_active` returns the *previous*
     // flag — so on a device that never left us it does nothing at all.
     // The reset has to be asked for directly.
-    tracing::warn!("resetting the DRM device to recover from a stalled page flip");
-    if let Err(error) = session.drm.reset_state() {
-        tracing::error!(
-            ?error,
-            "could not reset the DRM device after a stalled page flip; the screen stays frozen \
-             until the next attempt"
-        );
-        return false;
+    let mut reset = false;
+    for device in needs_reset {
+        if session.devices[device].removed || !session.devices[device].drm.is_active() { continue; }
+        tracing::warn!(device, "resetting DRM device to recover its stalled page flip");
+        if let Err(error) = session.devices[device].drm.reset_state() {
+            tracing::error!(?error, device, "could not reset stalled DRM device");
+            continue;
+        }
+        for output in session.outputs.iter_mut().filter(|output| output.device == device) {
+            recover_output(output, RecoveryRung::Reset);
+        }
+        reset = true;
     }
-
-    for output in session.outputs.iter_mut() {
-        recover_output(output, RecoveryRung::Reset);
-    }
-    true
+    reset
 }
 
 /// Tears down one output's crtc bookkeeping so its next frame goes out
@@ -3219,7 +3429,7 @@ pub(crate) fn gamma_ramp_sizes(graphics: &Graphics) -> Vec<u32> {
     session
         .outputs
         .iter()
-        .map(|output| match session.drm.device_fd().get_crtc(output.crtc) {
+        .map(|output| match session.devices[output.device].drm.device_fd().get_crtc(output.crtc) {
             Ok(info) => {
                 if info.gamma_length() == 0 {
                     tracing::info!(
@@ -3256,7 +3466,7 @@ pub(crate) fn read_gamma(graphics: &Graphics, index: usize, size: usize) -> Opti
     let mut red = vec![0u16; size];
     let mut green = vec![0u16; size];
     let mut blue = vec![0u16; size];
-    match session.drm.device_fd().get_gamma(output.crtc, &mut red, &mut green, &mut blue) {
+    match session.devices[output.device].drm.device_fd().get_gamma(output.crtc, &mut red, &mut green, &mut blue) {
         Ok(()) => Some((red, green, blue)),
         Err(error) => {
             tracing::info!(output = %output.name, ?error, "could not read the crtc's gamma ramp back");
@@ -3291,7 +3501,7 @@ pub(crate) fn write_gamma(
         return Err("the nested backend has no crtc to program a gamma ramp on".into());
     };
     let output = session.outputs.get(index).ok_or_else(|| format!("no session output at index {index}"))?;
-    session
+    session.devices[output.device]
         .drm
         .device_fd()
         .set_gamma(output.crtc, red, green, blue)
@@ -3397,18 +3607,18 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
     // Someone else owns the VT: every commit would fail with
     // `DeviceInactive`, and the outputs keep their dirty flags so the
     // resume handler's repaint has something to repaint.
-    let device_active = session.drm.is_active();
+    let any_active = session.devices.iter().any(|device| !device.removed && device.drm.is_active());
 
     // Before anything is drawn, and unconditionally rather than per
     // dirty output: a flip that is never going to complete is exactly
     // the case where nothing else in this function would run. Skipped
     // on an inactive device, where every flip is legitimately abandoned
     // and the resume handler is what clears them.
-    if device_active {
+    if any_active {
         service_pending_flips(session);
     }
 
-    let SessionGraphics { render_stack, outputs: session_outputs, strict_release, .. } = &mut **session;
+    let SessionGraphics { devices, render_stack, outputs: session_outputs, strict_release, .. } = &mut **session;
     let strict_release = *strict_release;
     let mut drew_any = false;
     for (output_index, output) in session_outputs.iter_mut().enumerate() {
@@ -3433,7 +3643,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             stats.skips[2] = stats.skips[2].saturating_add(1);
             continue;
         }
-        if !device_active {
+        if devices[output.device].removed || !devices[output.device].drm.is_active() {
             stats.skips[3] = stats.skips[3].saturating_add(1);
             continue;
         }
@@ -3444,7 +3654,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         }
 
         let render_started = Instant::now();
-        let flags = frame_flags();
+        let flags = if output.device == 0 { frame_flags() } else { FrameFlags::empty() };
         stats.begin(flags.bits());
 
         // Resetting every buffer age makes the internal damage tracker
@@ -3671,8 +3881,12 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                             *pointer_location,
                         );
                         surface_outputs.send_feedback(&entry.output, &render_states, dmabuf);
-                        let flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync;
-                        if let Some((at, sequence)) = output.last_vblank {
+                        let flags = if output.device == 0 {
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
+                        } else {
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty()
+                        };
+                        if let Some((at, sequence)) = output.last_vblank.filter(|_| output.device == 0) {
                             crate::renderer::present_at(
                                 &mut feedback,
                                 at,
@@ -3807,7 +4021,7 @@ fn open_first_usable_device(
     let mut selected: Option<(PathBuf, Device)> = None;
     for path in candidates {
         if selected.is_none() {
-            match probe_device(seat_session, &path) {
+            match probe_device(seat_session, &path, None, None) {
                 Ok(device) => {
                     selected = Some((path, device));
                 }
@@ -3845,31 +4059,49 @@ fn open_first_usable_device(
 /// GBM/EGL creation and, crucially, does not construct a `DrmDevice`
 /// with connector-reset enabled; it observes other GPUs without
 /// disturbing whichever compositor currently owns their display state.
-///
-/// The descriptor is only borrowed for the look, so it goes back to the
-/// seat on every path, success included.
-fn connected_desktop_connectors<S: Session>(seat_session: &mut S, path: &Path) -> Result<Vec<String>, String> {
-    let fd = seat_session.open(path, DEVICE_FLAGS).map_err(|error| format!("the seat would not open it: {error:?}"))?;
-    with_seat_device(
-        DeviceFd::from(fd),
-        |fd| connector_names(&DrmDeviceFd::new(fd)),
-        |_| true,
-        |fd| seat_session.close(fd).map_err(|error| format!("the seat would not take it back: {error:?}")),
-    )
+// Temporary KMS queries do not need Smithay's DRM master-taking wrapper.
+struct SeatProbeFd(std::os::fd::OwnedFd);
+impl std::os::fd::AsFd for SeatProbeFd {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.0)
+    }
+}
+impl smithay::reexports::drm::Device for SeatProbeFd {}
+impl ControlDevice for SeatProbeFd {}
+
+// Keep the exact seat-owned descriptor alive through inspection and return it
+// to the seat on every Result path. Closing only the OS fd leaks seat ownership.
+fn inspect_seat_probe<T>(
+    fd: std::os::fd::OwnedFd,
+    inspect: impl FnOnce(&SeatProbeFd) -> Result<T, String>,
+    close: impl FnOnce(std::os::fd::OwnedFd) -> Result<(), String>,
+) -> Result<T, String> {
+    let probe = SeatProbeFd(fd);
+    let result = inspect(&probe);
+    let closed = close(probe.0);
+    match (result, closed) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(close_error)) => Err(format!("{error}; {close_error}")),
+    }
 }
 
-fn connector_names(fd: &DrmDeviceFd) -> Result<Vec<String>, String> {
-    let resources = fd.resource_handles().map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
-    let mut names = Vec::new();
-    for handle in resources.connectors() {
-        let Ok(info) = fd.get_connector(*handle, true) else {
-            continue;
-        };
-        if info.state() == connector::State::Connected && !connector_is_non_desktop(fd, *handle) {
-            names.push(connector_name(&info));
+fn connected_desktop_connectors<S: Session>(
+    seat_session: &mut S,
+    path: &Path,
+) -> Result<Vec<String>, String> {
+    let fd = seat_session.open(path, DEVICE_FLAGS).map_err(|error| format!("the seat would not open it: {error:?}"))?;
+    inspect_seat_probe(fd, |fd| {
+        let resources = fd.resource_handles().map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
+        let mut names = Vec::new();
+        for handle in resources.connectors() {
+            let Ok(info) = fd.get_connector(*handle, true) else { continue; };
+            if info.state() == connector::State::Connected && !connector_is_non_desktop(fd, *handle) {
+                names.push(connector_name(&info));
+            }
         }
-    }
-    Ok(names)
+        Ok(names)
+    }, |fd| seat_session.close(fd).map_err(|error| format!("seat probe close failed: {error:?}")))
 }
 
 /// Runs `body` on a device the seat opened, then hands the descriptor back
@@ -3985,17 +4217,51 @@ fn candidate_devices(seat_name: &str) -> Vec<PathBuf> {
 /// A device that does not qualify goes back to the seat (see
 /// [`with_seat_device`]) after everything built on it has dropped. A device
 /// that does is owned by the returned [`Device`] and stays open.
-fn probe_device<S: Session>(seat_session: &mut S, path: &Path) -> Result<Device, String> {
+fn probe_device<S: Session>(seat_session: &mut S, path: &Path, expected_driver: Option<&str>, proof: Option<&M3ShadowProof>) -> Result<Device, String> {
     let fd = seat_session.open(path, DEVICE_FLAGS).map_err(|error| format!("the seat would not open it: {error:?}"))?;
     with_seat_device(
         DeviceFd::from(fd),
-        |fd| probe_open_device(DrmDeviceFd::new(fd)),
+        |fd| probe_open_device(DrmDeviceFd::new(fd), expected_driver, proof),
         |result| result.is_err(),
         |fd| seat_session.close(fd).map_err(|error| format!("the seat would not take it back: {error:?}")),
     )
 }
 
-fn probe_open_device(fd: DrmDeviceFd) -> Result<Device, String> {
+fn probe_open_device(fd: DrmDeviceFd, expected_driver: Option<&str>, proof: Option<&M3ShadowProof>) -> Result<Device, String> {
+    if let Some(expected) = expected_driver {
+        use smithay::reexports::drm::Device as _;
+        let driver = fd.get_driver().map_err(|error| format!("driver identity: {error}"))?;
+        if driver.name().to_string_lossy() != expected {
+            return Err(format!("extra KMS driver must be {expected}"));
+        }
+    }
+
+    // Check the advertised fixed mode and a same-flags allocator buffer
+    // before DrmDevice::new(true) can reset any KMS state.
+    if expected_driver == Some("apple-dcpext-shadow") {
+        let resources = fd.resource_handles().map_err(|error| format!("shadow resources: {error}"))?;
+        if resources.connectors().len() != 1 { return Err("4K shadow requires exactly one connector".into()); }
+        let connector = fd.get_connector(resources.connectors()[0], true)
+            .map_err(|error| format!("shadow connector: {error}"))?;
+        if connector.state() != connector::State::Connected || connector.modes().is_empty() ||
+            !connector.modes().iter().all(|mode| shadow_4k_mode_valid(
+                u32::from(mode.size().0), u32::from(mode.size().1), OutputMode::from(*mode).refresh)) {
+            return Err("4K candidate requires exclusively 3840x2160@60000 shadow modes".into());
+        }
+        if let Some(proof) = proof {
+            use smithay::backend::allocator::{Allocator, Buffer};
+            use smithay::reexports::drm::buffer::PlanarBuffer;
+            let gbm = GbmDevice::new(fd.clone()).map_err(|error| format!("proof GBM: {error}"))?;
+            let mut allocator = GbmAllocator::new(gbm, GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
+            let buffer = allocator.create_buffer(proof.width, proof.height, Fourcc::Xrgb8888, &[Modifier::Linear])
+                .map_err(|error| format!("qualified shadow allocation: {error}"))?;
+            if PlanarBuffer::pitches(&buffer)[0] != proof.stride || PlanarBuffer::offsets(&buffer)[0] != 0 ||
+                Buffer::format(&buffer) != (Format { code: Fourcc::Xrgb8888, modifier: Modifier::Linear }) {
+                return Err("shadow allocation does not match the probed linear XRGB layout".into());
+            }
+        }
+    }
+
     // `true`: start with every connector disabled. smithay enables the
     // ones it drives when a surface is attached, so anything we do not
     // use stays dark instead of showing whatever the previous session
@@ -4254,6 +4520,134 @@ fn connector_name(connector: &connector::Info) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn m3_shadow_proof_file_is_bounded_private_regular_json() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = std::env::temp_dir().join(format!("chonk-m3-proof-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("proof.json");
+        let json = r#"{"schema":1,"probe":"linear-xrgb8888-prime-egl-readback-v2","boot_id":"boot","primary_drm":"/dev/dri/card2","target_drm":"/dev/dri/card0","render_node":"/dev/dri/renderD128","gl_renderer":"M3 renderer","libgl_drivers_path":"/private/mesa/lib/dri","width":3840,"height":2160,"stride":15360,"format":875713112,"modifier":0}"#;
+        assert!(super::read_m3_shadow_proof(&path).is_err());
+        std::fs::write(&path, json).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(super::read_m3_shadow_proof(&path).is_ok());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o622)).unwrap();
+        assert!(super::read_m3_shadow_proof(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("link.json");
+        symlink(&path, &link).unwrap();
+        assert!(super::read_m3_shadow_proof(&link).is_err());
+        assert!(super::read_m3_shadow_proof(&dir).is_err());
+        std::fs::write(&path, vec![b' '; 4097]).unwrap();
+        assert!(super::read_m3_shadow_proof(&path).is_err());
+        std::fs::write(&path, json.replace("\"schema\":1", "\"schema\":1,\"unknown\":true")).unwrap();
+        assert!(super::read_m3_shadow_proof(&path).is_err());
+        std::fs::write(&path, json.replace("\"schema\":1", "\"schema\":1,\"schema\":2")).unwrap();
+        assert!(super::read_m3_shadow_proof(&path).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn m3_shadow_gate_requires_native_identified_honeykrisp_renderer() {
+        let name = "zink Vulkan 1.4(Apple M3 Pro (G15S B1) (MESA_HONEYKRISP))";
+        assert!(super::m3_shadow_renderer(name, "apple", true));
+        assert!(super::m3_shadow_renderer(name, "m3-dcp", true));
+        assert!(!super::m3_shadow_renderer(name, "apple", false));
+        assert!(!super::m3_shadow_renderer(name, "simpledrm", true));
+        assert!(!super::m3_shadow_renderer("llvmpipe", "apple", true));
+        assert!(!super::m3_shadow_renderer("zink Vulkan Apple M2 MESA_HONEYKRISP", "apple", true));
+        assert!(!super::m3_shadow_renderer("zink Apple M3", "apple", true));
+    }
+
+    #[test]
+    fn m3_shadow_proof_refuses_stale_boot_mesa_renderer_and_schema() {
+        let mut proof = super::M3ShadowProof {
+            schema: 2, probe: super::M3_SHADOW_PROBE.into(), boot_id: "boot-current".into(),
+            primary_drm: "/dev/dri/card2".into(), target_drm: "/dev/dri/card0".into(),
+            render_node: "/dev/dri/renderD128".into(), gl_renderer: "M3 renderer".into(),
+            libgl_drivers_path: "/private/mesa/lib/dri".into(),
+            width:3840, height:2160, stride:15360, format:super::Fourcc::Xrgb8888 as u32, modifier:0,
+        };
+        assert!(super::m3_proof_identity_matches(&proof, "boot-current", "M3 renderer", "/private/mesa/lib/dri"));
+        assert!(!super::m3_proof_identity_matches(&proof, "old-boot", "M3 renderer", "/private/mesa/lib/dri"));
+        assert!(!super::m3_proof_identity_matches(&proof, "boot-current", "other renderer", "/private/mesa/lib/dri"));
+        assert!(!super::m3_proof_identity_matches(&proof, "boot-current", "M3 renderer", "/usr/lib/dri"));
+        assert!(super::m3_proof_layout_valid(&proof));
+        for (width, height, stride, format, modifier) in [
+            (1920,1080,7680,proof.format,0), (3840,2160,15356,proof.format,0),
+            (3840,2160,15361,proof.format,0), (3840,2160,u32::MAX,proof.format,0),
+            (3840,2160,15360,0,0), (3840,2160,15360,proof.format,1),
+        ] {
+            let original = (proof.width,proof.height,proof.stride,proof.format,proof.modifier);
+            (proof.width,proof.height,proof.stride,proof.format,proof.modifier) = (width,height,stride,format,modifier);
+            assert!(!super::m3_proof_layout_valid(&proof));
+            (proof.width,proof.height,proof.stride,proof.format,proof.modifier) = original;
+        }
+        proof.schema = 1;
+        assert!(!super::m3_proof_identity_matches(&proof, "boot-current", "M3 renderer", "/private/mesa/lib/dri"));
+        proof.schema = 2;
+        proof.probe = "unqualified-probe".into();
+        assert!(!super::m3_proof_identity_matches(&proof, "boot-current", "M3 renderer", "/private/mesa/lib/dri"));
+    }
+
+    #[test]
+    fn shadow_4k_mode_requires_exact_geometry_and_refresh() {
+        assert!(super::shadow_4k_mode_valid(3840,2160,60000));
+        for (w,h,r) in [(1920,1080,60000),(3840,2160,30000),(3840,2160,59940),(4096,2160,60000)] {
+            assert!(!super::shadow_4k_mode_valid(w,h,r));
+        }
+    }
+
+    #[test]
+    fn pending_extra_retry_matches_only_unadopted_character_device() {
+        use std::os::unix::fs::MetadataExt;
+        let null = std::path::Path::new("/dev/null");
+        let device = std::fs::metadata(null).unwrap().rdev();
+        assert!(super::pending_extra_matches(null,device,false));
+        assert!(!super::pending_extra_matches(null,device,true));
+        assert!(!super::pending_extra_matches(null,device + 1,false));
+        assert!(!super::pending_extra_matches(std::path::Path::new("/proc/version"),0,false));
+        assert!(!super::pending_extra_matches(std::path::Path::new("/nonexistent-extra-card"),device,false));
+    }
+
+    #[test]
+    fn multikms_equal_crtc_numbers_do_not_cross_complete() {
+        assert!(super::same_kms_object(0, 37u32, 0, 37));
+        assert!(!super::same_kms_object(1, 37u32, 0, 37));
+        assert!(!super::same_kms_object(0, 37u32, 0, 38));
+        // Slot IDs are generations: a removed device's event cannot complete
+        // a re-added device even if kernel dev_t and CRTC numbers are reused.
+        assert!(!super::same_kms_object(1, 37u32, 2, 37));
+    }
+
+    #[test]
+    fn multikms_rescan_and_removal_preserve_other_device_indices() {
+        let h = |id| smithay::reexports::drm::control::connector::Handle::from(
+            std::num::NonZeroU32::new(id).unwrap());
+        let outputs = [(0, h(39)), (1, h(39)), (0, h(40)), (1, h(40))];
+        let plan = super::device_rescan_plan(1, &outputs, &[(h(39), super::ConnectorUse::Drive)], &[]);
+        assert_eq!(plan.remove, vec![3]);
+        assert!(plan.adopt.is_empty());
+        let gone = super::device_rescan_plan(1, &outputs, &[], &[]);
+        assert_eq!(gone.remove, vec![3, 1]);
+        let mut survivors = outputs.to_vec();
+        for index in gone.remove { survivors.remove(index); }
+        assert_eq!(survivors, vec![(0, h(39)), (0, h(40))]);
+        let new = super::device_rescan_plan(2, &outputs, &[(h(39), super::ConnectorUse::Drive)], &[]);
+        assert_eq!(new.adopt, vec![h(39)]);
+        assert!(new.remove.is_empty());
+    }
+
+    #[test]
+    fn multikms_full_device_removal_returns_only_owned_slots() {
+        let owners = [0, 1, 0, 2, 1];
+        let mut removed = super::owned_output_indices(owners.into_iter(), 1);
+        removed.reverse();
+        assert_eq!(removed, vec![4, 1]);
+        assert!(super::owned_output_indices(owners.into_iter(), 9).is_empty());
+    }
+
     use super::*;
 
     fn test_edid() -> [u8; 128] {
@@ -4960,7 +5354,7 @@ mod seat_device_tests {
     fn a_device_that_fails_the_probe_goes_back_to_the_seat() {
         let mut seat = FakeSeat::default();
         // `/dev/null` is not a DRM device, so the real probe fails after opening.
-        assert!(probe_device(&mut seat, Path::new("/dev/null")).is_err());
+        assert!(probe_device(&mut seat, Path::new("/dev/null"), None, None).is_err());
         assert_eq!((seat.opens, seat.closes), (1, 1));
         assert!(seat.live.is_empty());
     }
@@ -4978,7 +5372,7 @@ mod seat_device_tests {
         let mut seat = FakeSeat::default();
         for _ in 0..5 {
             let _ = connected_desktop_connectors(&mut seat, Path::new("/dev/null"));
-            let _ = probe_device(&mut seat, Path::new("/dev/null"));
+            let _ = probe_device(&mut seat, Path::new("/dev/null"), None, None);
         }
         assert_eq!((seat.opens, seat.closes), (10, 10));
         assert!(seat.live.is_empty());
@@ -5068,4 +5462,24 @@ mod seat_device_tests {
         let original: OwnedFd = escaped.borrow_mut().take().unwrap().try_into().unwrap();
         assert!(std::fs::read_link(format!("/proc/self/fd/{}", original.as_raw_fd())).is_ok());
     }
+}
+
+#[cfg(test)] mod seat_probe_cleanup_tests {
+ use super::*; use std::cell::Cell; use std::os::fd::{OwnedFd, AsRawFd};
+ fn fd()->OwnedFd {std::fs::File::open("/dev/null").unwrap().into()}
+ #[test] fn success_closes_exact_descriptor_once() {
+  let f=fd();let raw=f.as_raw_fd();let n=Cell::new(0);
+  let r=inspect_seat_probe(f,|p|{assert_eq!(p.0.as_raw_fd(),raw);Ok(7)},|f|{assert_eq!(f.as_raw_fd(),raw);n.set(n.get()+1);drop(f);Ok(())});
+  assert_eq!(r,Ok(7));assert_eq!(n.get(),1);
+ }
+ #[test] fn query_error_still_closes() {
+  let n=Cell::new(0);let r:Result<(),String>=inspect_seat_probe(fd(),|_|Err("query".into()),|f|{n.set(n.get()+1);drop(f);Ok(())});
+  assert_eq!(r,Err("query".into()));assert_eq!(n.get(),1);
+ }
+ #[test] fn close_error_is_not_silenced() {
+  let r=inspect_seat_probe(fd(),|_|Ok(7),|f|{drop(f);Err("close".into())});assert_eq!(r,Err("close".into()));
+ }
+ #[test] fn both_errors_are_preserved() {
+  let r:Result<(),String>=inspect_seat_probe(fd(),|_|Err("query".into()),|f|{drop(f);Err("close".into())});assert_eq!(r,Err("query; close".into()));
+ }
 }
