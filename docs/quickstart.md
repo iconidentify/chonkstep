@@ -48,8 +48,12 @@ for export paths, appearance overrides and the native theme descriptor.
 
 ## Open and manage windows
 
-In Omarchy mode, Super+Return opens your configured terminal and Super+Space
-opens Omarchy's launcher. The live Hyprland configuration supplies supported
+Super+Space (Command+Space on Mac keyboards) opens Omarchy's launcher in both
+keymaps. Chonkstep's themed terminal defaults to a compact 12px font, matching
+Omarchy's Foot default of 9pt, and an 80×24 window.
+
+In Omarchy mode, Super+Return opens your configured terminal.
+The live Hyprland configuration supplies supported
 keybindings. Right-click the desktop for ChonkStep's menu; right-click a
 titlebar for window actions.
 

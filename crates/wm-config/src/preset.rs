@@ -1102,7 +1102,7 @@ mod tests {
             assert_eq!(config.omarchy_bar, None, "text {text:?}");
             assert_eq!(config.theme, None, "text {text:?}");
             assert_eq!(config.keybindings, default.keybindings, "text {text:?}");
-            assert!(config.commands.is_empty(), "text {text:?}");
+            assert_eq!(config.commands, default.commands, "text {text:?}");
         }
     }
 
@@ -1132,7 +1132,7 @@ mod tests {
         let config = parse("desktop = \"omarchy\"\nkeymap = \"chonkstep\"").unwrap();
         assert_eq!(config.keymap, Keymap::Chonkstep);
         assert_eq!(config.keybindings, Config::default_config().keybindings);
-        assert!(config.commands.is_empty(), "and its commands go with it");
+        assert_eq!(config.commands, Config::default_config().commands, "only chonkstep's commands remain");
         // ...while the rest of the posture stays.
 
         // And the keymap without the posture.

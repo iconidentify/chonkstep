@@ -45,6 +45,7 @@ ever do disagree, the source wins.
 | Binding            | Action                 | What it does                                  |
 |--------------------|------------------------|-----------------------------------------------|
 | `alt+shift+return` | `spawn-terminal`       | Launch the themed terminal                    |
+| `super+space`      | `run omarchy-menu`     | Open Omarchy's launcher (Command+Space on Mac) |
 | `alt+shift+q`      | `close`                | Close the focused window                      |
 | `alt+shift+x`      | `toggle-maximize`      | Maximize / restore                            |
 | `alt+shift+s`      | `toggle-shade`         | Roll the window up into its titlebar          |

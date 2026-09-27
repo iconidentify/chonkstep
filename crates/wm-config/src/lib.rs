@@ -798,7 +798,7 @@ pub struct Config {
     /// edge within this many pixels of a screen or window edge lands
     /// flush against it. `0` disables snapping entirely.
     pub edge_resistance: u32,
-    /// Point size of the spawned terminal's font *at 1x*, which the UI
+    /// Pixel size of the spawned terminal's font *at 1x*, which the UI
     /// scale then multiplies exactly as it multiplies the chrome — so
     /// this is one number for "how big is terminal text", independent
     /// of the display it lands on. Not per-theme on purpose: a theme
@@ -1033,7 +1033,8 @@ fn hyprland_switch(table: &toml::Table, diagnostics: &mut Vec<String>) -> Option
 }
 
 /// Terminal font size when the config says nothing, in 1x pixels.
-pub const DEFAULT_TERMINAL_FONT_PX: f32 = 18.0;
+/// Matches Omarchy's Foot default of 9pt at 96 DPI.
+pub const DEFAULT_TERMINAL_FONT_PX: f32 = 12.0;
 
 /// The modifier the move/resize drag gesture rides on when the config
 /// says nothing: Alt, as Window Maker has always bound it.
@@ -1106,7 +1107,10 @@ impl Config {
             drag_modifier: Some(DEFAULT_DRAG_MODIFIER),
             restore_session: false,
             lock_command: None,
-            commands: BTreeMap::new(),
+            commands: BTreeMap::from([(
+                "omarchy-menu".into(),
+                vec!["omarchy-menu".into(), "toggle".into()],
+            )]),
             terminal: None,
             autostart: Vec::new(),
             omarchy_menu: true,
@@ -1154,6 +1158,7 @@ impl Config {
                     Action::Resize(wm_core::Point::new(0, -25)),
                 ),
                 bind("alt+shift+return", Action::SpawnTerminal),
+                bind("super+space", Action::Run("omarchy-menu".into())),
                 bind("alt+shift+q", Action::Close),
                 bind("alt+shift+x", Action::ToggleMaximize),
                 bind("alt+shift+s", Action::ToggleShade),
@@ -2802,8 +2807,8 @@ mod tests {
             config.layer_bindings.is_empty(),
             "layer-scoped live bindings are part of that keymap too"
         );
-        assert!(
-            config.commands.is_empty(),
+        assert_eq!(
+            config.commands, Config::default_config().commands,
             "commands owned only by the rejected live bindings go with them"
         );
         assert_eq!(
@@ -3041,6 +3046,7 @@ mod tests {
                 Action::Resize(wm_core::Point::new(0, -25)),
             ),
             (combo(0xff0d, alt_shift), Action::SpawnTerminal),
+            (combo(0x20, Modifiers::SUPER), Action::Run("omarchy-menu".into())),
             (combo(0x71, alt_shift), Action::Close),
             (combo(0x78, alt_shift), Action::ToggleMaximize),
             (combo(0x73, alt_shift), Action::ToggleShade),
@@ -3064,6 +3070,8 @@ mod tests {
         assert_eq!(config.theme, None);
         assert_eq!(config.placement, PlacementPolicy::Smart);
         assert_eq!(config.edge_resistance, 10);
+        assert_eq!(config.terminal_font_px, 12.0);
+        assert_eq!(config.commands["omarchy-menu"], ["omarchy-menu", "toggle"]);
         // The decoration policy ships no per-application list at all:
         // the compositor concludes the negotiation for every client
         // observed, and an entry here is a correction, not the
@@ -4395,11 +4403,11 @@ mod command_tests {
             menu = "omarchy-menu"
 
             [keybindings]
-            "super+space" = "run typo"
+            "super+f12" = "run typo"
             "#,
         )
         .expect("valid config");
-        assert_eq!(action_for(&config, "super+space"), None);
+        assert_eq!(action_for(&config, "super+f12"), None);
     }
 
     /// An unknown `run` must not take the *default* binding for that
@@ -4410,7 +4418,7 @@ mod command_tests {
         let config = parse(
             r#"
             [keybindings]
-            "super+space" = "run nope"
+            "super+f12" = "run nope"
             "#,
         )
         .expect("valid config");
@@ -4472,7 +4480,7 @@ mod command_tests {
             "#,
         )
         .expect("valid config");
-        assert!(config.commands.is_empty());
+        assert_eq!(config.commands, Config::default_config().commands);
     }
 
     /// `run` with no name is not an action. It must not become a

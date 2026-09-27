@@ -336,21 +336,19 @@
 # default of 10 is kept.
 #edge_resistance = 10
 
-# Font size of the terminal the desktop spawns, in pixels at 1x scale.
-# The UI `scale` above multiplies it, exactly as it multiplies the
-# window chrome -- so this is one number for "how big is terminal text"
-# regardless of the display it lands on. At the default 20 with
-# scale = 2.0 the terminal is set in 40px type.
+# Font size of the themed Foot terminal, in pixels at 1x scale.
+# The default 12 matches Omarchy's Foot setting of 9pt at 96 DPI.
+# On Wayland, Foot applies the output scale itself: a 2x display renders
+# 24px text. X11 applies the desktop's UI scale before launching Foot.
 #
-# The launch geometry is derived from it rather than fixed: the window
-# is sized as a fraction of the monitor, so raising this trades columns
-# for legibility instead of pushing the window off the screen. Colors
-# are the active theme's; the font size is not per-theme, since a theme
-# restyles the terminal rather than resizing it.
+# Terminals open at 80 columns by 24 rows when that fits the workarea,
+# falling back to a fraction of the monitor for unusually large fonts.
+# Colors follow the active theme; the font size is the same in every
+# theme. A custom `terminal` command keeps its own font settings.
 #
 # Must be a number between 6 and 96 -- outside that it is warned about
-# and the default of 20 is kept.
-#terminal_font_px = 18
+# and the default of 12 is kept.
+#terminal_font_px = 12
 
 # Session restore: when true, the desktop records every window's
 # application, geometry, workspace and shape (maximized / shaded /
@@ -515,6 +513,8 @@
 #
 # Same two spellings as `terminal` above: a string is split on
 # whitespace, an array is taken verbatim.
+# `omarchy-menu` is already declared by both keymaps for Super+Space;
+# an entry here can override its command.
 #[commands]
 #omarchy-menu = "omarchy-menu toggle"
 #volume-up    = "omarchy-audio-output-volume up"
@@ -602,6 +602,7 @@
 # merge over Omarchy's table instead, and every line below that you
 # have not edited is simply an extra binding on top of it.
 "alt+shift+return" = "spawn-terminal"       # launch the themed terminal
+"super+space" = "run omarchy-menu"          # open Omarchy's launcher (Command+Space on Mac)
 "alt+shift+q" = "close"                     # close the focused window
 "alt+shift+x" = "toggle-maximize"           # maximize / restore
 "alt+shift+s" = "toggle-shade"              # roll the window up into its titlebar
