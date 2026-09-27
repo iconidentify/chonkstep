@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Stable uwsm entry point for the opt-in M3 GPU session, the twin of
+# chonkstep-session: uwsm derives the compositor id from Exec[0], so this
+# name becomes `wayland-wm@chonkstep-session-m3gpu.service`.
+set -e
+exec "$(dirname "$0")/wayland-session-m3gpu.sh" "$@"

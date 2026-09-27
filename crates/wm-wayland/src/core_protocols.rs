@@ -48,11 +48,12 @@ impl smithay::wayland::security_context::SecurityContextHandler for Compositor {
     ) {
         let mut display = self.display_handle.clone();
         if let Err(error) = self.loop_handle.insert_source(source, move |stream, _, _comp| {
-            if let Err(error) = display.insert_client(
+            match display.insert_client(
                 stream,
                 std::sync::Arc::new(crate::state::ClientState::confined(context.clone())),
             ) {
-                tracing::warn!(?error, "failed to admit a security-context client");
+                Ok(client) => crate::client_mesa::record_peer(&client, &display),
+                Err(error) => tracing::warn!(?error, "failed to admit a security-context client"),
             }
         }) {
             tracing::warn!(?error, "failed to register a security-context listener");

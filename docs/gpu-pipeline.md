@@ -222,6 +222,112 @@ CHONKSTEP_TEST_GPU_PAIR=/dev/dri/renderD128,/dev/dri/renderD129 \
   -- --ignored --nocapture
 ```
 
+### Display-only KMS targets
+
+The KMS device may have no render node at all: simpledrm on a boot
+framebuffer, as on Apple silicon machines whose display controller has no
+driver yet. Its primary node then names the target inside the GPU manager
+(`target_kind=display-only` in diagnostics). It is never published as a render
+device: linux-dmabuf feedback names only the selected render node. The target
+renderer must be a software rasterizer (llvmpipe through kms_swrast) on that
+KMS fd. Startup refuses a GPU found behind the display-only fd, such as Mesa's
+kmsro wrapping of the render GPU. Proof uses `GL_RENDERER`, because Mesa's EGL
+device query names the display's "compatible render-only device" for
+kms_swrast screens selected through drirc. There is no cross-device
+scanout-feedback probe for this target. Client buffers are never offered to
+its planes, because a display-only device could show another GPU's buffer only
+by copying it on the CPU in the kernel. Composition still copies each frame
+into the target's own swapchain.
+
+On the Apple M3 (J516S, `renderD128` with Honeykrisp/zink, `card0`
+simpledrm), both transfer directions of the hardware test pass on a
+separately built Mesa: full 3456×2160 frames and a 31×23 partial update, in
+XRGB8888 and ARGB8888. All eight transfers are DMA copies: llvmpipe samples
+the LINEAR buffer zink rendered. Without the vendored Smithay LINEAR retry
+(see `vendor/README.md`) the same test passes through CPU copies. Reproduce it
+with Mesa's environment pointing at a build that drives the render node
+natively and pins the display device to kms_swrast:
+
+```sh
+CHONKSTEP_TEST_DISPLAY_ONLY_PAIR=/dev/dri/renderD128,/dev/dri/card0 \
+  cargo test --locked -p wm-wayland --lib \
+  multi_gpu::tests::a_render_node_composes_into_a_display_only_kms_target \
+  -- --ignored --nocapture
+```
+
+### Display controllers paired through kmsro
+
+A real display controller without a render node of its own (Apple's DCP,
+Rockchip, Mediatek and similar SoCs) is usually rendered by Mesa's kmsro: the
+GBM/EGL screen on the KMS fd renders with the paired GPU's render node,
+straight into the display device's scanout buffers. EGL names that render node
+as the renderer's device, and the session keeps its ordinary single-GPU stack
+(`multi_gpu=disabled`): no intermediate buffer, no copy. The session decides
+this in `renderer_render_node`: EGL's render node wins over the KMS device's
+(absent) one unless `GL_RENDERER` is a Mesa CPU rasterizer, which marks the
+kms_swrast case above. linux-dmabuf feedback and client scanout name the
+render node, as on Asahi M1/M2.
+
+On the Apple M3 (J516S) with its native display card (`m3-dcp`, devicetree
+`apple,t6030-display-subsystem`), a Mesa whose drirc selects zink for that
+card renders with zink on `renderD128` into the card's dumb buffers. The
+ignored hardware test below runs the session's device steps without a seat or
+DRM master: EGL on the KMS fd's GBM, the render-node decision, the single
+stack, an ARGB8888 LINEAR swapchain buffer from `attach_output`'s allocator
+and framebuffer exporter, and chonkstep's own scene elements drawn into it.
+It then reads the pixels from the display device's dma-buf of that buffer,
+which is the memory the display scans out: all 3456×2234 pixels match.
+
+```sh
+CHONKSTEP_TEST_KMSRO_DISPLAY=/dev/dri/renderD128,/dev/dri/card2 \
+  cargo test --locked -p wm-wayland --lib \
+  session::tests::a_kmsro_display_is_composed_by_its_gpu_in_scanout_memory \
+  -- --ignored --nocapture
+```
+
+### Restricting linux-dmabuf to one Mesa build
+
+`CHONKSTEP_DMABUF_REQUIRE_MESA=<prefix>` is an opt-in guard for sessions whose
+render GPU can be driven safely by only one separately installed Mesa. On the
+Apple M3, the distribution's Mesa accepts the GPU but submits work for an older
+generation, and one fault ends the GPU until reboot. linux-dmabuf is shown only
+to a client that meets one of two conditions. Either its process maps a library
+from the prefix, or its environment will load the prefix when graphics start:
+`LD_LIBRARY_PATH` names `<prefix>/lib`, every Vulkan driver manifest is inside
+the prefix, and the process is not secure-exec. A process that maps a Mesa
+driver library from elsewhere never sees the global, and neither does a process
+whose `/proc` entries are unreadable. Such clients use shared memory and render
+in software. Denials are logged with the client's PID and executable. The guard
+cannot stop a process from opening the render node itself. The value `none`
+hides the global from every client, so only the compositor renders on the GPU.
+Unset, every client sees linux-dmabuf as before.
+
+### Apple M3 session
+
+`scripts/wayland-session-m3gpu.sh` is the opt-in login session built on these
+pieces. It sets the private Mesa environment, `CHONKSTEP_DMABUF_REQUIRE_MESA`
+and `XWAYLAND_NO_GLAMOR=1`, then runs the ordinary `scripts/wayland-session.sh`.
+It has two display modes, `CHONKSTEP_M3_DISPLAY` or a leading
+`--display=auto|dcp|simpledrm` argument (`auto`, the default, picks `dcp` when
+the native display card exists):
+
+- `simpledrm`: `CHONKSTEP_RENDER_DEVICE` composes on the M3 and copies each
+  frame into the display-only boot framebuffer (the display-only target above).
+- `dcp`: the native display card, found by its devicetree node
+  (`apple,t6030-display-subsystem`), never by number. No
+  `CHONKSTEP_RENDER_DEVICE`: kmsro renders on the M3 straight into the card's
+  scanout buffers (the kmsro section above). The pre-flight requires the
+  prefix drirc to select zink for `asahi`, `m3-dcp` and `apple`, a connected
+  connector, the M3 as the only render node, and a kernel log without GPU
+  faults, rejected compute jobs or failed DCP flips. Direct scanout of client
+  buffers stays off (`CHONKSTEP_NO_DIRECT_SCANOUT=1`) unless
+  `CHONKSTEP_M3_DIRECT_SCANOUT=1`.
+
+`scripts/install-m3gpu-session.sh` adds the uwsm entry "chonkstep (M3 GPU,
+experimental)", and `--remove` takes it away again. Neither script changes the
+ordinary session entries. Under uwsm, pass the argument after `--`
+(`uwsm start ... -- scripts/chonkstep-session-m3gpu --display=dcp`).
+
 This supports a fixed render/target pair and the connected outputs of **one KMS
 controller**. Adopting another KMS controller, render-device hotplug/migration,
 and changing GPU selection during a session require further work. Physical

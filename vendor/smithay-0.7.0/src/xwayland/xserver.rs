@@ -211,6 +211,7 @@ impl XWayland {
                 #[cfg(feature = "wayland_frontend")]
                 compositor_state: CompositorClientState::default(),
                 data_map,
+                pid: child.id(),
                 child: Mutex::new(Some(child)),
             }),
         )?;
@@ -366,6 +367,7 @@ pub struct XWaylandClientData {
     #[cfg(feature = "wayland_frontend")]
     pub compositor_state: CompositorClientState,
     data_map: UserDataMap,
+    pid: u32,
     child: Mutex<Option<Child>>,
 }
 
@@ -387,6 +389,16 @@ impl ClientData for XWaylandClientData {
 }
 
 impl XWaylandClientData {
+    /// The process spawned for this XWayland connection.
+    ///
+    /// The socket pair is created by the compositor before spawning, so its
+    /// peer credentials identify the compositor rather than the X server.
+    /// Global filters can inspect this PID without locking the display or
+    /// the child-process mutex.
+    pub fn process_id(&self) -> u32 {
+        self.pid
+    }
+
     /// Access user_data map for a xwayland client
     pub fn user_data(&self) -> &UserDataMap {
         &self.data_map

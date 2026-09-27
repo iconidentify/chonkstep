@@ -16,6 +16,18 @@ Provenance:
   source changes are listed below. Preserve upstream attribution and compare
   against the archive when updating; do not reformat the dependency.
 
+## Local patch: expose the spawned XWayland process ID
+
+`src/xwayland/xserver.rs` retains `Child::id()` in `XWaylandClientData` and
+exposes it through `process_id()`. The compositor creates the Wayland socket
+pair before spawning XWayland, so socket peer credentials identify the
+compositor. ChonkStep's Mesa filter needs the actual child process to inspect
+its driver mappings and environment. Reading the immutable PID takes neither
+the Wayland display lock nor the child-process mutex. The existing Mesa checks
+still apply; XWayland receives no blanket exemption.
+
+Remove this patch when the adopted Smithay API exposes the spawned process ID.
+
 ## Local patch: retain the serial that authorized a client drag
 
 `src/wayland/selection/data_device/mod.rs` and `device.rs`:
@@ -108,6 +120,34 @@ winit, keyboard input, Wayland keyboard and XWM). Make the existing SHM SIGBUS
 handler's function-to-integer cast explicit through `*const ()`, as required
 by current compiler guidance. These are mechanical, behavior-preserving
 changes; they do not disable lints or change the signal handler.
+
+## Local patch: retry LINEAR dmabuf images with an explicit modifier
+
+`src/backend/egl/display.rs`, `EGLDisplay::create_image_from_dmabuf`:
+
+`Dmabuf::has_modifier()` counts `LINEAR` as implicit, so 0.7 creates every
+LINEAR EGLImage without `EGL_DMA_BUF_PLANE*_MODIFIER_*` attributes. That is an
+implicit-modifier import. Drivers without implicit-modifier support refuse it:
+zink on Honeykrisp (Apple M3) logs `driver can't handle INVALID<->LINEAR` and
+the call fails with `EGLImageCreationFailed`. Every LINEAR client buffer, and
+MultiRenderer's shared LINEAR framebuffer for DMA copies, was therefore
+rejected.
+
+The original attribute list stays the first attempt. The patch adds one step:
+if that attempt fails for a `LINEAR` buffer and the display supports
+`EGL_EXT_image_dma_buf_import_modifiers`, it retries with `LINEAR` spelled out.
+Images that succeeded before are created exactly as before, and nothing
+changes for other modifiers or for displays without the modifiers extension.
+The public API is unchanged. On drivers that refuse the first attempt, Mesa
+may log that attempt's error once per imported LINEAR buffer.
+
+Evidence: `multi_gpu::tests::a_render_node_composes_into_a_display_only_kms_target`
+(renderD128 zink → card0 llvmpipe, 3456×2160 and a partial update, XRGB8888 and
+ARGB8888) reported `dma_copies=0, cpu_copies=4` per format before the patch
+(Smithay fell back to CPU copies after the failed bind). It reports
+`dma_copies=4, cpu_copies=0` after, with identical pixels. Remove this patch
+once an adopted upstream release imports explicit LINEAR buffers on such
+drivers.
 
 ## Local patch: legacy keyboard keymap termination
 

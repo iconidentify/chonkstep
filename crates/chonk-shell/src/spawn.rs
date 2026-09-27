@@ -17,9 +17,13 @@ pub fn spawn_detached(program: &str, args: &[&str]) -> Option<u32> {
 /// socket (`docs/control-socket.md` §1.1) under.
 pub const CONTROL_SOCKET_ENV: &str = "CHONKSTEP_CONTROL_SOCKET";
 
-const INTERNAL_ENV: [&str; 22] = [
+const INTERNAL_ENV: [&str; 24] = [
     "CHONKSTEP_BACKEND",
     "CHONKSTEP_DAMAGE_LOG",
+    // Session graphics controls, like CHONKSTEP_DRM_DEVICE: a child that
+    // exported its environment into the systemd user manager would
+    // otherwise hand a GPU selection to the next, ordinary login.
+    "CHONKSTEP_DMABUF_REQUIRE_MESA",
     "CHONKSTEP_DRM_DEVICE",
     "CHONKSTEP_FOCUS_FOLLOWS_MOUSE",
     "CHONKSTEP_FULL_DAMAGE",
@@ -28,6 +32,7 @@ const INTERNAL_ENV: [&str; 22] = [
     "CHONKSTEP_NO_CURSOR_PLANE",
     "CHONKSTEP_NO_DIRECT_SCANOUT",
     "CHONKSTEP_OWNS_XCURSOR_SIZE",
+    "CHONKSTEP_RENDER_DEVICE",
     "CHONKSTEP_SESSION_BIN",
     "CHONKSTEP_SESSION_CONTINUES",
     "CHONKSTEP_SESSION_TESTING",
