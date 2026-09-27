@@ -1523,6 +1523,7 @@ pub(crate) fn init(
     // the conditions its `new` documents.
     let mut renderer = unsafe { GlesRenderer::new(egl_context) }
         .map_err(|error| format!("GLES renderer init failed on {}: {error}", device_path.display()))?;
+    configure_shm_uploads(&mut renderer);
     let mut render_node = renderer_render_node(&mut renderer, drm.device_fd());
     match render_node {
         Some(node) => tracing::info!(render_node = %node, "session backend: renderer device identified"),
@@ -1919,6 +1920,28 @@ struct M3ShadowProof {
 fn m3_shadow_renderer(name: &str, primary_driver: &str, has_render_node: bool) -> bool {
     has_render_node && matches!(primary_driver, "apple" | "m3-dcp") &&
         name.starts_with("zink ") && name.contains("Apple M3") && name.contains("MESA_HONEYKRISP")
+}
+
+fn configure_shm_uploads(renderer: &mut GlesRenderer) {
+    let name = renderer.with_context(|gl| {
+        // SAFETY: the renderer made its own context current; copy the static
+        // GL string before leaving this closure, checking for null first.
+        let raw = unsafe { gl.GetString(smithay::backend::renderer::gles::ffi::RENDERER) };
+        if raw.is_null() { String::new() } else {
+            // SAFETY: a non-null GL_RENDERER is a context-owned C string.
+            unsafe { std::ffi::CStr::from_ptr(raw.cast()) }.to_string_lossy().into_owned()
+        }
+    }).unwrap_or_default();
+    let enabled = shm_upload_staging_configured(&name, std::env::var_os("CHONKSTEP_SHM_UPLOAD_STAGING"));
+    let enabled = renderer.set_shm_upload_staging(enabled);
+    tracing::info!(enabled, "large SHM upload staging (CHONKSTEP_SHM_UPLOAD_STAGING overrides)");
+}
+
+fn shm_upload_staging_configured(renderer: &str, override_value: Option<std::ffi::OsString>) -> bool {
+    override_value.map_or_else(
+        || renderer.starts_with("zink ") && renderer.contains("Apple M3") && renderer.contains("MESA_HONEYKRISP"),
+        |value| value != "0",
+    )
 }
 
 fn m3_proof_identity_matches(proof: &M3ShadowProof, boot_id: &str, renderer: &str, driver_path: &str) -> bool {
@@ -4520,6 +4543,18 @@ fn connector_name(connector: &connector::Info) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shm_staging_defaults_to_measured_m3_renderer_and_honors_overrides() {
+        use super::shm_upload_staging_configured as configured;
+        let m3 = "zink Vulkan 1.4(Apple M3 Pro (G15S B1) (MESA_HONEYKRISP))";
+        assert!(configured(m3, None));
+        assert!(!configured(m3, Some("0".into())));
+        for other in ["llvmpipe", "AMD Radeon", "zink Vulkan (Intel)", "Apple M3"] {
+            assert!(!configured(other, None));
+            assert!(configured(other, Some("1".into())));
+        }
+    }
+
     #[test]
     fn m3_shadow_proof_file_is_bounded_private_regular_json() {
         use std::os::unix::fs::{PermissionsExt, symlink};

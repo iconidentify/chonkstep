@@ -419,3 +419,27 @@ The old capability check makes `needs_sync()` force a wait on the compositor's
 input thread. Live diagnostics recorded external CPU-fence waits up to 523 ms.
 See [kernel sync-file documentation](https://cdn.kernel.org/doc/html/latest/driver-api/sync_file.html).
 Remove this patch when the adopted Smithay version makes the same distinction.
+
+## Local patch: optional staging for large SHM uploads
+
+`src/backend/renderer/gles/{mod.rs,shm_upload.rs}` adds
+`GlesRenderer::set_shm_upload_staging`. GLES 3 can upload a large, dense damaged
+rectangle through a pixel unpack buffer. Each update re-specifies its storage,
+so queued GPU reads retain their original contents. The source is copied while
+the SHM guard is held, bounds and padded strides are checked, and the unpack
+buffer is unbound before the existing direct path can run. Small/sparse updates,
+GLES 2, first texture allocation and allocation failure retain direct uploads.
+Texture synchronization and client-buffer release rules are unchanged.
+
+ChonkStep enables this only for the measured Zink/Apple M3/Honeykrisp renderer;
+`CHONKSTEP_SHM_UPLOAD_STAGING=0` disables it. The generic renderer defaults off.
+A local profile attributed 89% of sampled CPU time to SHM TexSubImage2D host
+copies on the compositor thread. A standalone M3 upload test reduced 3452x2104
+submission from 8.2 to 3.7 ms, with full pixel comparison; this is not an
+end-to-end Discord latency measurement. The ignored GLES test exercises the
+actual staging helper with queued updates to two textures, padding, offsets,
+fallback and preserved undamaged pixels. Remove this patch when an adopted
+Smithay version supplies equivalent upload staging.
+
+The [GLES 3 specification](https://registry.khronos.org/OpenGL/specs/es/3.0/es_spec_3.0.withchanges.pdf)
+defines buffer-backed texture uploads and storage lifetime.

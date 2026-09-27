@@ -47,6 +47,15 @@ allows the M3 external shadow driver to wait in its commit worker instead of
 blocking the compositor's input thread. Unexportable fences still require the
 CPU fallback; buffer ownership and completed-swap checks are unchanged.
 
+On Zink/Apple M3/Honeykrisp, large shared-memory window updates use a GLES 3
+pixel unpack buffer before texture upload. This moves costly image tiling off
+the compositor's input thread; it still copies client pixels into staging
+memory. Small or sparse damage keeps the direct path. Storage is re-specified
+for each queued upload, preserving previous GPU reads, and existing texture
+fences still order writes against sampling. `CHONKSTEP_SHM_UPLOAD_STAGING=0`
+restores direct uploads; `1` opts other renderers into the path for testing.
+The default on other renderers and GLES 2 is unchanged.
+
 Successful DMA-BUF imports record the renderer's node when the buffer has no
 node hint. Without this, Smithay rejects client buffers before attempting plane
 export, even when scanout is enabled. This records a demonstrated import path;
