@@ -1135,8 +1135,11 @@ impl FrameClock {
         self.last_late_presentation = None;
     }
 
-    fn note_vblank(&mut self, at: Instant) {
-        self.last_vblank = Some(at);
+    /// Predict refresh deadlines only from a real scanout timestamp. A
+    /// software completion can include GPU work, copying and a backend-owned
+    /// swap wait; treating receipt as vblank adds another pacing delay.
+    fn note_completion(&mut self, vblank: Option<Instant>) {
+        self.last_vblank = vblank;
         self.deadline = None;
         self.target_vblank = None;
     }
@@ -2071,13 +2074,15 @@ fn register_drm_notifier(
                     };
                     let completed_frame = {
                         let output = &mut session.outputs[output_index];
-                        let vblank_at = match metadata.filter(|_| device == 0).map(|meta| meta.time) {
-                            Some(DrmEventTime::Monotonic(time)) => drm_monotonic_instant(time),
-                            _ => Instant::now(),
+                        let hardware_vblank = match metadata.filter(|_| device == 0).map(|meta| meta.time) {
+                            Some(DrmEventTime::Monotonic(time)) => Some(drm_monotonic_instant(time)),
+                            _ => None,
                         };
-                        // Shadow KMS completion reports CPU-copy completion, not
-                        // a physical vblank. Keep synthetic pacing, no HW claims.
-                        output.frame_clock.note_vblank(vblank_at);
+                        // The shadow driver already waits for its copy/swap to
+                        // finish. Start the next dirty frame when it completes;
+                        // receipt time cannot predict the physical refresh.
+                        output.frame_clock.note_completion(hardware_vblank);
+                        let vblank_at = hardware_vblank.unwrap_or_else(Instant::now);
                         let pending = output.frame_pending.take();
                         let completed_frame = pending.is_some();
                         let monotonic_metadata = metadata.filter(|_| device == 0).and_then(|meta| match meta.time {
@@ -5183,7 +5188,7 @@ mod tests {
         let vblank = Instant::now();
         let now = vblank + Duration::from_millis(1);
         let mut clock = FrameClock::for_period(period);
-        clock.note_vblank(vblank);
+        clock.note_completion(Some(vblank));
         let deadline = clock.arm(now);
         assert!(deadline > now);
         assert!(deadline < vblank + period);
@@ -5191,11 +5196,33 @@ mod tests {
     }
 
     #[test]
+    fn software_completions_do_not_add_a_second_refresh_wait() {
+        let period = Duration::from_millis(16);
+        let mut now = Instant::now();
+        let mut clock = FrameClock::for_period(period);
+        // Even an old hardware cadence or armed deadline must be forgotten
+        // when the completion has no trustworthy scanout timestamp.
+        clock.note_completion(Some(now));
+        assert!(clock.arm(now + Duration::from_millis(1)) > now);
+        for _ in 0..32 {
+            now += period;
+            clock.note_completion(None);
+            assert_eq!(clock.arm(now), now);
+            assert!(clock.target_vblank.is_none());
+            clock.observe_render(Duration::from_millis(2), now + Duration::from_millis(2));
+        }
+        // A real timestamp restores deadline prediction normally.
+        clock.note_completion(Some(now));
+        assert!(clock.arm(now + Duration::from_millis(1)) > now);
+        assert!(clock.target_vblank.is_some());
+    }
+
+    #[test]
     fn pausing_disarms_the_deadline_and_forgets_the_old_cadence() {
         let period = Duration::from_millis(16);
         let vblank = Instant::now();
         let mut clock = FrameClock::for_period(period);
-        clock.note_vblank(vblank);
+        clock.note_completion(Some(vblank));
         assert!(clock.arm(vblank + Duration::from_millis(1)) > vblank);
 
         clock.disarm();
@@ -5222,7 +5249,7 @@ mod tests {
         let period = Duration::from_nanos(6_944_444);
         let start = Instant::now();
         let mut clock = FrameClock::for_period(period);
-        clock.note_vblank(start);
+        clock.note_completion(Some(start));
         let deadline = clock.arm(start + Duration::from_micros(100));
         let queued_target = clock.target_vblank;
         clock.observe_render(Duration::from_micros(100), deadline + Duration::from_micros(100));
