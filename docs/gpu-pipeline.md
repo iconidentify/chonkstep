@@ -75,6 +75,14 @@ before gradual decay. GPU timer queries are not required. This covers GPU work
 that continues after an on-time CPU submission; idle frames and failed queue
 attempts cannot create fictitious misses.
 
+Refresh prediction requires a monotonic hardware scanout timestamp. The M3
+shadow display reports a software completion after its copy and synchronized
+swap; ChonkStep starts the next dirty frame immediately after that completion
+instead of predicting another refresh from event receipt. The single pending
+flip gate and the driver's synchronized swap still pace presentation and
+protect buffer ownership. This avoids an extra compositor delay without
+claiming a hardware timestamp for the shadow display.
+
 The scanout experiments remain opt-in until physical outputs have been qualified:
 
 | Environment variable | Live Hyprland-compatible IPC control |
