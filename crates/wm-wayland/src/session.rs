@@ -1932,7 +1932,7 @@ fn m3_proof_identity_matches(proof: &M3ShadowProof, boot_id: &str, renderer: &st
 fn m3_proof_layout_valid(proof: &M3ShadowProof) -> bool {
     proof.width == 3840 && proof.height == 2160 &&
         proof.format == Fourcc::Xrgb8888 as u32 && proof.modifier == 0 &&
-        proof.stride >= proof.width * 4 && proof.stride % 4 == 0 &&
+        proof.stride >= proof.width * 4 && proof.stride.is_multiple_of(4) &&
         u64::from(proof.stride) * u64::from(proof.height) <= 64 * 1024 * 1024
 }
 
@@ -1996,6 +1996,8 @@ fn adopt_secondary_device(
         // driver's static NUL-terminated string after checking for null.
         let name = unsafe { gl.GetString(smithay::backend::renderer::gles::ffi::RENDERER) };
         if name.is_null() { String::new() } else {
+            // SAFETY: the current GL context returned a non-null, NUL-terminated
+            // renderer string; it remains valid while copied inside this closure.
             unsafe { std::ffi::CStr::from_ptr(name.cast()) }.to_string_lossy().into_owned()
         }
     }).map_err(|error| format!("primary renderer identity: {error}"))?;
