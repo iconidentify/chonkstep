@@ -135,7 +135,7 @@ use std::{
 
 use drm::{
     control::{connector, crtc, framebuffer, plane, Device as _, Mode, PlaneType},
-    Device, DriverCapability,
+    Device,
 };
 use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
 use indexmap::{IndexMap, IndexSet};
@@ -1200,17 +1200,11 @@ where
 
         let cursor_size = Size::from((cursor_size.w as i32, cursor_size.h as i32));
         let damage_tracker = OutputDamageTracker::from_mode_source(output_mode_source.clone());
+        // IN_FENCE_FD consumes a sync_file exported by the renderer. It does
+        // not require syncobj handles on this KMS device: display-only drivers
+        // can accept an in-fence without providing DRM_CAP_SYNCOBJ. Requiring
+        // that unrelated capability forces the compositor to wait on the CPU.
         let supports_fencing = !surface.is_legacy()
-            && surface
-                .get_driver_capability(DriverCapability::SyncObj)
-                .map(|val| val != 0)
-                .map_err(|err| {
-                    FrameError::DrmError(DrmError::Access(AccessError {
-                        errmsg: "Failed to query driver capability",
-                        dev: surface.dev_path(),
-                        source: err,
-                    }))
-                })?
             && plane_has_property(&*surface, surface.plane(), "IN_FENCE_FD")?
             && !(is_nvidia && nvidia_drm_version().unwrap_or((0, 0, 0)) < (560, 35, 3));
 
@@ -1383,17 +1377,11 @@ where
 
         let cursor_size = Size::from((cursor_size.w as i32, cursor_size.h as i32));
         let damage_tracker = OutputDamageTracker::from_mode_source(output_mode_source.clone());
+        // IN_FENCE_FD consumes a sync_file exported by the renderer. It does
+        // not require syncobj handles on this KMS device: display-only drivers
+        // can accept an in-fence without providing DRM_CAP_SYNCOBJ. Requiring
+        // that unrelated capability forces the compositor to wait on the CPU.
         let supports_fencing = !surface.is_legacy()
-            && surface
-                .get_driver_capability(DriverCapability::SyncObj)
-                .map(|val| val != 0)
-                .map_err(|err| {
-                    FrameError::DrmError(DrmError::Access(AccessError {
-                        errmsg: "Failed to query driver capability",
-                        dev: surface.dev_path(),
-                        source: err,
-                    }))
-                })?
             && plane_has_property(&*surface, surface.plane(), "IN_FENCE_FD")?
             && !(is_nvidia && nvidia_drm_version().unwrap_or((0, 0, 0)) < (560, 35, 3));
 

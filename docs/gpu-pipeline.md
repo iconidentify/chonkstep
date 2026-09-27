@@ -40,6 +40,13 @@ On the native backend the GPU timestamp span surrounds `DrmCompositor` and can
 include CPU submission gaps during plane preparation. It is elapsed GPU-clock
 time across that span, not a hardware busy-time or shader-only measurement.
 
+Atomic KMS fence support is determined by the primary plane's `IN_FENCE_FD`
+property, retaining the existing NVIDIA version exclusion. A display-only card
+need not expose `DRM_CAP_SYNCOBJ` to consume an exported render fence. This
+allows the M3 external shadow driver to wait in its commit worker instead of
+blocking the compositor's input thread. Unexportable fences still require the
+CPU fallback; buffer ownership and completed-swap checks are unchanged.
+
 Successful DMA-BUF imports record the renderer's node when the buffer has no
 node hint. Without this, Smithay rejects client buffers before attempting plane
 export, even when scanout is enabled. This records a demonstrated import path;
