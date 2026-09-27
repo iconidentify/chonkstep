@@ -402,3 +402,20 @@ KMS device and is exercised by the hardware check recorded on the issue that
 introduced it (docked suspend/resume on DisplayPort). Remove this patch once an
 adopted upstream release exposes an equivalent connector-property seam or a
 forced-modeset request on `DrmCompositor`.
+
+## Local patch: use KMS in-fences without requiring syncobj handles
+
+`src/backend/drm/compositor/mod.rs`, both constructors:
+
+Detect explicit KMS fencing from atomic mode setting and the primary plane's
+`IN_FENCE_FD` property. Do not require `DRM_CAP_SYNCOBJ`: this path passes an
+exported `sync_file` to KMS, without creating/importing a syncobj on the target
+card. The separate render device supplies the fence. Keep the existing NVIDIA
+version exclusion and the CPU-wait fallback for unexportable render fences.
+
+The M3 external shadow card reports SYNCOBJ=0 and IN_FENCE_FD present; its
+atomic helper waits on that fence in the commit worker before CPU copying.
+The old capability check makes `needs_sync()` force a wait on the compositor's
+input thread. Live diagnostics recorded external CPU-fence waits up to 523 ms.
+See [kernel sync-file documentation](https://cdn.kernel.org/doc/html/latest/driver-api/sync_file.html).
+Remove this patch when the adopted Smithay version makes the same distinction.
