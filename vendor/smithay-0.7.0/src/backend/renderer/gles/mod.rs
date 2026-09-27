@@ -24,6 +24,7 @@ mod error;
 pub mod format;
 mod shaders;
 mod texture;
+mod shm_upload;
 #[cfg(test)]
 mod read_batch_tests;
 mod uniform;
@@ -304,6 +305,8 @@ pub struct GlesRenderer {
     buffers: Vec<GlesBuffer>,
     dmabuf_cache: HashMap<WeakDmabuf, GlesTexture>,
     vbos: [ffi::types::GLuint; 2],
+    shm_upload_staging: bool,
+    shm_upload_buffer: ffi::types::GLuint,
     vertices: Vec<f32>,
     non_opaque_damage: Vec<Rectangle<i32, Physical>>,
     opaque_damage: Vec<Rectangle<i32, Physical>>,
@@ -650,6 +653,8 @@ impl GlesRenderer {
             tex_program,
             solid_program,
             vbos,
+            shm_upload_staging: false,
+            shm_upload_buffer: 0,
             min_filter: TextureFilter::Linear,
             max_filter: TextureFilter::Linear,
 
@@ -669,6 +674,17 @@ impl GlesRenderer {
         };
         renderer.egl.unbind()?;
         Ok(renderer)
+    }
+
+    /// Stage large, dense partial SHM uploads through a pixel unpack buffer.
+    ///
+    /// This can avoid expensive synchronous host-to-tiled-image copies on
+    /// drivers such as Zink/Honeykrisp. Disabled by default; returns false
+    /// when GLES 3 pixel unpack buffers are unavailable. Small or sparse
+    /// updates retain the direct upload path. No client memory is retained.
+    pub fn set_shm_upload_staging(&mut self, enabled: bool) -> bool {
+        self.shm_upload_staging = enabled && self.gl_version >= version::GLES_3_0;
+        self.shm_upload_staging
     }
 
     fn bind_texture<'a>(&mut self, texture: &'a GlesTexture) -> Result<GlesTarget<'a>, GlesError> {
@@ -901,6 +917,14 @@ impl ImportMemWl for GlesRenderer {
                 } else {
                     for region in damage.iter() {
                         trace!("Uploading partial shm texture");
+                        if self.shm_upload_staging && shm_upload::stage_subimage(
+                            &self.gl, &mut self.shm_upload_buffer,
+                            ptr.add(offset as usize), len - offset as usize,
+                            width, height, stride, pixelsize, region,
+                            read_format, type_,
+                        ) {
+                            continue;
+                        }
                         self.gl.PixelStorei(ffi::UNPACK_SKIP_PIXELS, region.loc.x);
                         self.gl.PixelStorei(ffi::UNPACK_SKIP_ROWS, region.loc.y);
                         self.gl.TexSubImage2D(
@@ -1790,6 +1814,7 @@ impl Drop for GlesRenderer {
                 self.gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
                 self.gl.DeleteProgram(self.solid_program.program);
                 self.gl.DeleteBuffers(self.vbos.len() as i32, self.vbos.as_ptr());
+                self.gl.DeleteBuffers(1, &self.shm_upload_buffer);
 
                 if self.extensions.iter().any(|ext| ext == "GL_KHR_debug") {
                     self.gl.Disable(ffi::DEBUG_OUTPUT);
