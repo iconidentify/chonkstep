@@ -1899,6 +1899,14 @@ pub struct ClientState {
     pub security_context: std::sync::Mutex<
         Option<smithay::wayland::security_context::SecurityContext>,
     >,
+    /// The peer's process id, recorded right after the connection is
+    /// admitted (`client_mesa::record_peer`). Global filters read it
+    /// from here because they run while the display holds its own lock:
+    /// asking the display for the peer credentials from inside a filter
+    /// takes that lock again and deadlocks the compositor on the first
+    /// `wl_registry` of the first client. Unset for in-process
+    /// connections, which then see no filtered global that needs it.
+    pub peer_pid: std::sync::OnceLock<i32>,
 }
 
 impl ClientState {
@@ -4945,8 +4953,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let socket_name = listening_socket.socket_name().to_os_string();
     loop_handle
         .insert_source(listening_socket, |client_stream, _, comp| {
-            if let Err(error) = comp.display_handle.insert_client(client_stream, Arc::new(ClientState::default())) {
-                tracing::warn!(?error, "failed to admit a wayland client");
+            match comp.display_handle.insert_client(client_stream, Arc::new(ClientState::default())) {
+                Ok(client) => crate::client_mesa::record_peer(&client, &comp.display_handle),
+                Err(error) => tracing::warn!(?error, "failed to admit a wayland client"),
             }
         })
         .map_err(|error| format!("failed to register the wayland socket source: {error}"))?;
@@ -4960,8 +4969,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         Ok(socket) => {
             loop_handle.insert_source(socket, |stream, _, comp| {
                 let data = ClientState { capture_overlays: true, ..ClientState::default() };
-                if let Err(error) = comp.display_handle.insert_client(stream, Arc::new(data)) {
-                    tracing::warn!(?error, "failed to admit a demo capture client");
+                match comp.display_handle.insert_client(stream, Arc::new(data)) {
+                    Ok(client) => crate::client_mesa::record_peer(&client, &comp.display_handle),
+                    Err(error) => tracing::warn!(?error, "failed to admit a demo capture client"),
                 }
             }).map_err(|error| format!("failed to register the demo capture socket: {error}"))?;
         }

@@ -5,6 +5,23 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Xwayland inherits the session graphics stack and can use GPU OpenGL with
+  a GLX-enabled private M3 Mesa prefix. Its process passes the same opt-in
+  Mesa guard as native clients.
+- `CHONKSTEP_RENDER_DEVICE` composes into a display-only KMS device such as
+  simpledrm, which has no render node. Its software renderer receives the
+  finished frames, and no client buffers go to its planes.
+- Import LINEAR dma-bufs on drivers that refuse implicit modifiers (zink on
+  Honeykrisp). This fixes the fallback to CPU copies.
+- Add the opt-in `CHONKSTEP_DMABUF_REQUIRE_MESA` guard, which offers
+  linux-dmabuf only to clients running one Mesa build.
+- Add an experimental Apple M3 GPU session
+  (`scripts/wayland-session-m3gpu.sh`, `scripts/install-m3gpu-session.sh`).
+- The Apple M3 session drives the native display card (DCP) when it exists:
+  Mesa's kmsro renders with zink on the M3 directly into the display's scanout
+  buffers, on the single-GPU path with no copy. The simpledrm cross-GPU mode
+  is unchanged. A hardware test covers a kmsro-paired display controller.
+
 ## [0.7.0] - 2026-09-18
 
 - Restore the NeXTSTEP dock as `chonk-dock`, a standalone application in the

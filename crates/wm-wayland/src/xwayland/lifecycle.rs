@@ -4,6 +4,7 @@
 //! X server may restart once; the budget is consumed before spawn, never reset
 //! by readiness, so repeated failures cannot spin an unbounded supervisor.
 
+use std::ffi::OsString;
 use std::process::Stdio;
 
 use smithay::reexports::calloop::LoopHandle;
@@ -40,6 +41,23 @@ impl Default for State {
     }
 }
 
+/// Smithay clears the child environment. Keep the graphics stack and explicit
+/// software/glamor policy selected for this session; do not pass unrelated
+/// application credentials or compositor control variables to the X server.
+fn graphics_environment() -> Vec<(OsString, OsString)> {
+    const NAMES: &[&str] = &[
+        "LD_LIBRARY_PATH", "LIBGL_DRIVERS_PATH", "GBM_BACKENDS_PATH",
+        "__EGL_VENDOR_LIBRARY_FILENAMES", "__EGL_VENDOR_LIBRARY_DIRS",
+        "__GLX_VENDOR_LIBRARY_NAME", "VK_DRIVER_FILES", "VK_ICD_FILENAMES",
+        "VK_ADD_DRIVER_FILES", "VK_LOADER_LAYERS_DISABLE", "DRIRC_CONFIGDIR",
+        "ASAHI_M3_EXPERIMENTAL", "AGX_MESA_DEBUG", "HK_DEBUG_LOG",
+        "MESA_LOADER_DRIVER_OVERRIDE", "GALLIUM_DRIVER", "LIBGL_ALWAYS_SOFTWARE",
+        "GBM_ALWAYS_SOFTWARE", "LIBGL_DRI3_DISABLE", "XWAYLAND_NO_GLAMOR",
+    ];
+    NAMES.iter().filter_map(|name| std::env::var_os(name)
+        .map(|value| (OsString::from(name), value))).collect()
+}
+
 pub(crate) fn register_source(
     display_handle: &DisplayHandle,
     loop_handle: &LoopHandle<'static, Compositor>,
@@ -47,7 +65,7 @@ pub(crate) fn register_source(
     let (xwayland, xwayland_client) = match XWayland::spawn(
         display_handle,
         None,
-        std::iter::empty::<(String, String)>(),
+        graphics_environment(),
         true,
         Stdio::null(),
         Stdio::null(),
