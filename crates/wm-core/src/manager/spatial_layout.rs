@@ -350,6 +350,7 @@ impl<B: Backend> WindowManager<B> {
         if !self.clients.contains_key(id) { return false; }
         self.cancel_client_layout_interaction(id);
         if self.monitors_ref().get(index).is_none() { return false; }
+        self.release_evacuated_home(id);
         if self.separate_spaces() && self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::FULLSCREEN)) { self.unfullscreen(id); }
         if self.separate_spaces() { self.translate_space_move(id, self.regular_workspace_on_output(index)); }
         self.move_family_to_display(id, index);

@@ -5,6 +5,10 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Desktop mode restores a window's monitor, position and size when a
+  display that was briefly unplugged comes back. A move, resize, maximize
+  or fullscreen while it is gone is kept. Spaces mode already restored
+  these windows.
 - Xwayland inherits the session graphics stack and can use GPU OpenGL with
   a GLX-enabled private M3 Mesa prefix. Its process passes the same opt-in
   Mesa guard as native clients.
