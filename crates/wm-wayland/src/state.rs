@@ -4550,6 +4550,10 @@ impl Compositor {
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
         }
+        // Mapping/raising a focused window can replace the surface beneath
+        // a stationary pointer. Deliver its enter before waiting for physical
+        // motion so clients can set their cursor and activate pointer locks.
+        crate::input::sync_pointer_focus(self);
     }
 }
 

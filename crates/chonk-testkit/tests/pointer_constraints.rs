@@ -108,6 +108,35 @@ fn assert_at(event: Input, x: f64, y: f64) {
     );
 }
 
+#[test]
+#[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
+fn a_window_mapping_under_a_stationary_pointer_receives_enter() {
+    for scale in [1.0, 2.0] {
+        let mut session = Session::boot(
+            &format!("pointer-map-enter-{scale}"),
+            SessionOptions {
+                scale: Some(scale),
+                config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\nomarchy_menu = false\nhyprland_config = false\nplacement = \"center\"\n".into(),
+                ..Default::default()
+            },
+        ).unwrap();
+        let world = session.world().unwrap();
+        let (x, y) = (f64::from(world.output_w) / 2.0, f64::from(world.output_h) / 2.0);
+        session.door().motion(x, y).unwrap();
+        session.door().barrier().unwrap();
+        let binary = profile_binary(PROBE).unwrap();
+        session.launch_isolated(binary.to_str().unwrap(), &[&scale.to_string(), "lock-full"]).unwrap();
+        let window = session.wait_for_window("input-probe").unwrap();
+        assert!(x > f64::from(window.x) && x < f64::from(window.x) + f64::from(window.w));
+        assert!(y > f64::from(window.y) && y < f64::from(window.y) + f64::from(window.h));
+        // No click or motion after mapping. SDL needs this enter before it
+        // can hide the cursor and activate a fullscreen game's pointer lock.
+        wait_line(&session, "entered root", 1);
+        fence_key(&mut session, 59);
+        wait_line(&session, "constraint locked", 1);
+    }
+}
+
 fn region_activation(scale: f32, confined: bool) {
     let mode = if confined {
         "confine-region"

@@ -106,6 +106,7 @@ pub fn framebuffer_from_wayland_buffer<A: AsFd + 'static>(
                 bo: &bo,
                 offsets: None,
                 pitches: None,
+                modifier: None,
             },
             use_opaque,
             true,
@@ -169,6 +170,13 @@ pub fn framebuffer_from_dmabuf<A: AsFd + 'static>(
             bo: &bo,
             offsets: Some(offsets),
             pitches: Some(pitches),
+            // The single-fd GBM import path also handles explicit LINEAR
+            // dma-bufs, but marks the resulting GbmBuffer as implicit. Keep
+            // the client's known layout for ADDFB2 and format comparisons,
+            // just as we already retain its offsets and strides. Never infer
+            // a layout for an implicit client buffer.
+            modifier: (dmabuf.format().modifier != DrmModifier::Invalid)
+                .then_some(dmabuf.format().modifier),
         },
         use_opaque,
         allow_legacy,
@@ -194,6 +202,7 @@ pub fn framebuffer_from_bo(
             bo,
             offsets: None,
             pitches: None,
+            modifier: None,
         },
         use_opaque,
         true,
@@ -209,6 +218,7 @@ struct BufferObjectInternal<'a> {
     bo: &'a GbmBuffer,
     pitches: Option<[u32; 4]>,
     offsets: Option<[u32; 4]>,
+    modifier: Option<DrmModifier>,
 }
 
 impl std::ops::Deref for BufferObjectInternal<'_> {
@@ -233,7 +243,7 @@ impl PlanarBuffer for BufferObjectInternal<'_> {
 
     #[inline]
     fn modifier(&self) -> Option<DrmModifier> {
-        PlanarBuffer::modifier(self.bo)
+        self.modifier.or_else(|| PlanarBuffer::modifier(self.bo))
     }
 
     #[inline]

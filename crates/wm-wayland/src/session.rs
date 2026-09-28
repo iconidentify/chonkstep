@@ -60,7 +60,9 @@ use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::input::InputEvent;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Format, Fourcc, Modifier};
-use smithay::backend::drm::compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement};
+use smithay::backend::drm::compositor::{
+    primary_scanout_format_compatible, DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement,
+};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{
     DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmError, DrmEvent, DrmEventTime, DrmNode, NodeType,
@@ -1376,9 +1378,18 @@ impl SessionGraphics {
         if flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY) {
             formats.extend(output.primary_formats.indexset().iter().copied());
         } else if flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT) {
-            formats.extend(output.drm_compositor.modifiers().iter().map(|modifier| Format {
-                code: output.drm_compositor.format(), modifier: *modifier,
-            }));
+            // Advertise exactly the same conservative formats the assignment
+            // path accepts, including an opaque equivalent only when the plane
+            // actually supports it. Otherwise clients can keep reallocating a
+            // valid XRGB buffer which an ARGB swapchain then rejects forever.
+            formats.extend(output.primary_formats.indexset().iter().filter(|candidate| {
+                output.drm_compositor.modifiers().iter().any(|modifier| {
+                    primary_scanout_format_compatible(
+                        Format { code: output.drm_compositor.format(), modifier: *modifier },
+                        **candidate,
+                    )
+                })
+            }).copied());
         }
         if flags.contains(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT) {
             formats.extend(output.overlay_formats.indexset().iter().copied());
@@ -4549,6 +4560,21 @@ fn connector_name(connector: &connector::Info) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn conservative_primary_accepts_only_exact_or_opaque_equivalent_layout() {
+        use smithay::backend::allocator::{Format, Fourcc, Modifier};
+        use smithay::backend::drm::compositor::primary_scanout_format_compatible;
+        let argb = Format { code: Fourcc::Argb8888, modifier: Modifier::Linear };
+        let xrgb = Format { code: Fourcc::Xrgb8888, ..argb };
+        assert!(primary_scanout_format_compatible(argb, argb));
+        assert!(primary_scanout_format_compatible(argb, xrgb));
+        assert!(!primary_scanout_format_compatible(xrgb, argb));
+        assert!(!primary_scanout_format_compatible(argb, Format { modifier: Modifier::Invalid, ..xrgb }));
+        for code in [Fourcc::Xbgr8888, Fourcc::Rgb565, Fourcc::Xrgb2101010] {
+            assert!(!primary_scanout_format_compatible(argb, Format { code, ..argb }));
+        }
+    }
+
+    #[test]
     fn shm_staging_defaults_to_measured_m3_renderer_and_honors_overrides() {
         use super::shm_upload_staging_configured as configured;
         let m3 = "zink Vulkan 1.4(Apple M3 Pro (G15S B1) (MESA_HONEYKRISP))";
@@ -4880,6 +4906,16 @@ mod tests {
         // the dma-buf the swapchain exports and the one the KMS device
         // exports for the framebuffer's GEM handle are the same file.
         let mut dma = buffer.export().unwrap();
+        // A client can submit an explicitly linear buffer through GBM's
+        // single-fd import API. Its KMS framebuffer must retain that modifier,
+        // including when the alpha channel is discarded for opaque scanout.
+        let client_fb = smithay::backend::drm::gbm::framebuffer_from_dmabuf(
+            &fd, &gbm, &dma, true, false,
+        ).unwrap();
+        let client_format = smithay::backend::drm::Framebuffer::format(&client_fb);
+        let swapchain_format = smithay::backend::allocator::Buffer::format(&buffer);
+        assert_eq!(client_format.modifier, Modifier::Linear);
+        assert!(primary_scanout_format_compatible(swapchain_format, client_format));
         let kms_dmabuf = fd.buffer_to_prime_fd(buffer.handle(), 0).unwrap();
         let inode = |fd: std::os::fd::BorrowedFd<'_>| std::fs::File::from(fd.try_clone_to_owned().unwrap()).metadata().unwrap().ino();
         assert_eq!(
