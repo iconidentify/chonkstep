@@ -27,12 +27,27 @@ at demo startup produced 52.6 FPS under the same format override, without
 globally hiding the cursor. These single profiled diagnostic runs establish
 the path's potential; they are not measurements of this new compositor.
 
-The narrow format change passes the session unit tests, including rejected
-alpha/layout/modifier substitutions, strict release Clippy, release build, and
-eight fullscreen integration tests under a private headless Weston/pixman host.
-Native activation and before/after qualification of this exact candidate are
-pending. The 60 FPS goal is not yet met. External-display testing is deferred
-until the owner is docked; these measurements describe only the internal panel.
+The first native candidate (`03ff5e1`) did not engage scanout. A live
+argument trace showed AR24/LINEAR versus XR24/Invalid: the client's explicit
+LINEAR layout was lost in the single-fd GBM import path. The corrected exporter
+preserves the original DMA-BUF modifier for ADDFB2 and format comparison;
+it does not infer LINEAR for implicit buffers or relax the modifier check.
+A hardware regression test fails on the first candidate and passes with this
+fix, including all 7,720,704 scanout-memory reference pixels.
+
+A newly mapped window also received no pointer enter until the first physical
+motion. Reconcile pointer focus after window focus is applied so games can
+hide their cursor and activate pointer locks under a stationary pointer.
+The new nested enter/lock test fails on the first candidate and passes at
+scales1 and2 with the correction. All14 pointer-constraint and8 fullscreen
+integration tests pass, along with the41 session tests, strict release Clippy
+and release build. The corrected native compositor still needs activation.
+
+On performance1 with AC charging, ordinary composition and a pointer already
+inside the game, compute16 measured48.8/49.1/49.3FPS; the return-to-compute1
+check measured47.9/47.7. These runs do not measure this corrected compositor.
+The60FPS goal remains open. External-display qualification is deferred until
+the owner is docked.
 
 ## Qualification
 

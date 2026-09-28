@@ -4906,6 +4906,16 @@ mod tests {
         // the dma-buf the swapchain exports and the one the KMS device
         // exports for the framebuffer's GEM handle are the same file.
         let mut dma = buffer.export().unwrap();
+        // A client can submit an explicitly linear buffer through GBM's
+        // single-fd import API. Its KMS framebuffer must retain that modifier,
+        // including when the alpha channel is discarded for opaque scanout.
+        let client_fb = smithay::backend::drm::gbm::framebuffer_from_dmabuf(
+            &fd, &gbm, &dma, true, false,
+        ).unwrap();
+        let client_format = smithay::backend::drm::Framebuffer::format(&client_fb);
+        let swapchain_format = smithay::backend::allocator::Buffer::format(&buffer);
+        assert_eq!(client_format.modifier, Modifier::Linear);
+        assert!(primary_scanout_format_compatible(swapchain_format, client_format));
         let kms_dmabuf = fd.buffer_to_prime_fd(buffer.handle(), 0).unwrap();
         let inode = |fd: std::os::fd::BorrowedFd<'_>| std::fs::File::from(fd.try_clone_to_owned().unwrap()).metadata().unwrap().ino();
         assert_eq!(
