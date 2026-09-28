@@ -4557,9 +4557,11 @@ impl Compositor {
             keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
         }
         // Mapping/raising a focused window can replace the surface beneath
-        // a stationary pointer. Deliver its enter before waiting for physical
-        // motion so clients can set their cursor and activate pointer locks.
-        crate::input::sync_pointer_focus(self);
+        // a stationary pointer. Enter that surface before waiting for
+        // physical motion so clients can set their cursor and activate
+        // pointer locks. The window already under the pointer is left
+        // alone: resending its position becomes the first motion of a drag.
+        crate::input::enter_replaced_pointer_target(self);
     }
 }
 

@@ -496,6 +496,18 @@ pub(crate) fn reset_client_input_focus(state: &mut Compositor) {
 /// return only a lock surface or the root; while unlocked it returns
 /// the ordinary scene beneath the saved pointer location.
 pub(crate) fn sync_pointer_focus(state: &mut Compositor) {
+    reconcile_pointer_focus(state, true);
+}
+
+/// Enters whatever surface a map or raise just placed under a stationary
+/// pointer. Reapplying keyboard focus to the window already under the
+/// pointer must not invent a motion: the next `wl_pointer.motion` a
+/// held button sees is the first move of that drag.
+pub(crate) fn enter_replaced_pointer_target(state: &mut Compositor) {
+    reconcile_pointer_focus(state, false);
+}
+
+fn reconcile_pointer_focus(state: &mut Compositor, refresh_same_surface: bool) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
@@ -516,9 +528,11 @@ pub(crate) fn sync_pointer_focus(state: &mut Compositor) {
         let position = state.pointer_location;
         let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
         focus = client_focus(&hit_at(state.wm.backend(), at, position));
-    } else if constraints::is_locked(state) {
+    } else if constraints::is_locked(state) || !refresh_same_surface {
         // Scene/configuration reconciliation is not physical motion. The
-        // protocol forbids absolute motion while this lock remains active.
+        // protocol forbids absolute motion while a lock remains active,
+        // and a keyboard-focus pass must not resend the position a drag
+        // is about to leave.
         return;
     }
     let position = state.pointer_location;
