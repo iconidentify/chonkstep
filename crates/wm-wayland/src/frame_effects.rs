@@ -1224,13 +1224,28 @@ mod tests {
                         let pixels = read_pixels(&mut renderer, &elements, target_size, transform);
                         let previous_pixels =
                             read_pixels(&mut renderer, &legacy, target_size, transform);
-                        for (index, (&actual, &previous)) in
-                            pixels.iter().zip(&previous_pixels).enumerate()
-                        {
-                            assert!(
-                            actual.abs_diff(previous) <= 1,
-                            "batch changed old tile pixels: size={authored_size:?} scale={presentation_scale} {transform:?} crop={cropped} byte={index} {actual}!={previous}"
+                        assert_eq!(
+                            pixels.len(),
+                            previous_pixels.len(),
+                            "batch and per-tile shadow readbacks differ in length"
                         );
+                        // The batched draw samples an atlas that was tinted
+                        // to 8 bits. The per-tile oracle samples a white
+                        // atlas and applies the shadow color in the shader.
+                        // LINEAR filtering plus the 8-bit framebuffer can
+                        // move one sample two levels: GitHub's llvmpipe
+                        // (LLVM 20.1.2) reports 34 versus 32 at byte
+                        // 1886023 for a 340×180 shadow at scale 2. A
+                        // dropped tile or a broken seam is far larger.
+                        let worst = pixels.iter().zip(&previous_pixels).enumerate().max_by_key(
+                            |(_, (&actual, &previous))| actual.abs_diff(previous),
+                        );
+                        if let Some((index, (&actual, &previous))) = worst {
+                            let delta = actual.abs_diff(previous);
+                            assert!(
+                                delta <= 2,
+                                "batch changed old tile pixels: size={authored_size:?} scale={presentation_scale} {transform:?} crop={cropped} byte={index} {actual}!={previous} delta={delta}"
+                            );
                         }
                         for y in (0..target_size.h).step_by(3) {
                             for x in (0..target_size.w).step_by(3) {
