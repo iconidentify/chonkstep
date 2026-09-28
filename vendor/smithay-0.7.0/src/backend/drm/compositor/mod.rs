@@ -154,7 +154,7 @@ use crate::{
             dmabuf::{AsDmabuf, Dmabuf},
             format::{get_opaque, has_alpha},
             gbm::{GbmAllocator, GbmBuffer, GbmBufferFlags, GbmDevice},
-            Allocator, Buffer, Slot, Swapchain,
+            Allocator, Buffer, Format, Slot, Swapchain,
         },
         drm::{plane_has_property, DrmError, PlaneDamageClips},
         renderer::{
@@ -2991,7 +2991,10 @@ where
             .buffer
         {
             if !frame_flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY)
-                && slot.format() != element_config.properties.format
+                && !primary_scanout_format_compatible(
+                    slot.format(),
+                    element_config.properties.format,
+                )
             {
                 trace!(
                     "failed to assign element {:?} to primary {:?}, format doesn't match",
@@ -4463,4 +4466,16 @@ fn drm_compositor_is_send() {
 
     is_send::<DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>>(
     );
+}
+
+/// Formats accepted by the conservative primary-plane policy.
+///
+/// An opaque equivalent has identical color bits and memory layout; accepting
+/// XRGB for an ARGB swapchain does not require the arbitrary-format experiment.
+/// The modifier must still match. Plane capability checks, framebuffer import,
+/// scene eligibility and the atomic test remain responsible for scanout safety.
+pub fn primary_scanout_format_compatible(swapchain: Format, candidate: Format) -> bool {
+    swapchain == candidate
+        || (swapchain.modifier == candidate.modifier
+            && get_opaque(swapchain.code) == Some(candidate.code))
 }

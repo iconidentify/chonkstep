@@ -60,7 +60,9 @@ use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::input::InputEvent;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Format, Fourcc, Modifier};
-use smithay::backend::drm::compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement};
+use smithay::backend::drm::compositor::{
+    primary_scanout_format_compatible, DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement,
+};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{
     DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmError, DrmEvent, DrmEventTime, DrmNode, NodeType,
@@ -1376,9 +1378,18 @@ impl SessionGraphics {
         if flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY) {
             formats.extend(output.primary_formats.indexset().iter().copied());
         } else if flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT) {
-            formats.extend(output.drm_compositor.modifiers().iter().map(|modifier| Format {
-                code: output.drm_compositor.format(), modifier: *modifier,
-            }));
+            // Advertise exactly the same conservative formats the assignment
+            // path accepts, including an opaque equivalent only when the plane
+            // actually supports it. Otherwise clients can keep reallocating a
+            // valid XRGB buffer which an ARGB swapchain then rejects forever.
+            formats.extend(output.primary_formats.indexset().iter().filter(|candidate| {
+                output.drm_compositor.modifiers().iter().any(|modifier| {
+                    primary_scanout_format_compatible(
+                        Format { code: output.drm_compositor.format(), modifier: *modifier },
+                        **candidate,
+                    )
+                })
+            }).copied());
         }
         if flags.contains(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT) {
             formats.extend(output.overlay_formats.indexset().iter().copied());
@@ -4548,6 +4559,21 @@ fn connector_name(connector: &connector::Info) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conservative_primary_accepts_only_exact_or_opaque_equivalent_layout() {
+        use smithay::backend::allocator::{Format, Fourcc, Modifier};
+        use smithay::backend::drm::compositor::primary_scanout_format_compatible;
+        let argb = Format { code: Fourcc::Argb8888, modifier: Modifier::Linear };
+        let xrgb = Format { code: Fourcc::Xrgb8888, ..argb };
+        assert!(primary_scanout_format_compatible(argb, argb));
+        assert!(primary_scanout_format_compatible(argb, xrgb));
+        assert!(!primary_scanout_format_compatible(xrgb, argb));
+        assert!(!primary_scanout_format_compatible(argb, Format { modifier: Modifier::Invalid, ..xrgb }));
+        for code in [Fourcc::Xbgr8888, Fourcc::Rgb565, Fourcc::Xrgb2101010] {
+            assert!(!primary_scanout_format_compatible(argb, Format { code, ..argb }));
+        }
+    }
+
     #[test]
     fn shm_staging_defaults_to_measured_m3_renderer_and_honors_overrides() {
         use super::shm_upload_staging_configured as configured;
