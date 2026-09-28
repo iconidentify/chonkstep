@@ -117,6 +117,18 @@ struct ActiveResize {
     start_pointer: Option<Point>,
 }
 
+/// A freeform window's content rectangle on a display that was unplugged.
+/// Recorded once, before evacuation overwrites it. Consumed when that
+/// display returns, or when the user places the window while it is gone.
+struct EvacuatedHome {
+    name: String,
+    identity: Option<String>,
+    /// The departed monitor's rectangle, so a display that comes back at
+    /// a new origin still receives the window at the same relative place.
+    bounds: Rect,
+    geometry: Rect,
+}
+
 /// A titlebar button currently held down (pressed but not yet
 /// released) — the standard "arm on press, commit on release-while-
 /// still-over, cancel on release-elsewhere" interaction every button in
@@ -222,6 +234,9 @@ pub struct WindowManager<B: Backend> {
     /// is worse than the bug it fixes.
     drag_grab: Option<DragHandle>,
     active_resize: Option<ActiveResize>,
+    /// Content geometry at the start of the current move or resize.
+    /// A click that never moves the window is not a placement.
+    drag_started_geometry: Option<Rect>,
     active_button_press: Option<ActiveButtonPress>,
     /// The most recent press on a titlebar drag region, for double-click
     /// detection — a second press on the *same* client's titlebar within
@@ -366,6 +381,9 @@ pub struct WindowManager<B: Backend> {
     /// back to the *maximized* rect, and reusing maximize's slot would
     /// either clobber its own pre-maximize snapshot or restore too far.
     fullscreen_restore: HashMap<ClientId, Rect>,
+    /// Freeform windows evacuated off an unplugged display, keyed by
+    /// client. Absent in Spaces mode, which has its own home geometry.
+    evacuated_homes: HashMap<ClientId, EvacuatedHome>,
     /// Geometry snapshots keep the title metrics they were captured under.
     /// A later restyle may require rescuing their restored title, while a
     /// same-chrome restore preserves deliberate overlap exactly.
@@ -429,6 +447,7 @@ impl<B: Backend> WindowManager<B> {
             active_move: None,
             drag_grab: None,
             active_resize: None,
+            drag_started_geometry: None,
             active_button_press: None,
             last_titlebar_press: None,
             workareas: Vec::new(),
@@ -465,6 +484,7 @@ impl<B: Backend> WindowManager<B> {
             managed_order: Vec::new(),
             focus_history: Vec::new(),
             fullscreen_restore: HashMap::new(),
+            evacuated_homes: HashMap::new(),
             restore_title_metrics: HashMap::new(),
             pending_decorations: HashSet::new(),
             motion: crate::MotionPolicy::default(),
@@ -867,15 +887,34 @@ impl<B: Backend> WindowManager<B> {
     /// departed rect; keeping the policy here makes X11 and Wayland
     /// geometry obey the same rules if the X backend grows RandR
     /// hotplug later.
+    ///
+    /// Callers that can name the departed display should use
+    /// [`Self::rescue_departed_output`] so a later reconnect can put
+    /// freeform windows back. This entry point still evacuates, and it
+    /// does not record a home.
     pub fn rescue_clients_from_removed_monitor(&mut self, departed: Rect) {
+        self.rescue_departed_output(departed, "", None);
+    }
+
+    /// Evacuates windows off one departed display and, for a freeform
+    /// window whose center was on it, remembers that display and the
+    /// rectangle from before the move. The rectangle is recorded once:
+    /// a later clamp, or a second topology change while the display is
+    /// still gone, must not replace it. [`Self::restore_evacuated_clients`]
+    /// puts it back when the display returns.
+    ///
+    /// `identity` is the stable EDID description when the backend has
+    /// one. A unique identity matches even if the connector name
+    /// changed. With no identity, or with a duplicated one, the
+    /// connector `name` is the match.
+    pub fn rescue_departed_output(&mut self, departed: Rect, name: &str, identity: Option<&str>) {
         self.prune_special_shown();
         if self.separate_spaces() { self.reconcile_display_spaces(); return; }
-        self.end_active_drag();
         let monitors = self.backend.monitors();
         if monitors.is_empty() {
             return;
         }
-        let affected: Vec<ClientId> = self
+        let affected: Vec<(ClientId, bool)> = self
             .clients
             .iter()
             .filter_map(|(id, client)| {
@@ -891,11 +930,21 @@ impl<B: Backend> WindowManager<B> {
                         && frame.pos.y < other.pos.y.saturating_add(other.size.h as i32)
                         && other.pos.y < frame.pos.y.saturating_add(frame.size.h as i32)
                 });
-                (departed.contains(center) || !visible_somewhere).then_some(id)
+                let on_departed = departed.contains(center);
+                (on_departed || !visible_somewhere).then_some((id, on_departed))
             })
             .collect();
+        // Snapshot before ending a drag or reflowing. Both of those clamp
+        // the live rectangle against the smaller desktop, and that clamp
+        // must not become the rectangle we return to.
+        for &(id, on_departed) in &affected {
+            if on_departed {
+                self.remember_evacuated_home(id, name, identity, departed);
+            }
+        }
+        self.end_active_drag();
 
-        for id in affected {
+        for (id, _) in affected {
             if self.clients.get(id).is_some_and(|client| client.flags.contains(ClientFlags::FULLSCREEN)) {
                 self.unfullscreen(id);
             }
@@ -925,6 +974,93 @@ impl<B: Backend> WindowManager<B> {
             tracing::info!(?id, ?departed, ?target, "rescued window from a removed monitor");
         }
         self.reflow_layouts();
+    }
+
+    /// Puts evacuated freeform windows back on a display that has
+    /// returned. A unique EDID matches across a connector rename.
+    /// Otherwise the connector name has to match. A display that comes
+    /// back at a different origin keeps the window's place relative to
+    /// that origin; a smaller display clamps the rectangle so it fits,
+    /// and either way the saved home is then forgotten.
+    pub fn restore_evacuated_clients(&mut self) {
+        if self.separate_spaces() || self.evacuated_homes.is_empty() {
+            return;
+        }
+        let monitors = self.backend.monitors();
+        let pending: Vec<ClientId> = self.evacuated_homes.keys().copied().collect();
+        for id in pending {
+            if !self.clients.contains_key(id) {
+                self.evacuated_homes.remove(&id);
+                continue;
+            }
+            let Some(target) = self.evacuated_homes.get(&id).and_then(|home| returning_monitor(&monitors, home)).map(|monitor| monitor.geometry) else {
+                continue;
+            };
+            let Some(home) = self.evacuated_homes.remove(&id) else { continue };
+            let geometry = Self::place_evacuated_geometry(home.geometry, home.bounds, target);
+            tracing::info!(?id, ?geometry, "restored window to a returned monitor");
+            self.apply_evacuated_geometry(id, geometry);
+        }
+    }
+
+    /// Freeform windows, including ones floated out of a tiled layout,
+    /// keep a rectangle of their own. Tiled windows already remember an
+    /// output key and are placed by the layout solver.
+    fn keeps_evacuation_home(&self, id: ClientId) -> bool {
+        let Some(client) = self.clients.get(id) else { return false };
+        self.client_layout_mode(client) == crate::LayoutMode::Freeform || client.placement.floating
+    }
+
+    fn remember_evacuated_home(&mut self, id: ClientId, name: &str, identity: Option<&str>, bounds: Rect) {
+        let identity = identity.filter(|value| !value.is_empty());
+        if name.is_empty() && identity.is_none() {
+            return;
+        }
+        if !self.keeps_evacuation_home(id) {
+            return;
+        }
+        let Some(geometry) = self.clients.get(id).map(|client| client.geometry) else { return };
+        self.evacuated_homes.entry(id).or_insert(EvacuatedHome {
+            name: name.to_string(),
+            identity: identity.map(str::to_string),
+            bounds,
+            geometry,
+        });
+    }
+
+    /// The user placed this window while its display was gone. The
+    /// saved rectangle must not undo that.
+    fn release_evacuated_home(&mut self, id: ClientId) {
+        self.evacuated_homes.remove(&id);
+    }
+
+    fn remember_drag_start(&mut self, id: ClientId) {
+        self.drag_started_geometry = self.clients.get(id).map(|client| client.geometry);
+    }
+
+    fn apply_evacuated_geometry(&mut self, id: ClientId, geometry: Rect) {
+        let Some(client) = self.clients.get_mut(id) else { return };
+        if client.geometry == geometry {
+            return;
+        }
+        client.geometry = geometry;
+        self.bump_protocol_state_revision();
+        self.reflow_frame(id);
+    }
+
+    /// Translate `saved` from the departed monitor onto `target`.
+    /// Same-sized displays keep the exact rectangle. A different size
+    /// clamps it onto the monitor that actually came back.
+    fn place_evacuated_geometry(saved: Rect, from: Rect, target: Rect) -> Rect {
+        let mut rect = saved;
+        rect.pos.x = rect.pos.x.saturating_sub(from.pos.x).saturating_add(target.pos.x);
+        rect.pos.y = rect.pos.y.saturating_sub(from.pos.y).saturating_add(target.pos.y);
+        if from.size != target.size {
+            rect.size.w = rect.size.w.min(target.size.w).max(1);
+            rect.size.h = rect.size.h.min(target.size.h).max(1);
+            rect.pos = placement::clamp_to(target, rect.size, rect.pos);
+        }
+        rect
     }
 
     /// That monitor's workarea: the shell-reserved area if one was set
@@ -1130,11 +1266,13 @@ impl<B: Backend> WindowManager<B> {
             - i32::try_from(frame_size.w).unwrap_or(i32::MAX)) / 2;
         let frame_y = area.pos.y + (i32::try_from(area.size.h).unwrap_or(i32::MAX)
             - i32::try_from(frame_size.h).unwrap_or(i32::MAX)) / 2;
-        let Some(client) = self.clients.get_mut(id) else { return false };
         let position = Point::new(frame_x + offset.x, frame_y + offset.y);
-        if client.geometry.pos == position {
+        let unchanged = self.clients.get(id).is_some_and(|client| client.geometry.pos == position);
+        if unchanged {
             return true;
         }
+        self.release_evacuated_home(id);
+        let Some(client) = self.clients.get_mut(id) else { return false };
         client.geometry.pos = position;
         self.bump_protocol_state_revision();
         self.reflow_frame(id);
@@ -2368,6 +2506,7 @@ impl<B: Backend> WindowManager<B> {
     /// far as layout/repaint are concerned.
     pub fn resize_client_content(&mut self, id: ClientId, size: Size) {
         if self.is_layout_managed(id) {
+            self.release_evacuated_home(id);
             let current = self.clients[id].geometry.size;
             self.resize_layout_window(
                 id,
@@ -2378,12 +2517,14 @@ impl<B: Backend> WindowManager<B> {
             );
             return;
         }
+        let unchanged = self.clients.get(id).is_none_or(|client| client.geometry.size == size);
+        if unchanged {
+            return;
+        }
+        self.release_evacuated_home(id);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
-        if client.geometry.size == size {
-            return;
-        }
         client.geometry.size = size;
         self.bump_protocol_state_revision();
         self.reflow_frame(id);
@@ -2402,15 +2543,18 @@ impl<B: Backend> WindowManager<B> {
     /// stale-id path here.
     pub fn set_client_content_geometry(&mut self, id: ClientId, geometry: Rect) {
         if self.is_layout_managed(id) {
+            self.release_evacuated_home(id);
             self.resize_client_content(id, geometry.size);
             return;
         }
+        let unchanged = self.clients.get(id).is_none_or(|client| client.geometry == geometry);
+        if unchanged {
+            return;
+        }
+        self.release_evacuated_home(id);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
-        if client.geometry == geometry {
-            return;
-        }
         client.geometry = geometry;
         self.bump_protocol_state_revision();
         self.reflow_frame(id);
@@ -2459,6 +2603,7 @@ impl<B: Backend> WindowManager<B> {
         }
         self.forget_special_member(id);
         self.fullscreen_restore.remove(&id);
+        self.evacuated_homes.remove(&id);
         self.restore_title_metrics.remove(&(id, RestoreKind::Maximized));
         self.restore_title_metrics.remove(&(id, RestoreKind::Fullscreen));
         if let Some(state) = self.display_spaces.as_mut() { state.home_geometry.remove(&id); }
@@ -2922,6 +3067,7 @@ impl<B: Backend> WindowManager<B> {
                     // it back to a corner the user last saw minutes ago.
                     self.break_maximize(id);
                     self.active_move = Some(ActiveMove { client: id, grab_offset: local });
+                    self.remember_drag_start(id);
                     self.begin_drag_grab();
                 }
             }
@@ -2942,6 +3088,7 @@ impl<B: Backend> WindowManager<B> {
                 let start_pointer = (client.layout.input_margin > 0).then(|| Point::new(
                     start_frame.pos.x + local.x, start_frame.pos.y + local.y));
                 self.active_resize = Some(ActiveResize { client: id, edge, start_frame, start_pointer });
+                self.remember_drag_start(id);
                 self.begin_drag_grab();
             }
             _ => {}
@@ -3499,6 +3646,7 @@ impl<B: Backend> WindowManager<B> {
     /// in either axis) so `unmaximize` can restore it. No titlebar button
     /// triggers this — see `MaximizeDirections`'s doc comment.
     pub fn maximize(&mut self, id: ClientId, directions: MaximizeDirections) {
+        self.release_evacuated_home(id);
         self.cancel_client_layout_interaction(id);
         self.fit_maximized(id, directions);
         self.reflow_client_workspace(id);
@@ -3823,12 +3971,13 @@ impl<B: Backend> WindowManager<B> {
     /// already fullscreen.
     pub fn fullscreen(&mut self, id: ClientId) {
         self.cancel_client_layout_interaction(id);
+        if !self.clients.get(id).is_some_and(|client| !client.flags.contains(ClientFlags::FULLSCREEN)) {
+            return;
+        }
+        self.release_evacuated_home(id);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
-        if client.flags.contains(ClientFlags::FULLSCREEN) {
-            return;
-        }
         // A shaded window unshades on the way in, exactly as
         // `handle_activate_request` does and for the same reason: the
         // state being entered has no titlebar to roll up into, so the
@@ -5050,6 +5199,7 @@ impl<B: Backend> WindowManager<B> {
         );
         self.active_move =
             Some(ActiveMove { client: id, grab_offset: Point::new(pointer.x - origin.x, pointer.y - origin.y) });
+        self.remember_drag_start(id);
         // The grab is what makes this kind of drag finishable at all:
         // the client asked for it precisely because the pointer is over
         // its own chrome, so without one every later motion and the
@@ -5089,6 +5239,7 @@ impl<B: Backend> WindowManager<B> {
                 self.break_maximize(id);
                 self.active_move =
                     Some(ActiveMove { client: id, grab_offset: Point::new(local.x + offset.x, local.y + offset.y) });
+                self.remember_drag_start(id);
                 self.begin_drag_grab();
                 tracing::debug!(?id, "modifier-drag move begun");
             }
@@ -5101,6 +5252,7 @@ impl<B: Backend> WindowManager<B> {
                 );
                 self.active_resize =
                     Some(ActiveResize { client: id, edge, start_frame: Rect { pos: frame_pos, size: frame_size }, start_pointer: None });
+                self.remember_drag_start(id);
                 self.begin_drag_grab();
                 tracing::debug!(?id, ?edge, "modifier-drag resize begun");
             }
@@ -5176,9 +5328,18 @@ impl<B: Backend> WindowManager<B> {
     /// that "the drag is over" and "the pointer is free" cannot come
     /// apart. Safe to call when nothing is dragging.
     fn commit_active_drag(&mut self) {
+        let placed = self.active_move.as_ref().map(|drag| drag.client)
+            .or_else(|| self.active_resize.as_ref().map(|drag| drag.client));
+        let started = self.drag_started_geometry;
         self.layout_resize_snapshot = None;
         self.commit_layout_drop();
         self.end_active_drag();
+        if let Some(id) = placed {
+            let moved = self.clients.get(id).map(|client| client.geometry) != started;
+            if moved {
+                self.release_evacuated_home(id);
+            }
+        }
     }
 
     fn end_active_drag(&mut self) {
@@ -5187,6 +5348,7 @@ impl<B: Backend> WindowManager<B> {
         let client = self.interactive_drag_client();
         self.active_move = None;
         self.active_resize = None;
+        self.drag_started_geometry = None;
         if let Some(snapshot) = self.layout_resize_snapshot.take() {
             for (id, weight, width) in snapshot.placements {
                 if let Some(c) = self.clients.get_mut(id) {
@@ -5242,6 +5404,7 @@ impl<B: Backend> WindowManager<B> {
             size: client.layout.frame_size,
         };
         self.active_resize = Some(ActiveResize { client: id, edge, start_frame, start_pointer: Some(pointer) });
+        self.remember_drag_start(id);
         // Without the grab this resize could start but never end — the
         // client asked precisely because the pointer is over its own
         // chrome, where neither the motion nor the release reach us.
@@ -5471,6 +5634,23 @@ fn squared_distance_to(rect: Rect, point: Point) -> u128 {
     let dx = (rect.pos.x as i64 - point.x as i64).max(point.x as i64 - last_x).max(0);
     let dy = (rect.pos.y as i64 - point.y as i64).max(point.y as i64 - last_y).max(0);
     (dx as u128) * (dx as u128) + (dy as u128) * (dy as u128)
+}
+
+/// The connected monitor an evacuated window should return to.
+/// A unique EDID wins over the connector name, so a dock that comes
+/// back as a different port still matches. Duplicate EDIDs fall
+/// through to the name, and a name that matches nothing is left alone.
+fn returning_monitor<'a>(monitors: &'a [MonitorInfo], home: &EvacuatedHome) -> Option<&'a MonitorInfo> {
+    if let Some(identity) = home.identity.as_deref() {
+        let matched: Vec<_> = monitors.iter().filter(|monitor| monitor.identity.as_deref() == Some(identity)).collect();
+        if matched.len() == 1 {
+            return Some(matched[0]);
+        }
+    }
+    if home.name.is_empty() {
+        return None;
+    }
+    monitors.iter().find(|monitor| monitor.name == home.name)
 }
 
 /// The root-coordinate rectangle of a managed client's outer frame.
@@ -10956,6 +11136,245 @@ mod tests {
             frame.pos.x + frame.size.w as i32 / 2,
             frame.pos.y + frame.size.h as i32 / 2,
         )));
+    }
+
+    fn head(geometry: Rect, name: &str, identity: Option<&str>) -> MonitorInfo {
+        MonitorInfo {
+            geometry,
+            name: name.to_string(),
+            identity: identity.map(str::to_string),
+            primary: geometry.pos.x == 0 && geometry.pos.y == 0,
+        }
+    }
+
+    fn map_freeform(wm: &mut WindowManager<FakeBackend>, pos: Point, size: Size) -> ClientId {
+        let window = wm.backend_mut().create_window();
+        wm.backend_mut().set_geometry(window, Rect { pos, size });
+        wm.dispatch(BackendEvent::MapRequest(window));
+        wm.client_for_window(window).unwrap()
+    }
+
+    fn depart(wm: &mut WindowManager<FakeBackend>, departed: Rect, name: &str, identity: Option<&str>, remaining: Vec<MonitorInfo>) {
+        wm.backend_mut().set_monitors(remaining);
+        wm.rescue_departed_output(departed, name, identity);
+    }
+
+    #[test]
+    fn reconnecting_a_monitor_restores_the_evacuated_rectangle() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let left = map_freeform(&mut wm, Point::new(40, 100), Size::new(180, 100));
+        let right = map_freeform(&mut wm, Point::new(900, 120), Size::new(500, 450));
+        let left_at = wm.client(left).unwrap().geometry;
+        let right_at = wm.client(right).unwrap().geometry;
+
+        depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        assert_eq!(wm.client(left).unwrap().geometry, left_at, "a window on the surviving monitor stays put");
+        assert_ne!(wm.client(right).unwrap().geometry.pos, right_at.pos, "the right window has to leave with its monitor");
+        assert_eq!(wm.evacuated_homes.get(&right).map(|home| home.geometry), Some(right_at));
+        assert!(!wm.evacuated_homes.contains_key(&left));
+
+        wm.backend_mut().set_monitors(dual_monitors());
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(left).unwrap().geometry, left_at);
+        assert_eq!(wm.client(right).unwrap().geometry, right_at);
+        assert!(wm.evacuated_homes.is_empty());
+    }
+
+    #[test]
+    fn a_second_evacuation_keeps_the_original_rectangle() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let right = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        let original = wm.client(right).unwrap().geometry;
+        depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        let tiny = Rect { pos: Point::new(0, 0), size: Size::new(100, 80) };
+        depart(&mut wm, LEFT_HEAD, "left", None, vec![head(tiny, "left", None)]);
+        assert_eq!(wm.evacuated_homes.get(&right).map(|home| home.geometry), Some(original));
+        wm.backend_mut().set_monitors(dual_monitors());
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(right).unwrap().geometry, original);
+    }
+
+    #[test]
+    fn the_same_display_identity_restores_under_a_new_connector_name() {
+        let mut backend = FakeBackend::new();
+        let right = head(RIGHT_HEAD, "USB-2", Some("Sony SDM"));
+        backend.set_monitors(vec![head(LEFT_HEAD, "eDP-1", None), right]);
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        let original = wm.client(id).unwrap().geometry;
+        depart(&mut wm, RIGHT_HEAD, "USB-2", Some("Sony SDM"), vec![head(LEFT_HEAD, "eDP-1", None)]);
+        wm.backend_mut().set_monitors(vec![head(LEFT_HEAD, "eDP-1", None), head(RIGHT_HEAD, "USB-3", Some("Sony SDM"))]);
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(id).unwrap().geometry, original);
+        assert!(wm.evacuated_homes.is_empty());
+    }
+
+    #[test]
+    fn a_different_display_does_not_take_the_evacuated_window() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(vec![head(LEFT_HEAD, "eDP-1", None), head(RIGHT_HEAD, "USB-2", Some("Sony SDM"))]);
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        depart(&mut wm, RIGHT_HEAD, "USB-2", Some("Sony SDM"), vec![head(LEFT_HEAD, "eDP-1", None)]);
+        let parked = wm.client(id).unwrap().geometry;
+        wm.backend_mut().set_monitors(vec![head(LEFT_HEAD, "eDP-1", None), head(RIGHT_HEAD, "USB-3", Some("Other panel"))]);
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(id).unwrap().geometry, parked);
+        assert!(wm.evacuated_homes.contains_key(&id));
+    }
+
+    #[test]
+    fn an_explicit_move_while_the_display_is_gone_wins() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        let placed = Rect { pos: Point::new(30, 40), size: Size::new(200, 150) };
+        wm.set_client_content_geometry(id, placed);
+        wm.backend_mut().set_monitors(dual_monitors());
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(id).unwrap().geometry, placed);
+        assert!(wm.evacuated_homes.is_empty());
+    }
+
+    #[test]
+    fn a_titlebar_click_while_the_display_is_gone_does_not_forget_the_home() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        let original = wm.client(id).unwrap().geometry;
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        wm.dispatch(titlebar_press(frame, Point::new(30, 2), 0, Modifiers::empty()));
+        wm.dispatch(frame_release(frame, Point::new(30, 2)));
+        wm.backend_mut().set_monitors(dual_monitors());
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(id).unwrap().geometry, original);
+    }
+
+    #[test]
+    fn dragging_while_the_display_is_gone_keeps_the_new_position() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        let original = wm.client(id).unwrap().geometry;
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        wm.dispatch(titlebar_press(frame, Point::new(30, 2), 0, Modifiers::empty()));
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(80, 80), surface_local: None });
+        wm.dispatch(frame_release(frame, Point::new(80, 80)));
+        let placed = wm.client(id).unwrap().geometry;
+        assert_ne!(placed, original);
+        wm.backend_mut().set_monitors(dual_monitors());
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(id).unwrap().geometry, placed);
+    }
+
+    #[test]
+    fn maximizing_while_the_display_is_gone_keeps_the_window_there() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        wm.maximize(id, MaximizeDirections::FULL);
+        let maximized = wm.client(id).unwrap().geometry;
+        wm.backend_mut().set_monitors(dual_monitors());
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(id).unwrap().geometry, maximized);
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
+        assert!(LEFT_HEAD.contains(Point::new(
+            maximized.pos.x + maximized.size.w as i32 / 2,
+            maximized.pos.y + maximized.size.h as i32 / 2,
+        )));
+    }
+
+    #[test]
+    fn a_client_configure_while_the_display_is_gone_does_not_discard_the_home() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        let original = wm.client(id).unwrap().geometry;
+        let window = wm.client(id).unwrap().window;
+        depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        wm.dispatch(BackendEvent::ConfigureRequest {
+            window,
+            requested: Rect { pos: Point::new(0, 0), size: Size::new(100, 80) },
+        });
+        wm.backend_mut().set_monitors(dual_monitors());
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(id).unwrap().geometry, original);
+    }
+
+    #[test]
+    fn closing_an_evacuated_window_drops_its_return_record() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        let window = wm.client(id).unwrap().window;
+        let left = map_freeform(&mut wm, Point::new(40, 100), Size::new(180, 100));
+        let left_at = wm.client(left).unwrap().geometry;
+        depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        wm.dispatch(BackendEvent::Destroyed(window));
+        assert!(!wm.evacuated_homes.contains_key(&id));
+        wm.backend_mut().set_monitors(dual_monitors());
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(left).unwrap().geometry, left_at);
+    }
+
+    #[test]
+    fn a_shifted_or_smaller_return_places_the_window_on_that_monitor() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        let original = wm.client(id).unwrap().geometry;
+        depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        let shifted = Rect { pos: Point::new(1000, 40), size: RIGHT_HEAD.size };
+        wm.backend_mut().set_monitors(vec![head(LEFT_HEAD, "left", None), head(shifted, "right", None)]);
+        wm.restore_evacuated_clients();
+        assert_eq!(
+            wm.client(id).unwrap().geometry.pos,
+            Point::new(original.pos.x + 200, original.pos.y + 40)
+        );
+        assert_eq!(wm.client(id).unwrap().geometry.size, original.size);
+
+        depart(&mut wm, shifted, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+        let smaller = Rect { pos: Point::new(800, 0), size: Size::new(200, 150) };
+        wm.backend_mut().set_monitors(vec![head(LEFT_HEAD, "left", None), head(smaller, "right", None)]);
+        wm.restore_evacuated_clients();
+        let restored = wm.client(id).unwrap().geometry;
+        assert!(smaller.contains(restored.pos));
+        assert!(restored.size.w <= smaller.size.w && restored.size.h <= smaller.size.h);
+        assert!(wm.evacuated_homes.is_empty(), "a returned display consumes the saved rectangle");
+        wm.backend_mut().set_monitors(dual_monitors());
+        wm.restore_evacuated_clients();
+        assert_eq!(wm.client(id).unwrap().geometry, restored);
+    }
+
+    #[test]
+    fn a_repeated_unplug_cycle_restores_each_time() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+        let id = map_freeform(&mut wm, Point::new(900, 120), Size::new(240, 180));
+        let original = wm.client(id).unwrap().geometry;
+        for _ in 0..2 {
+            depart(&mut wm, RIGHT_HEAD, "right", None, vec![head(LEFT_HEAD, "left", None)]);
+            assert_ne!(wm.client(id).unwrap().geometry.pos, original.pos);
+            wm.backend_mut().set_monitors(dual_monitors());
+            wm.restore_evacuated_clients();
+            assert_eq!(wm.client(id).unwrap().geometry, original);
+        }
     }
 
     #[test]

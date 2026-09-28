@@ -537,6 +537,9 @@ impl<B: Backend> WindowManager<B> {
         if !self.spaces_mode() || !self.interaction.separate_spaces {
             return;
         }
+        // Spaces keeps its own per-display home. A desktop evacuation
+        // record must not fire after the session changes mode.
+        self.evacuated_homes.clear();
         self.end_active_drag();
         let monitors = self.monitors();
         if monitors.is_empty() {

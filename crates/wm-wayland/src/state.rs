@@ -2958,9 +2958,12 @@ fn apply_output_change(
         if index >= comp.outputs.len() {
             continue;
         }
+        let geometry = Rect::new(comp.outputs[index].position, comp.outputs[index].size);
+        let name = comp.outputs[index].output.name();
+        let identity = comp.outputs[index].identity.clone();
+        departed.push((geometry, name, identity));
         let entry = comp.outputs.remove(index);
         comp.surface_outputs.remove_output(&entry.output);
-        departed.push(Rect::new(entry.position, entry.size));
         // Registry clients see global_remove immediately. Keep the disabled
         // server-side record rather than freeing it in the same dispatch,
         // which avoids the bind-vs-removal race documented by wayland-server.
@@ -3041,7 +3044,10 @@ fn apply_output_change(
     if comp.wm.spaces_mode() && comp.wm.interaction_config().separate_spaces {
         comp.wm.reconcile_display_spaces();
     } else {
-        for rect in departed { comp.wm.rescue_clients_from_removed_monitor(rect); }
+        for (geometry, name, identity) in &departed {
+            comp.wm.rescue_departed_output(*geometry, name, identity.as_deref());
+        }
+        comp.wm.restore_evacuated_clients();
     }
     crate::input::reconcile_pointer_after_output_change(comp);
     crate::gamma::outputs_changed(comp);
