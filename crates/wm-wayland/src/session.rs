@@ -2041,14 +2041,25 @@ fn adopt_secondary_device(
     let proof = if !renderer_name.starts_with("llvmpipe") {
         Some(validate_m3_shadow_proof(session, path, &renderer_name)?)
     } else { None };
-    let Device { drm, notifier, gbm, non_desktop, .. } =
-        probe_device(&mut session.seat_session, path, Some("apple-dcpext-shadow"), proof.as_ref())?;
+    let probed = probe_device(&mut session.seat_session, path, Some("apple-dcpext-shadow"), proof.as_ref())?;
     let device = session.devices.len();
-    let notifier = register_drm_notifier(loop_handle, notifier, device)?;
-    session.devices.push(KmsDevice {
-        path: path.to_path_buf(), driver_name: "apple-dcpext-shadow".into(), drm, gbm,
-        hotplug_due: Some(Instant::now()), non_desktop, removed: false, notifier: Some(notifier),
-    });
+    // A successful probe still owns a libseat registration. Keep its original
+    // descriptor until notifier adoption succeeds; on failure the moved probe
+    // and insert_source's rejected notifier must drop before returning it.
+    let adopted = with_seat_device(
+        probed.drm.device_fd().device_fd(),
+        move |_| {
+            let Device { drm, notifier, gbm, non_desktop, .. } = probed;
+            let notifier = register_drm_notifier(loop_handle, notifier, device)?;
+            Ok(KmsDevice {
+                path: path.to_path_buf(), driver_name: "apple-dcpext-shadow".into(), drm, gbm,
+                hotplug_due: Some(Instant::now()), non_desktop, removed: false, notifier: Some(notifier),
+            })
+        },
+        |result| result.is_err(),
+        |fd| session.seat_session.close(fd).map_err(|error| format!("seat adoption close failed: {error:?}")),
+    )?;
+    session.devices.push(adopted);
     tracing::info!(device, path = %path.display(), "extra software KMS device registered; connector adoption pending");
     Ok(())
 }
@@ -5517,6 +5528,40 @@ mod seat_device_tests {
         assert_eq!(adopted.as_raw_fd(), raw);
         let original: OwnedFd = adopted.try_into().unwrap();
         assert_eq!(original.as_raw_fd(), raw);
+    }
+
+    #[test]
+    fn failed_notifier_adoption_returns_preexisting_owners_to_the_seat() {
+        use smithay::reexports::calloop::{generic::Generic, EventLoop, Interest, Mode, PostAction};
+
+        let mut seat = FakeSeat::default();
+        let keeper = DeviceFd::from(seat.open(Path::new("/dev/null"), OFlags::RDWR).unwrap());
+        let raw = keeper.as_raw_fd();
+        // A successful probe has already constructed these owners before the
+        // adoption guard is entered, unlike users created inside an initial probe.
+        let drm = keeper.clone();
+        let gbm = keeper.clone();
+        let notifier = Generic::new(keeper.clone(), Interest::READ, Mode::Level);
+        let event_loop = EventLoop::<()>::try_new().unwrap();
+        let result = with_seat_device(
+            keeper,
+            move |_| {
+                let (_drm, _gbm) = (drm, gbm);
+                // Linux epoll refuses /dev/null. Exercise the real insert_source
+                // error that owns the rejected notifier, rather than dropping a
+                // stand-in by hand before returning an artificial error.
+                event_loop.handle().insert_source(notifier, |_, _, _| Ok(PostAction::Continue))
+                    .map_err(|error| format!("notifier registration failed: {error}"))
+            },
+            |result| result.is_err(),
+            |original| {
+                assert_eq!(original.as_raw_fd(), raw);
+                seat.close(original).map_err(|_| "seat close failed".to_string())
+            },
+        );
+        assert!(result.unwrap_err().starts_with("notifier registration failed:"));
+        assert_eq!((seat.opens, seat.closes), (1, 1));
+        assert!(seat.live.is_empty());
     }
 
     #[test]
