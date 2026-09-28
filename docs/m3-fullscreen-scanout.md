@@ -39,14 +39,33 @@ A newly mapped window also received no pointer enter until the first physical
 motion. Reconcile pointer focus after window focus is applied so games can
 hide their cursor and activate pointer locks under a stationary pointer.
 The new nested enter/lock test fails on the first candidate and passes at
-scales1 and2 with the correction. All14 pointer-constraint and8 fullscreen
-integration tests pass, along with the41 session tests, strict release Clippy
-and release build. The corrected native compositor still needs activation.
+scales 1 and 2 with the correction. All 14 pointer-constraint and 8 fullscreen
+integration tests pass, along with the 41 session tests, strict release Clippy
+and release build.
 
 On performance1 with AC charging, ordinary composition and a pointer already
 inside the game, compute16 measured48.8/49.1/49.3FPS; the return-to-compute1
 check measured47.9/47.7. These runs do not measure this corrected compositor.
-The60FPS goal remains open. External-display qualification is deferred until
+
+The corrected compositor (`fb28717`) passed its approved native boot on the
+same performance1 kernel, with render/compute limits 16, the internal panel
+at 120 Hz, and battery power. Ordinary fullscreen demo1 now uses
+`primary: true`, `zero_copy: 1`, `composited: 0`; the arbitrary-format override
+is off and the application controls cursor visibility. No pointer movement
+or global cursor hiding was needed.
+
+Three unprofiled runs at unchanged native resolution and quality measured
+54.2, 54.4, and 54.2 FPS (median 54.2). Disabling direct scanout temporarily
+on this same boot measured 48.8 and 49.0 FPS (median 48.9), a 10.8%
+throughput improvement with direct scanout.
+Direct scanout was restored afterward. The GPU checks pass 33 dependent
+compute dispatches, 96 render references, and 300 Wayland frames with no new
+faults. The owner confirms a clean desktop and normal keyboard/trackpad input.
+Native menu entry, console entry via the keyboard, and windowed mode correctly
+return to composition; the console startup command alone closed the initial
+console and was not a valid console-entry test.
+
+The 60 FPS goal remains open. External-display qualification is deferred until
 the owner is docked.
 
 ## Qualification
