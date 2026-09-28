@@ -20,6 +20,9 @@ memory-profile = []
 # and tests on a macOS dev machine.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+# Bounded boot-scoped GPU cross-card proof, using the workspace's existing JSON stack.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 wm-core = { path = "../wm-core" }
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }

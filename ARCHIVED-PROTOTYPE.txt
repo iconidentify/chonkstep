@@ -1,0 +1,3 @@
+Archived M3 external-display prototype
+
+Preserves the tracked local source from chonkstep-seat-lifetime-review without changing its worktree, index, installed binary or fallback identity. Historical review source. Main carries the qualified display implementation; any remaining cleanup differences require a separate tested port. This historical snapshot is not a release candidate or a change to merge over main.
