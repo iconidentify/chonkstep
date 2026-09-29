@@ -5,10 +5,25 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-28
+
 - Desktop mode restores a window's monitor, position and size when a
   display that was briefly unplugged comes back. A move, resize, maximize
   or fullscreen while it is gone is kept. Spaces mode already restored
-  these windows.
+  these windows. Disconnecting the last monitor no longer configures
+  surviving windows down to a tiny size.
+- When a connector refuses its chosen mode, try the other advertised
+  timings, starting with the same resolution at a lower refresh rate, so a
+  bandwidth-limited dock link can still light the display.
+- While a driven external output is connected, including an Apple Silicon
+  USB-C or Thunderbolt connector named `USB-*`, hold the lid switch so
+  closing the laptop does not suspend. Drop that hold when the external
+  output leaves.
+- Return probed DRM devices to the seat, including a secondary GPU whose
+  notifier fails to adopt, so those devices do not stay registered for the
+  rest of the session.
+- A click on the window the pointer is already over does not send an extra
+  pointer motion at the press position.
 - Xwayland inherits the session graphics stack and can use GPU OpenGL with
   a GLX-enabled private M3 Mesa prefix. Its process passes the same opt-in
   Mesa guard as native clients.
@@ -25,6 +40,15 @@ crate and both session binaries carry the same number.
   Mesa's kmsro renders with zink on the M3 directly into the display's scanout
   buffers, on the single-GPU path with no copy. The simpledrm cross-GPU mode
   is unchanged. A hardware test covers a kmsro-paired display controller.
+  External Thunderbolt displays can be adopted again on that session.
+  Fullscreen scanout keeps the client's linear layout, accepts
+  opaque-equivalent formats, and waits on atomic in-fences when the display
+  device has no syncobj timeline. Large SHM uploads are staged off the
+  input thread, and the refresh estimate no longer follows software
+  completion time.
+- The default terminal font is 12 px, matching Omarchy's 9 pt Foot face at
+  96 DPI. Super+Space runs `omarchy-menu toggle`.
+- Add BeOS R5 and OS/2 Warp 4 themes.
 
 ## [0.7.0] - 2026-09-18
 

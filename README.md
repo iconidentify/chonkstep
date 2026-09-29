@@ -116,7 +116,7 @@ See [keybindings](docs/keybindings.md), [gestures](docs/gestures.md),
 
 ## Install and try it
 
-The current release is **0.7.0**. Check the
+The current release is **0.7.1**. Check the
 [release notes](https://github.com/iconidentify/chonkstep/releases) for the
 version being installed.
 
