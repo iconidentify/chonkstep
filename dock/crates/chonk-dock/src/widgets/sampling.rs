@@ -270,19 +270,53 @@ impl SamplerRegistry {
     }
 }
 
-/// The wall clock as `(h, m, s)`, truncated to `granularity` seconds.
+/// The local wall clock as `(h, m, s)`, truncated to `granularity`
+/// seconds.
+///
+/// Local means `TZ`, else `/etc/localtime`, via `localtime_r`. Taking
+/// the epoch modulo a day would give UTC. `tzset` runs every call so a
+/// timezone changed while the dock is up (`timedatectl set-timezone`)
+/// shows up on the next tick; glibc's `localtime_r` does not recheck on
+/// its own, and the recheck is a `stat` of the zone file at most once a
+/// second. Truncation happens after the conversion, so a zone with a
+/// non-whole-hour offset still lands on its own hour and minute
+/// boundaries.
 fn wall_clock(granularity: u64) -> (u32, u32, u32) {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let today = secs % 86_400;
-    let today = today - today % granularity;
+    let today = local_seconds_of_day(secs);
+    let today = today - today % granularity.max(1);
     (
         (today / 3600) as u32,
         ((today % 3600) / 60) as u32,
         (today % 60) as u32,
     )
+}
+
+// POSIX, in every libc, but not bound by the `libc` crate.
+unsafe extern "C" {
+    fn tzset();
+}
+
+/// Seconds since local midnight for the Unix time `secs`, or since UTC
+/// midnight if the conversion fails.
+fn local_seconds_of_day(secs: u64) -> u64 {
+    let t = secs as libc::time_t;
+    // SAFETY: `tzset` takes no arguments; `localtime_r` writes only into
+    // the `tm` we own and reads only `t`.
+    let local = unsafe {
+        tzset();
+        let mut tm: libc::tm = std::mem::zeroed();
+        (!libc::localtime_r(&t, &mut tm).is_null()).then_some(tm)
+    };
+    match local {
+        Some(tm) => {
+            (tm.tm_hour as u64) * 3600 + (tm.tm_min as u64) * 60 + (tm.tm_sec as u64).min(59)
+        }
+        None => secs % 86_400,
+    }
 }
 
 /// One external command, run on a thread of its own and never on the
