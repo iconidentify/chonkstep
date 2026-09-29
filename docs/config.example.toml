@@ -45,13 +45,12 @@
 #
 # Which desktop this session IS. Two names:
 #
-#   "chonkstep" (the default) a whole chonkstep desktop: the Dock of
-#               instruments in the corner, chonkstep's own themes, a
-#               hosted Omarchy bar kept off screen until asked for.
-#               This is what every config file without this key
-#               already means.
+#   "chonkstep" (the default) a whole chonkstep desktop: chonkstep's
+#               own themes, a hosted Omarchy bar kept off screen until
+#               asked for. This is what every config file without
+#               this key already means.
 #   "omarchy"   Omarchy's desktop, with chonkstep doing the window
-#               management. No Dock; Omarchy's bar shown; Omarchy's
+#               management. Omarchy's bar shown; Omarchy's
 #               theme followed; Omarchy's menu, pickers, panels,
 #               notifications and lock screen; and Omarchy's own
 #               keybinding vocabulary (see `keymap` below).
@@ -70,8 +69,14 @@
 # `autostart`, placement, focus policy, scale or the
 # decoration rules -- those are how chonkstep manages windows, which
 # is the half of the desktop the posture is keeping. See
-# docs/omarchy-mode.md for the whole story, including what to override
-# to get the Dock back and what the mode deliberately leaves alone.
+# docs/omarchy-mode.md for the whole story, including what the mode
+# deliberately leaves alone.
+#
+# NEITHER posture starts the Dock. Since 0.7 the NeXTSTEP Dock is its
+# own program, `chonk-dock`, and nothing launches it for you -- not
+# even `desktop = "chonkstep"`. If you want the Dock (and on a NeXT
+# style desktop you probably do), add "chonk-dock" to `autostart`
+# below. See dock/README.md.
 #
 # Case-insensitive. An unknown name is warned about and "chonkstep" is
 # kept.
@@ -494,11 +499,14 @@
 # line in the same two spellings as `terminal` above.
 #
 # The usual residents are the small daemons a desktop wants around it:
-# a clipboard manager, an automounter, a notification bridge. Omarchy's
-# shell is NOT one of them -- `omarchy_shell = true` above already
-# starts it through Omarchy's own launcher, and listing it here too
-# would start it twice.
+# a clipboard manager, an automounter, a notification bridge -- and the
+# Dock. `chonk-dock` is never started automatically, whichever
+# `desktop` is chosen above; listing it here is how you get it at every
+# login. Omarchy's shell is NOT one of them -- `omarchy_shell = true`
+# above already starts it through Omarchy's own launcher, and listing
+# it here too would start it twice.
 #autostart = [
+#  "chonk-dock",
 #  "wl-paste --watch cliphist store",
 #  "udiskie --automount --no-notify --no-tray",
 #]
