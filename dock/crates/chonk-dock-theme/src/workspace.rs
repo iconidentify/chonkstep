@@ -157,16 +157,8 @@ pub fn render_clip_tile(
         TextAlign::Center,
     );
     let mut label_font = theme.menu.item_font.clone();
-    label_font.size = ((size as f32) * 0.10).max(8.0);
-    // Long labels drop the "Desk" word rather than growing back into
-    // the crease: the guard estimates the rendered width from an
-    // average glyph advance, erring toward the shorter form.
-    let full = format!("Desk {} / {}", current + 1, count.max(1));
-    let label = if (full.chars().count() as f32) * label_font.size * 0.55 > (size as f32) * 0.68 {
-        format!("{} / {}", current + 1, count.max(1))
-    } else {
-        full
-    };
+    let (label, label_size) = clip_label(size, current, count);
+    label_font.size = label_size;
     paint::draw_text(
         &mut pixmap,
         font_system,
@@ -186,6 +178,30 @@ pub fn render_clip_tile(
         height: size,
         pixels: pixmap.take(),
     }
+}
+
+/// The Clip's workspace label and its font size for a `size` px tile.
+///
+/// The size is 8px at CHONKSTEP_SCALE 1's 56px tile and keeps that
+/// proportion at every scale (8/56 is above the 0.10 the crease
+/// clearance allows, so it is the size outright). It used to be a bare
+/// 8px floor over 0.10 of the tile, which stopped applying past an 80px
+/// tile: at scale 2 the label shrank to 5.6 logical px, and the width
+/// guard then let the longer "Desk N / M" through at that size. Below
+/// a 56px tile the 8px minimum still holds.
+///
+/// Long labels drop the "Desk" word rather than growing back into the
+/// crease: the guard estimates the rendered width from an average glyph
+/// advance, erring toward the shorter form.
+fn clip_label(size: u32, current: usize, count: usize) -> (String, f32) {
+    let font_size = ((size as f32) * (8.0 / 56.0)).max(8.0);
+    let full = format!("Desk {} / {}", current + 1, count.max(1));
+    let label = if (full.chars().count() as f32) * font_size * 0.55 > (size as f32) * 0.68 {
+        format!("{} / {}", current + 1, count.max(1))
+    } else {
+        full
+    };
+    (label, font_size)
 }
 
 fn fill_triangle(pixmap: &mut Pixmap, points: [(i32, i32); 3], color: Color) {
@@ -233,6 +249,31 @@ mod tests {
     #[test]
     fn changing_the_workspace_changes_the_pixels() {
         assert_ne!(render(0, 3, 64).pixels, render(1, 3, 64).pixels);
+    }
+
+    /// The label is the same label at every scale, only bigger: the
+    /// scale-2 tile draws scale 1's text at twice the size rather than
+    /// a smaller font with more words (#322).
+    #[test]
+    fn the_label_scales_with_the_tile() {
+        for (current, count) in [(0, 1), (2, 5), (11, 12)] {
+            let (one, one_px) = clip_label(56, current, count);
+            for scale in [1.5f32, 2.0, 3.0] {
+                let size = (56.0 * scale).round() as u32;
+                let (label, px) = clip_label(size, current, count);
+                assert_eq!(label, one, "scale {scale} changed the wording");
+                assert!(
+                    (px - one_px * scale).abs() < 0.5,
+                    "scale {scale}: {px}px, want {}px",
+                    one_px * scale
+                );
+            }
+        }
+        assert_eq!(
+            clip_label(28, 0, 5).1,
+            8.0,
+            "small tiles keep the 8px minimum"
+        );
     }
 
     /// The classic diagonal corner zones: the extreme corners resolve
