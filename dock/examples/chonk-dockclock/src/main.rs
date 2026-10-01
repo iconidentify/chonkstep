@@ -24,6 +24,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chonk_ui::dockapp::{self, Handlers, Options, Pixmap};
 
+// POSIX, in every libc, but not bound by the `libc` crate.
+unsafe extern "C" {
+    fn tzset();
+}
+
 /// Local wall-clock hours/minutes/seconds, copied verbatim from the
 /// built-in widget so the two tiles cannot disagree about the time.
 fn now_hms() -> (u32, u32, u32) {
@@ -31,7 +36,22 @@ fn now_hms() -> (u32, u32, u32) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let secs_today = secs % 86_400;
+    // Local means `TZ`, else `/etc/localtime`; `secs % 86_400` would be
+    // UTC. `tzset` first so a timezone change while running is seen.
+    let t = secs as libc::time_t;
+    // SAFETY: `tzset` takes no arguments; `localtime_r` writes only into
+    // the `tm` we own and reads only `t`.
+    let local = unsafe {
+        tzset();
+        let mut tm: libc::tm = std::mem::zeroed();
+        (!libc::localtime_r(&t, &mut tm).is_null()).then_some(tm)
+    };
+    let secs_today = match local {
+        Some(tm) => {
+            (tm.tm_hour as u64) * 3600 + (tm.tm_min as u64) * 60 + (tm.tm_sec as u64).min(59)
+        }
+        None => secs % 86_400,
+    };
     (
         (secs_today / 3600) as u32,
         ((secs_today % 3600) / 60) as u32,

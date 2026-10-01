@@ -12,3 +12,5 @@ publish = false
 # holds no display connection" is a claim the reference dockapp should
 # be able to demonstrate with `ldd`, not just assert in a doc comment.
 chonk-ui = { package = "chonk-dock-client", path = "../../crates/chonk-dock-client" }
+# `localtime_r`/`tzset`, for the local timezone.
+libc = "0.2"
