@@ -75,7 +75,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Bar {
             match interface.as_str() {
                 "wl_compositor" => bar.compositor = Some(registry.bind(name, version.min(4), qh, ())),
                 "wl_shm" => bar.shm = Some(registry.bind(name, 1, qh, ())),
-                "zwlr_layer_shell_v1" => bar.layer_shell = Some(registry.bind(name, version.min(4), qh, ())),
+                // Deliberately require v5, matching hyprtoolkit's bind. A v4
+                // compositor must fail this regression instead of hiding it.
+                "zwlr_layer_shell_v1" => bar.layer_shell = Some(registry.bind(name, 5, qh, ())),
                 _ => {}
             }
         }
@@ -141,12 +143,25 @@ enum Shape {
     /// A wallpaper: the whole output, on the background layer, under
     /// the given namespace.
     Background { namespace: String },
+    Corner { thickness: u32, edge: Anchor },
+    Overlay,
 }
 
 fn parse_args() -> Shape {
     let mut args = std::env::args().skip(1);
     let usage = "usage: chonk-fake-bar <height> [top|right] [namespace] | chonk-fake-bar background <namespace>";
     match args.next().as_deref() {
+        Some("overlay") => Shape::Overlay,
+        Some("corner") => {
+            let thickness = args.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| fatal(usage));
+            let edge = match args.next().as_deref() {
+                None | Some("top") => Anchor::Top,
+                Some("invalid") => Anchor::Bottom,
+                Some("multiple") => Anchor::Top | Anchor::Left,
+                Some(_) => fatal(usage),
+            };
+            Shape::Corner { thickness, edge }
+        }
         Some("background") => Shape::Background { namespace: args.next().unwrap_or_else(|| fatal(usage)) },
         Some(thickness) => {
             let thickness = thickness.parse().unwrap_or_else(|_| fatal(usage));
@@ -180,6 +195,8 @@ fn main() {
     let (layer_kind, namespace) = match &shape {
         Shape::Edge { namespace, .. } => (zwlr_layer_shell_v1::Layer::Top, namespace.clone()),
         Shape::Background { namespace } => (zwlr_layer_shell_v1::Layer::Background, namespace.clone()),
+        Shape::Corner { .. } => (zwlr_layer_shell_v1::Layer::Top, "chonk-fake-bar".into()),
+        Shape::Overlay => (zwlr_layer_shell_v1::Layer::Overlay, "omarchy-polkit".into()),
     };
     let layer = layer_shell.get_layer_surface(&surface, None, layer_kind, namespace, &qh, ());
     match shape {
@@ -200,6 +217,18 @@ fn main() {
             layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
             layer.set_size(0, 0);
             layer.set_exclusive_zone(-1);
+        }
+        Shape::Corner { thickness, edge } => {
+            layer.set_anchor(Anchor::Top | Anchor::Left);
+            layer.set_size(300, thickness);
+            layer.set_exclusive_zone(thickness as i32);
+            layer.set_exclusive_edge(edge);
+        }
+        Shape::Overlay => {
+            layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+            layer.set_size(0, 0);
+            layer.set_exclusive_zone(-1);
+            layer.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
         }
     }
     surface.commit();

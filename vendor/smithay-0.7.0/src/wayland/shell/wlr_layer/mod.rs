@@ -189,6 +189,9 @@ pub struct LayerSurfaceCachedState {
     pub anchor: Anchor,
     /// Descripton of exclusive zone
     pub exclusive_zone: ExclusiveZone,
+    /// Explicit edge for the exclusive zone (layer-shell version 5).
+    /// An empty anchor lets the compositor infer the edge from `anchor`.
+    pub exclusive_edge: Anchor,
     /// Describes distance from the anchor point of the output
     pub margin: Margins,
     /// Describes how keyboard events are delivered to this surface
@@ -240,7 +243,7 @@ impl WlrLayerShellState {
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
     {
         let shell_global = display.create_global::<D, ZwlrLayerShellV1, WlrLayerShellGlobalData>(
-            4,
+            5,
             WlrLayerShellGlobalData {
                 filter: Box::new(filter),
             },

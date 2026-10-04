@@ -134,6 +134,16 @@ where
                             let mut cached_guard = states.cached_state.get::<LayerSurfaceCachedState>();
                             let pending = cached_guard.pending();
 
+                            if !pending.exclusive_edge.is_empty()
+                                && !pending.anchor.contains(pending.exclusive_edge)
+                            {
+                                guard.surface.post_error(
+                                    zwlr_layer_surface_v1::Error::InvalidExclusiveEdge,
+                                    "exclusive edge must be an edge the surface is anchored to",
+                                );
+                                return;
+                            }
+
                             if pending.size.w == 0 && !pending.anchor.anchored_horizontally() {
                                 guard.surface.post_error(
                                     zwlr_layer_surface_v1::Error::InvalidSize,
@@ -248,6 +258,19 @@ where
                 let _ = with_surface_pending_state(layer_surface, |data| {
                     data.exclusive_zone = zone.into();
                 });
+            }
+            zwlr_layer_surface_v1::Request::SetExclusiveEdge { edge } => {
+                match Anchor::try_from(edge) {
+                    Ok(edge) if edge.is_empty() || edge.bits().count_ones() == 1 => {
+                        let _ = with_surface_pending_state(layer_surface, |data| {
+                            data.exclusive_edge = edge;
+                        });
+                    }
+                    _ => layer_surface.post_error(
+                        zwlr_layer_surface_v1::Error::InvalidExclusiveEdge,
+                        "exclusive edge must identify at most one edge",
+                    ),
+                }
             }
             zwlr_layer_surface_v1::Request::SetMargin {
                 top,
