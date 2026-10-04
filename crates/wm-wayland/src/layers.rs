@@ -250,6 +250,16 @@ pub(crate) fn exclusive_edge(anchor: Anchor) -> Option<Anchor> {
     None
 }
 
+/// Version 5 lets a corner surface choose which anchored edge to reserve.
+/// Smithay validates explicit edges against the committed anchors.
+fn reservation_edge(cached: &LayerSurfaceCachedState) -> Option<Anchor> {
+    if cached.exclusive_edge.is_empty() {
+        exclusive_edge(cached.anchor)
+    } else {
+        Some(cached.exclusive_edge)
+    }
+}
+
 /// Shrinks `area` by `insets`, clamping so a pathological reservation
 /// (two bars wider than the screen) degenerates to an empty rect at
 /// the far corner instead of an inside-out one.
@@ -510,7 +520,7 @@ fn arrange(comp: &mut Compositor) {
                 }
                 let record = &backend.layers[index];
                 let (Some(edge), ExclusiveZone::Exclusive(zone)) =
-                    (exclusive_edge(cached.anchor), cached.exclusive_zone)
+                    (reservation_edge(&cached), cached.exclusive_zone)
                 else {
                     continue;
                 };
@@ -540,7 +550,7 @@ fn arrange(comp: &mut Compositor) {
             }
             let cached = cached_state(backend.layers[index].surface.wl_surface());
             let exclusive = matches!(
-                (exclusive_edge(cached.anchor), cached.exclusive_zone),
+                (reservation_edge(&cached), cached.exclusive_zone),
                 (Some(_), ExclusiveZone::Exclusive(_))
             );
             if exclusive {
@@ -1003,14 +1013,14 @@ impl WlrLayerShellHandler for Compositor {
         layer: Layer,
         namespace: String,
     ) {
-        // The client's output by name, the primary when it named none
-        // (the protocol leaves that choice to the compositor, and the
-        // primary is where this desktop's user is looking).
+        // An unspecified output follows the user's focused monitor, as in
+        // Hyprland. Authentication dialogs must not open on an unattended
+        // built-in display while the user works on an external monitor.
         let output = wl_output
             .as_ref()
             .and_then(Output::from_resource)
             .and_then(|named| self.outputs.iter().position(|entry| entry.output == named))
-            .unwrap_or(0);
+            .unwrap_or_else(|| self.wm.focused_output_index().min(self.outputs.len().saturating_sub(1)));
         let backend = self.wm.backend_mut();
         let id = LayerId(backend.alloc_id());
         tracing::info!(id = id.0, ?layer, %namespace, output, "new layer surface");
@@ -1179,6 +1189,19 @@ mod tests {
         assert_eq!(exclusive_edge(Anchor::LEFT | Anchor::RIGHT), None);
         assert_eq!(exclusive_edge(Anchor::all()), None);
         assert_eq!(exclusive_edge(Anchor::empty()), None);
+    }
+
+    #[test]
+    fn an_explicit_exclusive_edge_disambiguates_a_corner() {
+        let mut cached = LayerSurfaceCachedState {
+            anchor: Anchor::TOP | Anchor::LEFT,
+            ..Default::default()
+        };
+        assert_eq!(reservation_edge(&cached), None);
+        cached.exclusive_edge = Anchor::TOP;
+        assert_eq!(reservation_edge(&cached), Some(Anchor::TOP));
+        cached.exclusive_edge = Anchor::LEFT;
+        assert_eq!(reservation_edge(&cached), Some(Anchor::LEFT));
     }
 
     #[test]

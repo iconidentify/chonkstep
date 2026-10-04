@@ -48,6 +48,14 @@ the menu is not undone the next time you log in.
 
 ## What the mode deliberately leaves alone
 
+- **Polkit authentication.** Current Omarchy's shell registers its native
+  Quickshell agent at `/org/omarchy/PolkitAgent`. Hosting the shell starts
+  that agent even when the bar is hidden. Its overlay dialog follows the
+  focused monitor when it has no explicit screen, including when you work
+  on an external display. A separate agent would compete for the same
+  session registration. Older Omarchy installations that use a standalone
+  agent can keep their existing user service; ChonkStep supports the
+  layer-shell version 5 required by hyprtoolkit 0.6.0.
 - **Notifications, the steady-state lock screen, idle and the OSD.**
   Omarchy's shell draws all four, and hosting it (`omarchy_shell = true`,
   already the default) is all they need while the session is healthy.

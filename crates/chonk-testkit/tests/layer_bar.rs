@@ -75,6 +75,50 @@ fn external_bars_are_the_only_reserved_chrome() {
     assert_frame(&mut session, 0, 0, world.output_w, world.output_h);
 }
 
+#[test]
+#[ignore = "needs a live Wayland session: scripts/e2e.sh --headless --test layer_bar"]
+fn version_five_corner_reservation_and_invalid_edges() {
+    let mut session = Session::boot("layer-v5-corner", SessionOptions { scale: Some(1.0), ..Default::default() }).unwrap();
+    let world = session.world().unwrap();
+    raise_bar(&mut session, &["corner", &BAR.to_string(), "top"]);
+    wait_for_client_mapped(&session);
+    session.launch("foot", &["--config=/dev/null"]).unwrap();
+    let window = session.wait_for_window("foot").unwrap();
+    toggle_maximize(&mut session);
+    poll_until(Duration::from_secs(10), "corner to reserve the explicitly selected top edge", || {
+        session.world().ok()?.frame_of(window.id)
+            .filter(|f| f.y == BAR as i32 && f.h == world.output_h - BAR).cloned()
+    }).unwrap();
+    session.kill_client("chonk-fake-bar");
+    for edge in ["invalid", "multiple"] {
+        raise_bar(&mut session, &["corner", &BAR.to_string(), edge]);
+        poll_until(Duration::from_secs(10), "invalid exclusive edge to disconnect only its client", || {
+            let log = session.client_log("chonk-fake-bar");
+            log.contains("exclusive edge").then_some(())
+        }).unwrap();
+        assert!(!session.client_log("chonk-fake-bar").contains("mapped "));
+        assert!(session.world().is_ok(), "bad client must leave the compositor alive");
+        session.kill_client("chonk-fake-bar");
+    }
+}
+
+#[test]
+#[ignore = "needs a live Wayland session: scripts/e2e.sh --headless --test layer_bar"]
+fn an_unspecified_overlay_output_follows_the_focused_monitor() {
+    let mut session = Session::boot("layer-focused-output", SessionOptions { scale: Some(1.0), ..Default::default() }).unwrap();
+    session.door().virtual_outputs(true).unwrap();
+    let world = session.world().unwrap();
+    session.door().motion(world.output_w as f64 * 0.75, 100.0).unwrap();
+    session.door().barrier().unwrap();
+    raise_bar(&mut session, &["overlay"]);
+    wait_for_client_mapped(&session);
+    let shot = session.screenshot("overlay-on-focused-output").unwrap();
+    let left = shot.mean_rgb(shot.width / 4 - 10, shot.height / 2 - 10, 20, 20);
+    let right = shot.mean_rgb(shot.width * 3 / 4 - 10, shot.height / 2 - 10, 20, 20);
+    assert!(near(right, FAKE_BAR_RGB), "dialog must appear on the focused right monitor: {right:?}");
+    assert!(!near(left, FAKE_BAR_RGB), "unattended left monitor must retain its desktop: {left:?}");
+}
+
 /// Waits for the fake bar to report itself mapped — the line it prints
 /// after the roundtrip that follows its first buffer, by which time the
 /// compositor has run the commit. Read the latest launch's log: prior

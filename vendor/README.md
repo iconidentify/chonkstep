@@ -1,5 +1,18 @@
 # Pinned dependency patches
 
+## Local patch: layer-shell version 5
+
+`src/wayland/shell/wlr_layer/{mod.rs,handlers.rs}` advertises version 5,
+retains the double-buffered explicit exclusive edge, and rejects multiple
+edges or an edge absent from the committed anchors. ChonkStep's layout uses
+that edge to disambiguate corner reservations. hyprtoolkit 0.6.0 binds version
+5 unconditionally; with version 4 its connection dies before DMA-BUF feedback
+arrives and its OpenGL renderer aborts with an invalid DRM descriptor.
+
+Real client coverage lives in `crates/chonk-testkit/tests/layer_bar.rs`.
+Remove this patch when the adopted Smithay version implements equivalent
+version 5 semantics.
+
 `smithay-0.7.0/` is the published crates.io 0.7.0 source, including its original
 MIT license (`LICENSE.txt`). It is excluded from this workspace's member list
 and selected through `[patch.crates-io]`; no Git branch or unpinned dependency
