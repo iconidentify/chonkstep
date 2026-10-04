@@ -980,7 +980,7 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn next_generation() -> u64 {
     NEXT_GENERATION
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_add(1))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_add(1))
         .expect("Omarchy menu generation space exhausted")
 }
 

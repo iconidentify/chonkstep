@@ -826,7 +826,7 @@ fn take_injected_queue_failure() -> bool {
         INJECTED_QUEUE_FAILURES.store(count, std::sync::atomic::Ordering::Relaxed);
     });
     INJECTED_QUEUE_FAILURES
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
             |remaining| remaining.checked_sub(1),
