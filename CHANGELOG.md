@@ -5,6 +5,20 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-06
+
+- At startup, watch udev for display changes before the first connector
+  read. A display that a dock reports connected just after that read is now
+  adopted through the usual hotplug rescan, instead of staying dark until
+  the next hotplug.
+- A layer surface that names no output, such as a polkit prompt, opens on
+  the focused output instead of the first one. Layer-shell version 5
+  clients, such as hyprtoolkit's dialogs, connect.
+- The Dock clock shows local time instead of UTC (tidux).
+- The Clip's workspace label scales with its tile (tidux).
+- The example configuration says that no desktop starts the Dock (tidux).
+- Builds with Rust 1.99: the deprecated atomic update calls are replaced.
+
 ## [0.7.1] - 2026-09-28
 
 - Desktop mode restores a window's monitor, position and size when a
