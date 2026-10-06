@@ -1513,6 +1513,17 @@ pub(crate) fn init(
     //    seat* so libseat owns the fd and can revoke it on a VT switch;
     //    opening `/dev/dri/cardN` directly would work as root and then
     //    strand the device on the first VT switch.
+    //
+    //    The udev watch comes first. Opening the device reads every
+    //    connector once, and a connector can be detected right after
+    //    that read (a dock display that reports connected a moment
+    //    later). Its change event must reach the hotplug handler, so the
+    //    monitor socket has to exist before the read: from here on it
+    //    holds the drm events udev relays, and the loop delivers them
+    //    once the source is registered in step 5, where the rescan picks
+    //    the connector up.
+    let udev_backend = UdevBackend::new(&seat_name)
+        .map_err(|error| format!("could not watch udev for seat {seat_name}: {error}"))?;
     let (device_path, device) = open_first_usable_device(&mut seat_session, &seat_name)?;
     let Device { mut drm, notifier: drm_notifier, gbm, connectors, non_desktop } = device;
     tracing::info!(
@@ -1630,8 +1641,8 @@ pub(crate) fn init(
     let primary_notifier = register_drm_notifier(loop_handle, drm_notifier, 0)?;
 
     // Only explicitly opted-in extra cards are adopted. Preserve primary choice.
-    let udev_backend = UdevBackend::new(&seat_name)
-        .map_err(|error| format!("could not watch udev for seat {seat_name}: {error}"))?;
+    // The watch was opened in step 2, before the first connector read; any
+    // change since then is already queued.
     let gpu_loop = loop_handle.clone();
     loop_handle.insert_source(udev_backend, move |event, _, comp: &mut Compositor| {
         let Graphics::Session(session) = &mut comp.graphics else { return };
